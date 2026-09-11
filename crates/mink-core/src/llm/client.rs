@@ -261,17 +261,6 @@ impl OpenAiCompatibleBackend {
         self.tool_choice = tool_choice;
         self
     }
-
-    fn tool_choice_for_purpose(&self, purpose: &LlmPurpose) -> Option<serde_json::Value> {
-        if matches!(purpose, LlmPurpose::Compaction) {
-            // Cache-aligned compaction retains Agent tools to preserve the
-            // provider prompt prefix, but tools are never executable there.
-            // Override user-configured `required`/named choices so the wire
-            // request cannot force a response that compaction must reject.
-            return Some(serde_json::json!("none"));
-        }
-        self.tool_choice.clone()
-    }
 }
 
 #[async_trait::async_trait]
@@ -314,7 +303,6 @@ impl LlmBackend for OpenAiCompatibleBackend {
             &request.api_key,
             &request.api_url,
         );
-        let tool_choice = self.tool_choice_for_purpose(&request.purpose);
         let body = crate::llm::transport::build_openai_body_with_options_and_extensions(
             &request.model,
             &request.messages,
@@ -322,7 +310,7 @@ impl LlmBackend for OpenAiCompatibleBackend {
             &request.system_prompt,
             request.max_tokens,
             &self.options,
-            tool_choice.as_ref(),
+            self.tool_choice.as_ref(),
             &self.extra_body,
         )?;
         // Final body cap (v7 §9.4): fail before any bytes hit the wire. The
