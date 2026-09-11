@@ -167,17 +167,21 @@ impl super::TurnExecutor {
                 saw_stop = true;
                 break;
             }
+            // Deadline enforcement lives on the deterministic loop path: a
+            // stream of events arriving faster than the 25ms tick must not
+            // starve the first-event/idle checks (each iteration recreates
+            // the select's sleep timer).
+            self.check_llm_wait_timeout(
+                saw_any_event,
+                stream_started,
+                last_event_at,
+                first_event_timeout,
+                idle_timeout,
+            )?;
 
             let result = tokio::select! {
                 result = stream.next() => result,
                 _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
-                    self.check_llm_wait_timeout(
-                        saw_any_event,
-                        stream_started,
-                        last_event_at,
-                        first_event_timeout,
-                        idle_timeout,
-                    )?;
                     self.maybe_render_llm_wait_heartbeat(
                         saw_any_event,
                         stream_started,
@@ -185,14 +189,6 @@ impl super::TurnExecutor {
                         &mut last_heartbeat_at,
                         heartbeat,
                     );
-                    if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
-                        self.ctx.log_event(crate::events::EventLog::Stop {
-                            reason: "interrupted".into(),
-                        });
-                        stop = "interrupted".into();
-                        saw_stop = true;
-                        break;
-                    }
                     continue;
                 }
             };

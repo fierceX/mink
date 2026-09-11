@@ -147,7 +147,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 ### Display 与 TUI
 
 - Display 实现必须完整转发 `ToolCallDisplay` / `PresentedToolResultDisplay` 结构化字段，不得丢失 `tool_use_id`、presentation 或 artifact 元数据。
-- REPL/TUI 输出不可信 payload（模型文本/thinking、工具输出/摘要、错误）前必须经共享控制序列清洗（thinking/text 块内跨 chunk 保留解析状态、类型切换与消息边界 reset、每条错误 reset stderr、stdout/stderr 状态独立）；renderer 的颜色/标题码在清洗之后添加。
+- REPL/TUI 输出不可信 payload（模型文本/thinking、工具输出/摘要、错误）前必须经共享控制序列清洗（thinking/text 块内跨 chunk 保留解析状态、类型切换与消息边界 reset、每条错误 reset stderr、子代理 thinking/text 两段分别清洗、stdout/stderr 状态独立）；renderer 的颜色/标题码在清洗之后添加。
 - TUI 光标必须落在 UTF-8 char boundary；输入/删除按 char boundary 处理。
 - TUI 粘贴图片只产生 session `attachments/` 传输副本并把绝对路径写入用户消息；图片进入上下文的唯一入口仍是 `Read` 捕获；重复粘贴按内容寻址路径去重，路径不可无歧义表示时 fail closed。
 - Inline TUI 只提交连续且 sealed 的 transcript 前缀；committed 项不得修改或重复写入原生 scrollback；空闲保留最后一个 sealed item，新工作开始后才能推进 committed 边界。

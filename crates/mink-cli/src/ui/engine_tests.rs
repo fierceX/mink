@@ -210,3 +210,33 @@ fn tool_result_boundary_resets_parser_for_following_text() {
         "the tool-result boundary must reset the parser: {text:?}"
     );
 }
+
+#[test]
+fn sub_agent_output_resets_between_thinking_and_text() {
+    let out = SharedBuffer::default();
+    let err = SharedBuffer::default();
+    let display = display_with(&out, &err, false);
+
+    display.render_sub_agent_output(
+        "child",
+        "ok",
+        "thinking \x1b]0;unterminated",
+        "child final answer",
+        1,
+        2,
+    );
+
+    let text = out.text();
+    assert!(
+        text.contains("child final answer"),
+        "the sub-agent body must not be swallowed by thinking's parser: {text:?}"
+    );
+
+    // The sub-agent block must also leave the main stream parser clean.
+    display.render_text("main body");
+    let text = out.text();
+    assert!(
+        text.contains("main body"),
+        "the block boundary must leave the main parser clean: {text:?}"
+    );
+}

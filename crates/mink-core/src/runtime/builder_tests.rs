@@ -3212,3 +3212,79 @@ async fn latched_fault_fails_next_turn_without_model_call() {
     let _ = tokio::fs::remove_dir_all(home).await;
     let _ = tokio::fs::remove_dir_all(cwd).await;
 }
+
+/// Emits a Retry control notification every 5ms forever: the event cadence is
+/// faster than the consumer's 25ms tick, which used to starve deadline checks.
+struct HighFrequencyRetryBackend;
+
+#[async_trait::async_trait]
+impl crate::llm::client::LlmBackend for HighFrequencyRetryBackend {
+    fn name(&self) -> &str {
+        "high-frequency-retry"
+    }
+
+    async fn stream(
+        &self,
+        _request: crate::runtime::LlmRequest,
+    ) -> anyhow::Result<crate::runtime::LlmResponseStream> {
+        use crate::protocol::{Event, RetryEvent};
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<anyhow::Result<Event>>();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(5));
+            loop {
+                interval.tick().await;
+                if tx.send(Ok(Event::Retry(RetryEvent {}))).is_err() {
+                    break;
+                }
+            }
+        });
+        let events = futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        });
+        Ok(crate::runtime::LlmResponseStream {
+            events: Box::pin(events),
+            attempt_count: 1,
+        })
+    }
+}
+
+#[tokio::test]
+async fn high_frequency_retry_events_do_not_starve_deadline_checks() {
+    let home = unique_temp_dir("retry-storm-home");
+    let cwd = unique_temp_dir("retry-storm-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let runtime = build_runtime(runtime_config_with_backend(
+        &home,
+        &cwd,
+        Arc::new(HighFrequencyRetryBackend),
+        |cfg| {
+            cfg.llm_first_event_timeout_secs = 1;
+            cfg.llm_idle_timeout_secs = 30;
+        },
+    ))
+    .await
+    .unwrap();
+
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        tokio::time::Duration::from_secs(2),
+        runtime.run_turn("retry storm"),
+    )
+    .await
+    .expect("continuous Retry events must not starve the first-event deadline")
+    .unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        outcome.status,
+        crate::agent::orchestrator::TurnStatus::Failed
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(1_500),
+        "the deadline must fire on the consumption path, not only when idle: {elapsed:?}"
+    );
+
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}

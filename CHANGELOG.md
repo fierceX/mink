@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### 修复（复核 S1）：期限检查不再被高频事件饿死
+
+- 首事件/idle deadline 检查移到消费循环每轮的确定路径（select 之前）：高频控制事件（如每 5ms 一个 `Retry`）不再因每轮重建 sleep 定时器而始终绕过检查；禁用期限与有效首事件后的 idle 语义不变。
+
+### 修复（复核 S2）：子代理 thinking/text 分别清洗
+
+- `render_sub_agent_output` 的 thinking 与 text 两段完整消息各自重置解析器（复用已有边界函数）；未结束 OSC 不再吞掉子代理正文，块结束后主流解析器保持干净。
+
 ### 修复（复核 R1）：持久化故障锁存封闭执行边界
 
 - 锁存的权威检查点补齐：`TurnExecutor::execute` 与 orchestrator 用户输入入口、`evaluate_and_compact_with_prefix` 入口、`ToolRunner::execute_all` 每个调用派发前、`publish_state*` 入口；低层 `atomic_replace` 保留给显式恢复路径。锁存后下一轮不再请求模型、不修改历史、不执行工具。

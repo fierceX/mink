@@ -320,6 +320,9 @@ impl Display for TerminalDisplay {
             session_id, status, in_tokens, out_tokens,
         ));
         if !thinking.is_empty() {
+            // Each section is a complete message: reset the parser so an
+            // unterminated sequence in thinking cannot swallow the body.
+            self.begin_stdout_message();
             self.write_out("── Thinking ──\n");
             let filtered = self.write_untrusted_out(thinking);
             if !filtered.ends_with('\n') {
@@ -327,6 +330,7 @@ impl Display for TerminalDisplay {
             }
         }
         if !text.is_empty() {
+            self.begin_stdout_message();
             self.write_out("── Text ──\n");
             let filtered = self.write_untrusted_out(text);
             if !filtered.ends_with('\n') {
