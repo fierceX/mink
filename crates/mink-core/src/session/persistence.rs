@@ -119,6 +119,10 @@ fn publish_state_with(
     publish: impl FnOnce() -> Result<(), PublishError>,
     sync: impl FnOnce(&Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    // Authoritative publish entry: a latched session must not write new
+    // state. Explicit recovery paths use the low-level `atomic_replace`
+    // helpers instead of this entry point.
+    fault.check()?;
     match publish() {
         Ok(()) => Ok(()),
         // Nothing was published: the previous state is still authoritative

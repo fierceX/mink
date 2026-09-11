@@ -218,6 +218,19 @@ impl OrchActor {
     async fn handle_user_input(&mut self, input: String) -> TurnRunResult {
         let started_at = Instant::now();
         let billing_turn_id = self.ctx.usage.begin_turn();
+        // Session-level publish fault: refuse the operation up front instead
+        // of requesting the model, touching history or executing tools.
+        if let Err(error) = self.ctx.persistence_fault.check() {
+            self.ctx.display.render_error(&format!("{error:#}"));
+            self.refresh_title().await;
+            let result = self.finish_usage(
+                TurnRunResult::failed(format!("{error:#}")),
+                &billing_turn_id,
+            );
+            self.log_turn_final(&result, started_at.elapsed().as_millis() as u64)
+                .await;
+            return result;
+        }
         // 跨轮重复失败可累积升级，单次偶然失败自然消退。
         self.belief.decay(self.ctx.config.signal.decay_per_input);
         self.refresh_title().await;

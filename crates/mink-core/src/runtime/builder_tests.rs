@@ -3006,3 +3006,209 @@ async fn post_init_hook_rewrites_are_visible_to_first_turn() {
     let _ = tokio::fs::remove_dir_all(home).await;
     let _ = tokio::fs::remove_dir_all(cwd).await;
 }
+
+/// Latched sessions must be refused before any model request.
+struct PanicIfCalledBackend;
+
+#[async_trait::async_trait]
+impl crate::llm::client::LlmBackend for PanicIfCalledBackend {
+    fn name(&self) -> &str {
+        "panic-if-called"
+    }
+
+    async fn stream(
+        &self,
+        _request: crate::runtime::LlmRequest,
+    ) -> anyhow::Result<crate::runtime::LlmResponseStream> {
+        panic!("backend must not be called while the session is latched");
+    }
+}
+
+/// Emits `retries` control notifications and then stays pending forever.
+struct RetryThenPendingBackend {
+    retries: usize,
+}
+
+#[async_trait::async_trait]
+impl crate::llm::client::LlmBackend for RetryThenPendingBackend {
+    fn name(&self) -> &str {
+        "retry-then-pending"
+    }
+
+    async fn stream(
+        &self,
+        _request: crate::runtime::LlmRequest,
+    ) -> anyhow::Result<crate::runtime::LlmResponseStream> {
+        use crate::protocol::{Event, RetryEvent};
+        use futures::StreamExt as _;
+        let retries =
+            futures::stream::iter((0..self.retries).map(|_| Ok(Event::Retry(RetryEvent {}))));
+        Ok(crate::runtime::LlmResponseStream {
+            events: Box::pin(retries.chain(futures::stream::pending())),
+            attempt_count: 1,
+        })
+    }
+}
+
+#[tokio::test]
+async fn retry_does_not_bypass_first_event_deadline() {
+    let home = unique_temp_dir("retry-deadline-home");
+    let cwd = unique_temp_dir("retry-deadline-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let runtime = build_runtime(runtime_config_with_backend(
+        &home,
+        &cwd,
+        Arc::new(RetryThenPendingBackend { retries: 1 }),
+        |cfg| {
+            cfg.llm_first_event_timeout_secs = 1;
+            cfg.llm_idle_timeout_secs = 30;
+        },
+    ))
+    .await
+    .unwrap();
+
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        tokio::time::Duration::from_secs(2),
+        runtime.run_turn("retry then silence"),
+    )
+    .await
+    .expect("the first-event deadline must still fire after a Retry event")
+    .unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        outcome.status,
+        crate::agent::orchestrator::TurnStatus::Failed
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(1_500),
+        "Retry must not extend the first-event budget: {elapsed:?}"
+    );
+
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+#[tokio::test]
+async fn repeated_retry_events_do_not_extend_first_event_deadline() {
+    let home = unique_temp_dir("retry-multi-home");
+    let cwd = unique_temp_dir("retry-multi-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let runtime = build_runtime(runtime_config_with_backend(
+        &home,
+        &cwd,
+        Arc::new(RetryThenPendingBackend { retries: 3 }),
+        |cfg| {
+            cfg.llm_first_event_timeout_secs = 1;
+            cfg.llm_idle_timeout_secs = 30;
+        },
+    ))
+    .await
+    .unwrap();
+
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        tokio::time::Duration::from_secs(2),
+        runtime.run_turn("many retries then silence"),
+    )
+    .await
+    .expect("repeated Retry events must not bypass the first-event deadline")
+    .unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        outcome.status,
+        crate::agent::orchestrator::TurnStatus::Failed
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(1_500),
+        "repeated Retry must not extend the first-event budget: {elapsed:?}"
+    );
+
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+#[tokio::test]
+async fn retry_followed_by_real_output_still_succeeds() {
+    let home = unique_temp_dir("retry-output-home");
+    let cwd = unique_temp_dir("retry-output-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    use crate::protocol::{Event, RetryEvent, StopEvent, TextEvent};
+    let backend = crate::llm::mock::MockLlmBackend::new(
+        "flash",
+        vec![vec![
+            Ok(Event::Retry(RetryEvent {})),
+            Ok(Event::Text(TextEvent {
+                content: "after retry".into(),
+            })),
+            Ok(Event::Stop(StopEvent {
+                reason: "end_turn".into(),
+            })),
+        ]],
+    );
+    let runtime = build_runtime(runtime_config_with_mock(&home, &cwd, backend))
+        .await
+        .unwrap();
+
+    let outcome = runtime.run_turn("retry then output").await.unwrap();
+
+    assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+    assert!(outcome.text.contains("after retry"), "{}", outcome.text);
+
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+#[tokio::test]
+async fn latched_fault_fails_next_turn_without_model_call() {
+    let home = unique_temp_dir("latched-turn-home");
+    let cwd = unique_temp_dir("latched-turn-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let runtime = build_runtime(runtime_config_with_backend(
+        &home,
+        &cwd,
+        Arc::new(PanicIfCalledBackend),
+        |_| {},
+    ))
+    .await
+    .unwrap();
+    let _ = runtime
+        .ctx
+        .persistence_fault
+        .raise(std::path::Path::new("todos.json"), "injected fault");
+
+    let outcome = tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        runtime.run_turn("plain text must not succeed"),
+    )
+    .await
+    .expect("a latched turn must finish promptly")
+    .unwrap();
+
+    assert_eq!(
+        outcome.status,
+        crate::agent::orchestrator::TurnStatus::Failed
+    );
+    assert!(
+        outcome
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("persistence fault"),
+        "{:?}",
+        outcome.error
+    );
+    assert!(
+        runtime.ctx.store.lines().await.unwrap().is_empty(),
+        "history must stay untouched for a latched turn"
+    );
+
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}

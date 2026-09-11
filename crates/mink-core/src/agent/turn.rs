@@ -231,6 +231,9 @@ impl TurnExecutor {
         user_input: &str,
         mut belief: Option<&mut crate::agent::belief::BeliefTracker>,
     ) -> Result<(TurnDecision, Vec<TurnEffect>)> {
+        // A latched persistence fault means the session must not accept new
+        // work: refuse before the model request, history append or tools.
+        self.ctx.persistence_fault.check()?;
         // New user intent: compiler-enforced full local-state reset.
         self.reset_local_state(user_input);
 

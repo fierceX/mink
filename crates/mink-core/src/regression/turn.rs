@@ -527,10 +527,12 @@ async fn edit_tool_result_uses_full_edit_preview_branch() -> anyhow::Result<()> 
 }
 
 #[tokio::test]
-async fn persistence_fault_stops_the_turn_after_tool_execution() -> anyhow::Result<()> {
-    let h = harness("persistence-fault").await?;
+async fn latched_fault_blocks_turn_before_tools_and_history() -> anyhow::Result<()> {
+    let h = harness("persistence-fault-entry").await?;
+    let marker = h.cwd.join("must-not-exist.txt");
     // Simulate a store that latched an unrecoverable publish/durability
-    // fault: the turn must stop even when the executed tool itself succeeds.
+    // fault: the next turn must be refused before the model request, any
+    // history append or any tool side effect.
     let _ = h
         .ctx
         .persistence_fault
@@ -541,7 +543,7 @@ async fn persistence_fault_stops_the_turn_after_tool_execution() -> anyhow::Resu
             Ok(Event::ToolCall(tool_call(
                 "Bash",
                 "call_bash",
-                json!({"command":"echo still-running"}),
+                json!({"command": format!("touch {}", marker.display())}),
             ))),
             Ok(Event::Stop(StopEvent {
                 reason: "tool_use".into(),
@@ -551,11 +553,19 @@ async fn persistence_fault_stops_the_turn_after_tool_execution() -> anyhow::Resu
     let mut executor = TurnExecutor::new(h.ctx.clone(), llm_backend_from_mock(llm));
 
     let error = executor
-        .execute("check persistence fault propagation", None)
+        .execute("check entry seal", None)
         .await
         .expect_err("a latched persistence fault must fail the turn");
 
     assert!(error.to_string().contains("persistence fault"), "{error}");
     assert!(error.to_string().contains("restart the session"), "{error}");
+    assert!(
+        !marker.exists(),
+        "the latched turn must not execute tools with side effects"
+    );
+    assert!(
+        h.ctx.store.lines().await?.is_empty(),
+        "the latched turn must not modify history"
+    );
     Ok(())
 }

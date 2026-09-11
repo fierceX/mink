@@ -280,8 +280,26 @@ impl ToolRunner {
         // mid-way, but the counters must NOT reset there or a Read→Bash→Read
         // group would slip two 10MiB images into the same request.
         let mut image_budget = ImageBatchBudget::default();
+        // A latched session must not dispatch further tools: stop before the
+        // next call and report every remaining call as explicitly not
+        // executed so the tool_call/result protocol stays complete.
+        let mut halted: Option<String> = None;
 
         for call in calls {
+            if halted.is_none()
+                && let Err(error) = self.ctx.persistence_fault.check()
+            {
+                halted = Some(format!(
+                    "not executed: session state persistence fault: {error:#}"
+                ));
+            }
+            if let Some(reason) = &halted {
+                for pending in std::mem::take(&mut read_batch) {
+                    results.push(not_executed_tool_result(pending, reason));
+                }
+                results.push(not_executed_tool_result(call, reason));
+                continue;
+            }
             let metadata = self.metadata_for(&call.name);
             let custom_sequential = self.find_custom_tool(&call.name).is_some_and(|tool| {
                 tool.definition.execution == crate::runtime::ToolExecutionMode::Sequential
@@ -1244,6 +1262,12 @@ pub(crate) fn failed_tool_result(
     result.status =
         ToolStatus::Failed(crate::tools::metadata::classify_failure_kind(&reason, None));
     result
+}
+
+/// Explicit "this call was never dispatched" result, used when a latched
+/// session halts a tool batch mid-way.
+fn not_executed_tool_result(call: ToolCallEvent, reason: &str) -> ToolExecution {
+    failed_tool_result(call.id, call.name, call.fields, reason.to_string())
 }
 
 fn resolve_summary_path(cwd: &Path, raw: &str) -> PathBuf {

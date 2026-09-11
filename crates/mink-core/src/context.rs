@@ -122,6 +122,9 @@ pub struct ToolContext {
     pub snapshots: Arc<Mutex<FileSnapshotStore>>,
     pub plan_store: Arc<PlanStore>,
     pub todo_store: Arc<TodoStore>,
+    /// Session publish-fault latch (shared with `AgentSharedContext`): the
+    /// tool runner refuses to dispatch any tool while latched.
+    pub(crate) persistence_fault: crate::session::persistence::PersistenceFault,
     pub tool_config: ToolConfig,
     pub interrupt: Arc<AtomicBool>,
     pub read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
@@ -156,6 +159,7 @@ impl From<&AgentSharedContext> for ToolContext {
                     .with_fault(ctx.persistence_fault.clone()),
             ),
             todo_store: ctx.todo_store.clone(),
+            persistence_fault: ctx.persistence_fault.clone(),
             tool_config: ctx.tool_config.clone(),
             interrupt: ctx.interrupt.clone(),
             read_only_fs: ctx.read_only_fs.clone(),

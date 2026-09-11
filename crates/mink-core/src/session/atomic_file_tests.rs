@@ -112,10 +112,82 @@ fn permissions_are_applied_before_publish() {
 
 #[cfg(unix)]
 #[test]
-fn permission_failure_before_publish_keeps_old_body() {
+fn restrictive_temp_creation_never_exposes_content() {
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     let root = std::env::temp_dir().join(format!(
-        "mink-atomic-perm-fail-{}-{}",
+        "mink-atomic-restrict-{}-{}",
+        std::process::id(),
+        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let temporary = root.join("staging");
+
+    let mut file = create_temp_file(&temporary, true).unwrap();
+    let mode_at_creation = std::fs::metadata(&temporary).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode_at_creation, 0o600,
+        "staging file must be restrictive at creation, before any content"
+    );
+    file.write_all(b"private payload").unwrap();
+    let mode_with_content = std::fs::metadata(&temporary).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode_with_content, 0o600,
+        "staging content must never sit in a wider-permission file"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn injected_permission_failure_is_not_published() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!(
+        "mink-atomic-perm-inject-{}-{}",
+        std::process::id(),
+        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let target = root.join("script.sh");
+    std::fs::write(&target, b"old").unwrap();
+
+    inject_permission_failure_once();
+    let error = atomic_replace_status_with_permissions(
+        &target,
+        b"new",
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap_err();
+
+    match error {
+        PublishError::NotPublished(inner) => {
+            assert!(
+                inner.to_string().contains("injected permission failure"),
+                "{inner}"
+            );
+        }
+        other => panic!("expected NotPublished, got {other:?}"),
+    }
+    assert_eq!(std::fs::read(&target).unwrap(), b"old");
+    assert!(
+        std::fs::read_dir(&root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".tmp-")
+        }),
+        "staging files must be cleaned up when permission application fails"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn rename_failure_before_publish_keeps_old_body() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!(
+        "mink-atomic-rename-fail-{}-{}",
         std::process::id(),
         TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
@@ -130,8 +202,8 @@ fn permission_failure_before_publish_keeps_old_body() {
         .unwrap();
     let permissions = std::fs::Permissions::from_mode(0o600);
 
-    // Remove the temporary file before the permission step so
-    // `set_permissions` fails: the rollback must not be published.
+    // Unlink the staging file in the pre-replace hook: the rename itself
+    // fails, so nothing is published and the old body stays.
     let error = write_and_replace_with(
         &mut file,
         &temporary,

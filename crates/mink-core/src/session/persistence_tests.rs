@@ -112,3 +112,25 @@ fn first_fault_is_kept_as_root_cause() {
     );
     assert_eq!(fault.info().unwrap().path, PathBuf::from("/first"));
 }
+
+#[test]
+fn publish_entry_refuses_after_latch() {
+    let dir = temp_dir("entry-refuses");
+    let path = dir.join("state.json");
+    std::fs::write(&path, b"old").unwrap();
+    let fault = PersistenceFault::default();
+    let _ = fault.raise(&path, "injected fault");
+
+    let error = publish_state(&path, b"new", &fault).unwrap_err();
+    assert!(error.to_string().contains("persistence fault"), "{error}");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"old",
+        "a latched session must not publish new state"
+    );
+
+    // Explicit recovery paths may still use the low-level helper by design.
+    crate::session::atomic_file::atomic_replace(&path, b"recovered").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"recovered");
+    let _ = std::fs::remove_dir_all(dir);
+}

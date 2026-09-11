@@ -986,3 +986,55 @@ async fn mixed_batch_preserves_dispatch_order() {
         results[1].content
     );
 }
+
+#[tokio::test]
+async fn latched_fault_halts_tool_batch_without_side_effects() {
+    let shared = crate::regression::test_context_for_agent("runner-latched-batch")
+        .await
+        .unwrap();
+    let marker = shared.cwd.join("must-not-exist.txt");
+    let _ = shared
+        .persistence_fault
+        .raise(std::path::Path::new("todos.json"), "injected fault");
+    let ctx = crate::context::ToolContext::from(shared.as_ref());
+    let runner = ToolRunner::new(Arc::new(ctx));
+
+    let calls = vec![
+        ToolCallEvent {
+            name: "Bash".into(),
+            id: "call-write".into(),
+            input_json: serde_json::json!({"command": format!("touch {}", marker.display())}),
+            fields: BTreeMap::new(),
+            parse_error: None,
+        },
+        ToolCallEvent {
+            name: "Bash".into(),
+            id: "call-write-2".into(),
+            input_json: serde_json::json!({"command": format!("touch {}2", marker.display())}),
+            fields: BTreeMap::new(),
+            parse_error: None,
+        },
+    ];
+    let results = runner.execute_all(calls).await.unwrap();
+
+    assert_eq!(results.len(), 2, "every call must keep a result");
+    for result in &results {
+        assert!(
+            matches!(result.status, ToolStatus::Failed(_)),
+            "{:?}",
+            result.status
+        );
+        assert!(
+            result
+                .content
+                .contains("not executed: session state persistence fault"),
+            "{}",
+            result.content
+        );
+    }
+    assert!(
+        !marker.exists(),
+        "a latched session must not dispatch tools with side effects"
+    );
+    let _ = std::fs::remove_dir_all(shared.home.as_path());
+}

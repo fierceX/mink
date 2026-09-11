@@ -131,3 +131,82 @@ fn stream_json_mode_writes_nothing() {
 
     assert_eq!(out.text(), "");
 }
+
+#[test]
+fn unterminated_osc_in_error_does_not_hide_next_error() {
+    let out = SharedBuffer::default();
+    let err = SharedBuffer::default();
+    let display = display_with(&out, &err, false);
+
+    display.render_error("bad \x1b]0;unterminated");
+    display.render_error("second independent error");
+
+    let text = err.text();
+    assert!(
+        text.contains("second independent error"),
+        "each error must be sanitized as a complete message: {text:?}"
+    );
+}
+
+#[test]
+fn unterminated_osc_in_thinking_does_not_hide_final_answer() {
+    let out = SharedBuffer::default();
+    let err = SharedBuffer::default();
+    let display = display_with(&out, &err, false);
+
+    display.render_thinking("thinking \x1b]0;unterminated");
+    display.render_text("final answer");
+
+    let text = out.text();
+    assert!(
+        text.contains("final answer"),
+        "the thinking → text boundary must reset the parser: {text:?}"
+    );
+}
+
+#[test]
+fn failed_stream_without_stop_resets_parser_for_next_turn() {
+    let out = SharedBuffer::default();
+    let err = SharedBuffer::default();
+    let display = display_with(&out, &err, false);
+
+    // A stream that dies without Stop leaves a dirty parser unless the error
+    // path resets it; the next turn's thinking must still render.
+    display.render_thinking("\x1b]0;unterminated");
+    display.render_error("turn failed");
+    display.render_thinking("next turn thinking");
+
+    let text = out.text();
+    assert!(
+        text.contains("next turn thinking"),
+        "a failed stream must not leak parser state into the next turn: {text:?}"
+    );
+}
+
+#[test]
+fn tool_result_boundary_resets_parser_for_following_text() {
+    let out = SharedBuffer::default();
+    let err = SharedBuffer::default();
+    let display = display_with(&out, &err, false);
+
+    display.render_tool_result(&crate::ui::PresentedToolResultDisplay {
+        base: crate::ui::ToolResultDisplay {
+            tool_name: "Read",
+            content_preview: "preview \x1b]0;unterminated",
+            content: "",
+            tool_use_id: Some("t1"),
+            exit_code: None,
+        },
+        status: crate::runtime::ToolStatus::Succeeded,
+        result_kind: crate::ui::ToolResultKind::Text,
+        presentation: None,
+        artifacts: &[],
+    });
+    display.render_text("body after tool result");
+
+    let text = out.text();
+    assert!(
+        text.contains("body after tool result"),
+        "the tool-result boundary must reset the parser: {text:?}"
+    );
+}

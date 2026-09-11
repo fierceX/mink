@@ -330,6 +330,8 @@ impl CompactionEngine {
         source_fingerprint: Option<&str>,
         current_projection: Option<&LlmCacheProjection>,
     ) -> Result<(bool, String)> {
+        // Latched session: refuse before any summary request or state write.
+        self.fault.check()?;
         let _guard = self.compact_lock.lock().await;
         if self.config.max_context_tokens == 0 && matches!(trigger, "auto" | "preflight") {
             return Ok((false, "automatic compaction disabled".into()));
@@ -479,11 +481,21 @@ impl CompactionEngine {
             crate::session::persistence::publish_state(&summary_path, summary.as_bytes(), &fault)
         })
         .await;
+        // The authoritative context-state is committed, but a failed derived
+        // projection must surface as an error instead of silently returning
+        // success: the dirty flag only marks it for a later retry.
+        let projection_result = match projection {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(error),
+            Err(join_error) => Err(anyhow::anyhow!(
+                "summary projection write task failed: {join_error}"
+            )),
+        };
         self.projection_dirty
-            .store(!matches!(projection, Ok(Ok(()))), Ordering::SeqCst);
+            .store(projection_result.is_err(), Ordering::SeqCst);
         self.memo_epoch.fetch_add(1, Ordering::SeqCst);
         self.projection_generation.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        projection_result
     }
 
     pub async fn flush_projection(&self) -> Result<()> {

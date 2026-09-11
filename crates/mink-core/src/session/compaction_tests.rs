@@ -1189,3 +1189,77 @@ async fn zero_context_window_disables_auto_but_allows_manual_compaction() -> any
     assert!(manual);
     Ok(())
 }
+
+#[tokio::test]
+async fn manual_compact_refuses_latched_session() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "compact-latched-session",
+        |config| config.context_compact_tail_tokens = 1,
+        summary_backend(),
+    )
+    .await?;
+    for index in 0..3 {
+        ctx.store
+            .add_user(&format!("request {index}: {}", "x".repeat(6_000)))
+            .await?;
+        ctx.store
+            .add_assistant(&format!("progress {index}: {}", "y".repeat(6_000)), "", &[])
+            .await?;
+    }
+    let state_path = ctx.summary_path.with_file_name("context-state.json");
+    let _ = ctx
+        .persistence_fault
+        .raise(&state_path, "injected publish fault");
+
+    let error = compact(&ctx, "manual", 10_000).await.unwrap_err();
+
+    assert!(error.to_string().contains("persistence fault"), "{error}");
+    assert!(
+        !state_path.exists(),
+        "a latched session must not write compaction state"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn summary_projection_failure_fails_compaction() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "compact-projection-failure",
+        |config| {
+            config.max_context_tokens = 64_000;
+            config.context_reserve_tokens = 12_000;
+            config.context_compact_tail_tokens = 16_000;
+            config.context_compact_max_output_tokens = 2_048;
+        },
+        summary_backend(),
+    )
+    .await?;
+    for index in 0..4 {
+        ctx.store
+            .add_user(&format!("request {index}: {}", "x".repeat(8_000)))
+            .await?;
+        ctx.store
+            .add_assistant(&format!("progress {index}: {}", "y".repeat(8_000)), "", &[])
+            .await?;
+    }
+    // Replace the derived summary file with a directory: the authoritative
+    // context-state write succeeds, but the projection write cannot, and the
+    // compaction must report an error instead of returning success with only
+    // a dirty marker.
+    let _ = std::fs::remove_file(&ctx.summary_path);
+    std::fs::create_dir(&ctx.summary_path)?;
+
+    let error = compact(&ctx, "manual", 50_000).await.unwrap_err();
+
+    let message = format!("{error:#}").to_lowercase();
+    assert!(
+        message.contains("directory") || message.contains("projection"),
+        "{message}"
+    );
+    let state = load_state(&ctx.summary_path.with_file_name("context-state.json"))?;
+    assert!(
+        state.active_start > 0,
+        "authoritative state is committed before the derived projection fails"
+    );
+    Ok(())
+}

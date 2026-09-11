@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### 修复（复核 R1）：持久化故障锁存封闭执行边界
+
+- 锁存的权威检查点补齐：`TurnExecutor::execute` 与 orchestrator 用户输入入口、`evaluate_and_compact_with_prefix` 入口、`ToolRunner::execute_all` 每个调用派发前、`publish_state*` 入口；低层 `atomic_replace` 保留给显式恢复路径。锁存后下一轮不再请求模型、不修改历史、不执行工具。
+- 同批工具：锁存后未派发的调用生成显式 `not executed` 结果，保持 tool_call/result 配对；已执行调用保留真实结果。
+- 压缩策略统一：权威 `context-state.json` 与派生 summary 分开对待，派生投影失败不再仅置 dirty 返回成功，错误向上传播（dirty 仍保留供重试）。
+
+### 修复（复核 R2）：Retry 事件不再绕过首事件期限
+
+- `Retry` 作为控制通知不再计入“有效首 provider 事件”，不满足也不重置绝对首事件 deadline；单次/连续 Retry 后永久 pending 仍会在原预算内失败，Retry 后真实输出正常成功。
+
+### 修复（复核 R3）：终端清洗器补齐消息/流边界
+
+- thinking/text 块内保留跨 chunk 解析状态，类型切换时 reset；完整消息（tool call/result、stop、retry、sub-agent 块、prompt）重置 stdout 解析器；每条错误先 reset stderr 解析器并结束 stdout 流边界。未结束 OSC 不再吞掉下一条错误、thinking 后的正文或下一轮输出。
+
+### 修复（复核 R4）：临时文件创建即限制权限并在 chmod 后同步
+
+- 提供最终权限时，临时文件以 0600 创建（Unix），写入内容期间不存在更宽权限窗口；顺序改为创建（限制权限）→ 写入 → 设置最终权限 → 文件 fsync → rename → 目录同步，权限变化进入同一次文件同步屏障。
+- 新增权限设置失败注入 seam：失败归类 NotPublished、不发布且清理临时文件；原“权限失败”测试实际触发 rename 失败，已更名纠正；新增创建权限、注入失败不发布、最终权限回归。
+
 ### 维护：移除不可达溢出分支与事件交付契约文档（A4/A5）
 
 - `checked_pixel_count` 改为总是可得的 `pixel_count`（`u32 × u32` 永在 `u64` 内），删除三处不可达的 “dimensions overflow” 错误分支与对应断言；真正的边长/像素/字节配额检查保留。

@@ -95,11 +95,7 @@ fn atomic_replace_impl(
             ".{file_name}.tmp-{}-{sequence}",
             std::process::id()
         ));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-        {
+        match create_temp_file(&temporary, permissions.is_some()) {
             Ok(mut file) => {
                 let result = write_and_replace_with(
                     &mut file,
@@ -128,6 +124,22 @@ fn atomic_replace_impl(
     ))
 }
 
+/// Create the staging file. When the caller supplies final permissions, the
+/// staging file is created restrictively (0600 on Unix) so the private
+/// content is never stored under the default umask mode, even briefly.
+fn create_temp_file(path: &Path, restrict_permissions: bool) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if restrict_permissions {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = restrict_permissions;
+    options.open(path)
+}
+
 fn write_and_replace_with(
     file: &mut File,
     temporary: &Path,
@@ -141,21 +153,40 @@ fn write_and_replace_with(
         .map_err(|error| PublishError::NotPublished(error.into()))?;
     file.flush()
         .map_err(|error| PublishError::NotPublished(error.into()))?;
-    file.sync_all()
-        .map_err(|error| PublishError::NotPublished(error.into()))?;
-    before_replace().map_err(PublishError::NotPublished)?;
-    // Permissions are applied to the temporary file **before** the rename:
-    // the published inode never briefly carries the default mode (audit F9).
+    // Apply the final permissions BEFORE the file sync so the mode is part
+    // of the same durability barrier as the content (audit R4).
     if let Some(permissions) = permissions {
+        #[cfg(test)]
+        if INJECT_PERMISSION_FAILURE.with(|flag| flag.replace(false)) {
+            return Err(PublishError::NotPublished(anyhow::anyhow!(
+                "injected permission failure"
+            )));
+        }
         file.set_permissions(permissions.clone())
             .map_err(|error| PublishError::NotPublished(error.into()))?;
     }
+    file.sync_all()
+        .map_err(|error| PublishError::NotPublished(error.into()))?;
+    before_replace().map_err(PublishError::NotPublished)?;
     replace_existing(temporary, path).map_err(PublishError::NotPublished)?;
     // From here on the new bytes are visible: failures are durability
     // failures, never "nothing happened".
     after_replace().map_err(PublishError::PublishedButUnsynced)?;
     sync_parent(path).map_err(PublishError::PublishedButUnsynced)?;
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only injection: make the next permission application fail, so
+    /// tests can pin the "no publish on permission failure" contract.
+    static INJECT_PERMISSION_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn inject_permission_failure_once() {
+    INJECT_PERMISSION_FAILURE.with(|flag| flag.set(true));
 }
 
 #[cfg(not(windows))]

@@ -200,7 +200,13 @@ impl super::TurnExecutor {
                 break;
             };
             let evt = result?;
-            saw_any_event = true;
+            // Retry is a control notification, not a valid first provider
+            // event: it must not satisfy (or restart) the first-event
+            // deadline, which stays absolute until real output arrives.
+            let is_retry = matches!(&evt, Event::Retry(_));
+            if !is_retry {
+                saw_any_event = true;
+            }
             last_event_at = Instant::now();
 
             match evt {

@@ -20,6 +20,16 @@ pub struct TerminalDisplay {
 struct DisplayState {
     last_char: String,
     prev_was_thinking: bool,
+    /// Which continuous untrusted stream the stdout escape parser is in.
+    /// Chunked text/thinking keep parser state; any message/kind boundary
+    /// resets it so an unterminated sequence cannot swallow later content.
+    stream_kind: Option<StreamKind>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamKind {
+    Thinking,
+    Text,
 }
 
 impl TerminalDisplay {
@@ -113,6 +123,34 @@ impl TerminalDisplay {
             .reset();
     }
 
+    fn reset_stderr_filter(&self) {
+        self.stderr_filter
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .reset();
+    }
+
+    /// Message boundary: reset the stdout parser and leave streamed-kind
+    /// tracking so the next thinking/text block starts clean.
+    fn begin_stdout_message(&self) {
+        self.reset_stdout_filter();
+        self.lock_state().stream_kind = None;
+    }
+
+    /// Continuous-stream boundary: parser state is kept inside one
+    /// thinking/text block and reset when the block kind changes.
+    fn ensure_stream_kind(&self, kind: StreamKind) {
+        let changed = {
+            let mut state = self.lock_state();
+            let changed = state.stream_kind != Some(kind);
+            state.stream_kind = Some(kind);
+            changed
+        };
+        if changed {
+            self.reset_stdout_filter();
+        }
+    }
+
     fn write_err(&self, s: &str) {
         let mut stderr = self.lock_stderr();
         let _ = write!(stderr, "{s}");
@@ -131,6 +169,7 @@ impl TerminalDisplay {
 
 impl Display for TerminalDisplay {
     fn render_thinking(&self, content: &str) {
+        self.ensure_stream_kind(StreamKind::Thinking);
         let filtered = self.filter_stdout(content);
         self.write_normalized(&format!("\x1b[90m{filtered}\x1b[0m"));
         self.update_last_char(&filtered);
@@ -138,6 +177,7 @@ impl Display for TerminalDisplay {
     }
 
     fn render_text(&self, content: &str) {
+        self.ensure_stream_kind(StreamKind::Text);
         {
             let state = self.lock_state();
             if state.prev_was_thinking && state.last_char != "\n" {
@@ -152,7 +192,7 @@ impl Display for TerminalDisplay {
     }
 
     fn render_tool_call(&self, call: &crate::ui::ToolCallDisplay<'_>) {
-        self.reset_stdout_filter();
+        self.begin_stdout_message();
         {
             let state = self.lock_state();
             if state.last_char != "\n" {
@@ -168,7 +208,7 @@ impl Display for TerminalDisplay {
     }
 
     fn render_tool_result(&self, result: &crate::ui::PresentedToolResultDisplay<'_>) {
-        self.reset_stdout_filter();
+        self.begin_stdout_message();
         {
             let state = self.lock_state();
             if state.prev_was_thinking && state.last_char != "\n" {
@@ -185,7 +225,7 @@ impl Display for TerminalDisplay {
     }
 
     fn render_stop(&self, _reason: &str) {
-        self.reset_stdout_filter();
+        self.begin_stdout_message();
         let state = self.lock_state();
         if state.last_char != "\n" {
             drop(state);
@@ -195,6 +235,11 @@ impl Display for TerminalDisplay {
     }
 
     fn render_error(&self, message: &str) {
+        // Errors are complete messages and mark a stream interruption: reset
+        // both parsers so one unterminated sequence cannot hide the next
+        // independent error or the following turn's output.
+        self.reset_stderr_filter();
+        self.begin_stdout_message();
         {
             let state = self.lock_state();
             if state.last_char != "\n" {
@@ -207,7 +252,7 @@ impl Display for TerminalDisplay {
     }
 
     fn render_retry(&self) {
-        self.reset_stdout_filter();
+        self.begin_stdout_message();
         self.write_err("RETRY\n");
     }
 
@@ -269,7 +314,7 @@ impl Display for TerminalDisplay {
     ) {
         // Independent message block: do not share parser state with the main
         // stream in either direction.
-        self.reset_stdout_filter();
+        self.begin_stdout_message();
         self.write_out(&format!(
             "[sub-agent {}] {} (in={}, out={})\n",
             session_id, status, in_tokens, out_tokens,
@@ -288,16 +333,16 @@ impl Display for TerminalDisplay {
                 self.write_out("\n");
             }
         }
-        self.reset_stdout_filter();
+        self.begin_stdout_message();
     }
 
     fn render_prompt(&self) {
-        self.reset_stdout_filter();
+        self.begin_stdout_message();
         self.write_err("\x1b[32m> \x1b[0m");
     }
 
     fn render_clear_line(&self) {
-        self.reset_stdout_filter();
+        self.begin_stdout_message();
         self.write_err("\r\x1b[2K");
     }
 }
