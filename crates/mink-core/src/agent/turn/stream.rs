@@ -77,7 +77,16 @@ impl super::TurnExecutor {
         tools_json: &[serde_json::Value],
         current_context_tokens: usize,
     ) -> anyhow::Result<StreamOutput> {
-        let mut stream = match crate::llm::client::stream_backend(
+        // 首事件期限自进入函数起算一次绝对 deadline，覆盖“请求建立＋首事件”；
+        // 建流返回不会重新获得完整预算，`Retry` 事件也不延长它。
+        let stream_started = Instant::now();
+        let first_event_timeout = positive_duration(self.ctx.config.llm_first_event_timeout_secs);
+        let idle_timeout = positive_duration(self.ctx.config.llm_idle_timeout_secs);
+        let heartbeat = positive_duration(self.ctx.config.llm_wait_heartbeat_secs);
+        let mut last_heartbeat_at = stream_started;
+
+        // 建流 future 只创建一次并 pin：tick 分支不得重建它，否则会重复发请求。
+        let mut establish = std::pin::pin!(crate::llm::client::stream_backend(
             &self.llm_backend,
             &self.ctx,
             &self.model_name,
@@ -85,16 +94,57 @@ impl super::TurnExecutor {
             messages,
             tools_json,
             system_prompt,
-        )
-        .await
-        {
-            Ok(stream) => stream,
-            Err(error) if is_context_overflow_message(&error.to_string()) => {
-                return Err(anyhow::Error::new(ContextOverflowError {
-                    message: error.to_string(),
-                }));
+        ));
+        let mut stream = loop {
+            tokio::select! {
+                biased;
+                // 已完成的建流结果优先于并发到达的取消：迟到取消不能覆盖
+                // 已经确定的成功结果。
+                result = &mut establish => {
+                    break match result {
+                        Ok(stream) => stream,
+                        Err(error) if error.downcast_ref::<TurnInterrupted>().is_some() => {
+                            return Err(error);
+                        }
+                        Err(error) if is_context_overflow_message(&error.to_string()) => {
+                            return Err(anyhow::Error::new(ContextOverflowError {
+                                message: error.to_string(),
+                            }));
+                        }
+                        Err(error) => return Err(error),
+                    };
+                }
+                // shutdown / 外层取消：与流消费阶段一致映射为中断。
+                _ = self.ctx.cancel.cancelled() => {
+                    self.ctx.log_event(crate::events::EventLog::Stop {
+                        reason: "interrupted".into(),
+                    });
+                    return Err(anyhow::Error::new(TurnInterrupted));
+                }
+                // tick 仅负责 interrupt 轮询、首事件 deadline 与等待心跳。
+                _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
+                    if self.ctx.interrupt.load(Ordering::SeqCst) {
+                        self.ctx.log_event(crate::events::EventLog::Stop {
+                            reason: "interrupted".into(),
+                        });
+                        return Err(anyhow::Error::new(TurnInterrupted));
+                    }
+                    self.check_llm_wait_timeout(
+                        false,
+                        stream_started,
+                        stream_started,
+                        first_event_timeout,
+                        idle_timeout,
+                    )?;
+                    self.maybe_render_llm_wait_heartbeat(
+                        false,
+                        stream_started,
+                        stream_started,
+                        &mut last_heartbeat_at,
+                        heartbeat,
+                    );
+                }
             }
-            Err(error) => return Err(error),
         };
 
         let mut text = String::new();
@@ -105,12 +155,8 @@ impl super::TurnExecutor {
         let mut saw_stop = false;
         let mut saw_any_event = false;
         let mut saw_visible_output = false;
-        let stream_started = Instant::now();
-        let mut last_event_at = stream_started;
-        let mut last_heartbeat_at = stream_started;
-        let first_event_timeout = positive_duration(self.ctx.config.llm_first_event_timeout_secs);
-        let idle_timeout = positive_duration(self.ctx.config.llm_idle_timeout_secs);
-        let heartbeat = positive_duration(self.ctx.config.llm_wait_heartbeat_secs);
+        // idle 只在流消费阶段计量；首事件 deadline 继续使用请求起点。
+        let mut last_event_at = Instant::now();
 
         loop {
             if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {

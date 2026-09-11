@@ -98,6 +98,14 @@ fn execute_script_with_interrupt_in_dir(
         }
         stdout.push_str("[... Python script interrupted ...]");
     }
+    if completion.tree_cleanup == crate::tools::process::ProcessTreeCleanup::Unconfirmed {
+        if !stdout.is_empty() {
+            stdout.push('\n');
+        }
+        stdout.push_str(
+            "[... process group cleanup unconfirmed; descendants may still be running ...]",
+        );
+    }
 
     Ok((stdout, stderr, completion.exit_code))
 }

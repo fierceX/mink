@@ -1678,6 +1678,299 @@ async fn interrupt_mid_turn_returns_interrupted_and_next_turn_works() {
     let _ = tokio::fs::remove_dir_all(cwd).await;
 }
 
+/// First `stream()` call never returns: exercises interrupt during request
+/// establishment. Later calls return a normal stream so recovery can be
+/// asserted.
+#[derive(Default)]
+struct PendingEstablishBackend {
+    calls: std::sync::Mutex<u32>,
+}
+
+#[async_trait::async_trait]
+impl crate::llm::client::LlmBackend for PendingEstablishBackend {
+    fn name(&self) -> &str {
+        "pending-establish"
+    }
+
+    async fn stream(
+        &self,
+        _request: crate::runtime::LlmRequest,
+    ) -> anyhow::Result<crate::runtime::LlmResponseStream> {
+        use crate::protocol::{Event, StopEvent, TextEvent};
+        let call = {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            *calls
+        };
+        if call == 1 {
+            futures::future::pending::<()>().await;
+        }
+        Ok(crate::runtime::LlmResponseStream {
+            events: Box::pin(futures::stream::iter(vec![
+                Ok(Event::Text(TextEvent {
+                    content: "after establishment interrupt".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ])),
+            attempt_count: 1,
+        })
+    }
+}
+
+/// Consumes most of the first-event budget before returning a stream that
+/// never yields an event.
+struct SlowEstablishBackend;
+
+#[async_trait::async_trait]
+impl crate::llm::client::LlmBackend for SlowEstablishBackend {
+    fn name(&self) -> &str {
+        "slow-establish"
+    }
+
+    async fn stream(
+        &self,
+        _request: crate::runtime::LlmRequest,
+    ) -> anyhow::Result<crate::runtime::LlmResponseStream> {
+        tokio::time::sleep(tokio::time::Duration::from_millis(700)).await;
+        Ok(crate::runtime::LlmResponseStream {
+            events: Box::pin(futures::stream::pending()),
+            attempt_count: 1,
+        })
+    }
+}
+
+fn runtime_config_with_backend(
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+    backend: Arc<dyn crate::llm::client::LlmBackend>,
+    mutate: impl FnOnce(&mut Config),
+) -> AgentRuntimeConfig {
+    let mut cfg = Config {
+        model: "flash".into(),
+        api_key: "test-key".into(),
+        base_url: "https://example.invalid/v1".into(),
+        max_context_tokens: 1_000_000,
+        log_events: true,
+        ..Config::default()
+    };
+    mutate(&mut cfg);
+    AgentRuntimeConfig::from_config(cfg, home.to_path_buf(), cwd.to_path_buf())
+        .with_llm_backend(backend)
+}
+
+#[tokio::test]
+async fn interrupt_during_stream_establishment_returns_interrupted_and_next_turn_works() {
+    let home = unique_temp_dir("pending-establish-home");
+    let cwd = unique_temp_dir("pending-establish-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+
+    let backend = Arc::new(PendingEstablishBackend::default());
+    let runtime = build_runtime(runtime_config_with_backend(
+        &home,
+        &cwd,
+        backend.clone(),
+        |_| {},
+    ))
+    .await
+    .unwrap();
+
+    let handle = runtime.handle();
+    let turn_handle = handle.clone();
+    let task = tokio::spawn(async move { turn_handle.run_turn("blocking establish").await });
+    // Let the request reach the non-returning backend.stream() future.
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    handle.interrupt_current_turn();
+
+    let outcome = tokio::time::timeout(tokio::time::Duration::from_secs(2), task)
+        .await
+        .expect("interrupt during establishment must end the turn")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        outcome.status,
+        crate::agent::orchestrator::TurnStatus::Interrupted
+    );
+    assert!(*backend.calls.lock().unwrap() >= 1);
+
+    let outcome2 = tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        runtime.run_turn("after interrupt"),
+    )
+    .await
+    .expect("next turn must start")
+    .unwrap();
+    assert_eq!(outcome2.status, crate::agent::orchestrator::TurnStatus::Ok);
+
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+#[tokio::test]
+async fn interrupt_with_disabled_first_event_timeout_still_ends_establishment() {
+    let home = unique_temp_dir("pending-no-timeout-home");
+    let cwd = unique_temp_dir("pending-no-timeout-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+
+    let backend = Arc::new(PendingEstablishBackend::default());
+    let runtime = build_runtime(runtime_config_with_backend(
+        &home,
+        &cwd,
+        backend.clone(),
+        |cfg| {
+            cfg.llm_first_event_timeout_secs = 0;
+            cfg.llm_idle_timeout_secs = 0;
+        },
+    ))
+    .await
+    .unwrap();
+
+    let handle = runtime.handle();
+    let turn_handle = handle.clone();
+    let task = tokio::spawn(async move { turn_handle.run_turn("blocking establish").await });
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    handle.interrupt_current_turn();
+
+    let outcome = tokio::time::timeout(tokio::time::Duration::from_secs(2), task)
+        .await
+        .expect("interrupt must work even when the timeout is disabled")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        outcome.status,
+        crate::agent::orchestrator::TurnStatus::Interrupted
+    );
+
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+#[tokio::test]
+async fn first_event_deadline_survives_stream_establishment() {
+    let home = unique_temp_dir("deadline-home");
+    let cwd = unique_temp_dir("deadline-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let runtime = build_runtime(runtime_config_with_backend(
+        &home,
+        &cwd,
+        Arc::new(SlowEstablishBackend),
+        |cfg| {
+            cfg.llm_first_event_timeout_secs = 1;
+        },
+    ))
+    .await
+    .unwrap();
+
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        tokio::time::Duration::from_secs(3),
+        runtime.run_turn("slow establish"),
+    )
+    .await
+    .expect("turn must fail once the first-event budget is exhausted")
+    .unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(
+        outcome.status,
+        crate::agent::orchestrator::TurnStatus::Failed
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(1_500),
+        "establishment must consume the same first-event budget instead of \
+         restarting it: {elapsed:?}"
+    );
+
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+#[tokio::test]
+async fn interrupt_during_response_header_wait_ends_turn() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let server = {
+        let accepted = accepted.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        accepted.store(true, std::sync::atomic::Ordering::SeqCst);
+                        // Hold the connection open without sending headers.
+                        let _ = release_rx.recv_timeout(std::time::Duration::from_secs(3));
+                        drop(stream);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+    };
+
+    let home = unique_temp_dir("header-wait-home");
+    let cwd = unique_temp_dir("header-wait-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let cfg = Config {
+        model: "flash".into(),
+        api_key: "test-key".into(),
+        base_url: format!("http://{addr}"),
+        max_context_tokens: 1_000_000,
+        log_events: true,
+        ..Config::default()
+    };
+    let runtime = build_runtime(AgentRuntimeConfig::from_config(
+        cfg,
+        home.clone(),
+        cwd.clone(),
+    ))
+    .await
+    .unwrap();
+
+    let handle = runtime.handle();
+    let turn_handle = handle.clone();
+    let task = tokio::spawn(async move { turn_handle.run_turn("wait for headers").await });
+    // Wait until the request actually reached the local server, so the
+    // interrupt lands in the response-header wait window.
+    for _ in 0..200 {
+        if accepted.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        accepted.load(std::sync::atomic::Ordering::SeqCst),
+        "request never reached the local server"
+    );
+    handle.interrupt_current_turn();
+
+    let outcome = tokio::time::timeout(tokio::time::Duration::from_secs(3), task)
+        .await
+        .expect("interrupt during header wait must end the turn")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        outcome.status,
+        crate::agent::orchestrator::TurnStatus::Interrupted
+    );
+
+    let _ = release_tx.send(());
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = server.join();
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
 #[tokio::test]
 async fn interrupt_manual_compaction_releases_gate_for_next_turn() {
     let home = unique_temp_dir("compact-interrupt-home");
@@ -1727,6 +2020,186 @@ async fn interrupt_manual_compaction_releases_gate_for_next_turn() {
     let outcome = runtime.run_turn("still works").await.unwrap();
     assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
     runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+/// Runtime whose compaction request never returns until interrupted, with
+/// enough history for a manual compaction to actually run.
+async fn seeded_compaction_runtime(
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> crate::runtime::AgentRuntime {
+    let cfg = Config {
+        model: "flash".into(),
+        api_key: "test-key".into(),
+        max_context_tokens: 64_000,
+        context_reserve_tokens: 8_000,
+        context_compact_tail_tokens: 1,
+        ..Config::default()
+    };
+    let runtime = build_runtime(
+        AgentRuntimeConfig::from_config(cfg, home.to_path_buf(), cwd.to_path_buf())
+            .with_llm_backend(Arc::new(InterruptibleCompactionBackend)),
+    )
+    .await
+    .unwrap();
+    for index in 0..3 {
+        runtime
+            .ctx
+            .store
+            .add_user(&format!("request {index}: {}", "x".repeat(2_000)))
+            .await
+            .unwrap();
+        runtime
+            .ctx
+            .store
+            .add_assistant(&format!("progress {index}: {}", "y".repeat(2_000)), "", &[])
+            .await
+            .unwrap();
+    }
+    runtime
+}
+
+#[tokio::test]
+async fn dropping_compact_caller_future_keeps_gate_busy_until_operation_ends() {
+    let home = unique_temp_dir("compact-drop-home");
+    let cwd = unique_temp_dir("compact-drop-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let runtime = seeded_compaction_runtime(&home, &cwd).await;
+    let handle = runtime.handle();
+
+    let mut compact = Box::pin(handle.compact());
+    // First poll acquires the permit, sends the command and then waits on
+    // the non-returning compaction request.
+    assert!(
+        tokio::time::timeout(tokio::time::Duration::from_millis(150), &mut compact)
+            .await
+            .is_err(),
+        "compaction should still be running"
+    );
+    // The caller abandons waiting; the operation must keep the gate.
+    drop(compact);
+    let busy = match handle.stream_turn("must be busy") {
+        Ok(_) => panic!("gate must stay busy while the abandoned compaction runs"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(busy, crate::runtime::RuntimeError::Busy { .. }),
+        "{busy:?}"
+    );
+
+    // Interrupt ends the compaction and releases the gate.
+    handle.interrupt_current_turn();
+    let mut attempts = 0;
+    let outcome = loop {
+        match handle.stream_turn("after interrupt") {
+            Ok(stream) => break stream.outcome().await.unwrap(),
+            Err(_) => {
+                attempts += 1;
+                assert!(attempts < 250, "gate was never released after interrupt");
+                tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            }
+        }
+    };
+    assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+#[tokio::test]
+async fn compact_send_failure_releases_gate() {
+    let home = unique_temp_dir("compact-send-fail-home");
+    let cwd = unique_temp_dir("compact-send-fail-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let runtime = build_runtime(runtime_config_with_mock(&home, &cwd, mock_llm_hello()))
+        .await
+        .unwrap();
+    let real = runtime.handle();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    drop(rx);
+    let broken = crate::runtime::AgentRuntimeHandle {
+        cmd_tx: tx,
+        ..real.clone()
+    };
+
+    let error = broken.compact().await.unwrap_err();
+    assert!(
+        matches!(error, crate::runtime::RuntimeError::Command(_)),
+        "{error:?}"
+    );
+
+    // The shared gate must be free again for the real handle.
+    let outcome = runtime.run_turn("after failed send").await.unwrap();
+    assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+#[tokio::test]
+async fn compact_when_done_sender_dropped_releases_gate_and_errors() {
+    let home = unique_temp_dir("compact-done-drop-home");
+    let cwd = unique_temp_dir("compact-done-drop-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let runtime = build_runtime(runtime_config_with_mock(&home, &cwd, mock_llm_hello()))
+        .await
+        .unwrap();
+    let real = runtime.handle();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = crate::runtime::AgentRuntimeHandle {
+        cmd_tx: tx,
+        ..real.clone()
+    };
+    let compact_handle = handle.clone();
+    let task = tokio::spawn(async move { compact_handle.compact().await });
+
+    let done = match rx.recv().await.expect("compact command must be sent") {
+        crate::agent::orchestrator::OrchCmd::Compact { done } => done,
+        _ => panic!("expected an OrchCmd::Compact"),
+    };
+    // Orchestrator drops the completion sender without reporting a result.
+    drop(done);
+
+    let result = task.await.unwrap();
+    assert!(
+        matches!(result, Err(crate::runtime::RuntimeError::Command(_))),
+        "{result:?}"
+    );
+
+    // The shared gate must be free again for the real handle.
+    let outcome = runtime.run_turn("after done drop").await.unwrap();
+    assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+#[tokio::test]
+async fn shutdown_ends_compaction_whose_caller_is_gone() {
+    let home = unique_temp_dir("compact-shutdown-home");
+    let cwd = unique_temp_dir("compact-shutdown-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let runtime = seeded_compaction_runtime(&home, &cwd).await;
+    let handle = runtime.handle();
+
+    let mut compact = Box::pin(handle.compact());
+    assert!(
+        tokio::time::timeout(tokio::time::Duration::from_millis(150), &mut compact)
+            .await
+            .is_err(),
+        "compaction should still be running"
+    );
+    drop(compact);
+
+    let result = tokio::time::timeout(tokio::time::Duration::from_secs(5), runtime.shutdown())
+        .await
+        .expect("shutdown must finish even when the compaction caller is gone");
+    result.unwrap();
     let _ = tokio::fs::remove_dir_all(home).await;
     let _ = tokio::fs::remove_dir_all(cwd).await;
 }

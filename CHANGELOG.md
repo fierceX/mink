@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### 修复：compact/set_model 的 busy permit 生命周期移交操作任务
+
+- 此前 `compact()` / `set_model()` 的 permit 保存在调用者 future 栈上，调用方 timeout/abort/丢弃 future 会提前释放 busy，而已发送的命令仍在 orchestrator 执行：新 turn 可抢占 gate 并把事件归属到新 turn（审计 F3）。现在 permit 由 spawned 操作任务持有，直到 orchestrator 返回完成结果；调用者丢弃 future 仅表示放弃等待，不隐含撤销操作。
+- 取得 permit → 发送命令 → 移交任务之间无可取消的 `await` 空窗；命令发送失败与完成通道丢失（orchestrator 丢弃 done sender）均释放 gate；shutdown 仍可结束已失去调用者的操作。
+- **测试**：新增 4 个用例（调用者丢弃 future 后仍 Busy 直到操作结束、发送失败释放 gate、done sender 丢失释放 gate、shutdown 结束无主操作）；其中丢弃 future 用例在旧实现上复现失败。
+
+### 修复：等待响应头/自定义 backend 建立流时中断与首事件超时失效
+
+- **建立阶段取消**：`stream_llm_response` 的建流 future 现在与取消（`cancel.cancelled()`）、25ms interrupt 轮询、绝对首事件 deadline 一起 select。此前在等待 HTTP 响应头或自定义 backend 的 `stream()` 未返回期间，Ctrl+C 只设置 interrupt 标志而无人轮询，内置客户端可能拖到 600 秒总超时，自定义 backend 可永久占住 turn（审计 F2）。
+- **首事件预算**：`llm_first_event_timeout_secs` 改为覆盖「请求建立＋首事件」的绝对期限，建流返回不重置、`Retry` 事件不延长；timeout 禁用时中断仍生效；已完成的建流结果优先于并发取消，迟到取消不覆盖已确定的成功结果。
+- **错误语义**：建立阶段中断使用类型化 `TurnInterrupted`，在错误分支中先于字符串式 context-overflow 识别处理，映射 `TurnStatus::Interrupted`，不降级为普通网络失败。
+- **取消契约**：`LlmBackend::stream` 文档明确 backend 须自行遵守 `request.cancel` 并清理自己 spawn 的任务；drop future 不构成清理保证。
+- **测试**：新增 4 个用例（`backend.stream` 永久 pending 后中断并可继续下一轮、timeout 禁用时中断、建流消耗大部分预算后空流只剩原预算、本地服务器收连接不回响应头时中断）。
+
+### 修复：Bash/Python 超时/中断后残留忽略 SIGTERM 的孙进程
+
+- **进程组清理**：`terminate_child_process_tree_with_grace` 不再把直接子进程退出当作整个进程组退出。此前发送组 SIGTERM 后只要直接 child 退出就立即返回，忽略 TERM 的孙进程拿不到后续 SIGKILL（审计 F1，已复现：孙进程同 pgid 持续存活）。现在宽限期内以 `kill(-pgid, 0)` 判定组存活（仅 `ESRCH` 视为组不存在，`EPERM` 按仍存在处理），到期对残余组发 SIGKILL，并在有界窗口内确认清理结果。
+- **清理状态**：进程监督层新增 `ProcessTreeCleanup`（`NotAttempted` / `Confirmed` / `Unconfirmed`）；Bash/Python 超时或中断的结果在未确认清理时附注 `process group cleanup unconfirmed; descendants may still be running`，不再暗示所有副作用均已停止。
+- **测试**：新增 5 个进程监督用例（父退孙忽略 TERM、空组提前确认、timeout/中断两入口、自然退出），测试自带兜底清理，断言失败也不遗留孙进程。
+
 ## v0.6.2 (2026-09-11)
 
 ### 修复：压缩请求丢失前缀缓存

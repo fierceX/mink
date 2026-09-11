@@ -38,6 +38,20 @@ impl std::fmt::Display for ContextOverflowError {
 
 impl std::error::Error for ContextOverflowError {}
 
+/// 用户在请求建立阶段（等待响应头 / 自定义 backend 的 `stream()`
+/// 尚未返回）中断。调用方必须映射为 `TurnDecision::Interrupted`，
+/// 不能降级为普通网络失败。
+#[derive(Debug)]
+pub(crate) struct TurnInterrupted;
+
+impl std::fmt::Display for TurnInterrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("turn interrupted during request establishment")
+    }
+}
+
+impl std::error::Error for TurnInterrupted {}
+
 /// Per-user-input state. Every field is reset between inputs by replacing
 /// the whole value with `Default::default()`, so adding a new field cannot be
 /// forgotten in a hand-maintained reset list.
@@ -302,6 +316,12 @@ impl TurnExecutor {
                     .await
                 {
                     Ok(output) => break output,
+                    Err(error) if error.downcast_ref::<TurnInterrupted>().is_some() => {
+                        // 建立阶段的中断必须先于 context-overflow 等
+                        // 字符串式识别处理：用户中断不能伪装成网络失败。
+                        self.ctx.display.render_stop("interrupted");
+                        return Ok((TurnDecision::Interrupted, effects));
+                    }
                     Err(error)
                         if error.downcast_ref::<ContextOverflowError>().is_some()
                             && !overflow_recovery_attempted

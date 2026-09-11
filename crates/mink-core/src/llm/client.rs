@@ -96,6 +96,15 @@ pub struct LlmRequest {
 #[async_trait::async_trait]
 pub trait LlmBackend: Send + Sync {
     fn name(&self) -> &str;
+
+    /// Open one streaming request.
+    ///
+    /// Cancellation contract: implementations should observe `request.cancel`
+    /// and stop any work they spawn themselves. The runtime additionally
+    /// drops this future when a turn is interrupted while the response is
+    /// not yet established, but dropping a future does not by itself
+    /// guarantee that backend-spawned tasks, connections, or threads are
+    /// cleaned up.
     async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream>;
 
     /// Whether provider prompt usage can be adjusted by the source-request

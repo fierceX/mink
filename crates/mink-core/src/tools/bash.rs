@@ -123,6 +123,11 @@ fn execute_sync(
     } else if completion.exit_code == Some(130) {
         out.push_str("\n[... command interrupted ...]");
     }
+    if completion.tree_cleanup == crate::tools::process::ProcessTreeCleanup::Unconfirmed {
+        out.push_str(
+            "\n[... process group cleanup unconfirmed; descendants may still be running ...]",
+        );
+    }
 
     Ok(SyncOutput {
         stdout: out.into_bytes(),

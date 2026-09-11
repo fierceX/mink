@@ -158,17 +158,59 @@ pub(crate) fn join_output_readers_bounded(readers: Vec<JoinHandle<()>>) {
     }
 }
 
+/// Outcome of terminating a spawned process tree.
+///
+/// Supervision uses this to avoid implying that all side effects stopped
+/// when the process group could not actually be confirmed empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessTreeCleanup {
+    /// No termination sequence ran; the child exited on its own.
+    NotAttempted,
+    /// The process group was confirmed gone (`ESRCH`) after termination
+    /// and reaping; no group members remain.
+    Confirmed,
+    /// The direct child was reaped but the process group could not be
+    /// confirmed empty; descendants may still be running.
+    Unconfirmed,
+}
+
+/// `true` while any member of the child's process group exists.
+///
+/// Only `ESRCH` means "no such process group"; `EPERM` and any unexpected
+/// error are treated as "still present" so cleanup never claims a group is
+/// gone without evidence. Zombies count as members until reaped, so
+/// liveness is re-checked after `SIGKILL` instead of assumed.
+#[cfg(unix)]
+fn process_group_alive(child_pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(child_pid) else {
+        return true;
+    };
+    let result = unsafe { libc::kill(-pid, 0) };
+    if result == 0 {
+        return true;
+    }
+    let errno = std::io::Error::last_os_error().raw_os_error();
+    errno != Some(libc::ESRCH)
+}
+
 /// Outcome of waiting for a child process with timeout/interrupt enforcement.
 pub(crate) struct ChildCompletion {
     pub exit_code: Option<i32>,
     pub timed_out: bool,
     pub interrupted: bool,
+    /// Cleanup status of the process group after a timeout/interrupt
+    /// termination. `NotAttempted` when the child exited on its own.
+    pub tree_cleanup: ProcessTreeCleanup,
 }
 
 /// Wait for the child to exit (killing the process tree on timeout or
 /// interrupt), then join output readers with a bounded grace period.
 /// Shared by the Bash and Python tools so their wait semantics stay
 /// identical; the caller supplies a label for the wait-error message.
+///
+/// `tree_cleanup` reports whether the process group was confirmed empty
+/// after termination; callers must not imply all descendants stopped when
+/// it is [`ProcessTreeCleanup::Unconfirmed`].
 pub(crate) fn wait_child_with_output(
     child: &mut Child,
     readers: Vec<JoinHandle<()>>,
@@ -179,17 +221,18 @@ pub(crate) fn wait_child_with_output(
     let start = Instant::now();
     let mut timed_out = false;
     let mut interrupted = false;
+    let mut tree_cleanup = ProcessTreeCleanup::NotAttempted;
     let exit_code = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.code(),
             Ok(None) => {
                 if interrupt.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst)) {
-                    terminate_child_process_tree(child);
+                    tree_cleanup = terminate_child_process_tree(child);
                     interrupted = true;
                     break Some(130);
                 }
                 if start.elapsed() >= timeout {
-                    terminate_child_process_tree(child);
+                    tree_cleanup = terminate_child_process_tree(child);
                     timed_out = true;
                     break Some(124);
                 }
@@ -203,6 +246,7 @@ pub(crate) fn wait_child_with_output(
         exit_code,
         timed_out,
         interrupted,
+        tree_cleanup,
     })
 }
 
@@ -224,34 +268,84 @@ pub(crate) fn configure_child_process_group(cmd: &mut Command) {
 #[cfg(not(unix))]
 pub(crate) fn configure_child_process_group(_cmd: &mut Command) {}
 
-pub(crate) fn terminate_child_process_tree(child: &mut Child) {
-    terminate_child_process_tree_with_grace(child, Duration::from_millis(250));
+pub(crate) fn terminate_child_process_tree(child: &mut Child) -> ProcessTreeCleanup {
+    terminate_child_process_tree_with_grace(child, Duration::from_millis(250))
 }
 
-pub(crate) fn terminate_child_process_tree_with_grace(child: &mut Child, grace: Duration) {
+/// Terminate the spawned process group after `SIGTERM` did not finish it,
+/// then confirm the group is actually gone.
+///
+/// The direct child exiting during the grace window is **not** sufficient
+/// evidence: grandchildren share the group and may ignore `SIGTERM`. The
+/// grace window therefore ends only when the group is confirmed empty
+/// (`ESRCH`), otherwise the remaining members receive `SIGKILL`, followed
+/// by a bounded settle-and-confirm window (reaping a `SIGKILL`ed
+/// descendant can lag the signal). Processes that escape the group via
+/// `setsid` are out of scope for group-based cleanup.
+pub(crate) fn terminate_child_process_tree_with_grace(
+    child: &mut Child,
+    grace: Duration,
+) -> ProcessTreeCleanup {
     #[cfg(unix)]
     {
         let pgid = -(child.id() as i32);
+        // Ask the whole group to terminate; ESRCH (already gone) is fine.
         unsafe {
             libc::kill(pgid, libc::SIGTERM);
         }
         let start = Instant::now();
-        while start.elapsed() < grace {
-            match child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-                Err(_) => break,
+        let mut child_exited = false;
+        loop {
+            if !child_exited {
+                match child.try_wait() {
+                    Ok(Some(_)) => child_exited = true,
+                    Ok(None) => {}
+                    // Cannot wait on the child: escalate to the group kill
+                    // (preserves the pre-existing fallback behavior).
+                    Err(_) => break,
+                }
             }
+            // Only an empty process group ends the grace window.
+            if !process_group_alive(child.id()) {
+                if !child_exited {
+                    let _ = child.wait();
+                }
+                return ProcessTreeCleanup::Confirmed;
+            }
+            if start.elapsed() >= grace {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
         unsafe {
             libc::kill(pgid, libc::SIGKILL);
         }
-        let _ = child.wait();
+        if !child_exited {
+            let _ = child.wait();
+        }
+        // Bounded confirmation: do not claim cleanup while group members
+        // (including zombies pending reaping) still exist.
+        let settle_start = Instant::now();
+        while process_group_alive(child.id()) && settle_start.elapsed() < grace {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if process_group_alive(child.id()) {
+            ProcessTreeCleanup::Unconfirmed
+        } else {
+            ProcessTreeCleanup::Confirmed
+        }
     }
 
     #[cfg(not(unix))]
     {
         let _ = child.kill();
         let _ = child.wait();
+        // Descendants beyond the direct child are not tracked on this
+        // platform, so cleanup cannot be confirmed.
+        ProcessTreeCleanup::Unconfirmed
     }
 }
+
+#[cfg(test)]
+#[path = "process_tests.rs"]
+mod tests;

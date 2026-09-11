@@ -306,22 +306,40 @@ impl AgentRuntimeHandle {
         })
     }
 
+    /// Run a manual compaction.
+    ///
+    /// The busy permit is owned by the spawned operation task until the
+    /// orchestrator reports completion: dropping this future only abandons
+    /// waiting, it does not cancel the operation or release the gate early.
     pub async fn compact(&self) -> RuntimeResult<CompactOutcome> {
         let operation_id = self.next_turn_id();
-        let _permit = self.turn_gate.acquire(operation_id)?;
+        let permit = self.turn_gate.acquire(operation_id)?;
+        // No `.await` between acquiring the permit, sending the command and
+        // handing the permit to the task: cancellation cannot interleave
+        // while the operation is still owned by this future. A send failure
+        // returns before the task exists, so the local permit drops here.
         let (done_tx, done_rx) = oneshot::channel();
         self.cmd_tx
             .send(OrchCmd::Compact { done: done_tx })
             .map_err(|e| RuntimeError::Command(e.to_string()))?;
-        done_rx
-            .await
-            .map_err(|e| RuntimeError::Command(e.to_string()))?
-            .map_err(|e| RuntimeError::Command(format!("{e:#}")))
+        let task = tokio::spawn(async move {
+            let _permit = permit;
+            done_rx
+                .await
+                .map_err(|e| RuntimeError::Command(e.to_string()))?
+                .map_err(|e| RuntimeError::Command(format!("{e:#}")))
+        });
+        task.await.map_err(|e| RuntimeError::Join(e.to_string()))?
     }
 
+    /// Switch the active model.
+    ///
+    /// Same permit ownership contract as [`Self::compact`]: the permit lives
+    /// in the spawned operation task until the orchestrator reports
+    /// completion, so dropping the caller future only abandons waiting.
     pub async fn set_model(&self, model: impl Into<String>) -> RuntimeResult<()> {
         let operation_id = self.next_turn_id();
-        let _permit = self.turn_gate.acquire(operation_id)?;
+        let permit = self.turn_gate.acquire(operation_id)?;
         let (done_tx, done_rx) = oneshot::channel();
         self.cmd_tx
             .send(OrchCmd::SetModel {
@@ -329,10 +347,14 @@ impl AgentRuntimeHandle {
                 done: done_tx,
             })
             .map_err(|e| RuntimeError::Command(e.to_string()))?;
-        done_rx
-            .await
-            .map_err(|e| RuntimeError::Command(e.to_string()))?
-            .map_err(|e| RuntimeError::Command(format!("{e:#}")))
+        let task = tokio::spawn(async move {
+            let _permit = permit;
+            done_rx
+                .await
+                .map_err(|e| RuntimeError::Command(e.to_string()))?
+                .map_err(|e| RuntimeError::Command(format!("{e:#}")))
+        });
+        task.await.map_err(|e| RuntimeError::Join(e.to_string()))?
     }
 
     pub fn interrupt_current_turn(&self) {
