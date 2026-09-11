@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### 安全修复：图片缓存读取与去重校验改为有界单句柄
+
+- `ImageCache::read_bounded` 此前先查 metadata 再整文件读取，检查与读取之间文件被替换/增长或换成特殊文件时，后置检查无法阻止无界分配/阻塞（审计 F7，条件性代码路径）。现在单句柄打开（Unix `O_NOFOLLOW | O_NONBLOCK`：拒绝符号链接、FIFO 打开不阻塞）、句柄 `fstat` 拒绝非 regular file、`take(max_bytes + 1)` 限制实际读入。
+- `commit` 的去重三个分支（初始检查、锁内二次检查、hard-link `AlreadyExists`）统一走有界校验：已有对象必须与待提交内容**长度一致 + 摘要一致**，读取上限 `len + 1`；锁内二次检查不再未校验直接返回。
+- **测试**：新增符号链接对象与 FIFO 对象用例；既有去重、损坏、超限用例保持通过。
+
 ### 安全修复：REPL 输出清洗模型返回的终端控制序列
 
 - `TerminalDisplay` 现在对不可信 payload（模型 text/thinking、工具摘要与结果预览、错误消息、子代理输出）先经共享的 `ControlSequenceFilter`，再由 renderer 添加可信颜色/标题序列；此前 REPL 只做 CRLF 归一，模型返回的 ESC/OSC/CSI 可直接作用于终端（审计 F6）。

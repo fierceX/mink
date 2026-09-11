@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -80,19 +80,17 @@ impl ImageCache {
         let target = object_path(&self.objects, &id);
         if target.exists() {
             // Dedup: verify the existing object really matches the digest.
-            let existing = std::fs::read(&target)
-                .with_context(|| format!("read existing image object {}", target.display()))?;
-            if digest(&existing) != id {
-                bail!("image object {id} exists with mismatched content (corruption)");
-            }
+            verify_existing_object(&target, bytes.len(), &id)?;
             return Ok(id);
         }
         let _guard = self
             .write_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        // Re-check under the lock (concurrent commit race).
+        // Re-check under the lock (concurrent commit race); the winner's
+        // object must still match the expected length and digest.
         if target.exists() {
+            verify_existing_object(&target, bytes.len(), &id)?;
             return Ok(id);
         }
         if let Some(parent) = target.parent() {
@@ -112,11 +110,9 @@ impl ImageCache {
             match std::fs::hard_link(&temporary, &target) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    // Another writer won the race; verify its object.
-                    let existing = std::fs::read(&target)?;
-                    if digest(&existing) != id {
-                        bail!("image object {id} exists with mismatched content (corruption)");
-                    }
+                    // Another writer won the race; verify its object with the
+                    // same bounded check used by the other dedup branches.
+                    verify_existing_object(&target, bytes.len(), &id)?;
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -130,23 +126,35 @@ impl ImageCache {
     }
 
     /// Read one object with full digest verification and a hard size cap.
-    /// `Ok(None)` when the object is absent; oversized or corrupt objects
-    /// are errors (fail closed). The metadata size is checked before any
-    /// allocation, with a second post-read check against TOCTOU races.
+    /// `Ok(None)` when the object is absent; oversized, non-regular or
+    /// corrupt objects are errors (fail closed).
+    ///
+    /// One handle is opened and the cap is enforced on **that handle**:
+    /// metadata is checked first, then the read is limited to
+    /// `max_bytes + 1`, so a concurrent replacement or growth (TOCTOU) still
+    /// cannot cause an unbounded allocation. Symlinks are rejected on Unix
+    /// (`O_NOFOLLOW`) and non-regular files (e.g. FIFOs) fail closed;
+    /// `O_NONBLOCK` keeps opening a FIFO from blocking.
     pub fn read_bounded(&self, id: &str, max_bytes: u64) -> Result<Option<Vec<u8>>> {
         if !validate_image_id(id) {
             bail!("invalid image object id: {id}");
         }
         let path = object_path(&self.objects, id);
-        let metadata = match std::fs::metadata(&path) {
-            Ok(metadata) => metadata,
+        let file = match open_object_readonly(&path) {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            bail!("image object {id} is not a regular file");
+        }
         if metadata.len() > max_bytes {
             bail!("image object {id} exceeds the {} byte limit", max_bytes);
         }
-        let bytes = std::fs::read(&path)?;
+        let mut bytes = Vec::new();
+        file.take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
         if bytes.len() as u64 > max_bytes {
             bail!("image object {id} exceeds the {} byte limit", max_bytes);
         }
@@ -170,6 +178,47 @@ fn uuid_tail() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos().to_string())
         .unwrap_or_else(|_| "0".to_string())
+}
+
+/// Open a cache object for reading without following symlinks and without
+/// blocking on FIFOs; the caller checks `metadata.is_file()` afterwards.
+#[cfg(unix)]
+fn open_object_readonly(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_object_readonly(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
+/// Verify an existing dedup candidate against the content being committed.
+///
+/// The read is bounded by the expected length (+1 to detect growth): a
+/// matching object must have exactly the submitted length and digest, so a
+/// mismatch is corruption and fails closed.
+fn verify_existing_object(target: &Path, expected_len: usize, id: &str) -> Result<()> {
+    let file = open_object_readonly(target)
+        .with_context(|| format!("open existing image object {}", target.display()))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        bail!("image object {id} exists but is not a regular file (corruption)");
+    }
+    let expected = expected_len as u64;
+    if metadata.len() != expected {
+        bail!("image object {id} exists with mismatched length (corruption)");
+    }
+    let mut existing = Vec::new();
+    file.take(expected.saturating_add(1))
+        .read_to_end(&mut existing)?;
+    if existing.len() as u64 != expected || digest(&existing) != id {
+        bail!("image object {id} exists with mismatched content (corruption)");
+    }
+    Ok(())
 }
 
 fn sync_directory(path: &Path) -> Result<()> {
@@ -262,6 +311,44 @@ mod tests {
         let path = object_path(&cache.objects, &id);
         std::fs::write(&path, b"corrupted").unwrap();
         assert!(cache.commit(b"first").is_err());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_bounded_rejects_symlinked_object() {
+        use std::os::unix::fs::symlink;
+        let (cache, home) = cache("symlink-object");
+        cache.ensure().unwrap();
+        let id = digest(b"payload");
+        let path = object_path(&cache.objects, &id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        symlink("/dev/zero", &path).unwrap();
+
+        // O_NOFOLLOW refuses the symlink instead of reading an unbounded
+        // device stream.
+        assert!(cache.read_bounded(&id, 1024).is_err());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_bounded_rejects_fifo_object() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let (cache, home) = cache("fifo-object");
+        cache.ensure().unwrap();
+        let id = digest(b"payload");
+        let path = object_path(&cache.objects, &id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let cpath = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let rc = unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
+
+        // O_NONBLOCK keeps the open from blocking on a writer-less FIFO; the
+        // regular-file check fails closed.
+        let error = cache.read_bounded(&id, 1024).unwrap_err();
+        assert!(error.to_string().contains("not a regular file"), "{error}");
         let _ = std::fs::remove_dir_all(&home);
     }
 }
