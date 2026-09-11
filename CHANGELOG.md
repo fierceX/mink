@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+### 维护：移除不可达溢出分支与事件交付契约文档（A4/A5）
+
+- `checked_pixel_count` 改为总是可得的 `pixel_count`（`u32 × u32` 永在 `u64` 内），删除三处不可达的 “dimensions overflow” 错误分支与对应断言；真正的边长/像素/字节配额检查保留。
+- `docs/ARCHITECTURE.md` 新增“事件交付契约”：turn 可靠流（unbounded，**当前没有慢消费者内存边界**）与尽力 observer（有界 1024、溢出丢弃并告警）分别定义；明确队列预算/慢消费者策略为延期项，并列出后续压力测试与实现验收占位，不宣称已有内存边界。
+
+### 维护：清理预留接口与宽泛 dead_code 豁免（A3）
+
+- `ImageFormat::extension()` 改为 `#[deprecated]`（生产与测试均不再调用，计划在下一个破坏性版本移除），并删除仅为其存在性背书的断言。
+- `ImageCache::root()` 与冗余 `root` 字段删除；`contains()` 经核实**仅测试代码**使用（审计“无消费者”结论对生产代码成立、对测试不成立），改为 `#[cfg(test)]` 测试辅助而非直接删除。
+- `lib.rs` 对整个 `config` 模块的 `allow(dead_code)` 移除：default / no-default-features / all-features 与 `make feature-matrix` 均无新增告警；clipboard/sandbox 的条件编译 allow 保留（有平台/feature 理由）。
+
+### 修复：信号回滚保留原文件权限（审计 F9）
+
+- 回滚写回改用 `publish_state_with_permissions`：目标权限先设置到**临时文件**再发布，不再“先发布再 chmod”；原 0600 文件不再存在短暂变为默认权限的窗口，chmod 失败也不再被忽略。
+- 权限读取失败时拒绝发布并记录 `SignalRollbackError`（不再回退到“无权限信息也发布”）；发布后同步失败按 F8 语义校验/重同步或闩锁，失败不记录为成功回滚。ACL/所有者/扩展属性明确不在支持范围（仅 mode）。
+- **测试**：0600 回滚保持私有权限、发布前权限失败旧文件不变；既有可执行位用例保持通过。
+
+### 修复：Plan 状态与压缩投影接入发布失败语义（审计 F8c）
+
+- `PlanStore`（draft/journal/plan/回滚快照）与 `CompactionEngine`（context-state.json、summary 投影）的运行时写入统一改走 `publish_state`：发布后同步失败时先重读比对完整快照并重做同步，无法恢复则闩锁 session、拒绝后续 Plan/压缩状态变更。
+- `PlanStore`/`CompactionEngine` 新增共享闩锁注入（`with_fault`），由 session 构建处注入同一 `PersistenceFault`；`PlanStore` 的 draft/confirm/clear 入口先检查闩锁。
+- **测试**：闩锁后 Plan draft/confirm/clear 被拒；既有 Plan journal 事务与投影测试保持通过。
+
+### 修复：状态文件发布阶段失败不再静默按旧状态继续（审计 F8）
+
+- `atomic_replace` 内部区分**发布前失败**（旧文件不变）与“已发布但目录同步失败”（内容可见、持久性未确认），新增 `atomic_replace_status`；公开签名保持兼容。
+- 新增 session 级 `PersistenceFault` 闩锁与 `publish_state` 决策点：发布后失败时重读并**比对完整预期快照**、重做目录同步；仅当同步确认成功才恢复正常执行，否则闩锁 session 并返回 fatal 错误（拒绝后续状态变更，要求重启 session）。“重读一致”本身不等于持久化成功，仍保持故障状态。
+- `TodoStore` 先行接入：写入/推进前检查闩锁，持久化走 `publish_state`；`TurnExecutor` 在工具结果落盘后检查闩锁，故障会**结束当前 turn**（不是可重试工具错误后继续对话）。Plan journal/projection 与其余调用方在后续提交迁移。
+- **测试**：发布后注入失败、快照不匹配/重同步失败闩锁、已校验且重同步成功后恢复、首次故障保留根因、闩锁后 Todo 写入被拒、turn 因闩锁停止。
+
 ### 安全修复：图片缓存读取与去重校验改为有界单句柄
 
 - `ImageCache::read_bounded` 此前先查 metadata 再整文件读取，检查与读取之间文件被替换/增长或换成特殊文件时，后置检查无法阻止无界分配/阻塞（审计 F7，条件性代码路径）。现在单句柄打开（Unix `O_NOFOLLOW | O_NONBLOCK`：拒绝符号链接、FIFO 打开不阻塞）、句柄 `fstat` 拒绝非 regular file、`take(max_bytes + 1)` 限制实际读入。

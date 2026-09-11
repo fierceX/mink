@@ -597,6 +597,7 @@ async fn derive_and_persist_title(
     let fmt = time::format_description::well_known::Rfc3339;
     metadata["updated_at"] = serde_json::Value::String(now.format(&fmt).unwrap_or_default());
     if let Ok(text) = serde_json::to_string_pretty(&metadata) {
+        // Cosmetic title write-back: best-effort, never fails the run.
         let _ = mink::runtime::atomic_replace(metadata_path, format!("{text}\n").as_bytes());
     }
     Some(title)

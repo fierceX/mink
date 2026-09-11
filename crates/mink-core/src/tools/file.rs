@@ -1827,8 +1827,7 @@ pub(crate) fn prepare_image_read(
             limits.max_dimension
         );
     }
-    let pixels = crate::tools::image::checked_pixel_count(info.width, info.height)
-        .ok_or_else(|| anyhow::anyhow!("Error: image dimensions overflow"))?;
+    let pixels = crate::tools::image::pixel_count(info.width, info.height);
     if pixels > limits.max_pixels {
         anyhow::bail!(
             "Error: image exceeds the {}px decoded-size limit; downscale the image and retry",
@@ -1919,8 +1918,7 @@ pub(crate) fn prepare_vfs_candidate(
             limits.max_dimension
         );
     }
-    let pixels = crate::tools::image::checked_pixel_count(info.width, info.height)
-        .ok_or_else(|| anyhow::anyhow!("Error: image dimensions overflow"))?;
+    let pixels = crate::tools::image::pixel_count(info.width, info.height);
     if pixels > limits.max_pixels {
         anyhow::bail!(
             "Error: image exceeds the {}px decoded-size limit; downscale the image and retry",

@@ -35,7 +35,12 @@ impl ImageFormat {
         }
     }
 
-    #[allow(dead_code)] // Phase two index/variant layout may persist extensions.
+    /// Human-facing file extension for this format.
+    ///
+    /// Deprecated: no production path consumes it (phase-two variant layout
+    /// may re-add a consumer). Kept for source compatibility and scheduled
+    /// for removal at the next breaking-version boundary.
+    #[deprecated(note = "no production consumer; removal planned for the next breaking release")]
     pub fn extension(self) -> &'static str {
         match self {
             ImageFormat::Png => "png",
@@ -110,9 +115,12 @@ pub fn probe(bytes: &[u8]) -> Option<ImageInfo> {
     })
 }
 
-/// `width as u64 * height as u64` with overflow rejection.
-pub fn checked_pixel_count(width: u32, height: u32) -> Option<u64> {
-    u64::from(width).checked_mul(u64::from(height))
+/// `width as u64 * height as u64`.
+///
+/// `u32::MAX * u32::MAX < 2^64`, so this product is total; callers keep the
+/// real limits (per-side / max pixels / bytes) as the safety checks.
+pub fn pixel_count(width: u32, height: u32) -> u64 {
+    u64::from(width) * u64::from(height)
 }
 
 /// Structured image capture attached to a successful Read outcome
@@ -245,22 +253,18 @@ mod tests {
     }
 
     #[test]
-    fn checked_pixel_count_computes_without_overflow() {
-        // u32 x u32 always fits u64, so the checked product is total; the
-        // guard exists for the pixel-limit comparison itself.
-        assert_eq!(checked_pixel_count(u32::MAX, 2), Some(8_589_934_590));
-        assert_eq!(checked_pixel_count(1024, 768), Some(786_432));
-        assert_eq!(
-            checked_pixel_count(u32::MAX, u32::MAX),
-            Some(18_446_744_065_119_617_025)
-        );
+    fn pixel_count_is_total() {
+        // u32 x u32 always fits u64; the meaningful limits are the pixel and
+        // byte quotas, not an impossible overflow branch.
+        assert_eq!(pixel_count(u32::MAX, 2), 8_589_934_590);
+        assert_eq!(pixel_count(1024, 768), 786_432);
+        assert_eq!(pixel_count(u32::MAX, u32::MAX), 18_446_744_065_119_617_025);
     }
 
     #[test]
-    fn format_mime_and_extension_roundtrip() {
+    fn format_mime_is_non_empty() {
         for format in ImageFormat::ALL {
             assert!(!format.mime().is_empty());
-            assert!(!format.extension().is_empty());
         }
     }
 }

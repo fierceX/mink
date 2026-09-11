@@ -339,3 +339,19 @@ async fn recovery_rolls_back_unbound_clear_to_confirmed_plan() {
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn faulted_session_rejects_plan_writes() {
+    let (root, store) = store("faulted-plan");
+    let fault = crate::session::persistence::PersistenceFault::default();
+    let store = store.with_fault(fault.clone());
+    let _ = fault.raise(&root.join("plan.md"), "injected publish fault");
+
+    let error = store.set_draft("draft body", 1024).unwrap_err();
+    assert!(error.to_string().contains("persistence fault"), "{error}");
+    let error = store.confirm().unwrap_err();
+    assert!(error.to_string().contains("persistence fault"), "{error}");
+    let error = store.clear().unwrap_err();
+    assert!(error.to_string().contains("persistence fault"), "{error}");
+    let _ = std::fs::remove_dir_all(root);
+}

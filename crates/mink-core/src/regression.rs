@@ -320,22 +320,29 @@ async fn harness_with_config(
     let cancel = crate::cancel::CancellationToken::new();
     let interrupt = Arc::new(AtomicBool::new(false));
     let event_log_writer = crate::session::event_log::EventLogWriter::start(spaths.events.clone());
-    let compaction = Arc::new(CompactionEngine::new(
-        store.clone(),
-        spaths.summary.clone(),
-        crate::config::api_url(&cfg),
-        &cfg,
-        stats.clone(),
-        usage.clone(),
-        cfg.session_id.clone(),
-        display.clone(),
-        cancel.clone(),
-        interrupt.clone(),
-        llm_backend.clone(),
-        Some(event_log_writer.clone()),
-    )?);
+    let persistence_fault = crate::session::persistence::PersistenceFault::default();
+    let compaction = Arc::new(
+        CompactionEngine::new(
+            store.clone(),
+            spaths.summary.clone(),
+            crate::config::api_url(&cfg),
+            &cfg,
+            stats.clone(),
+            usage.clone(),
+            cfg.session_id.clone(),
+            display.clone(),
+            cancel.clone(),
+            interrupt.clone(),
+            llm_backend.clone(),
+            Some(event_log_writer.clone()),
+        )?
+        .with_fault(persistence_fault.clone()),
+    );
     let tool_config = ToolConfig::from_config(&cfg);
-    let todo_store = Arc::new(crate::session::todo::TodoStore::load(spaths.todos.clone())?);
+    let todo_store = Arc::new(
+        crate::session::todo::TodoStore::load(spaths.todos.clone())?
+            .with_fault(persistence_fault.clone()),
+    );
     let (tool_resolution_context, tool_surface, tool_capabilities) =
         crate::context::resolve_tool_runtime(&tool_config, is_sub_agent, false, &[])?;
     let ctx = Arc::new(AgentSharedContext {
@@ -348,6 +355,7 @@ async fn harness_with_config(
         store,
         artifacts,
         todo_store,
+        persistence_fault,
         read_memo: Arc::new(Mutex::new(crate::tools::read_memo::ReadMemo::new())),
         memo_epoch: compaction.memo_epoch(),
         memo_mutation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -460,6 +468,7 @@ fn test_context_with_llm_backend(
         store: ctx.store.clone(),
         artifacts: ctx.artifacts.clone(),
         todo_store: ctx.todo_store.clone(),
+        persistence_fault: ctx.persistence_fault.clone(),
         read_memo: ctx.read_memo.clone(),
         memo_epoch: ctx.memo_epoch.clone(),
         memo_mutation: ctx.memo_mutation.clone(),

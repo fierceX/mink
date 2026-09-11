@@ -388,6 +388,8 @@ async fn read_metadata(path: &Path) -> Result<Option<SessionMetadata>> {
 }
 
 async fn write_metadata(path: &Path, metadata: &SessionMetadata) -> Result<()> {
+    // Cosmetic session metadata (title/alias): best-effort, never latches the
+    // session; a publish-phase failure is reported but state keeps going.
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }

@@ -459,6 +459,12 @@ VFS 只接管普通路径。`artifact://`、`skill://`、`rule://` 和 `session:
 REPL/TUI 在 `mink-cli` 内把同一事件流投影为终端输出或 `TuiSignal`；实时路径与 replay 共用 reducer，
 不从展示文本反推 Todo、artifact 或工具状态。
 
+### 事件交付契约（可靠流 vs 尽力 observer）
+
+- **turn 可靠流**（`AgentEventStream`）：`stream_turn` 返回的每 turn 事件流是可靠交付通道，宿主必须消费 `recv()` 直到结束或用 `outcome()` 等待结果；内部为 unbounded 队列，**当前没有慢消费者内存边界**（未消费的事件会在内存中累计）。
+- **尽力 observer**（`EventSink` + `EventDispatcher`）：有界队列（容量 1024），溢出时丢弃最新事件并告警一次，适合遥测，不承担 UI 完整性。
+- **延期项（队列预算/慢消费者）**：合并增量、字节预算、落盘溢出或明确中止等策略尚未实现，在实现前不得宣称事件流已有内存边界。后续验收占位：`outcome`-only 消费、满队列行为、长流式输出下的积压字节与 RSS 压力测试。
+
 ---
 
 ## Session 结构

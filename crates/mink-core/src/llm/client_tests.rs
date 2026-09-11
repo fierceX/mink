@@ -359,22 +359,29 @@ async fn test_context(name: &str, api_url: &str) -> anyhow::Result<Arc<AgentShar
         &cfg.skills,
     )?);
     let llm_backend = Arc::new(OpenAiCompatibleBackend::deepseek_defaults());
-    let compaction = Arc::new(CompactionEngine::new(
-        store.clone(),
-        spaths.summary.clone(),
-        api_url.to_string(),
-        &cfg,
-        stats.clone(),
-        usage.clone(),
-        "client".into(),
-        Arc::new(TestDisplay::new()),
-        CancellationToken::new(),
-        Arc::new(AtomicBool::new(false)),
-        llm_backend.clone(),
-        None,
-    )?);
+    let persistence_fault = crate::session::persistence::PersistenceFault::default();
+    let compaction = Arc::new(
+        CompactionEngine::new(
+            store.clone(),
+            spaths.summary.clone(),
+            api_url.to_string(),
+            &cfg,
+            stats.clone(),
+            usage.clone(),
+            "client".into(),
+            Arc::new(TestDisplay::new()),
+            CancellationToken::new(),
+            Arc::new(AtomicBool::new(false)),
+            llm_backend.clone(),
+            None,
+        )?
+        .with_fault(persistence_fault.clone()),
+    );
     let tool_config = ToolConfig::from_config(&cfg);
-    let todo_store = Arc::new(crate::session::todo::TodoStore::load(spaths.todos.clone())?);
+    let todo_store = Arc::new(
+        crate::session::todo::TodoStore::load(spaths.todos.clone())?
+            .with_fault(persistence_fault.clone()),
+    );
     let (tool_resolution_context, tool_surface, tool_capabilities) =
         crate::context::resolve_tool_runtime(&tool_config, false, false, &[])?;
     Ok(Arc::new(AgentSharedContext {
@@ -387,6 +394,7 @@ async fn test_context(name: &str, api_url: &str) -> anyhow::Result<Arc<AgentShar
         store,
         artifacts,
         todo_store,
+        persistence_fault,
         read_memo: Arc::new(Mutex::new(crate::tools::read_memo::ReadMemo::new())),
         memo_epoch: compaction.memo_epoch(),
         memo_mutation: Arc::new(std::sync::atomic::AtomicU64::new(0)),

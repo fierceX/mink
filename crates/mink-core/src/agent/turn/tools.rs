@@ -128,6 +128,10 @@ impl super::TurnExecutor {
                 .finish_plan_transition(&tool_use_id, command)
                 .await?;
         }
+        // A state store may have hit an unrecoverable publish fault while
+        // executing these tools: the session must stop instead of letting
+        // the model continue from a possibly divergent in-memory view.
+        self.ctx.persistence_fault.check()?;
         self.observe_todo_progress(&processed_results);
         self.maybe_append_todo_progress_reminder().await?;
 

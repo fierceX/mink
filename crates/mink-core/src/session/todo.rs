@@ -1,4 +1,3 @@
-use crate::session::atomic_file::atomic_replace;
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -110,6 +109,9 @@ pub struct TodoTransitionResult {
 pub struct TodoStore {
     path: PathBuf,
     state: Mutex<TodoSnapshot>,
+    /// Shared publish-fault latch: a durability failure latches the whole
+    /// session, so subsequent todo mutations fail closed.
+    fault: crate::session::persistence::PersistenceFault,
 }
 
 impl TodoStore {
@@ -129,7 +131,18 @@ impl TodoStore {
         Ok(Self {
             path,
             state: Mutex::new(state),
+            fault: crate::session::persistence::PersistenceFault::default(),
         })
+    }
+
+    /// Attach the session-wide publish-fault latch (see
+    /// [`crate::session::persistence`]).
+    pub(crate) fn with_fault(
+        mut self,
+        fault: crate::session::persistence::PersistenceFault,
+    ) -> Self {
+        self.fault = fault;
+        self
     }
 
     pub fn snapshot(&self) -> TodoSnapshot {
@@ -144,6 +157,7 @@ impl TodoStore {
         base_revision: u64,
         changes: TodoChanges,
     ) -> Result<TodoStructureResult> {
+        self.fault.check()?;
         let mut guard = self.state.lock().unwrap_or_else(|error| error.into_inner());
         ensure!(
             guard.revision == base_revision,
@@ -273,7 +287,7 @@ impl TodoStore {
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("todo revision overflow"))?;
         validate_snapshot(&next)?;
-        persist_snapshot(&self.path, &next)?;
+        persist_snapshot(&self.path, &next, &self.fault)?;
         *guard = next.clone();
         Ok(TodoStructureResult {
             snapshot: next,
@@ -286,6 +300,7 @@ impl TodoStore {
         base_revision: u64,
         transitions: TodoTransitions,
     ) -> Result<TodoTransitionResult> {
+        self.fault.check()?;
         let mut guard = self.state.lock().unwrap_or_else(|error| error.into_inner());
         ensure!(
             guard.revision == base_revision,
@@ -363,7 +378,7 @@ impl TodoStore {
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("todo revision overflow"))?;
         validate_snapshot(&next)?;
-        persist_snapshot(&self.path, &next)?;
+        persist_snapshot(&self.path, &next, &self.fault)?;
         *guard = next.clone();
         let mut activated = transitions.activate.clone();
         activated.extend(auto_activated);
@@ -517,10 +532,14 @@ fn set_statuses(snapshot: &mut TodoSnapshot, ids: &[String], status: TodoStatus)
     }
 }
 
-fn persist_snapshot(path: &Path, snapshot: &TodoSnapshot) -> Result<()> {
+fn persist_snapshot(
+    path: &Path,
+    snapshot: &TodoSnapshot,
+    fault: &crate::session::persistence::PersistenceFault,
+) -> Result<()> {
     let mut serialized = serde_json::to_vec_pretty(snapshot)?;
     serialized.push(b'\n');
-    atomic_replace(path, &serialized)
+    crate::session::persistence::publish_state(path, &serialized, fault)
 }
 
 fn validate_snapshot(snapshot: &TodoSnapshot) -> Result<()> {

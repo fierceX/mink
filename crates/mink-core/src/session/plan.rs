@@ -1,4 +1,4 @@
-use crate::session::atomic_file::atomic_replace;
+use crate::session::persistence::publish_state;
 use crate::session::store::ConversationStore;
 use crate::tools::plan::PlanCommand;
 use crate::tools::runner::ToolExecution;
@@ -113,6 +113,9 @@ pub struct PlanStore {
     draft_path: PathBuf,
     journal_path: PathBuf,
     transition_lock: Mutex<()>,
+    /// Shared session publish-fault latch; a durability failure stops all
+    /// later plan state changes until the session is restarted.
+    fault: crate::session::persistence::PersistenceFault,
 }
 
 impl PlanStore {
@@ -126,7 +129,17 @@ impl PlanStore {
             draft_path,
             journal_path,
             transition_lock: Mutex::new(()),
+            fault: Default::default(),
         }
+    }
+
+    /// Attach the session-wide publish-fault latch.
+    pub(crate) fn with_fault(
+        mut self,
+        fault: crate::session::persistence::PersistenceFault,
+    ) -> Self {
+        self.fault = fault;
+        self
     }
 
     pub fn set_draft(&self, content: &str, max_bytes: usize) -> Result<()> {
@@ -134,6 +147,7 @@ impl PlanStore {
             .transition_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        self.fault.check()?;
         self.ensure_no_pending_transaction()?;
         if content.len() > max_bytes {
             bail!(
@@ -157,7 +171,7 @@ impl PlanStore {
                 ));
             }
         }
-        atomic_replace(&self.draft_path, content.as_bytes())
+        publish_state(&self.draft_path, content.as_bytes(), &self.fault)
     }
 
     pub fn confirm(&self) -> Result<String> {
@@ -165,6 +179,7 @@ impl PlanStore {
             .transition_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        self.fault.check()?;
         self.ensure_no_pending_transaction()?;
         let draft = match std::fs::read(&self.draft_path) {
             Ok(draft) => draft,
@@ -219,6 +234,7 @@ impl PlanStore {
             .transition_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        self.fault.check()?;
         self.ensure_no_pending_transaction()?;
         let current = match std::fs::read(&self.plan_path) {
             Ok(current) => current,
@@ -487,7 +503,7 @@ impl PlanStore {
     fn save_journal(&self, journal: &PlanTransactionJournal) -> Result<()> {
         let mut bytes = serde_json::to_vec_pretty(journal)?;
         bytes.push(b'\n');
-        atomic_replace(&self.journal_path, &bytes)
+        publish_state(&self.journal_path, &bytes, &self.fault)
     }
 
     fn apply_transaction(&self, transaction: &PlanTransaction) -> Result<()> {
@@ -498,7 +514,7 @@ impl PlanStore {
                 })?;
                 ensure_matches_or_missing(&self.plan_path, content, "confirmed plan")?;
                 if !self.plan_path.exists() {
-                    atomic_replace(&self.plan_path, content)?;
+                    publish_state(&self.plan_path, content, &self.fault)?;
                 }
                 remove_if_matches(&self.draft_path, Some(content), "plan draft")?;
             }
@@ -524,12 +540,14 @@ impl PlanStore {
             transaction.prior_plan.as_deref(),
             transaction.plan_content.as_deref(),
             "confirmed plan",
+            &self.fault,
         )?;
         restore_snapshot(
             &self.draft_path,
             transaction.prior_draft.as_deref(),
             transaction.plan_content.as_deref(),
             "plan draft",
+            &self.fault,
         )
     }
 }
@@ -621,6 +639,7 @@ fn restore_snapshot(
     previous: Option<&[u8]>,
     transaction_content: Option<&[u8]>,
     label: &str,
+    fault: &crate::session::persistence::PersistenceFault,
 ) -> Result<()> {
     match previous {
         Some(previous) => {
@@ -633,7 +652,7 @@ fn restore_snapshot(
                     path.display()
                 );
             }
-            atomic_replace(path, previous)
+            publish_state(path, previous, fault)
         }
         None => remove_if_matches(path, transaction_content, label),
     }

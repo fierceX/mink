@@ -8,6 +8,7 @@ pub mod init;
 pub(crate) mod jsonl;
 pub mod metadata;
 pub mod paths;
+pub(crate) mod persistence;
 pub mod plan;
 pub mod prefix;
 pub mod stats;

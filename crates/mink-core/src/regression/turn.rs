@@ -525,3 +525,37 @@ async fn edit_tool_result_uses_full_edit_preview_branch() -> anyhow::Result<()> 
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn persistence_fault_stops_the_turn_after_tool_execution() -> anyhow::Result<()> {
+    let h = harness("persistence-fault").await?;
+    // Simulate a store that latched an unrecoverable publish/durability
+    // fault: the turn must stop even when the executed tool itself succeeds.
+    let _ = h
+        .ctx
+        .persistence_fault
+        .raise(std::path::Path::new("todos.json"), "injected publish fault");
+    let llm = Arc::new(MockLlmBackend::new(
+        "flash",
+        vec![vec![
+            Ok(Event::ToolCall(tool_call(
+                "Bash",
+                "call_bash",
+                json!({"command":"echo still-running"}),
+            ))),
+            Ok(Event::Stop(StopEvent {
+                reason: "tool_use".into(),
+            })),
+        ]],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_backend_from_mock(llm));
+
+    let error = executor
+        .execute("check persistence fault propagation", None)
+        .await
+        .expect_err("a latched persistence fault must fail the turn");
+
+    assert!(error.to_string().contains("persistence fault"), "{error}");
+    assert!(error.to_string().contains("restart the session"), "{error}");
+    Ok(())
+}

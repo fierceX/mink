@@ -302,6 +302,7 @@ read_dirs = ["./data"]
 ```
 
 旧的顶层扁平字段不再接受；解析器会报告 unknown field。算法阈值、先验、衰减、证据长度、冷却和恢复限制是内部策略，不属于配置协议。
+`llm_first_event_timeout` 覆盖「请求建立（含等待响应头）＋首事件」的**总预算**：建流返回不会重置计时，`Retry` 不延长；Ctrl+C 在建立阶段同样生效，中断映射为 Interrupted。
 `--agent-jsonl` 模式不会读取 `.minkrc`，但仍应用命令行 `--config`。
 
 #### 信号系统（分层响应模型）

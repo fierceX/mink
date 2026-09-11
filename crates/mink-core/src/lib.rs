@@ -40,7 +40,6 @@ mod agent;
 mod assets;
 mod cancel;
 mod capabilities;
-#[allow(dead_code)]
 mod config;
 mod context;
 mod errors;

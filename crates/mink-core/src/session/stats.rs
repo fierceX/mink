@@ -60,6 +60,8 @@ impl StatsTracker {
     }
 
     pub async fn flush(&self) -> Result<()> {
+        // Telemetry stats: best-effort. A publish failure is returned to the
+        // caller but must not latch session state (no `publish_state` here).
         let version = self.version.load(Ordering::Acquire);
         let stats = self.stats.read().await;
         let data = serde_json::to_string(&*stats)?;

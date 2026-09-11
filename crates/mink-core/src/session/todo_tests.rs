@@ -222,6 +222,31 @@ fn corrupt_file_fails_closed() {
 }
 
 #[test]
+fn faulted_session_rejects_todo_writes() {
+    let (root, store) = store("faulted");
+    let fault = crate::session::persistence::PersistenceFault::default();
+    let store = store.with_fault(fault.clone());
+    let _ = fault.raise(&root.join("todos.json"), "injected publish fault");
+
+    let error = store
+        .apply_structure(
+            0,
+            TodoChanges {
+                add: vec![add("must not commit")],
+                ..TodoChanges::default()
+            },
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("persistence fault"), "{error}");
+    assert!(error.to_string().contains("restart the session"), "{error}");
+
+    let error = store.advance(0, TodoTransitions::default()).unwrap_err();
+    assert!(error.to_string().contains("persistence fault"), "{error}");
+    assert_eq!(store.snapshot(), TodoSnapshot::default());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn batch_cannot_target_an_id_created_in_the_same_write() {
     let (root, store) = store("guessed-id");
     let error = store

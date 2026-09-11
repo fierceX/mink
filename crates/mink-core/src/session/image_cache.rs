@@ -44,7 +44,6 @@ fn object_path(objects: &Path, id: &str) -> PathBuf {
 }
 
 pub struct ImageCache {
-    root: PathBuf,
     objects: PathBuf,
     tmp: PathBuf,
     write_lock: Mutex<()>,
@@ -56,14 +55,8 @@ impl ImageCache {
         Self {
             objects: root.join("objects"),
             tmp: root.join("tmp"),
-            root,
             write_lock: Mutex::new(()),
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     pub fn ensure(&self) -> Result<()> {
@@ -164,7 +157,8 @@ impl ImageCache {
         Ok(Some(bytes))
     }
 
-    #[allow(dead_code)]
+    /// Test-only helper: does the content-addressed object exist?
+    #[cfg(test)]
     pub fn contains(&self, id: &str) -> bool {
         validate_image_id(id) && object_path(&self.objects, id).exists()
     }

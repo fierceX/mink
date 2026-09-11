@@ -151,10 +151,10 @@ impl From<&AgentSharedContext> for ToolContext {
             memo_epoch: ctx.memo_epoch.clone(),
             memo_mutation: ctx.memo_mutation.clone(),
             snapshots: ctx.snapshots.clone(),
-            plan_store: Arc::new(PlanStore::new(
-                ctx.plan_path.clone(),
-                ctx.plan_draft_path.clone(),
-            )),
+            plan_store: Arc::new(
+                PlanStore::new(ctx.plan_path.clone(), ctx.plan_draft_path.clone())
+                    .with_fault(ctx.persistence_fault.clone()),
+            ),
             todo_store: ctx.todo_store.clone(),
             tool_config: ctx.tool_config.clone(),
             interrupt: ctx.interrupt.clone(),
@@ -277,6 +277,8 @@ pub struct AgentSharedContext {
     pub store: Arc<ConversationStore>,
     pub artifacts: Arc<ArtifactManager>,
     pub todo_store: Arc<TodoStore>,
+    /// Session-wide publish-fault latch (see `session::persistence`).
+    pub(crate) persistence_fault: crate::session::persistence::PersistenceFault,
     pub read_memo: Arc<Mutex<crate::tools::read_memo::ReadMemo>>,
     pub memo_epoch: Arc<AtomicU64>,
     pub memo_mutation: Arc<AtomicU64>,

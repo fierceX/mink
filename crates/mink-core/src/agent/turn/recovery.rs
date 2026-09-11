@@ -73,7 +73,9 @@ impl super::TurnExecutor {
     /// 回滚循环窗口内（最近 SignalConfig.seq_window 步）被编辑过的路径。
     /// - 回滚目标是 read 基线而非 record_edit 的编辑后内容（否则恒等 no-op）；
     /// - 只回滚窗口内路径，窗口之前的合法编辑保持不动；
-    /// - 写回经 atomic_replace（同目录临时文件 + rename），失败只记录不中断 turn。
+    /// - 写回经 `publish_state_with_permissions`：权限在临时文件上先设置再
+    ///   发布（保留原 mode），发布后同步失败按 F8 语义校验/重同步或
+    ///   闩锁 session；普通发布前失败只记录不中断 turn。
     async fn apply_rollback(&mut self) -> Result<()> {
         let rollback_window_steps = self.ctx.config.signal.seq_window;
         let paths = self
@@ -114,20 +116,38 @@ impl super::TurnExecutor {
                 snapshot.crlf,
                 &snapshot.text,
             );
-            // atomic_replace 会用临时文件替换目标，因此必须显式保留原权限。
-            let original_permissions = std::fs::metadata(&full).map(|meta| meta.permissions()).ok();
-            if let Err(error) =
-                crate::session::atomic_file::atomic_replace(&full, restored.as_bytes())
-            {
+            // 权限必须在发布前设置到临时文件上（发布后再 chmod 会留下
+            // 错误权限窗口，chmod 失败还会被忽略）。读取失败则拒绝发布。
+            let permissions = match std::fs::metadata(&full) {
+                Ok(meta) => meta.permissions(),
+                Err(error) => {
+                    self.ctx
+                        .log_event(crate::events::EventLog::SignalRollbackError {
+                            path: full.display().to_string(),
+                            error: format!(
+                                "cannot read permissions; refusing to publish rollback: {error}"
+                            ),
+                        });
+                    continue;
+                }
+            };
+            if let Err(error) = crate::session::persistence::publish_state_with_permissions(
+                &full,
+                restored.as_bytes(),
+                permissions,
+                &self.ctx.persistence_fault,
+            ) {
                 self.ctx
                     .log_event(crate::events::EventLog::SignalRollbackError {
                         path: full.display().to_string(),
                         error: error.to_string(),
                     });
+                if self.ctx.persistence_fault.info().is_some() {
+                    // Published-but-unsynced without successful recovery:
+                    // fail closed instead of continuing on unknown state.
+                    return Err(error);
+                }
                 continue;
-            }
-            if let Some(permissions) = original_permissions {
-                let _ = std::fs::set_permissions(&full, permissions);
             }
             self.ctx
                 .memo_mutation

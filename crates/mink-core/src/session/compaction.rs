@@ -105,6 +105,9 @@ pub struct CompactionEngine {
     prompt_usage: Mutex<PromptUsageState>,
     projection_dirty: AtomicBool,
     event_log_writer: Option<EventLogWriter>,
+    /// Shared session publish-fault latch for context-state and projection
+    /// writes.
+    fault: crate::session::persistence::PersistenceFault,
 }
 
 impl CompactionEngine {
@@ -129,6 +132,8 @@ impl CompactionEngine {
         let projection_matches = std::fs::read(&summary_path)
             .is_ok_and(|content| content == expected_projection.as_bytes());
         if !projection_matches {
+            // Startup-only projection repair: a failure aborts construction
+            // before the engine is usable, so no shared latch is involved.
             crate::session::atomic_file::atomic_replace(
                 &summary_path,
                 expected_projection.as_bytes(),
@@ -155,7 +160,18 @@ impl CompactionEngine {
             prompt_usage: Mutex::new(PromptUsageState::default()),
             projection_dirty: AtomicBool::new(false),
             event_log_writer,
+            fault: Default::default(),
         })
+    }
+
+    /// Attach the session-wide publish-fault latch (see
+    /// [`crate::session::persistence`]).
+    pub(crate) fn with_fault(
+        mut self,
+        fault: crate::session::persistence::PersistenceFault,
+    ) -> Self {
+        self.fault = fault;
+        self
     }
 
     /// Shared epoch counter for read memos: any committed compaction invalidates
@@ -446,8 +462,9 @@ impl CompactionEngine {
     async fn commit_state(&self, state: CompactionState) -> Result<()> {
         let data = serde_json::to_vec_pretty(&state)?;
         let state_path = self.state_path.clone();
+        let fault = self.fault.clone();
         tokio::task::spawn_blocking(move || {
-            crate::session::atomic_file::atomic_replace(&state_path, &data)
+            crate::session::persistence::publish_state(&state_path, &data, &fault)
         })
         .await??;
         *self
@@ -457,8 +474,9 @@ impl CompactionEngine {
         self.store.prune_cache_before(state.active_start).await;
         let summary_path = self.summary_path.clone();
         let summary = format!("{}\n", state.summary);
+        let fault = self.fault.clone();
         let projection = tokio::task::spawn_blocking(move || {
-            crate::session::atomic_file::atomic_replace(&summary_path, summary.as_bytes())
+            crate::session::persistence::publish_state(&summary_path, summary.as_bytes(), &fault)
         })
         .await;
         self.projection_dirty
@@ -475,8 +493,9 @@ impl CompactionEngine {
         let state = self.current_state()?;
         let summary_path = self.summary_path.clone();
         let summary = format!("{}\n", state.summary);
+        let fault = self.fault.clone();
         tokio::task::spawn_blocking(move || {
-            crate::session::atomic_file::atomic_replace(&summary_path, summary.as_bytes())
+            crate::session::persistence::publish_state(&summary_path, summary.as_bytes(), &fault)
         })
         .await??;
         self.projection_dirty.store(false, Ordering::SeqCst);

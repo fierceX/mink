@@ -77,8 +77,9 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
     let usage = params
         .usage_journal
         .unwrap_or_else(|| UsageJournal::new(paths.usage.clone()));
-    let todo_store = Arc::new(TodoStore::load(paths.todos.clone())?);
-
+    let persistence_fault = crate::session::persistence::PersistenceFault::default();
+    let todo_store =
+        Arc::new(TodoStore::load(paths.todos.clone())?.with_fault(persistence_fault.clone()));
     let vfs_scope = VfsScope {
         resource_session_id: params.resource_session_id,
         agent_session_id: params.session_id.clone(),
@@ -110,20 +111,23 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
     let event_log_writer = config
         .log_events
         .then(|| crate::session::event_log::EventLogWriter::start(paths.events.clone()));
-    let compaction = Arc::new(CompactionEngine::new(
-        store.clone(),
-        paths.summary.clone(),
-        params.api_url.clone(),
-        &config,
-        stats.clone(),
-        usage.clone(),
-        params.session_id.clone(),
-        params.display.clone(),
-        params.cancel.clone(),
-        params.interrupt.clone(),
-        params.llm_backend.clone(),
-        event_log_writer.clone(),
-    )?);
+    let compaction = Arc::new(
+        CompactionEngine::new(
+            store.clone(),
+            paths.summary.clone(),
+            params.api_url.clone(),
+            &config,
+            stats.clone(),
+            usage.clone(),
+            params.session_id.clone(),
+            params.display.clone(),
+            params.cancel.clone(),
+            params.interrupt.clone(),
+            params.llm_backend.clone(),
+            event_log_writer.clone(),
+        )?
+        .with_fault(persistence_fault.clone()),
+    );
 
     // Session-scoped model capabilities: resolve once, freeze, persist, and
     // validate the startup model against the snapshot (v7 §3).
@@ -143,6 +147,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         store,
         artifacts,
         todo_store,
+        persistence_fault,
         read_memo: Arc::new(Mutex::new(crate::tools::read_memo::ReadMemo::new())),
         memo_epoch: compaction.memo_epoch(),
         memo_mutation: Arc::new(std::sync::atomic::AtomicU64::new(0)),

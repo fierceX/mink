@@ -321,6 +321,10 @@ pub fn load_capabilities(path: &Path) -> Result<Option<SessionModelCapabilities>
 }
 
 /// Atomically persist a snapshot (same-directory temp file + rename).
+///
+/// Session-startup write: a failure aborts construction before any state
+/// can diverge, so it deliberately keeps the non-latching `atomic_replace`
+/// contract (no shared `PersistenceFault` here).
 pub fn save_capabilities(path: &Path, caps: &SessionModelCapabilities) -> Result<()> {
     let raw = serde_json::to_string_pretty(caps)?;
     crate::session::atomic_file::atomic_replace(path, raw.as_bytes())

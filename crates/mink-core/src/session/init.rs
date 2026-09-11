@@ -45,6 +45,8 @@ pub async fn init_session_base_at(
         let initial = r#"{"current_turn_count":0,"agent_request_count":0,"compact_request_count":0,"sub_agent_request_count":0,"total_input_tokens":0,"total_output_tokens":0,"total_cache_read_tokens":0,"total_cache_creation_tokens":0,"current_context_tokens":0,"last_updated":""}"#;
         let stats_path = paths.stats.clone();
         tokio::task::spawn_blocking(move || {
+            // Startup bootstrap: a failure aborts construction, so the
+            // non-latching `atomic_replace` contract is sufficient here.
             crate::session::atomic_file::atomic_replace(
                 &stats_path,
                 format!("{initial}\n").as_bytes(),

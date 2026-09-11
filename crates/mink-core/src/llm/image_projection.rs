@@ -300,8 +300,7 @@ fn materialize_one(
             limits.max_dimension
         );
     }
-    let pixels = crate::tools::image::checked_pixel_count(info.width, info.height)
-        .ok_or_else(|| anyhow::anyhow!("image dimensions overflow"))?;
+    let pixels = crate::tools::image::pixel_count(info.width, info.height);
     if pixels > limits.max_pixels {
         anyhow::bail!(
             "image exceeds the {}px decoded-size limit",

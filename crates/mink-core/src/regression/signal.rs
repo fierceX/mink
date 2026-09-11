@@ -734,6 +734,36 @@ async fn rollback_preserves_executable_permissions() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+#[cfg(unix)]
+async fn rollback_preserves_private_permissions() -> anyhow::Result<()> {
+    // 权限在临时文件上先设置再发布：0600 文件回滚后不能变成默认 0644。
+    use std::os::unix::fs::PermissionsExt;
+    let h = harness("rollback-private-perms").await?;
+    let original = "secret = true\n";
+    tokio::fs::write(h.cwd.join("a.rs"), original).await?;
+    tokio::fs::set_permissions(h.cwd.join("a.rs"), std::fs::Permissions::from_mode(0o600)).await?;
+    let tag = crate::tools::snapshot::compute_file_tag(original);
+    let llm = Arc::new(MockLlmBackend::new(
+        "flash",
+        rollback_script_after_edit(&tag),
+    ));
+    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
+    let mut belief = BeliefTracker::new(16);
+    let (decision, _) = executor
+        .execute("edit then fail", Some(&mut belief))
+        .await?;
+    assert_eq!(decision, TurnDecision::Stop);
+    let meta = tokio::fs::metadata(h.cwd.join("a.rs")).await?;
+    assert_eq!(
+        meta.permissions().mode() & 0o777,
+        0o600,
+        "rollback must preserve private permissions"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn replace_mode_rollback_restores_last_read_baseline() -> anyhow::Result<()> {
     let h = harness_with_config(
         "replace-rollback",

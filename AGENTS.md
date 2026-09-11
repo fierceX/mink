@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-09-08
+> 更新日期：2026-09-11
 
 ## 项目概览
 
@@ -89,6 +89,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - `ImmutablePrefix`：system prompt/tools 变更必须 invalidate prefix；前缀构建/失效重建必须向 events.jsonl 写一条 `prefix_snapshot` 事件（fingerprint/dependency_fingerprint/system_prompt/tools_json），缓存命中不得重复写（invariant 测试钉住）。
 - `conversation.jsonl` 完整保留且只追加；压缩只推进 `context-state.json` 的活跃投影边界；`ConversationStore` 内存缓存只保留活跃后缀，append 增量更新。
 - `context-state.json` 必须同目录临时文件 + rename 原子替换，成功后更新内存并按新 `active_start` 裁剪缓存；模型请求只能经 `active_messages()` 读取活跃投影。
+- 状态文件发布区分**发布前失败**与“已发布但目录同步失败”：已发布失败必须重读并比对**完整预期快照**、重做目录同步；无法恢复时闩锁 session（拒绝后续状态变更、以 fatal 结束当前 turn），禁止以旧 revision 重试。启动期写入与 telemetry/外观元数据（stats、session title）不在此列。
 - 续写前修复未换行尾记录，追加用含换行的单缓冲区；append 经内部写锁串行化；读盘只容忍文件末尾未换行的半截 JSONL。
 - 投影边界必须位于完整历史内，且不能拆开 tool call/result 协议；cut point 必须保留最近 ≥2 条真实 user 消息（优先于纯 token 预算）。
 - 所有压缩统一调用 LLM 摘要；摘要以唯一 internal user `<compacted-summary>` checkpoint 投影，不修改 immutable system/tools prefix；`context_compact_input_reduction=true` 只精简摘要请求，不改写完整历史或热尾部。
@@ -113,7 +114,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - `BeliefTracker` 初始 0.75，每输入按 `decay_per_input`（默认 0.6）衰减替代硬重置；`DecisionEngine` 冷却与 `StormBreaker` 每输入 reset。
 - 软信号（ToolError/EditLoop/ArgumentError）单次且信念 ≥ warn 不干预；累计 ≥2 次软失败或出现硬信号（ToolFailed/SafetyBlocked/CompileError/TestFailure）与结构化错误码（Timeout/ProcessFailed/SafetyBlocked/Aborted）才参与决策。
 - 响应注入的是轨迹事实帧（`[trajectory]`/`[detector]`），禁止祈使句与"进入恢复模式"命令；去重哈希只覆盖证据事实文本，同一证据批不重复注入；响应事件携带证据文本（可回溯 conversation.jsonl）。
-- 回滚只作用于循环窗口内被编辑路径，目标为最后一次 Read/Write 完整内容基线（编辑后内容不得作为回滚目标）；Replace 的 Read 同样记录基线；写回经 `atomic_replace` 且仅当磁盘与基线不一致；写回后 bump memo mutation；以 `signal_rollback` 落事件。
+- 回滚只作用于循环窗口内被编辑路径，目标为最后一次 Read/Write 完整内容基线（编辑后内容不得作为回滚目标）；Replace 的 Read 同样记录基线；写回经 `publish_state_with_permissions`（权限先设置到临时文件再发布；权限读取/设置失败不得发布，也不得记录成功回滚）且仅当磁盘与基线不一致；写回后 bump memo mutation；以 `signal_rollback` 落事件。
 - 恢复守卫拦截必须生成真实信号喂回信念；连续拦截达 `guard_max_blocks` 必须绕过守卫并强制注入，禁止无限拦截；B < abort 进入用户接管（`signal_handover` 事件落盘后 Failed），禁止静默丢弃证据；策略重启子代理初始化失败必须降级（`signal_replan_error` 后返回 None），不得升级为整轮 Err。
 - Recovery 首步资格来自 resolved semantic capabilities；Bash 的 `FocusedVerificationExec` classifier 与普通 Bash 安全/误用策略相互独立。
 
@@ -146,6 +147,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 ### Display 与 TUI
 
 - Display 实现必须完整转发 `ToolCallDisplay` / `PresentedToolResultDisplay` 结构化字段，不得丢失 `tool_use_id`、presentation 或 artifact 元数据。
+- REPL/TUI 输出不可信 payload（模型文本/thinking、工具输出/摘要、错误）前必须经共享控制序列清洗（跨 chunk 保留解析状态、消息边界 reset、stdout/stderr 状态独立）；renderer 的颜色/标题码在清洗之后添加。
 - TUI 光标必须落在 UTF-8 char boundary；输入/删除按 char boundary 处理。
 - TUI 粘贴图片只产生 session `attachments/` 传输副本并把绝对路径写入用户消息；图片进入上下文的唯一入口仍是 `Read` 捕获；重复粘贴按内容寻址路径去重，路径不可无歧义表示时 fail closed。
 - Inline TUI 只提交连续且 sealed 的 transcript 前缀；committed 项不得修改或重复写入原生 scrollback；空闲保留最后一个 sealed item，新工作开始后才能推进 committed 边界。
