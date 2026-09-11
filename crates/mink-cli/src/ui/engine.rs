@@ -1,4 +1,5 @@
 use super::{Display, StatsSnapshot};
+use crate::ui::sanitize::ControlSequenceFilter;
 use crate::util::fmt_k;
 use std::io::{self, Write};
 use std::sync::Mutex;
@@ -6,9 +7,13 @@ use std::sync::Mutex;
 pub struct TerminalDisplay {
     interactive: bool,
     stream_json: bool,
-    stdout: Mutex<io::Stdout>,
-    stderr: Mutex<io::Stderr>,
+    stdout: Mutex<Box<dyn Write + Send>>,
+    stderr: Mutex<Box<dyn Write + Send>>,
     state: Mutex<DisplayState>,
+    /// Escape parsers for untrusted payloads; stdout/stderr are independent
+    /// streams and must not share parser state.
+    stdout_filter: Mutex<ControlSequenceFilter>,
+    stderr_filter: Mutex<ControlSequenceFilter>,
 }
 
 #[derive(Default)]
@@ -22,17 +27,38 @@ impl TerminalDisplay {
         Self {
             interactive,
             stream_json,
-            stdout: Mutex::new(io::stdout()),
-            stderr: Mutex::new(io::stderr()),
+            stdout: Mutex::new(Box::new(io::stdout())),
+            stderr: Mutex::new(Box::new(io::stderr())),
             state: Mutex::new(DisplayState::default()),
+            stdout_filter: Mutex::new(ControlSequenceFilter::new()),
+            stderr_filter: Mutex::new(ControlSequenceFilter::new()),
         }
     }
 
-    fn lock_stdout(&self) -> std::sync::MutexGuard<'_, io::Stdout> {
+    /// Test seam: inspect written bytes without touching a real terminal.
+    #[cfg(test)]
+    pub(crate) fn with_writers(
+        interactive: bool,
+        stream_json: bool,
+        stdout: Box<dyn Write + Send>,
+        stderr: Box<dyn Write + Send>,
+    ) -> Self {
+        Self {
+            interactive,
+            stream_json,
+            stdout: Mutex::new(stdout),
+            stderr: Mutex::new(stderr),
+            state: Mutex::new(DisplayState::default()),
+            stdout_filter: Mutex::new(ControlSequenceFilter::new()),
+            stderr_filter: Mutex::new(ControlSequenceFilter::new()),
+        }
+    }
+
+    fn lock_stdout(&self) -> std::sync::MutexGuard<'_, Box<dyn Write + Send>> {
         self.stdout.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn lock_stderr(&self) -> std::sync::MutexGuard<'_, io::Stderr> {
+    fn lock_stderr(&self) -> std::sync::MutexGuard<'_, Box<dyn Write + Send>> {
         self.stderr.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -41,6 +67,12 @@ impl TerminalDisplay {
     }
 
     fn write_out(&self, s: &str) {
+        self.write_normalized(s);
+    }
+
+    /// Write trusted renderer text (colors/title codes added here) after
+    /// normalization; suppressed in stream-json mode.
+    fn write_normalized(&self, s: &str) {
         if self.stream_json {
             return;
         }
@@ -48,6 +80,37 @@ impl TerminalDisplay {
         let mut stdout = self.lock_stdout();
         let _ = write!(stdout, "{normalized}");
         let _ = stdout.flush();
+    }
+
+    /// Strip terminal control sequences from an untrusted payload before it
+    /// is wrapped in trusted renderer codes. Returns the emitted text so
+    /// callers can keep layout state consistent.
+    fn write_untrusted_out(&self, s: &str) -> String {
+        let filtered = self.filter_stdout(s);
+        self.write_normalized(&filtered);
+        filtered
+    }
+
+    fn filter_stdout(&self, s: &str) -> String {
+        if self.stream_json {
+            return String::new();
+        }
+        let mut filter = self.stdout_filter.lock().unwrap_or_else(|e| e.into_inner());
+        filter.push(s)
+    }
+
+    fn filter_stderr(&self, s: &str) -> String {
+        let mut filter = self.stderr_filter.lock().unwrap_or_else(|e| e.into_inner());
+        filter.push(s)
+    }
+
+    /// Mark a message boundary: drop any partially consumed escape sequence
+    /// so an unterminated one cannot swallow the next message's body.
+    fn reset_stdout_filter(&self) {
+        self.stdout_filter
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .reset();
     }
 
     fn write_err(&self, s: &str) {
@@ -68,8 +131,9 @@ impl TerminalDisplay {
 
 impl Display for TerminalDisplay {
     fn render_thinking(&self, content: &str) {
-        self.write_out(&format!("\x1b[90m{content}\x1b[0m"));
-        self.update_last_char(content);
+        let filtered = self.filter_stdout(content);
+        self.write_normalized(&format!("\x1b[90m{filtered}\x1b[0m"));
+        self.update_last_char(&filtered);
         self.lock_state().prev_was_thinking = true;
     }
 
@@ -82,12 +146,13 @@ impl Display for TerminalDisplay {
                 self.lock_state().last_char = "\n".into();
             }
         }
-        self.write_out(content);
-        self.update_last_char(content);
+        let filtered = self.write_untrusted_out(content);
+        self.update_last_char(&filtered);
         self.lock_state().prev_was_thinking = false;
     }
 
     fn render_tool_call(&self, call: &crate::ui::ToolCallDisplay<'_>) {
+        self.reset_stdout_filter();
         {
             let state = self.lock_state();
             if state.last_char != "\n" {
@@ -96,12 +161,14 @@ impl Display for TerminalDisplay {
                 self.lock_state().last_char = "\n".into();
             }
         }
-        self.write_out(&format!("\x1b[33m[tool] {}\x1b[0m\n", call.summary));
+        let summary = self.filter_stdout(call.summary);
+        self.write_normalized(&format!("\x1b[33m[tool] {summary}\x1b[0m\n"));
         self.lock_state().last_char = "\n".into();
         self.lock_state().prev_was_thinking = false;
     }
 
     fn render_tool_result(&self, result: &crate::ui::PresentedToolResultDisplay<'_>) {
+        self.reset_stdout_filter();
         {
             let state = self.lock_state();
             if state.prev_was_thinking && state.last_char != "\n" {
@@ -112,12 +179,13 @@ impl Display for TerminalDisplay {
         }
         self.lock_state().prev_was_thinking = false;
         if !result.base.content_preview.is_empty() {
-            self.write_out(result.base.content_preview);
-            self.update_last_char(result.base.content_preview);
+            let filtered = self.write_untrusted_out(result.base.content_preview);
+            self.update_last_char(&filtered);
         }
     }
 
     fn render_stop(&self, _reason: &str) {
+        self.reset_stdout_filter();
         let state = self.lock_state();
         if state.last_char != "\n" {
             drop(state);
@@ -127,15 +195,19 @@ impl Display for TerminalDisplay {
     }
 
     fn render_error(&self, message: &str) {
-        let state = self.lock_state();
-        if state.last_char != "\n" {
-            drop(state);
-            self.write_err("\n");
+        {
+            let state = self.lock_state();
+            if state.last_char != "\n" {
+                drop(state);
+                self.write_err("\n");
+            }
         }
-        self.write_err(&format!("\x1b[31mError: {message}\x1b[0m\n"));
+        let filtered = self.filter_stderr(message);
+        self.write_err(&format!("\x1b[31mError: {filtered}\x1b[0m\n"));
     }
 
     fn render_retry(&self) {
+        self.reset_stdout_filter();
         self.write_err("RETRY\n");
     }
 
@@ -195,31 +267,37 @@ impl Display for TerminalDisplay {
         in_tokens: u64,
         out_tokens: u64,
     ) {
+        // Independent message block: do not share parser state with the main
+        // stream in either direction.
+        self.reset_stdout_filter();
         self.write_out(&format!(
             "[sub-agent {}] {} (in={}, out={})\n",
             session_id, status, in_tokens, out_tokens,
         ));
         if !thinking.is_empty() {
             self.write_out("── Thinking ──\n");
-            self.write_out(thinking);
-            if !thinking.ends_with('\n') {
+            let filtered = self.write_untrusted_out(thinking);
+            if !filtered.ends_with('\n') {
                 self.write_out("\n");
             }
         }
         if !text.is_empty() {
             self.write_out("── Text ──\n");
-            self.write_out(text);
-            if !text.ends_with('\n') {
+            let filtered = self.write_untrusted_out(text);
+            if !filtered.ends_with('\n') {
                 self.write_out("\n");
             }
         }
+        self.reset_stdout_filter();
     }
 
     fn render_prompt(&self) {
+        self.reset_stdout_filter();
         self.write_err("\x1b[32m> \x1b[0m");
     }
 
     fn render_clear_line(&self) {
+        self.reset_stdout_filter();
         self.write_err("\r\x1b[2K");
     }
 }
@@ -232,3 +310,7 @@ fn normalize_display_text(s: &str, interactive: bool) -> String {
         normalized
     }
 }
+
+#[cfg(test)]
+#[path = "engine_tests.rs"]
+mod tests;

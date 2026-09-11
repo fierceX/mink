@@ -66,6 +66,16 @@ pub enum CompactOutcome {
     Skipped { reason: String },
 }
 
+/// Result of a successful model switch: the resolved human-facing label and
+/// the title snapshot captured after the switch. Control callers (CLI/TUI)
+/// render these directly because they have no turn emitter to carry the
+/// title update.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelSwitchOutcome {
+    pub label: String,
+    pub stats: crate::ui::StatsSnapshot,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnOutcome {
     pub turn_id: TurnId,
@@ -338,6 +348,18 @@ impl AgentRuntimeHandle {
     /// in the spawned operation task until the orchestrator reports
     /// completion, so dropping the caller future only abandons waiting.
     pub async fn set_model(&self, model: impl Into<String>) -> RuntimeResult<()> {
+        self.set_model_with_outcome(model).await.map(|_| ())
+    }
+
+    /// Switch the active model and return the resolved label plus the title
+    /// snapshot captured after the switch.
+    ///
+    /// Additive companion to [`Self::set_model`] for control UIs that must
+    /// update the displayed model label without re-resolving aliases.
+    pub async fn set_model_with_outcome(
+        &self,
+        model: impl Into<String>,
+    ) -> RuntimeResult<ModelSwitchOutcome> {
         let operation_id = self.next_turn_id();
         let permit = self.turn_gate.acquire(operation_id)?;
         let (done_tx, done_rx) = oneshot::channel();
@@ -391,6 +413,16 @@ impl AgentRuntime {
 
     pub async fn set_model(&self, model: impl Into<String>) -> RuntimeResult<()> {
         self.handle.set_model(model).await
+    }
+
+    /// Switch the active model and return the resolved label plus the title
+    /// snapshot captured after the switch (see
+    /// [`AgentRuntimeHandle::set_model_with_outcome`]).
+    pub async fn set_model_with_outcome(
+        &self,
+        model: impl Into<String>,
+    ) -> RuntimeResult<ModelSwitchOutcome> {
+        self.handle.set_model_with_outcome(model).await
     }
 
     pub fn interrupt_current_turn(&self) {

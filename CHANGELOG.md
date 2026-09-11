@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### 安全修复：REPL 输出清洗模型返回的终端控制序列
+
+- `TerminalDisplay` 现在对不可信 payload（模型 text/thinking、工具摘要与结果预览、错误消息、子代理输出）先经共享的 `ControlSequenceFilter`，再由 renderer 添加可信颜色/标题序列；此前 REPL 只做 CRLF 归一，模型返回的 ESC/OSC/CSI 可直接作用于终端（审计 F6）。
+- 清洗器有跨 chunk 解析状态：序列被切分到多个流式片段仍会移除；消息边界（stop/retry/tool call/sub-agent 块）reset，未结束的 OSC 不会吞掉下一条消息正文；stdout/stderr 使用独立解析状态；超长序列有上限。
+- `strip_ansi` 下沉到 `ui::sanitize` 与 TUI 共享（控制序列清洗与布局归一分离，TUI 保留 tab/换行策略）；非 TTY 装饰码现状保留，明确延期打磨。
+- **测试**：新增 11 个 filter 字节级用例（CSI、OSC52、`ESC \` 终止、未结束序列、reset、跨 chunk、C1、中文、超长序列）与 6 个 display 字节级用例（跨 chunk 清洗、可信包装码保留、未结束 OSC 不吞下一条消息、CRLF 布局、stream-json 静默）。
+
+### 修复：TUI 启动/运行错误带上下文传播，不再静默成功退出
+
+- `run_tui` 返回的 Err 此前只 `eprintln!`，外层 `turn_result` 仍为 `Ok`，初始化/渲染失败可能以退出码 0 结束（审计 F5）。现在经私有 `launch_tui_with` seam 带上 `TUI error:` 上下文传播到 `turn_result`，`main` 的 Err→exit 1 通路生效。
+- 清理顺序保持先 `shutdown` 再判定结果：`finish_turn` 保证 shutdown 即使在前序失败时也执行；两者都失败时保留主要错误与清理错误信息（`combine_turn_and_shutdown`）。
+- **测试**：新增 4 个 mink-cli 用例（launcher 错误带上下文、正常退出不误报失败、失败后仍执行 shutdown、主错误+清理错误同时保留）。
+
+### 修复：CLI 控制操作（/compact、/model）的结果不再被静默丢弃
+
+- broker 现在渲染 `CompactOutcome`（含 skip 原因）与 `set_model` 成功提示；模型切换同时更新实际模型标签与标题（TUI 状态栏 / REPL 标题），此前这些输出经无 turn emitter 的事件通道落入空处（审计 F4）。
+- 标签来自 core 已解析的结果：新增 additive `AgentRuntimeHandle::set_model_with_outcome` / `AgentRuntime::set_model_with_outcome`（返回 label + 标题快照），原 `set_model` 签名与行为保持兼容；CLI 不重复模型解析规则。
+- 错误仍通过返回 `Err` 由 broker 统一展示一次；完整控制事件流（可靠交付）保持为后续工作。
+- **测试**：mink-cli 新增 recording display + 真实 runtime 用例，断言压缩跳过、切换成功（含标签与标题）、错误各恰好出现一次。
+
 ### 修复：compact/set_model 的 busy permit 生命周期移交操作任务
 
 - 此前 `compact()` / `set_model()` 的 permit 保存在调用者 future 栈上，调用方 timeout/abort/丢弃 future 会提前释放 busy，而已发送的命令仍在 orchestrator 执行：新 turn 可抢占 gate 并把事件归属到新 turn（审计 F3）。现在 permit 由 spawned 操作任务持有，直到 orchestrator 返回完成结果；调用者丢弃 future 仅表示放弃等待，不隐含撤销操作。

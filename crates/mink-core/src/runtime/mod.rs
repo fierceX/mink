@@ -60,8 +60,8 @@ pub use config::{SessionInfo, SessionPolicy};
 pub(crate) use events::TurnEventEmitter;
 pub use events::{AgentEvent, AgentEventKind, EventSink};
 pub use handle::{
-    AgentEventStream, AgentRuntime, AgentRuntimeHandle, CompactOutcome, RuntimeError,
-    RuntimeResult, TurnId, TurnOutcome,
+    AgentEventStream, AgentRuntime, AgentRuntimeHandle, CompactOutcome, ModelSwitchOutcome,
+    RuntimeError, RuntimeResult, TurnId, TurnOutcome,
 };
 pub use options::{AgentOptions, ContextPolicy, GenerationOptions, ProviderOptions, ToolOptions};
 

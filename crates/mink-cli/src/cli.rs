@@ -142,8 +142,26 @@ fn start_runtime_broker(
                     }
                     continue;
                 }
-                RuntimeCmd::Compact => work_handle.compact().await.map(|_| ()),
-                RuntimeCmd::SetModel(model) => work_handle.set_model(model).await,
+                RuntimeCmd::Compact => work_handle.compact().await.map(|outcome| match outcome {
+                    crate::runtime::CompactOutcome::Compacted { reason } => {
+                        display.render_info(&format!("Context compacted ({reason})."))
+                    }
+                    crate::runtime::CompactOutcome::Skipped { reason } => {
+                        display.render_info(&format!("Compaction skipped: {reason}"))
+                    }
+                }),
+                RuntimeCmd::SetModel(model) => {
+                    match work_handle.set_model_with_outcome(model).await {
+                        Ok(outcome) => {
+                            // 控制操作没有 turn emitter：成功提示与标题快照在适配层渲染，
+                            // 模型解析（别名 → 标签）仍归 core。
+                            display.render_info(&format!("Switched to {} model.", outcome.label));
+                            display.render_title_update(&outcome.label, &outcome.stats);
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
                 RuntimeCmd::Interrupt => unreachable!("interrupts bypass the work queue"),
                 RuntimeCmd::Exit => unreachable!("exit bypasses the work queue"),
             };
@@ -386,16 +404,16 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
                 let cmd_tx = start_runtime_broker(runtime_handle.clone(), display.clone());
                 if let Some((_, signal_rx)) = tui_tx {
                     let model_label = crate::config::resolve_model_label(&cfg.model);
-                    if let Err(e) = crate::tui::run_tui(
-                        cfg.tui_mode,
-                        signal_rx,
-                        cmd_tx.clone(),
-                        &session,
-                        &model_label,
-                        &cfg.sandbox,
-                    ) {
-                        eprintln!("TUI error: {e}");
-                    }
+                    launch_tui_with(|| {
+                        crate::tui::run_tui(
+                            cfg.tui_mode,
+                            signal_rx,
+                            cmd_tx.clone(),
+                            &session,
+                            &model_label,
+                            &cfg.sandbox,
+                        )
+                    })?;
                 }
             }
             #[cfg(not(feature = "tui"))]
@@ -426,9 +444,7 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
     }
     .await;
 
-    let shutdown_result = runtime.shutdown().await;
-    turn_result?;
-    shutdown_result?;
+    finish_turn(turn_result, runtime.shutdown()).await?;
 
     if !session.session_id.is_empty() {
         let alias_label = read_session_alias(&session).await;
@@ -584,6 +600,44 @@ async fn derive_and_persist_title(
         let _ = mink::runtime::atomic_replace(metadata_path, format!("{text}\n").as_bytes());
     }
     Some(title)
+}
+
+/// Run the TUI launcher and surface failures with a stable context prefix.
+///
+/// Private seam for tests; deliberately not a long-term public launcher
+/// trait. `shutdown` still runs in the caller after this returns.
+#[cfg(feature = "tui")]
+fn launch_tui_with(run: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
+    run().map_err(|error| anyhow::anyhow!("TUI error: {error}"))
+}
+
+/// Await the runtime shutdown even when `turn_result` failed, then combine
+/// both outcomes (shutdown must run before the process decides the exit code).
+async fn finish_turn(
+    turn_result: anyhow::Result<()>,
+    shutdown: impl std::future::Future<Output = crate::runtime::RuntimeResult<()>>,
+) -> anyhow::Result<()> {
+    let shutdown_result = shutdown.await;
+    combine_turn_and_shutdown(turn_result, shutdown_result)
+}
+
+/// Combine the turn result with the shutdown result.
+///
+/// `shutdown` always runs (including when the turn/TUI failed); a failing
+/// cleanup must not mask the primary error, and a primary error must not hide
+/// that cleanup also failed.
+fn combine_turn_and_shutdown(
+    turn_result: anyhow::Result<()>,
+    shutdown_result: crate::runtime::RuntimeResult<()>,
+) -> anyhow::Result<()> {
+    match (turn_result, shutdown_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error.into()),
+        (Err(primary), Err(cleanup)) => Err(anyhow::anyhow!(
+            "{primary:#}; cleanup also failed: {cleanup}"
+        )),
+    }
 }
 
 fn reexec_if_sandbox(cfg: &crate::config::CliConfig) {
@@ -1000,3 +1054,7 @@ fn version_line() -> String {
         format!("mink {} ({git_hash})", env!("CARGO_PKG_VERSION"))
     }
 }
+
+#[cfg(test)]
+#[path = "cli_tests.rs"]
+mod tests;

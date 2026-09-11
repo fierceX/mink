@@ -27,7 +27,7 @@ pub enum OrchCmd {
     },
     SetModel {
         model: String,
-        done: oneshot::Sender<anyhow::Result<()>>,
+        done: oneshot::Sender<anyhow::Result<crate::runtime::ModelSwitchOutcome>>,
     },
     Compact {
         done: oneshot::Sender<anyhow::Result<crate::runtime::CompactOutcome>>,
@@ -388,7 +388,10 @@ impl OrchActor {
         crate::ui::render_title_snapshot(&self.ctx, &label, self.belief.belief()).await;
     }
 
-    async fn handle_model_command(&mut self, model: &str) -> anyhow::Result<()> {
+    async fn handle_model_command(
+        &mut self,
+        model: &str,
+    ) -> anyhow::Result<crate::runtime::ModelSwitchOutcome> {
         let model = model.trim();
         if model.is_empty() {
             self.ctx
@@ -423,11 +426,15 @@ impl OrchActor {
         }
         self.ctx.compaction.clear_prompt_usage();
         let resolved = self.resolve_active();
+        let label = resolved.label;
         self.ctx
             .display
-            .render_info(&format!("Switched to {} model.", resolved.label));
-        self.refresh_title().await;
-        Ok(())
+            .render_info(&format!("Switched to {label} model."));
+        // 控制操作没有 turn emitter，标题更新会落入空处；把快照随结果返回，
+        // 由 CLI/TUI 适配层自行渲染（不在适配层重新解析模型别名）。
+        let stats = crate::ui::title_snapshot(&self.ctx, self.belief.belief()).await;
+        self.ctx.display.render_title_update(&label, &stats);
+        Ok(crate::runtime::ModelSwitchOutcome { label, stats })
     }
 
     fn resolve_active(&self) -> crate::config::ResolvedModel {

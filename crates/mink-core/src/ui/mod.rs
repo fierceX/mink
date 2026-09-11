@@ -223,13 +223,13 @@ impl StatsSnapshot {
     }
 }
 
-pub async fn render_title_snapshot(
+/// 构造当前标题栏快照（供 `render_title_snapshot` 与控制操作结果复用）。
+pub async fn title_snapshot(
     ctx: &crate::context::AgentSharedContext,
-    model_label: &str,
     belief: f64,
-) {
+) -> StatsSnapshot {
     let stats = ctx.stats.snapshot().await;
-    let snapshot = StatsSnapshot {
+    StatsSnapshot {
         current_turn_count: stats.current_turn_count,
         agent_request_count: stats.agent_request_count,
         total_input_tokens: stats.total_input_tokens,
@@ -239,7 +239,15 @@ pub async fn render_title_snapshot(
         total_cache_read_tokens: stats.total_cache_read_tokens,
         total_cache_creation_tokens: stats.total_cache_creation_tokens,
         belief,
-    };
+    }
+}
+
+pub async fn render_title_snapshot(
+    ctx: &crate::context::AgentSharedContext,
+    model_label: &str,
+    belief: f64,
+) {
+    let snapshot = title_snapshot(ctx, belief).await;
     ctx.display.render_title_update(model_label, &snapshot);
 }
 
