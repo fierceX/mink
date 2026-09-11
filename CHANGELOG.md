@@ -1,115 +1,51 @@
 # Changelog
 
-## Unreleased
-
-### 修复（复核 S1）：期限检查不再被高频事件饿死
-
-- 首事件/idle deadline 检查移到消费循环每轮的确定路径（select 之前）：高频控制事件（如每 5ms 一个 `Retry`）不再因每轮重建 sleep 定时器而始终绕过检查；禁用期限与有效首事件后的 idle 语义不变。
-
-### 修复（复核 S2）：子代理 thinking/text 分别清洗
-
-- `render_sub_agent_output` 的 thinking 与 text 两段完整消息各自重置解析器（复用已有边界函数）；未结束 OSC 不再吞掉子代理正文，块结束后主流解析器保持干净。
-
-### 修复（复核 R1）：持久化故障锁存封闭执行边界
-
-- 锁存的权威检查点补齐：`TurnExecutor::execute` 与 orchestrator 用户输入入口、`evaluate_and_compact_with_prefix` 入口、`ToolRunner::execute_all` 每个调用派发前、`publish_state*` 入口；低层 `atomic_replace` 保留给显式恢复路径。锁存后下一轮不再请求模型、不修改历史、不执行工具。
-- 同批工具：锁存后未派发的调用生成显式 `not executed` 结果，保持 tool_call/result 配对；已执行调用保留真实结果。
-- 压缩策略统一：权威 `context-state.json` 与派生 summary 分开对待，派生投影失败不再仅置 dirty 返回成功，错误向上传播（dirty 仍保留供重试）。
-
-### 修复（复核 R2）：Retry 事件不再绕过首事件期限
-
-- `Retry` 作为控制通知不再计入“有效首 provider 事件”，不满足也不重置绝对首事件 deadline；单次/连续 Retry 后永久 pending 仍会在原预算内失败，Retry 后真实输出正常成功。
-
-### 修复（复核 R3）：终端清洗器补齐消息/流边界
-
-- thinking/text 块内保留跨 chunk 解析状态，类型切换时 reset；完整消息（tool call/result、stop、retry、sub-agent 块、prompt）重置 stdout 解析器；每条错误先 reset stderr 解析器并结束 stdout 流边界。未结束 OSC 不再吞掉下一条错误、thinking 后的正文或下一轮输出。
-
-### 修复（复核 R4）：临时文件创建即限制权限并在 chmod 后同步
-
-- 提供最终权限时，临时文件以 0600 创建（Unix），写入内容期间不存在更宽权限窗口；顺序改为创建（限制权限）→ 写入 → 设置最终权限 → 文件 fsync → rename → 目录同步，权限变化进入同一次文件同步屏障。
-- 新增权限设置失败注入 seam：失败归类 NotPublished、不发布且清理临时文件；原“权限失败”测试实际触发 rename 失败，已更名纠正；新增创建权限、注入失败不发布、最终权限回归。
-
-### 维护：移除不可达溢出分支与事件交付契约文档（A4/A5）
-
-- `checked_pixel_count` 改为总是可得的 `pixel_count`（`u32 × u32` 永在 `u64` 内），删除三处不可达的 “dimensions overflow” 错误分支与对应断言；真正的边长/像素/字节配额检查保留。
-- `docs/ARCHITECTURE.md` 新增“事件交付契约”：turn 可靠流（unbounded，**当前没有慢消费者内存边界**）与尽力 observer（有界 1024、溢出丢弃并告警）分别定义；明确队列预算/慢消费者策略为延期项，并列出后续压力测试与实现验收占位，不宣称已有内存边界。
-
-### 维护：清理预留接口与宽泛 dead_code 豁免（A3）
-
-- `ImageFormat::extension()` 改为 `#[deprecated]`（生产与测试均不再调用，计划在下一个破坏性版本移除），并删除仅为其存在性背书的断言。
-- `ImageCache::root()` 与冗余 `root` 字段删除；`contains()` 经核实**仅测试代码**使用（审计“无消费者”结论对生产代码成立、对测试不成立），改为 `#[cfg(test)]` 测试辅助而非直接删除。
-- `lib.rs` 对整个 `config` 模块的 `allow(dead_code)` 移除：default / no-default-features / all-features 与 `make feature-matrix` 均无新增告警；clipboard/sandbox 的条件编译 allow 保留（有平台/feature 理由）。
-
-### 修复：信号回滚保留原文件权限（审计 F9）
-
-- 回滚写回改用 `publish_state_with_permissions`：目标权限先设置到**临时文件**再发布，不再“先发布再 chmod”；原 0600 文件不再存在短暂变为默认权限的窗口，chmod 失败也不再被忽略。
-- 权限读取失败时拒绝发布并记录 `SignalRollbackError`（不再回退到“无权限信息也发布”）；发布后同步失败按 F8 语义校验/重同步或闩锁，失败不记录为成功回滚。ACL/所有者/扩展属性明确不在支持范围（仅 mode）。
-- **测试**：0600 回滚保持私有权限、发布前权限失败旧文件不变；既有可执行位用例保持通过。
-
-### 修复：Plan 状态与压缩投影接入发布失败语义（审计 F8c）
-
-- `PlanStore`（draft/journal/plan/回滚快照）与 `CompactionEngine`（context-state.json、summary 投影）的运行时写入统一改走 `publish_state`：发布后同步失败时先重读比对完整快照并重做同步，无法恢复则闩锁 session、拒绝后续 Plan/压缩状态变更。
-- `PlanStore`/`CompactionEngine` 新增共享闩锁注入（`with_fault`），由 session 构建处注入同一 `PersistenceFault`；`PlanStore` 的 draft/confirm/clear 入口先检查闩锁。
-- **测试**：闩锁后 Plan draft/confirm/clear 被拒；既有 Plan journal 事务与投影测试保持通过。
-
-### 修复：状态文件发布阶段失败不再静默按旧状态继续（审计 F8）
-
-- `atomic_replace` 内部区分**发布前失败**（旧文件不变）与“已发布但目录同步失败”（内容可见、持久性未确认），新增 `atomic_replace_status`；公开签名保持兼容。
-- 新增 session 级 `PersistenceFault` 闩锁与 `publish_state` 决策点：发布后失败时重读并**比对完整预期快照**、重做目录同步；仅当同步确认成功才恢复正常执行，否则闩锁 session 并返回 fatal 错误（拒绝后续状态变更，要求重启 session）。“重读一致”本身不等于持久化成功，仍保持故障状态。
-- `TodoStore` 先行接入：写入/推进前检查闩锁，持久化走 `publish_state`；`TurnExecutor` 在工具结果落盘后检查闩锁，故障会**结束当前 turn**（不是可重试工具错误后继续对话）。Plan journal/projection 与其余调用方在后续提交迁移。
-- **测试**：发布后注入失败、快照不匹配/重同步失败闩锁、已校验且重同步成功后恢复、首次故障保留根因、闩锁后 Todo 写入被拒、turn 因闩锁停止。
-
-### 安全修复：图片缓存读取与去重校验改为有界单句柄
-
-- `ImageCache::read_bounded` 此前先查 metadata 再整文件读取，检查与读取之间文件被替换/增长或换成特殊文件时，后置检查无法阻止无界分配/阻塞（审计 F7，条件性代码路径）。现在单句柄打开（Unix `O_NOFOLLOW | O_NONBLOCK`：拒绝符号链接、FIFO 打开不阻塞）、句柄 `fstat` 拒绝非 regular file、`take(max_bytes + 1)` 限制实际读入。
-- `commit` 的去重三个分支（初始检查、锁内二次检查、hard-link `AlreadyExists`）统一走有界校验：已有对象必须与待提交内容**长度一致 + 摘要一致**，读取上限 `len + 1`；锁内二次检查不再未校验直接返回。
-- **测试**：新增符号链接对象与 FIFO 对象用例；既有去重、损坏、超限用例保持通过。
-
-### 安全修复：REPL 输出清洗模型返回的终端控制序列
-
-- `TerminalDisplay` 现在对不可信 payload（模型 text/thinking、工具摘要与结果预览、错误消息、子代理输出）先经共享的 `ControlSequenceFilter`，再由 renderer 添加可信颜色/标题序列；此前 REPL 只做 CRLF 归一，模型返回的 ESC/OSC/CSI 可直接作用于终端（审计 F6）。
-- 清洗器有跨 chunk 解析状态：序列被切分到多个流式片段仍会移除；消息边界（stop/retry/tool call/sub-agent 块）reset，未结束的 OSC 不会吞掉下一条消息正文；stdout/stderr 使用独立解析状态；超长序列有上限。
-- `strip_ansi` 下沉到 `ui::sanitize` 与 TUI 共享（控制序列清洗与布局归一分离，TUI 保留 tab/换行策略）；非 TTY 装饰码现状保留，明确延期打磨。
-- **测试**：新增 11 个 filter 字节级用例（CSI、OSC52、`ESC \` 终止、未结束序列、reset、跨 chunk、C1、中文、超长序列）与 6 个 display 字节级用例（跨 chunk 清洗、可信包装码保留、未结束 OSC 不吞下一条消息、CRLF 布局、stream-json 静默）。
-
-### 修复：TUI 启动/运行错误带上下文传播，不再静默成功退出
-
-- `run_tui` 返回的 Err 此前只 `eprintln!`，外层 `turn_result` 仍为 `Ok`，初始化/渲染失败可能以退出码 0 结束（审计 F5）。现在经私有 `launch_tui_with` seam 带上 `TUI error:` 上下文传播到 `turn_result`，`main` 的 Err→exit 1 通路生效。
-- 清理顺序保持先 `shutdown` 再判定结果：`finish_turn` 保证 shutdown 即使在前序失败时也执行；两者都失败时保留主要错误与清理错误信息（`combine_turn_and_shutdown`）。
-- **测试**：新增 4 个 mink-cli 用例（launcher 错误带上下文、正常退出不误报失败、失败后仍执行 shutdown、主错误+清理错误同时保留）。
-
-### 修复：CLI 控制操作（/compact、/model）的结果不再被静默丢弃
-
-- broker 现在渲染 `CompactOutcome`（含 skip 原因）与 `set_model` 成功提示；模型切换同时更新实际模型标签与标题（TUI 状态栏 / REPL 标题），此前这些输出经无 turn emitter 的事件通道落入空处（审计 F4）。
-- 标签来自 core 已解析的结果：新增 additive `AgentRuntimeHandle::set_model_with_outcome` / `AgentRuntime::set_model_with_outcome`（返回 label + 标题快照），原 `set_model` 签名与行为保持兼容；CLI 不重复模型解析规则。
-- 错误仍通过返回 `Err` 由 broker 统一展示一次；完整控制事件流（可靠交付）保持为后续工作。
-- **测试**：mink-cli 新增 recording display + 真实 runtime 用例，断言压缩跳过、切换成功（含标签与标题）、错误各恰好出现一次。
-
-### 修复：compact/set_model 的 busy permit 生命周期移交操作任务
-
-- 此前 `compact()` / `set_model()` 的 permit 保存在调用者 future 栈上，调用方 timeout/abort/丢弃 future 会提前释放 busy，而已发送的命令仍在 orchestrator 执行：新 turn 可抢占 gate 并把事件归属到新 turn（审计 F3）。现在 permit 由 spawned 操作任务持有，直到 orchestrator 返回完成结果；调用者丢弃 future 仅表示放弃等待，不隐含撤销操作。
-- 取得 permit → 发送命令 → 移交任务之间无可取消的 `await` 空窗；命令发送失败与完成通道丢失（orchestrator 丢弃 done sender）均释放 gate；shutdown 仍可结束已失去调用者的操作。
-- **测试**：新增 4 个用例（调用者丢弃 future 后仍 Busy 直到操作结束、发送失败释放 gate、done sender 丢失释放 gate、shutdown 结束无主操作）；其中丢弃 future 用例在旧实现上复现失败。
-
-### 修复：等待响应头/自定义 backend 建立流时中断与首事件超时失效
-
-- **建立阶段取消**：`stream_llm_response` 的建流 future 现在与取消（`cancel.cancelled()`）、25ms interrupt 轮询、绝对首事件 deadline 一起 select。此前在等待 HTTP 响应头或自定义 backend 的 `stream()` 未返回期间，Ctrl+C 只设置 interrupt 标志而无人轮询，内置客户端可能拖到 600 秒总超时，自定义 backend 可永久占住 turn（审计 F2）。
-- **首事件预算**：`llm_first_event_timeout_secs` 改为覆盖「请求建立＋首事件」的绝对期限，建流返回不重置、`Retry` 事件不延长；timeout 禁用时中断仍生效；已完成的建流结果优先于并发取消，迟到取消不覆盖已确定的成功结果。
-- **错误语义**：建立阶段中断使用类型化 `TurnInterrupted`，在错误分支中先于字符串式 context-overflow 识别处理，映射 `TurnStatus::Interrupted`，不降级为普通网络失败。
-- **取消契约**：`LlmBackend::stream` 文档明确 backend 须自行遵守 `request.cancel` 并清理自己 spawn 的任务；drop future 不构成清理保证。
-- **测试**：新增 4 个用例（`backend.stream` 永久 pending 后中断并可继续下一轮、timeout 禁用时中断、建流消耗大部分预算后空流只剩原预算、本地服务器收连接不回响应头时中断）。
-
-### 修复：Bash/Python 超时/中断后残留忽略 SIGTERM 的孙进程
-
-- **进程组清理**：`terminate_child_process_tree_with_grace` 不再把直接子进程退出当作整个进程组退出。此前发送组 SIGTERM 后只要直接 child 退出就立即返回，忽略 TERM 的孙进程拿不到后续 SIGKILL（审计 F1，已复现：孙进程同 pgid 持续存活）。现在宽限期内以 `kill(-pgid, 0)` 判定组存活（仅 `ESRCH` 视为组不存在，`EPERM` 按仍存在处理），到期对残余组发 SIGKILL，并在有界窗口内确认清理结果。
-- **清理状态**：进程监督层新增 `ProcessTreeCleanup`（`NotAttempted` / `Confirmed` / `Unconfirmed`）；Bash/Python 超时或中断的结果在未确认清理时附注 `process group cleanup unconfirmed; descendants may still be running`，不再暗示所有副作用均已停止。
-- **测试**：新增 5 个进程监督用例（父退孙忽略 TERM、空组提前确认、timeout/中断两入口、自然退出），测试自带兜底清理，断言失败也不遗留孙进程。
-
 ## v0.6.2 (2026-09-11)
 
 ### 修复：压缩请求丢失前缀缓存
 
 - 压缩请求不再改写 `tool_choice`（移除 `tool_choice_for_purpose`）：配置值对所有请求一致生效，未配置则不发送。此前压缩被强制为 `none`，每次压缩都构成一次参数切换，前缀在 tools 段之后断裂（实测同一 session 手动压缩命中率 1.5% → 99.8%）。
+
+### 修复：请求取消、期限与操作生命周期
+
+- 建流阶段（等待 HTTP 响应头或自定义 backend 的 `stream()` 未返回）纳入取消与期限管理：Ctrl+C 立即生效并映射为 `Interrupted`；首事件期限改为「请求建立＋首事件」的绝对预算，建流返回不重置，`Retry` 等控制通知不满足也不延长；期限检查在消费循环的确定路径执行，高频控制事件不能使其停摆；禁用期限时中断仍然生效，已完成的建流结果不被迟到取消覆盖。
+- `compact()` / `set_model()` 的 busy permit 由操作任务持有到完成：调用者 timeout/abort/丢弃 future 只放弃等待，不会提前释放 busy 或在旧操作未结束时接受新 turn。
+
+### 修复：Bash/Python 超时与中断的进程清理
+
+- 发送组 SIGTERM 后不再以直接子进程退出作为整组退出判据：宽限期内以 `kill(-pgid, 0)` 判定组存活（仅 `ESRCH` 视为不存在，`EPERM` 按存在处理），到期对残余组 SIGKILL 并在有界窗口确认清理结果；未确认清理时在工具结果中标注，不再暗示副作用已全部停止。主动 `setsid` 逃离的进程与非 Unix 进程树不在覆盖范围。
+
+### 修复：状态持久化的发布失败语义（fail-closed）
+
+- 原子替换区分**发布前失败**（旧文件不变）与**已发布但目录同步失败**：后者重读并比对完整预期快照、重做目录同步；无法恢复时闩锁 session 并返回 fatal 错误（要求重启），禁止按旧 revision 重试。`atomic_replace` 公开签名保持兼容。
+- 闩锁后的权威检查点：turn 与用户输入入口、手动压缩入口、同批工具派发前、所有 `publish_state` 入口；未派发的工具调用生成明确的“未执行”结果以保持 tool_call/result 配对。Todo、Plan 与压缩投影接入同一闩锁。
+- 压缩的权威 `context-state.json` 与派生 summary 分开处理：派生投影写入失败不再仅置 dirty 后返回成功，错误向上传播（dirty 仍保留供重试）。
+
+### 修复：回滚与状态写入的文件权限
+
+- 信号回滚与权限保留发布复用同一条带发布语义的写入路径：最终权限先设置到临时文件再发布；权限读取失败拒绝发布并记录 `SignalRollbackError`，失败不记为成功回滚。
+- 指定最终权限时，临时文件以 0600 创建（Unix），写入内容期间不存在更宽权限窗口；写入顺序为创建（限权）→ 写入 → 设置最终权限 → 文件 fsync → rename → 目录同步。ACL、所有者与扩展属性不在支持范围（仅 mode）。
+
+### 安全修复：终端输出清洗与消息边界
+
+- REPL 对不可信 payload（模型文本/thinking、工具摘要与结果预览、错误、子代理输出）先经共享控制序列清洗，renderer 的颜色/标题码在其后添加；控制序列清洗与布局归一分离，TUI 保留自身 tab/换行策略。
+- 解析状态按“连续流 / 完整消息”分界：thinking/text 块内跨 chunk 保留，类型切换、工具消息、stop/retry、每条错误、子代理 thinking/text 两段均 reset；未结束的 OSC 不再吞掉后续正文、下一条错误或下一轮输出；stdout/stderr 独立解析。
+- 非 TTY 输出装饰码维持现状（延期打磨）。
+
+### 安全修复：图片缓存有界读取
+
+- `ImageCache::read_bounded` 改为单句柄读取：Unix `O_NOFOLLOW | O_NONBLOCK` 拒绝符号链接、FIFO 不阻塞，句柄 fstat 拒绝非 regular file，`take(max_bytes + 1)` 限制实际读入后再做长度与摘要校验，避免检查与读取之间的替换或增长造成无界分配。
+- 去重的三个分支统一校验：已有对象必须与待提交内容长度一致且摘要一致。
+
+### 修复：CLI 控制反馈与 TUI 错误处理
+
+- `/compact` 与 `/model` 类控制操作的结果不再静默丢弃：展示压缩结果（含跳过原因）与切换成功提示，并同步实际模型标签与标题；标签来自 core 已解析结果（新增 additive `set_model_with_outcome`，原方法签名兼容）。
+- TUI 启动/渲染错误带上下文传播为进程失败（非零退出码），并保证先执行 shutdown；主错误与清理错误同时保留。
+
+### 维护
+
+- `ImageFormat::extension()` 标记 deprecated（下一个破坏性版本移除）；删除死私有接口与冗余字段；收窄 `config` 模块级 `allow(dead_code)`；移除不可达的像素溢出分支（保留真实边长/像素/字节配额检查）。
+- `docs/ARCHITECTURE.md` 明确事件交付契约：turn 可靠流为 unbounded 队列、**当前没有慢消费者内存边界**；尽力 observer 队列有界（1024）且溢出丢弃告警。队列预算与慢消费者策略列为后续工作。
 
 ## v0.6.1 (2026-09-08)
 
