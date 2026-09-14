@@ -1,5 +1,5 @@
 use crate::context::AgentSharedContext;
-use crate::guard::collector::{Signal, SignalCollector, SignalKind};
+use crate::guard::collector::{SignalCollector, SignalKind};
 use crate::guard::evidence::EvidenceTracker;
 use crate::tools::runner::ToolExecution;
 use std::sync::Arc;
@@ -7,7 +7,6 @@ use std::sync::Arc;
 pub struct ToolSignalProcessor {
     collector: SignalCollector,
     tool_error_count: u32,
-    signals: Vec<Signal>,
     evidence: EvidenceTracker,
 }
 
@@ -30,7 +29,6 @@ impl ToolSignalProcessor {
                 config.edit_loop_weights.clone(),
             ),
             tool_error_count: 0,
-            signals: Vec::new(),
             evidence: EvidenceTracker::new(
                 config.seq_window.max(MIN_EVIDENCE_RECORDS),
                 config.evidence_dedup_window,
@@ -40,17 +38,11 @@ impl ToolSignalProcessor {
 
     pub fn reset(&mut self) {
         self.tool_error_count = 0;
-        self.signals.clear();
         self.evidence.reset();
     }
 
     pub fn tool_error_count(&self) -> u32 {
         self.tool_error_count
-    }
-
-    #[cfg(test)]
-    pub fn collected_signals(&self) -> &[Signal] {
-        &self.signals
     }
 
     /// 本输入累计硬失败数（供 DecisionEngine::decide_with_signals）。
@@ -110,7 +102,6 @@ impl ToolSignalProcessor {
             scan_error_patterns,
         );
         result.signals = new_signals;
-        self.signals.extend(result.signals.clone());
 
         let hard_count = result.signals.iter().filter(|s| s.kind.is_hard()).count();
         // 用户主动中断不是模型失败：collector 不产生 Signal，这里也排除

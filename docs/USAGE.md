@@ -351,6 +351,8 @@ read_dirs = ["./data"]
 `~/.minkrc` > env > 默认）。
 环境变量在文件层之前应用，因此 `[tools]` / `[generation]` 等文件配置会覆盖同名环境变量。
 
+`log_events = true` 时 `events.jsonl` 是诊断与审计通道：关键事件（`prefix_snapshot`、signal 恢复）使用有期限的可靠提交（写失败会反馈给调用方）；普通诊断事件在 writer 停摆、队列满时为可见降级——事件被丢弃并计入丢失报告，不会阻塞运行时。
+
 ```toml
 # ~/.minkrc
 [provider]

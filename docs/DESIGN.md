@@ -72,18 +72,18 @@ SubAgent 由 `SubAgentCoordinator` 在 turn 内部启动、收集和注入结果
 步骤 6: 工具执行（ToolRunner::execute_all）
   ├── resolved ModelToolSurface 执行门禁
   ├── StormBreaker 重复抑制
-  ├── PlanActionHandler 将已完成 PlanCommand 转换为 effect / 压缩请求
+  ├── 工具阶段原地完成 PlanCommand 交接（effects / append-only transition）
   ├── SubAgentCoordinator 启动并收集子代理
   ├── 延迟结果统一执行大小保护
   ├── ToolSignalProcessor 基于最终结果采集信号并更新 belief
   ├── ConversationStore::add_tool_results()
   └── AgentEventKind::ToolResult
-步骤 6.1: Plan 压缩请求交给 TurnCompactor，失败则终止并返回错误
+步骤 6.1: Plan transition 由 session 唯一 PlanStore 原子提交并追加内部 transition（不触发压缩）
 步骤 7: DecisionEngine 决策继续、注入、中止或停止
 ```
 
 各个阶段之间有严格的依赖关系：
-- 步骤 2 和步骤 6.1 共用 `TurnCompactor` 内部标记互锁，同一用户输入最多压缩一次
+- 同一用户输入的压缩互锁由 `TurnCompactor` 内部标记保证（自动/预检/手动/溢出统一入口），与工具阶段的 Plan transition 无关
 - 步骤 4 依赖步骤 3 收集的 thinking + text 内容
 - 步骤 6 依赖步骤 4 补充后的 calls 列表
 - 步骤 7 根据 stop_reason 决定是否循环
@@ -236,7 +236,7 @@ artifact 跟随 session 生命周期，不跨 session 共享。
 | 生命周期 | 字段（代表） | 共享/重置方式 |
 |---|---|---|
 | 构建期冻结 | `config`、`api_url`、`session_layout`、`cwd`/`home`、`capability_snapshot`、`tool_config`、`tool_surface`、`tool_capabilities`、`tool_resolution_context`、`model_capabilities`、`resource_router`、`vfs_scope` | 构建后不变；变更需重建 prefix/session |
-| 会话级服务 | `store`、`artifacts`、`todo_store`（`ToolContext.plan_store`）、`snapshots`、`stats`、`usage`、`compaction`、`read_memo`、`memo_epoch`、`memo_mutation`、`persistence_fault`、`event_log_writer`、`image_cache` | Arc 共享；同一 session 内唯一；闩锁/epoch 必须跨 Turn/Tool/压缩共享 |
+| 会话级服务 | `store`、`artifacts`、`todo_store`、`plan_store`（经 `ToolContext` 克隆同一 Arc）、`snapshots`、`stats`、`usage`、`compaction`、`read_memo`、`memo_epoch`、`memo_mutation`、`persistence_fault`、`event_log_writer`、`image_cache` | Arc 共享；同一 session 内唯一；闩锁/epoch 必须跨 Turn/Tool/压缩共享 |
 | 跨请求去重 | `warned_image_ids` | **会话级**，不得当作每轮状态清空 |
 | 每轮重置 | `interrupt`、`this_turn_image_ids` | `TurnExecutor::reset_local_state` 重置；子代理与父**共享** `interrupt`，子代理局部超时只取消自己的 linked cancel 令牌 |
 | 惰性/节流 | `immutable_prefix`、`stream_flush_last`、`event_log_warned` | prefix 失效重建；`stream_flush_last` 为 **context 级**节流（非每轮）；`event_log_warned` 整个会话只警告一次 |
@@ -399,6 +399,8 @@ StormDecision::Suppress(reason) => {
 ---
 
 ## 主题五：信号驱动的信念系统
+
+> 实现收敛（S8）：`ToolSignalProcessor` 不再累计完整信号副本（原 `signals`/`collected_signals` 已删除）；事实来源是 `ToolExecution.signals` 与 events.jsonl 的 `type=signal` 事件。
 
 信号系统是 Mink 的反馈回路：工具执行质量被采集为信号，合并为单一信念度 `B`，
 低信念时向 LLM 注入修正提示（或中止），构成闭环。完整设计（设计思想、信号采集、
@@ -571,6 +573,8 @@ session 恢复和重放仍可按需读取全部原始消息；`session://current
 
 ### 事件日志丢失确认（D1 决策）
 
+- **状态所有权（S6）**：writer 线程独占 `WriterState{file,failure,last_loss,processed_lost}`（无 Mutex/Atomic）；共享的只有发送侧 `send_lost` 原子、`init_error` 锁与测试计数。已报告损失水位由 `EventLogWriter.reported`（async Mutex，兼作 flush 串行化）持有，收到 FlushAck 后才推进；取消/超时的 flush 不消费未报告损失。
+
 `events.jsonl` 由专用 writer 线程串行追加，队列有界（满时阻塞，不静默丢弃）。丢失的确认与报告遵循以下所有权规则：
 
 - **发送侧计数**：writer 线程创建失败、通道断开、入队拒绝由发送侧计入 `send_lost`——不存在的 writer 无法承担统计。
@@ -585,6 +589,7 @@ session 恢复和重放仍可按需读取全部原始消息；`session://current
 - 进度事件（`Text`/`Thinking`）有 1 MiB 的 pending 字节预算：每个事件按 `max(payload, 128B)` 计费（空 delta 也占用队列槽位，不得零成本）；超限的 delta 仅对 stream 出口丢弃，并以一条可靠 `Info` 通知。**不把 agent 事件流改为 bounded channel**：生产者等待容量会让 outcome-only 消费者死锁。
 - 可靠事件（工具调用/结果、stop/error/usage、控制事件）不进预算也不丢弃；其总量由结构约束：工具调用/结果数受 turn 机制限制、payload 受 `format_tool_result` 上限约束。**上游 SSE 生产者队列已改为有界（1024）并用 async send 背压**；observer 通道保持有界（溢出丢弃并告警）。
 - 验证：单元（预算边界、空 delta 计费、一次性通知、可靠事件不被丢弃、**stream 不消费时 observer 仍收到全部增量**）+ SSE（满容量背压、丢弃消费者后生产者退出）+ 集成（8 MiB 与 32 MiB 两档慢消费：pending ≤ 1 MiB、dropped > 0、`outcome()` 正常完成）。
+- 发送失败回收：仅进度事件能到达发送点（已 reserve）；`tx.send` 失败时按返回事件的 payload 归还本次预留，Info/Stop 等无 progress_len 不误释放；`release` 用 debug_assert 守住“不得超额释放”。
 - **范围限定（复核结论）**：本项证明的是“进度事件与上游 SSE 队列有界 + 可靠事件结构有界”；可靠事件突发（大量工具结果）的峰值字节未做定量测量，属 deferred 验证项。
 
 ### 关键事件与诊断事件（复核修复）
@@ -835,7 +840,8 @@ surface 解析阶段 fail closed。
 
 | 类别 | 位置 | 中毒行为 | 依据 |
 |---|---|---|---|
-| 可重建/派生 | `read_memo`、`snapshots`、`immutable_prefix`、`stream_flush_last`、子代理 Capture 显示缓冲、event-log writer 内部状态 | 取回数据继续（单次插入/替换，无跨字段不变式；显示缓冲允许丢失） | 派生数据可由源重建，继续使用不会伪装已验证状态 |
+| 可重建/派生 | `read_memo`、`snapshots`、`immutable_prefix`、`stream_flush_last`、子代理 Capture 显示缓冲 | 取回数据继续（单次插入/替换，无跨字段不变式；显示缓冲允许丢失） | 派生数据可由源重建，继续使用不会伪装已验证状态 |
+| 线程独占（无锁） | event-log `WriterState`（file/failure/last_loss/processed_lost） | 仅 writer 线程读写；跨线程只通过 FlushAck 快照 | 单一所有权消除多余同步 |
 | 权威内存状态 | `TodoStore.state` | **写路径 fail closed**：`lock_for_write()` 闩锁 session 并返回错误；读路径取最后一致快照 | panic 中断可能留下撕裂 revision；恢复需重启 |
 | 文件事务串行化 | `PlanStore.transition_lock` | 取回继续；真相在文件/journal，恢复由 `recover_pending`/`ensure_no_pending_transaction` 重放完成 | 锁只做串行化，不承载内存不变式 |
 | 租约/活动状态（server） | `Registry.active`/`operation_locks`/`create_locks` | 可返回错误的操作经 `lock_active_state()` 返回 `Internal`（要求重启 server）；签名不可错的辅助函数显式 panic 并注明原因 | 活动 runtime 与租约不可在未验证状态下继续 |
@@ -969,7 +975,7 @@ Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。`mink-core` 发布�
 实现；终端二进制和 UI 实现由 workspace 中的 `mink-cli` 包持有。服务端依赖时推荐只启用嵌入式 runtime：
 
 ```toml
-mink = { package = "mink-core", version = "0.6.2", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.6.3", default-features = false, features = ["runtime"] }
 ```
 
 `mink::runtime` / `mink::prelude` 解决这些问题：**同一套 OrchActor / TurnExecutor / ToolRunner 核心，但无进程边界**。

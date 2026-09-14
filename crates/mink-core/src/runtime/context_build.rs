@@ -85,6 +85,10 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         .usage_journal
         .unwrap_or_else(|| UsageJournal::new(paths.usage.clone()));
     let persistence_fault = crate::session::persistence::PersistenceFault::default();
+    let plan_store = Arc::new(
+        crate::session::plan::PlanStore::new(paths.plan.clone(), paths.plan_draft.clone())
+            .with_fault(persistence_fault.clone()),
+    );
     let todo_store =
         Arc::new(TodoStore::load(paths.todos.clone())?.with_fault(persistence_fault.clone()));
     let vfs_scope = VfsScope {
@@ -158,6 +162,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         store,
         artifacts,
         todo_store,
+        plan_store: plan_store.clone(),
         persistence_fault,
         read_memo: Arc::new(Mutex::new(crate::tools::read_memo::ReadMemo::new())),
         memo_epoch: compaction.memo_epoch(),
@@ -193,8 +198,6 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         event_log_warned: AtomicBool::new(false),
         event_log_writer,
         prefix_build_lock: tokio::sync::Mutex::new(()),
-        #[cfg(test)]
-        stream_json_emits: std::sync::atomic::AtomicU64::new(0),
         stream_flush_last: Mutex::new(None),
     });
     ctx.log_event(crate::events::EventLog::ToolSurface {

@@ -2,67 +2,95 @@
 
 ## Unreleased
 
-### 修复（复核）：关键提交响应当前轮中断，flush 等待有期限
+### 修复：子代理中断不再报告为成功，收集等待可被停止
 
-- 关键事件提交等待现在同时响应 runtime cancel 与 `interrupt_current_turn()`（当前轮 interrupt）：writer 停摆时中断可立即结束等待并保持 Interrupted 分类；健康 writer 的提交有宽限期（500ms/测试 150ms），不会被在途取消误伤。
-- `EventLogWriter::flush` 的确认等待纳入内部期限：writer 停摆时 turn 收尾不再无限挂起，而是按期限上报错误。
-- 测试：公开 `interrupt_current_turn()` + 暂停 writer 场景（中断及时结束、恢复后下一轮仍可运行）；winter 级中断释放；组合变异验证测试能捕获依赖缺失。
+- 子代理终态由内部 `SubAgentStatus{Succeeded,Failed,Interrupted,TimedOut}` 表达：Interrupted/TimedOut 不再落入“Ok 即成功”，coordinator 与恢复 replan 按准确状态映射工具结果与事件字符串（外部字段与协议不变）。
+- 子代理批次只有一个 pending 所有者：未知/重复结果按协议故障处理；收集循环响应 runtime cancel 与当前轮 interrupt；收集 future 被丢弃时 cancel+abort 未完成任务；结果仍按输入顺序回填。
 
+### 维护
 
-### 修复（复核）：关键事件等待真实写入结果，提交异步可取消并保留 stream-json 输出
+- turn 模型与 backend 一次装配：删除独立 executor backend 与 `with_model_target`，测试统一在 context 构建期注入 backend。
+- PlanStore 归属 session；Plan 工具阶段原地交接（删除 handler 与中转 Vec）；启动期 journal 恢复实例一次性使用。
+- 事件日志 writer 独占状态（无锁 WriterState）与单一 reported 水位；三个工具失败分支共用 `ToolExecOutput::failed`；生产不再累计信号测试镜像；stream-json 回归改验真实 stdout 子进程输出；进度发送失败回收预留；API 边界测试仅在消费根校验非空；删除 CLI `write_out` 薄包装。
 
-- 关键事件（prefix_snapshot、signal rollback/replan/handover）经 `AppendCritical` 携带单次写入应答：只有 writer 实际 open/write 成功才算成功，入队不再被当作完成；prefix 仅在应答成功后更新缓存。
-- 提交改为异步、有期限、可取消（不再用 `thread::sleep` 轮询阻塞异步线程）；取消保持 turn interruption 分类。
-- 关键事件继续输出 stream-json stdout（与 `log_event`/`log_raw_event` 共用同一实现），恢复既有兼容行为。
+## v0.6.3 (2026-09-11)
 
+### 新增：事件流进度预算与嵌入诊断接口
 
-### 修复（复核）：关键事件可靠提交，SSE 发送可取消
+- 实时事件流的 `Text`/`Thinking` 进度受 1 MiB pending 字节预算（每事件按 `max(payload, 128B)` 计费）：慢消费者下超限增量仅对 stream 丢弃，并以一条可靠 `Info` 通知；可靠事件（工具调用/结果、stop/error/usage、控制事件）不受预算影响。
+- `AgentEventStream::outcome()` 主动排空事件并释放进度字节，不再要求消费者先读空队列；新增嵌入诊断 API `progress_backlog()` 返回 `(pending_bytes, dropped_deltas)`；`docs/EMBEDDING.md` 记录三种消费方式与边界。
+- observer（`EventSink`）投递独立于 stream 预算：慢 stream 消费者不会连带丢弃 observer 的增量。
 
-- `EventLog` 区分关键契约事件（`prefix_snapshot`、signal rollback/replan/handover）与诊断事件：关键事件经 `log_critical_event` 有期限可靠提交，失败传播给调用方；prefix 快照失败时不再更新前缀缓存（下次重建重试，不产生缓存命中假象）。
-- 诊断事件继续 best-effort（可见丢弃 + 丢失报告）；`log_event` 收到关键事件时兜底走可靠路径并告警。
-- SSE 生产者在满队列发送期间同时监听取消；取消时的中断通知不再等待容量（保留 receiver 的停滞消费者也不能钉住任务）。
-- 文档精确化资源边界：SSE 队列仅限事件个数，不含单事件字节与解析缓冲；runtime 可靠事件不计入进度预算，整链路"内存完全有界"不成立。
+### 兼容性说明
 
+- 公共 API 仅增量变化（新增 `AgentEventStream::progress_backlog()`，以及已有的 additive `set_model_with_outcome`）：无删除或破坏性签名变更；CLI 参数、`--print`/`--agent-jsonl` 协议与 `events.jsonl` 事件形状不变。
+- 行为变化汇总：进程失败分类改由执行事实决定；诊断事件在 writer 持续停摆时可见丢弃并计入丢失报告；取消/超时的建流请求会留下 `Unreported` 用量记录。
 
-### 修复（复核）：shutdown 阻塞 IO 移出 async worker，异步日志入队不再阻塞
+### 修复：事件日志可靠性与丢失可见
 
-- `usage.flush()` 改为经 `spawn_blocking` 执行并由 shutdown 阶段预算约束；stats/projection 原本已在 blocking pool。超时只界定调用者等待，不谎报后台写入完成。
-- 异步 turn/runtime 的 `log_event` 改用 `send_best_effort`：writer 停摆导致队列满时可见地丢弃诊断事件并计入丢失报告，不再阻塞 tokio worker；同步路径仍可用阻塞 `send`。
-- 测试：真实阻塞闭包的阶段超时有界；paused-writer 下 best-effort 入队不阻塞且丢失可见；正常 runtime 的 shutdown 在预算内完成。
+- flush 屏障报告此前的累计未报告丢失（含最近原因）并推进确认水位；取消/超时的 flush 不消费丢失。丢失按所有权拆分：发送侧计入初始化/通道失败，writer 只累计实际未持久化的事件；writer 线程创建失败在 flush 时显式可见。
+- `EventLog` 区分关键契约事件（`prefix_snapshot`、signal rollback/replan/handover）与诊断事件：关键事件携带**单次写入应答**（入队成功不算成功），失败传播给调用方；prefix 快照失败不更新缓存（下次重建重试），signal 恢复失败向上传播；关键事件保持 stream-json stdout 输出。
+- 关键提交全异步、有期限，并同时响应 runtime cancel 与当前轮 `interrupt_current_turn()`：writer 停摆时立即结束等待并保持 `Interrupted` 分类，健康 writer 有短暂宽限避免误伤在途写入。
+- 异步路径不再阻塞 tokio worker：诊断事件在队列满时可见降级（计入丢失报告，下一次 flush 报出）；`EventLogWriter::flush` 的确认等待有内部期限；shutdown 各阶段有预算，`usage.flush` 等阻塞工作经 `spawn_blocking` 执行。
 
-### 修复（复核）：事件出口解耦、进度结构计费与上游 SSE 有界
+### 修复：实时事件链路与 SSE 背压
 
-- observer（EventDispatcher）投递独立于 stream 进度预算：慢 stream 消费者不再连带丢弃 observer 的增量。
-- 进度事件按 `max(payload, 128B)` 计费：空 delta 也占用队列槽位，不能零成本绕开预算。
-- 上游 SSE 生产者队列改为有界（1024）并使用 async send 背压；消费者被丢弃后生产者退出，不再无界堆积。
+- observer（`EventDispatcher`）投递与 stream 预算解耦；进度事件按 `max(payload, 128B)` 计费，空 delta 也占用队列槽位。
+- 上游 SSE 生产者队列由无界改为有界（1024）并使用 async send 背压；消费者被丢弃后生产者退出，不再无界堆积。
+- 满队列发送期间同时监听取消，取消时的中断通知不再等待容量（保留 receiver 的停滞消费者也不能钉住任务）。
+- 边界以文档为准：SSE 队列仅限制事件个数，不含单事件字节与解析缓冲；可靠事件不计入进度预算。
 
+### 修复：进程终止、超时清理与状态分类
 
-### 修复：用户文件写入不再吞掉目标 metadata 错误
+- Bash/Python 的终止原因类型化传递到工具状态：运行库超时 → `Timeout`，运行库中断 → `Interrupted`，信号终止/非零退出 → `ProcessFailed`；输出中出现 `timeout` 等词不再覆盖真实原因，信号终止（无输出、退出码 `None`）不再落入 `Unknown`。
+- Bash 不再把命令自行 `exit 130` 标注为 `command interrupted`（该文本改由运行库中断路径添加）；模型可见文本、退出码展示与 JSONL 字段保持兼容，分类更正已同步 `docs/tools.md`。
+- 发送组 SIGTERM 后不再以直接子进程退出作为整组退出判据：宽限期内以 `kill(-pgid, 0)` 判定组存活（仅 `ESRCH` 视为不存在，`EPERM` 按存在处理），到期对残余组 SIGKILL 并在有界窗口确认清理结果；未确认清理时在工具结果中标注，不再暗示副作用已全部停止。主动 `setsid` 逃离的进程与非 Unix 进程树不在覆盖范围。
 
-- Edit/Write 的原子写入此前把目标 metadata 读取失败当作"目标不存在"继续：现在区分 NotFound 与真实错误（如符号链接循环），后者直接报错并保留原文件。
-- 已存在目标的权限继续先设置到临时文件再写入；提供最终权限时临时文件以 0600 创建，内容不会落在宽权限文件中；新建文件保持默认 umask。发布与目录同步承诺不变。
-
-### 修复：图片对象目录同步失败不再被静默忽略
-
-- `ImageCache` 提交后的目录同步此前把“打开目录失败”当作成功；现在返回错误，并保留“不支持目录 fsync（EINVAL/ENOTSUP）”的平台差异为 best-effort。
-- 错误语义明确为**发布后失败**：对象已可见但持久性未确认，不撤销已发布对象（重试走内容寻址去重），错误信息包含该语义。
-
-### 修复：取消/超时的建流请求留下未知用量记录
+### 修复：请求取消/超时的用量记录
 
 - 建流阶段被取消（Ctrl+C）或首事件期限到期时，已开始的 backend 请求此前不会出现在 usage journal；现在使用唯一完成权的 `UsageGuard`，取消路径记录一条 `Unreported`（tokens/费用为 None，不虚构重试次数）。
 - 压缩摘要请求使用同一 guard（`compaction_interrupted`/`request_failed`）；成功路径移交给 `MeteredStream`，每个请求最多一条记录；本地图片投影失败（尚未发出请求）不记录。
 
-### 修复：进程失败分类依据执行事实而非输出文本
+### 修复：文件写入与发布错误语义
 
-- Bash/Python 的终止原因类型化传递到工具状态：运行库超时 → `Timeout`，运行库中断 → `Interrupted`，信号终止/非零退出 → `ProcessFailed`。输出中出现 `timeout` 等词不再覆盖真实原因（例如打印 `timeout` 后 `exit 2` 不再被判为超时）。
-- Bash 不再把命令自行 `exit 130` 标注为 `command interrupted`（该文本改由运行库中断路径添加）；信号终止（无输出、退出码 `None`）不再落入 `Unknown`。
-- 模型可见文本、退出码展示与 JSONL 字段保持兼容；分类更正已同步 `docs/tools.md`。
+- Edit/Write 的原子写入不再把目标 metadata 读取失败当作“目标不存在”继续：区分 NotFound 与真实错误（如符号链接循环），后者直接报错并保留原文件；已存在目标的权限继续先设置到临时文件再写入，提供最终权限时临时文件以 0600 创建，新建文件保持默认 umask。
+- `ImageCache` 提交后的目录同步失败不再被静默忽略：返回错误并保留“不支持目录 fsync（EINVAL/ENOTSUP）”的平台差异为 best-effort；错误语义为**发布后失败**（对象已可见但持久性未确认，不撤销已发布对象，重试走内容寻址去重）。
 
-### 修复：事件日志恢复后不再掩盖未报告的丢失
+### 修复：状态持久化的发布失败语义（fail-closed）
 
-- 事件日志 writer 修复了“写入失败 → 文件重新打开成功 → flush 报成功”的路径：现在的 flush 屏障会报告此前累计且尚未报告的丢失（含最近一次丢失原因），并在报告一次后推进确认水位；取消/超时的 flush 不消费丢失。
-- 丢失统计按所有权拆分：发送侧计入初始化/通道失败，writer 只累计实际未能持久化的事件；writer 不等待调用方确认。writer 线程创建失败在 flush 时显式可见，不再伪装成队列断开。
-- 语义细节见 `docs/DESIGN.md` 的“事件日志丢失确认”。
+- 原子替换区分**发布前失败**（旧文件不变）与**已发布但目录同步失败**：后者重读并比对完整预期快照、重做目录同步；无法恢复时闩锁 session 并返回 fatal 错误（要求重启），禁止按旧 revision 重试。`atomic_replace` 公开签名保持兼容。
+- 闩锁后的权威检查点：turn 与用户输入入口、手动压缩入口、同批工具派发前、所有 `publish_state` 入口；未派发的工具调用生成明确的“未执行”结果以保持 tool_call/result 配对。Todo、Plan 与压缩投影接入同一闩锁。
+- 压缩的权威 `context-state.json` 与派生 summary 分开处理：派生投影写入失败不再仅置 dirty 后返回成功，错误向上传播（dirty 仍保留供重试）。
+
+### 修复：回滚与状态写入的文件权限
+
+- 信号回滚与权限保留发布复用同一条带发布语义的写入路径：最终权限先设置到临时文件再发布；权限读取失败拒绝发布并记录 `SignalRollbackError`，失败不记为成功回滚。
+- 指定最终权限时，临时文件以 0600 创建（Unix），写入内容期间不存在更宽权限窗口；写入顺序为创建（限权）→ 写入 → 设置最终权限 → 文件 fsync → rename → 目录同步。ACL、所有者与扩展属性不在支持范围（仅 mode）。
+
+### 安全修复：终端输出清洗与消息边界
+
+- REPL 对不可信 payload（模型文本/thinking、工具摘要与结果预览、错误、子代理输出）先经共享控制序列清洗，renderer 的颜色/标题码在其后添加；控制序列清洗与布局归一分离，TUI 保留自身 tab/换行策略。
+- 解析状态按“连续流 / 完整消息”分界：thinking/text 块内跨 chunk 保留，类型切换、工具消息、stop/retry、每条错误、子代理 thinking/text 两段均 reset；未结束的 OSC 不再吞掉后续正文、下一条错误或下一轮输出；stdout/stderr 独立解析。
+- 非 TTY 输出装饰码维持现状（延期打磨）。
+
+### 安全修复：图片缓存有界读取
+
+- `ImageCache::read_bounded` 改为单句柄读取：Unix `O_NOFOLLOW | O_NONBLOCK` 拒绝符号链接、FIFO 不阻塞，句柄 fstat 拒绝非 regular file，`take(max_bytes + 1)` 限制实际读入后再做长度与摘要校验，避免检查与读取之间的替换或增长造成无界分配。
+- 去重的三个分支统一校验：已有对象必须与待提交内容长度一致且摘要一致。
+
+### 修复：CLI 控制反馈与 TUI 错误处理
+
+- `/compact` 与 `/model` 类控制操作的结果不再静默丢弃：展示压缩结果（含跳过原因）与切换成功提示，并同步实际模型标签与标题；标签来自 core 已解析结果（新增 additive `set_model_with_outcome`，原方法签名兼容）。
+- TUI 启动/渲染错误带上下文传播为进程失败（非零退出码），并保证先执行 shutdown；主错误与清理错误同时保留。
+
+### 维护
+
+- `ImageFormat::extension()` 标记 deprecated（下一个破坏性版本移除）；删除死私有接口与冗余字段；收窄 `config` 模块级 `allow(dead_code)`；移除不可达的像素溢出分支（保留真实边长/像素/字节配额检查）。
+- 事件交付契约更新为：turn 可靠流保持 unbounded 但进度事件有 1 MiB 预算与结构最小值，observer 队列有界（1024）且溢出丢弃告警（详见 `docs/ARCHITECTURE.md`/`docs/DESIGN.md`）。
+- 按内聚拆分：`compaction` 1230→990+259、turn 抽出 `prepare_request`、server 抽出 `SessionSummary`；registry 租约/操作层整体拆分经评估延期（理由见 `docs/DESIGN.md`）。
+- 锁中毒逐类处理：可重建缓存恢复、权威状态 fail closed、不可错辅助函数显式 panic（分类表见 `docs/DESIGN.md`）。
+- 测试装配统一走生产组装并在构建期注入 backend（删除 `with_llm_backend` 字段复制）；公开边界覆盖 router/prefab；删除/合并低价值断言并附删测表。
+- 开发过程文档（行动计划/AUDIT/稳定性方案/收敛设计）移出版本控制并加入 `.gitignore`，仅本地保留。
 
 ## v0.6.2 (2026-09-11)
 
@@ -110,6 +138,10 @@
 
 - `ImageFormat::extension()` 标记 deprecated（下一个破坏性版本移除）；删除死私有接口与冗余字段；收窄 `config` 模块级 `allow(dead_code)`；移除不可达的像素溢出分支（保留真实边长/像素/字节配额检查）。
 - `docs/ARCHITECTURE.md` 明确事件交付契约：turn 可靠流为 unbounded 队列、**当前没有慢消费者内存边界**；尽力 observer 队列有界（1024）且溢出丢弃告警。队列预算与慢消费者策略列为后续工作。
+- 按内聚拆分：`compaction` 1230→990+259、turn 抽出 `prepare_request`、server 抽出 `SessionSummary`；registry 租约/操作层整体拆分经评估延期（理由见 `docs/DESIGN.md`）。
+- 锁中毒逐类处理：可重建缓存恢复、权威状态 fail closed、不可错辅助函数显式 panic（分类表见 `docs/DESIGN.md`）。
+- 测试装配统一走生产组装并在构建期注入 backend（删除 `with_llm_backend` 字段复制）；公开边界覆盖 router/prefab；删除/合并低价值断言并附删测表。
+- 开发过程文档（行动计划/AUDIT/稳定性方案/收敛设计）移出版本控制并加入 `.gitignore`，仅本地保留。
 
 ## v0.6.1 (2026-09-08)
 

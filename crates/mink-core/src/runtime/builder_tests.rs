@@ -3091,7 +3091,7 @@ impl crate::llm::client::LlmBackend for RetryThenPendingBackend {
 }
 
 #[tokio::test]
-async fn public_interrupt_current_turn_releases_a_stalled_critical_commit() {
+async fn public_interrupt_with_writer_recovery_finishes_turn_and_allows_next_turn() {
     use crate::session::event_log::{EventLogWriter, EventLogWriterGate};
 
     let home = unique_temp_dir("interrupt-critical-home");
@@ -3149,9 +3149,8 @@ async fn public_interrupt_current_turn_releases_a_stalled_critical_commit() {
 
     let started = std::time::Instant::now();
     handle.interrupt_current_turn();
-    // Resume the writer now that the interrupt released the commit wait: the
-    // per-turn flush afterwards is healthy again (the stalled-wait release is
-    // already established by queued=1 + prompt abort below).
+    // Resume the writer right after the interrupt; then this case asserts the
+    // turn ends as Interrupted and the next turn runs, not a permanent stall.
     gate.set_paused(false);
     let outcome = tokio::time::timeout(tokio::time::Duration::from_secs(2), first)
         .await

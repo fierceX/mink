@@ -25,7 +25,7 @@ ToolCallEvent
   -> format_dispatched_result() 生成 ToolExecution
      -> 普通结果执行大小保护、Bash noise filter、Read-Write summary、Edit conv_content
      -> Plan/SubAgent 结果标记为待定稿
-  -> PlanActionHandler 生成 Plan effect / 压缩请求；SubAgentCoordinator 完成延迟工作
+  -> 工具阶段原地完成 PlanCommand 交接；SubAgentCoordinator 完成延迟工作
   -> finalize_deferred_results() 对延迟结果执行大小保护
   -> SignalCollector 只观察最终 ToolExecution.status；Command 正文只用于诊断 regex
 ```

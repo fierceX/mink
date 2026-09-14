@@ -238,6 +238,34 @@ struct ToolExecOutput {
     presentation: Option<ToolPresentation>,
 }
 
+impl ToolExecOutput {
+    /// Single constructor for failed executions: success paths keep their own
+    /// explicit field mapping, failures always share these defaults.
+    fn failed(
+        content: String,
+        status: ToolStatus,
+        result_kind: ToolResultKind,
+        wall_ms: Option<u128>,
+    ) -> Self {
+        Self {
+            content,
+            is_bash: false,
+            conv_content: String::new(),
+            exit_code: None,
+            wall_ms,
+            no_mutation: false,
+            memo_candidate: None,
+            spawns_sub_agent: false,
+            status,
+            diagnostics: Vec::new(),
+            plan_command: None,
+            state_metadata: None,
+            result_kind,
+            presentation: None,
+        }
+    }
+}
+
 impl ToolRunner {
     pub fn new(ctx: Arc<ToolContext>) -> Self {
         Self {
@@ -802,22 +830,12 @@ async fn execute_custom(
         }
         Err(error) => {
             let detail = error.to_string();
-            ToolExecOutput {
-                content: format!("Error: tool execution failed: {detail}"),
-                is_bash: false,
-                conv_content: String::new(),
-                exit_code: None,
-                wall_ms: Some(started.elapsed().as_millis()),
-                no_mutation: false,
-                memo_candidate: None,
-                spawns_sub_agent: false,
-                status: failed_status(&detail, None, None),
-                diagnostics: Vec::new(),
-                plan_command: None,
-                state_metadata: None,
-                result_kind: definition.result_kind,
-                presentation: None,
-            }
+            ToolExecOutput::failed(
+                format!("Error: tool execution failed: {detail}"),
+                failed_status(&detail, None, None),
+                definition.result_kind,
+                Some(started.elapsed().as_millis()),
+            )
         }
     };
     let formatted = format_dispatched_result(ctx, call, raw);
@@ -939,44 +957,24 @@ fn dispatch_tool(
             }
             Err(e) => {
                 let detail = e.to_string();
-                ToolExecOutput {
-                    content: format!("Error: tool execution failed: {detail}"),
-                    is_bash: false,
-                    conv_content: String::new(),
-                    exit_code: None,
-                    wall_ms: None,
-                    no_mutation: false,
-                    memo_candidate: None,
-                    // A failed execute must never mark the call as spawning a
-                    // sub-agent: the coordinator would launch a child with raw
-                    // fields even though the executor rejected the input.
-                    spawns_sub_agent: false,
-                    status: failed_status(&detail, None, None),
-                    diagnostics: Vec::new(),
-                    plan_command: None,
-                    state_metadata: None,
-                    result_kind: metadata.result_kind,
-                    presentation: None,
-                }
+                // A failed execute must never mark the call as spawning a
+                // sub-agent: the coordinator would launch a child with raw
+                // fields even though the executor rejected the input.
+                ToolExecOutput::failed(
+                    format!("Error: tool execution failed: {detail}"),
+                    failed_status(&detail, None, None),
+                    metadata.result_kind,
+                    None,
+                )
             }
         }
     } else {
-        ToolExecOutput {
-            content: format!("Error: tool execution failed: unknown tool: {}", call.name),
-            is_bash: false,
-            conv_content: String::new(),
-            exit_code: None,
-            wall_ms: None,
-            no_mutation: false,
-            memo_candidate: None,
-            spawns_sub_agent: false,
-            status: ToolStatus::Failed(ToolFailureKind::Unknown),
-            diagnostics: Vec::new(),
-            plan_command: None,
-            state_metadata: None,
-            result_kind: ToolResultKind::Text,
-            presentation: None,
-        }
+        ToolExecOutput::failed(
+            format!("Error: tool execution failed: unknown tool: {}", call.name),
+            ToolStatus::Failed(ToolFailureKind::Unknown),
+            ToolResultKind::Text,
+            None,
+        )
     }
 }
 

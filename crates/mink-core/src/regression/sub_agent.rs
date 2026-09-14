@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn sub_agent_recursion_is_rejected_without_running_child() -> anyhow::Result<()> {
     let h = harness_with("sub-recursion", true, 300).await?;
-    let coordinator = SubAgentCoordinator::new(h.ctx.clone(), h.ctx.config.clone());
+    let coordinator = SubAgentCoordinator::new(h.ctx.clone());
     let mut result = internal_result("SubAgent");
     result.spawns_sub_agent = true;
     result.sub_agent_prompt = Some("nested task".into());
@@ -22,14 +22,14 @@ async fn sub_agent_recursion_is_rejected_without_running_child() -> anyhow::Resu
 #[tokio::test]
 async fn sub_agent_success_formats_result_and_records_usage() -> anyhow::Result<()> {
     let h = harness_with("sub-success", false, 300).await?;
-    let coordinator = SubAgentCoordinator::new(h.ctx.clone(), h.ctx.config.clone());
+    let coordinator = SubAgentCoordinator::new(h.ctx.clone());
     let mut result = internal_result("SubAgent");
     result.spawns_sub_agent = true;
     result.sub_agent_prompt = Some("task".into());
     let runner: SubAgentRunner = Arc::new(|_, _, _, _, _| {
         Box::pin(async {
             SubAgentResult {
-                status: "ok".into(),
+                status: SubAgentStatus::Succeeded,
                 thinking: "child thought".into(),
                 text: "child text".into(),
                 usage: crate::session::stats::Stats {
@@ -61,7 +61,7 @@ async fn sub_agent_success_formats_result_and_records_usage() -> anyhow::Result<
 #[tokio::test]
 async fn sub_agent_runner_panic_is_reported_as_failed_result() -> anyhow::Result<()> {
     let h = harness_with("sub-panic", false, 300).await?;
-    let coordinator = SubAgentCoordinator::new(h.ctx.clone(), h.ctx.config.clone());
+    let coordinator = SubAgentCoordinator::new(h.ctx.clone());
     let mut result = internal_result("SubAgent");
     result.spawns_sub_agent = true;
     result.sub_agent_prompt = Some("panic task".into());
@@ -98,7 +98,7 @@ async fn sub_agent_runner_panic_is_reported_as_failed_result() -> anyhow::Result
 #[tokio::test]
 async fn sub_agent_runner_sync_panic_is_reported_as_failed_result() -> anyhow::Result<()> {
     let h = harness_with("sub-sync-panic", false, 300).await?;
-    let coordinator = SubAgentCoordinator::new(h.ctx.clone(), h.ctx.config.clone());
+    let coordinator = SubAgentCoordinator::new(h.ctx.clone());
     let mut result = internal_result("SubAgent");
     result.spawns_sub_agent = true;
     result.sub_agent_prompt = Some("sync panic task".into());
@@ -122,7 +122,7 @@ async fn sub_agent_runner_sync_panic_is_reported_as_failed_result() -> anyhow::R
 #[tokio::test]
 async fn sub_agent_timeout_marks_incomplete() -> anyhow::Result<()> {
     let h = harness_with("sub-timeout", false, 0).await?;
-    let coordinator = SubAgentCoordinator::new(h.ctx.clone(), h.ctx.config.clone());
+    let coordinator = SubAgentCoordinator::new(h.ctx.clone());
     let mut result = internal_result("SubAgent");
     result.spawns_sub_agent = true;
     result.sub_agent_prompt = Some("slow task".into());
@@ -130,7 +130,7 @@ async fn sub_agent_timeout_marks_incomplete() -> anyhow::Result<()> {
         Box::pin(async move {
             tokio::time::sleep(Duration::from_millis(200)).await;
             SubAgentResult {
-                status: "ok".into(),
+                status: SubAgentStatus::Succeeded,
                 thinking: String::new(),
                 text: "late".into(),
                 usage: Default::default(),
@@ -147,7 +147,7 @@ async fn sub_agent_timeout_marks_incomplete() -> anyhow::Result<()> {
 async fn sub_agent_collection_enters_timeout_even_when_more_than_limit_are_launched()
 -> anyhow::Result<()> {
     let h = harness_with("sub-timeout-many", false, 0).await?;
-    let coordinator = SubAgentCoordinator::new(h.ctx.clone(), h.ctx.config.clone());
+    let coordinator = SubAgentCoordinator::new(h.ctx.clone());
     let mut calls = Vec::new();
     for idx in 0..9 {
         let mut result = internal_result("SubAgent");
@@ -159,7 +159,7 @@ async fn sub_agent_collection_enters_timeout_even_when_more_than_limit_are_launc
         Box::pin(async {
             tokio::time::sleep(Duration::from_millis(50)).await;
             SubAgentResult {
-                status: "ok".into(),
+                status: SubAgentStatus::Succeeded,
                 thinking: String::new(),
                 text: "late".into(),
                 usage: Default::default(),
@@ -210,7 +210,7 @@ async fn sub_agent_executor_with_mock_llm_captures_child_output() -> anyhow::Res
     )
     .await?;
     let result = executor.execute("child task".into()).await;
-    assert_eq!(result.status, "ok");
+    assert_eq!(result.status, SubAgentStatus::Succeeded);
     assert_eq!(result.text, "child answer");
     assert!(
         result.thinking.is_empty(),
@@ -275,5 +275,249 @@ async fn real_deepseek_api_smoke_streams_response() -> anyhow::Result<()> {
     }
     assert!(saw_text, "real API stream did not yield text");
     assert!(saw_stop, "real API stream did not yield stop");
+    Ok(())
+}
+
+#[tokio::test]
+async fn interrupted_child_reports_interrupted_not_success() -> anyhow::Result<()> {
+    let h = harness_with("child-interrupt-status", false, 30).await?;
+    let child = SubAgentExecutor::new(
+        h.ctx.clone(),
+        "interrupted-child".into(),
+        false,
+        h.ctx.config.clone(),
+    )
+    .await?;
+    h.ctx.interrupt.store(true, Ordering::SeqCst);
+
+    let result = tokio::time::timeout(Duration::from_secs(3), child.execute("task".into()))
+        .await
+        .expect("interrupted child must return promptly");
+
+    assert_eq!(
+        result.status,
+        SubAgentStatus::Interrupted,
+        "interrupted child must report Interrupted, got {:?}",
+        result
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn coordinator_maps_sub_agent_terminal_states_to_tool_status() -> anyhow::Result<()> {
+    use crate::tools::metadata::{ToolFailureKind, ToolStatus};
+
+    let cases = [
+        (SubAgentStatus::Interrupted, ToolStatus::Interrupted),
+        (
+            SubAgentStatus::TimedOut,
+            ToolStatus::Failed(ToolFailureKind::Timeout),
+        ),
+        (
+            SubAgentStatus::Failed,
+            ToolStatus::Failed(ToolFailureKind::Unknown),
+        ),
+        (SubAgentStatus::Succeeded, ToolStatus::Succeeded),
+    ];
+    for (terminal, expected) in cases {
+        let h = harness_with("child-status-map", false, 30).await?;
+        let coordinator = SubAgentCoordinator::new(h.ctx.clone());
+        let mut result = internal_result("SubAgent");
+        result.spawns_sub_agent = true;
+        result.sub_agent_prompt = Some("task".into());
+        let runner: SubAgentRunner = Arc::new(move |_, _, _, _, _| {
+            Box::pin(async move {
+                SubAgentResult {
+                    status: terminal,
+                    thinking: String::new(),
+                    text: "child output".into(),
+                    usage: Default::default(),
+                }
+            })
+        });
+        let processed = coordinator.process_with_runner(vec![result], runner).await;
+        assert_eq!(processed.len(), 1);
+        assert_eq!(
+            processed[0].status, expected,
+            "terminal {terminal:?} mapped incorrectly: {}",
+            processed[0].content
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn interrupt_wakes_pending_subagent_collection() -> anyhow::Result<()> {
+    let h = harness_with("pending-sub-interrupt", false, 30).await?;
+    let coordinator = SubAgentCoordinator::new(h.ctx.clone());
+    let mut result = internal_result("SubAgent");
+    result.spawns_sub_agent = true;
+    result.sub_agent_prompt = Some("pending".into());
+
+    // Deterministic phase barrier: the runner signals it is parked, so the
+    // assertion does not guess the start moment with a sleep.
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let entered_runner = entered.clone();
+    let runner: SubAgentRunner = Arc::new(move |_, _, _, _, _| {
+        let entered = entered_runner.clone();
+        Box::pin(async move {
+            entered.notify_one();
+            futures::future::pending::<SubAgentResult>().await
+        })
+    });
+
+    let mut task =
+        tokio::spawn(async move { coordinator.process_with_runner(vec![result], runner).await });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+    h.ctx.interrupt.store(true, Ordering::SeqCst);
+
+    let completed = tokio::time::timeout(Duration::from_millis(800), &mut task).await;
+    if completed.is_err() {
+        task.abort();
+        let _ = task.await;
+    }
+    assert!(
+        completed.is_ok(),
+        "collection did not observe interrupt while a child remained pending"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_cancel_wakes_pending_subagent_collection() -> anyhow::Result<()> {
+    let h = harness_with("pending-sub-cancel", false, 30).await?;
+    let coordinator = SubAgentCoordinator::new(h.ctx.clone());
+    let mut result = internal_result("SubAgent");
+    result.spawns_sub_agent = true;
+    result.sub_agent_prompt = Some("pending".into());
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let entered_runner = entered.clone();
+    let runner: SubAgentRunner = Arc::new(move |_, _, _, _, _| {
+        let entered = entered_runner.clone();
+        Box::pin(async move {
+            entered.notify_one();
+            futures::future::pending::<SubAgentResult>().await
+        })
+    });
+
+    let mut task =
+        tokio::spawn(async move { coordinator.process_with_runner(vec![result], runner).await });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+    h.ctx.cancel.cancel();
+
+    let completed = tokio::time::timeout(Duration::from_millis(800), &mut task).await;
+    if completed.is_err() {
+        task.abort();
+        let _ = task.await;
+    }
+    assert!(
+        completed.is_ok(),
+        "collection did not observe runtime cancel while a child remained pending"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn dropping_collection_releases_pending_subagent_task() -> anyhow::Result<()> {
+    struct NotifyOnDrop(Arc<tokio::sync::Notify>);
+    impl Drop for NotifyOnDrop {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+
+    let h = harness_with("pending-sub-drop", false, 30).await?;
+    let coordinator = SubAgentCoordinator::new(h.ctx.clone());
+    let mut result = internal_result("SubAgent");
+    result.spawns_sub_agent = true;
+    result.sub_agent_prompt = Some("pending".into());
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let released = Arc::new(tokio::sync::Notify::new());
+    let runner_entered = entered.clone();
+    let runner_released = released.clone();
+    let runner: SubAgentRunner = Arc::new(move |_, _, _, _, _| {
+        let entered = runner_entered.clone();
+        let released = runner_released.clone();
+        Box::pin(async move {
+            let _guard = NotifyOnDrop(released);
+            entered.notify_one();
+            futures::future::pending::<SubAgentResult>().await
+        })
+    });
+
+    let task =
+        tokio::spawn(async move { coordinator.process_with_runner(vec![result], runner).await });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+    task.abort();
+    let _ = task.await;
+
+    tokio::time::timeout(Duration::from_secs(2), released.notified())
+        .await
+        .expect("aborted collection must release the spawned child task");
+    Ok(())
+}
+
+#[tokio::test]
+async fn sub_agent_results_follow_input_order_and_count_usage_per_child() -> anyhow::Result<()> {
+    let h = harness_with("sub-order", false, 30).await?;
+    let coordinator = SubAgentCoordinator::new(h.ctx.clone());
+    let mut normal = internal_result("Read");
+    normal.content = "read ok".into();
+    let mut first = internal_result("SubAgent");
+    first.spawns_sub_agent = true;
+    first.sub_agent_prompt = Some("slow".into());
+    let mut second = internal_result("SubAgent");
+    second.spawns_sub_agent = true;
+    second.sub_agent_prompt = Some("fast".into());
+
+    let runner: SubAgentRunner = Arc::new(|_, _, prompt, _, _| {
+        Box::pin(async move {
+            let (delay, input_tokens) = if prompt == "slow" {
+                (120, 10)
+            } else {
+                (10, 20)
+            };
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            SubAgentResult {
+                status: SubAgentStatus::Succeeded,
+                thinking: String::new(),
+                text: format!("answer for {prompt}"),
+                usage: crate::session::stats::Stats {
+                    agent_request_count: 1,
+                    total_input_tokens: input_tokens,
+                    total_output_tokens: 1,
+                    ..Default::default()
+                },
+            }
+        })
+    });
+
+    let processed = coordinator
+        .process_with_runner(vec![normal, first, second], runner)
+        .await;
+
+    assert_eq!(processed.len(), 3);
+    assert_eq!(processed[0].tool_name, "Read");
+    assert_eq!(processed[0].content, "read ok");
+    assert!(
+        processed[1].content.contains("answer for slow"),
+        "{}",
+        processed[1].content
+    );
+    assert!(
+        processed[2].content.contains("answer for fast"),
+        "{}",
+        processed[2].content
+    );
+    assert!(processed.iter().all(|result| result.succeeded()));
+
+    // Each child is accounted exactly once (completion order differs):
+    // request_count counts children, token totals sum both.
+    let stats = h.ctx.stats.snapshot().await;
+    assert_eq!(stats.sub_agent_request_count, 2);
+    assert_eq!(stats.total_input_tokens, 30);
+    assert_eq!(stats.total_output_tokens, 2);
     Ok(())
 }

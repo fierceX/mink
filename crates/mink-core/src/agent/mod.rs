@@ -2,7 +2,6 @@ pub mod belief;
 pub mod compactor;
 pub mod decision;
 pub mod orchestrator;
-pub mod plan_actions;
 pub mod prefix;
 pub mod recovery_policy;
 pub mod sub_coordinator;

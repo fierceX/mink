@@ -259,6 +259,10 @@ impl ProgressBudget {
         let _ = self
             .pending
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                debug_assert!(
+                    current >= bytes,
+                    "progress budget released more than reserved: {current} < {bytes}"
+                );
                 Some(current.saturating_sub(bytes))
             });
     }
@@ -349,8 +353,15 @@ impl TurnEventEmitter {
                 },
                 None => Some(kind.clone()),
             };
-            if let Some(stream_kind) = stream_kind {
-                let _ = tx.send(make_event(stream_kind));
+            if let Some(stream_kind) = stream_kind
+                && let Err(error) = tx.send(make_event(stream_kind))
+                && let Some(budget) = &self.progress_budget
+                && let Some(bytes) = error.0.kind.progress_len()
+            {
+                // Only events that reserved budget reach this send; a failed
+                // send must give the reservation back (the consumer never saw
+                // it). Info/Stop etc. have no progress_len and are no-ops.
+                budget.release(bytes);
             }
         }
 

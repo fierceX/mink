@@ -21,7 +21,7 @@ Rust 发布包为 `mink-core`，库 crate 名为 `mink`。发布包只包含可�
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.6.2", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.6.3", default-features = false, features = ["runtime"] }
 ```
 
 公开入口为 `mink::prelude`、`mink::runtime`、`mink::sdk_protocol` 和 `mink::ui`；启用 `prefab` feature 时 `mink::runtime::prefab` 提供 `ensure_session()`。
@@ -203,7 +203,7 @@ let runtime = AgentRuntime::start(
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.6.2", default-features = false, features = ["runtime", "prefab"] }
+mink = { package = "mink-core", version = "0.6.3", default-features = false, features = ["runtime", "prefab"] }
 ```
 
 ```rust

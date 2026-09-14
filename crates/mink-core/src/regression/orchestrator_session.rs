@@ -398,7 +398,10 @@ async fn orchestrator_manual_compact_failure_is_logged() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()> {
-    let h = harness("plan-actions").await?;
+    let backend = Arc::new(PlanPipelineBackend {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let h = harness_with_backend("plan-actions", backend).await?;
     let prefix = PrefixManager::new(h.ctx.clone());
     let (stable_prompt, stable_tools) = prefix.ensure().await?;
     let stable_fingerprint = h
@@ -412,47 +415,81 @@ async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()
         .to_string();
     assert!(!stable_prompt.contains("<current-plan>"));
 
-    let handler = PlanActionHandler;
-    let tool_ctx = crate::context::ToolContext::from(h.ctx.as_ref());
-    let mut effects = Vec::new();
-    let draft_outcome = crate::tools::runner::ToolExec::execute(
-        &crate::tools::plan::PlanDraftTool,
-        &serde_json::json!({"content": "1. ship it\n"}),
-        &tool_ctx,
-    )?;
-    let mut draft = plan_result("PlanDraft", draft_outcome);
-    assert_eq!(handler.handle(&mut draft, &mut effects), None);
-    assert_eq!(draft.content, "Plan draft saved.");
+    let mut executor = TurnExecutor::new(h.ctx.clone());
+
+    // Turn 1: PlanDraft through the real tool pipeline.
+    let (decision, effects) = executor.execute("draft the plan", None).await?;
+    assert_eq!(decision, TurnDecision::Stop);
+    assert!(effects.is_empty());
     assert_eq!(
         tokio::fs::read_to_string(&h.ctx.plan_draft_path).await?,
         "1. ship it\n"
     );
-    assert!(effects.is_empty());
-    assert!(h.ctx.immutable_prefix.lock().unwrap().is_some());
+    assert!(!h.ctx.plan_path.exists());
 
-    let confirm_outcome = crate::tools::runner::ToolExec::execute(
-        &crate::tools::plan::PlanConfirmTool,
-        &serde_json::json!({}),
-        &tool_ctx,
-    )?;
-    let mut confirm = plan_result("PlanConfirm", confirm_outcome);
-    // Mirrors ToolRunner::execute_one: the filesystem mutation is journaled and
-    // bound to this tool result before the transition handler consumes it.
-    tool_ctx.plan_store.bind_transition(&mut confirm)?;
-    assert_eq!(
-        handler.handle(&mut confirm, &mut effects),
-        Some(crate::tools::plan::PlanCommand::Confirm)
-    );
-    assert_eq!(confirm.content, "Plan confirmed and locked in.");
+    // Turn 2: PlanConfirm commits the file and appends the transition.
+    let (decision, effects) = executor.execute("confirm the plan", None).await?;
+    assert_eq!(decision, TurnDecision::Stop);
+    assert_eq!(effects, vec!["Plan confirmed."]);
     assert_eq!(
         tokio::fs::read_to_string(&h.ctx.plan_path).await?,
         "1. ship it\n"
     );
     assert!(!h.ctx.plan_draft_path.exists());
-    assert!(matches!(effects.as_slice(), ["Plan confirmed."]));
-    let (after_confirm_prompt, after_confirm_tools) = prefix.ensure().await?;
-    assert_eq!(after_confirm_prompt, stable_prompt);
-    assert_eq!(after_confirm_tools, stable_tools);
+    let rows = h.ctx.store.lines().await?;
+    let confirmed_index = rows
+        .iter()
+        .position(|message| {
+            message
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|content| content.contains("<plan-transition state=\"confirmed\">"))
+        })
+        .expect("confirmed transition persisted");
+    assert!(rows[..confirmed_index].iter().any(|message| {
+        message
+            .get("content")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|blocks| {
+                blocks.iter().any(|block| {
+                    block.get("tool_use_id").and_then(serde_json::Value::as_str)
+                        == Some("call_plan_confirm")
+                })
+            })
+    }));
+
+    // Turn 3: PlanClear removes the file and records its transition.
+    let (decision, effects) = executor.execute("clear the plan", None).await?;
+    assert_eq!(decision, TurnDecision::Stop);
+    assert_eq!(effects, vec!["Plan cleared."]);
+    assert!(!h.ctx.plan_path.exists());
+    let rows = h.ctx.store.lines().await?;
+    let cleared_index = rows
+        .iter()
+        .position(|message| {
+            message
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|content| content.contains("<plan-transition state=\"cleared\">"))
+        })
+        .expect("cleared transition persisted");
+    assert!(cleared_index > confirmed_index);
+    assert!(rows[..cleared_index].iter().any(|message| {
+        message
+            .get("content")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|blocks| {
+                blocks.iter().any(|block| {
+                    block.get("tool_use_id").and_then(serde_json::Value::as_str)
+                        == Some("call_plan_clear")
+                })
+            })
+    }));
+
+    // The immutable prefix never changes across plan transitions.
+    let (after_prompt, after_tools) = prefix.ensure().await?;
+    assert_eq!(after_prompt, stable_prompt);
+    assert_eq!(after_tools, stable_tools);
     assert_eq!(
         h.ctx
             .immutable_prefix
@@ -463,53 +500,15 @@ async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()
             .fingerprint(),
         stable_fingerprint
     );
-    // Mirrors TurnExecutor: the bound journal is completed after the tool
-    // result is appended, so the next plan mutation may proceed.
-    tool_ctx
-        .plan_store
-        .finish_transition(
-            &tool_ctx.store,
-            &confirm.tool_use_id,
-            crate::tools::plan::PlanCommand::Confirm,
-        )
-        .await?;
-
-    let clear_outcome = crate::tools::runner::ToolExec::execute(
-        &crate::tools::plan::PlanClearTool,
-        &serde_json::json!({}),
-        &tool_ctx,
-    )?;
-    let mut clear = plan_result("PlanClear", clear_outcome);
-    tool_ctx.plan_store.bind_transition(&mut clear)?;
-    assert_eq!(
-        handler.handle(&mut clear, &mut effects),
-        Some(crate::tools::plan::PlanCommand::Clear)
-    );
-    assert_eq!(clear.content, "Plan cleared.");
-    assert!(!h.ctx.plan_path.exists());
-    assert!(matches!(
-        effects.as_slice(),
-        ["Plan confirmed.", "Plan cleared."]
-    ));
-    tool_ctx
-        .plan_store
-        .finish_transition(
-            &tool_ctx.store,
-            &clear.tool_use_id,
-            crate::tools::plan::PlanCommand::Clear,
-        )
-        .await?;
-    let (after_clear_prompt, after_clear_tools) = prefix.ensure().await?;
-    assert_eq!(after_clear_prompt, stable_prompt);
-    assert_eq!(after_clear_tools, stable_tools);
     Ok(())
 }
-
 #[tokio::test]
 async fn plan_compaction_obeys_the_existing_single_turn_guard() -> anyhow::Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let backend = Arc::new(RecordingCompactionBackend {
-        requests: requests.clone(),
+    let backend = Arc::new(PlanTurnBackend {
+        compaction_requests: requests.clone(),
+        forbid_compaction: false,
+        calls: std::sync::atomic::AtomicUsize::new(0),
     });
     let h = harness_with_config(
         "plan-single-compaction",
@@ -534,25 +533,7 @@ async fn plan_compaction_obeys_the_existing_single_turn_guard() -> anyhow::Resul
     }
     tokio::fs::write(&h.ctx.plan_draft_path, "1. execute\n").await?;
 
-    let llm = Arc::new(MockLlmBackend::new(
-        "flash",
-        vec![
-            vec![
-                Ok(Event::ToolCall(tool_call(
-                    "PlanConfirm",
-                    "call_plan_confirm",
-                    json!({}),
-                ))),
-                Ok(Event::Stop(StopEvent {
-                    reason: "tool_use".into(),
-                })),
-            ],
-            vec![Ok(Event::Stop(StopEvent {
-                reason: "end_turn".into(),
-            }))],
-        ],
-    ));
-    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_backend_from_mock(llm));
+    let mut executor = TurnExecutor::new(h.ctx.clone());
     let (decision, effects) = executor.execute("confirm the plan", None).await?;
 
     assert_eq!(decision, TurnDecision::Stop);
@@ -573,7 +554,11 @@ async fn plan_confirm_does_not_force_compaction() -> anyhow::Result<()> {
             config.context_compact_pct = 100;
             config.context_compact_tail_tokens = 1;
         },
-        Some(Arc::new(FailingCompactionBackend)),
+        Some(Arc::new(PlanTurnBackend {
+            compaction_requests: Arc::new(Mutex::new(Vec::new())),
+            forbid_compaction: true,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        })),
     )
     .await?;
     for index in 0..3 {
@@ -585,25 +570,7 @@ async fn plan_confirm_does_not_force_compaction() -> anyhow::Result<()> {
     }
     tokio::fs::write(&h.ctx.plan_draft_path, "1. execute\n").await?;
 
-    let llm = Arc::new(MockLlmBackend::new(
-        "flash",
-        vec![
-            vec![
-                Ok(Event::ToolCall(tool_call(
-                    "PlanConfirm",
-                    "call_plan_confirm",
-                    json!({}),
-                ))),
-                Ok(Event::Stop(StopEvent {
-                    reason: "tool_use".into(),
-                })),
-            ],
-            vec![Ok(Event::Stop(StopEvent {
-                reason: "end_turn".into(),
-            }))],
-        ],
-    ));
-    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_backend_from_mock(llm));
+    let mut executor = TurnExecutor::new(h.ctx.clone());
     let (decision, _) = executor.execute("confirm the plan", None).await?;
 
     assert_eq!(decision, TurnDecision::Stop);
@@ -766,4 +733,146 @@ async fn todo_tools_persist_incremental_state_and_reject_stale_writes() -> anyho
     assert_eq!(reloaded.snapshot().revision, 4);
     assert_eq!(prefix.ensure().await?, stable_prefix);
     Ok(())
+}
+
+/// Shared backend for plan-transition turns: scripted agent responses plus
+/// compaction accounting (or a hard failure when compaction must not run).
+struct PlanTurnBackend {
+    compaction_requests: Arc<Mutex<Vec<CapturedModelTarget>>>,
+    forbid_compaction: bool,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for PlanTurnBackend {
+    fn name(&self) -> &str {
+        "plan-turn"
+    }
+
+    async fn stream(&self, request: LlmRequest) -> anyhow::Result<LlmResponseStream> {
+        if matches!(request.purpose, LlmPurpose::Compaction) {
+            if self.forbid_compaction {
+                anyhow::bail!("compaction must not run for this input");
+            }
+            self.compaction_requests
+                .lock()
+                .unwrap()
+                .push(CapturedModelTarget {
+                    model: request.model,
+                    alias: request.model_alias,
+                });
+            return Ok(LlmResponseStream {
+                events: Box::pin(futures::stream::iter(vec![
+                    Ok(Event::Text(TextEvent {
+                        content: "Current objective and completed work retained.".into(),
+                    })),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "end_turn".into(),
+                    })),
+                ])),
+                attempt_count: 1,
+            });
+        }
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let events = if call == 0 {
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "PlanConfirm",
+                    "call_plan_confirm",
+                    json!({}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_use".into(),
+                })),
+            ]
+        } else {
+            vec![Ok(Event::Stop(StopEvent {
+                reason: "end_turn".into(),
+            }))]
+        };
+        Ok(LlmResponseStream {
+            events: Box::pin(futures::stream::iter(events)),
+            attempt_count: 1,
+        })
+    }
+}
+
+/// Scripted backend for the three-input Plan pipeline (Draft → Confirm →
+/// Clear), one shared backend for all requests of the session.
+struct PlanPipelineBackend {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for PlanPipelineBackend {
+    fn name(&self) -> &str {
+        "plan-pipeline"
+    }
+
+    async fn stream(&self, request: LlmRequest) -> anyhow::Result<LlmResponseStream> {
+        if matches!(request.purpose, LlmPurpose::Compaction) {
+            anyhow::bail!("plan pipeline test must not compact");
+        }
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let events = match call {
+            0 => vec![
+                Ok(Event::ToolCall(tool_call(
+                    "PlanDraft",
+                    "call_plan_draft",
+                    json!({"content": "1. ship it\n"}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_use".into(),
+                })),
+            ],
+            1 => vec![
+                Ok(Event::Text(TextEvent {
+                    content: "drafted".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+            2 => vec![
+                Ok(Event::ToolCall(tool_call(
+                    "PlanConfirm",
+                    "call_plan_confirm",
+                    json!({}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_use".into(),
+                })),
+            ],
+            3 => vec![
+                Ok(Event::Text(TextEvent {
+                    content: "confirmed".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+            4 => vec![
+                Ok(Event::ToolCall(tool_call(
+                    "PlanClear",
+                    "call_plan_clear",
+                    json!({}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_use".into(),
+                })),
+            ],
+            _ => vec![
+                Ok(Event::Text(TextEvent {
+                    content: "cleared".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+        };
+        Ok(LlmResponseStream {
+            events: Box::pin(futures::stream::iter(events)),
+            attempt_count: 1,
+        })
+    }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::guard::collector::Signal;
 use crate::tools::runner::ToolExecution;
 use std::collections::BTreeMap;
 
@@ -105,7 +106,7 @@ async fn compile_error_increments_tool_error_count() {
         )
         .await;
     assert_eq!(processor.tool_error_count(), 1);
-    assert!(!processor.collected_signals().is_empty());
+    assert!(!result.signals.is_empty());
 }
 
 #[tokio::test]

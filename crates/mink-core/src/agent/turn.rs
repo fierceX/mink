@@ -1,6 +1,6 @@
 use crate::agent::text::truncate_str;
 use crate::context::AgentSharedContext;
-use crate::llm::client::{LlmBackend, LlmModelTarget};
+use crate::llm::client::LlmModelTarget;
 use crate::protocol::{Event, ToolCallEvent, UsageEvent};
 use crate::session::store::{build_tool_call_summary, first_line};
 use crate::sse::toolcall::build_tool_call_event;
@@ -84,14 +84,12 @@ struct TurnLocalState {
 ///   Stream (LLM response) → Persist → Tools → Decide (continue/stop)
 pub struct TurnExecutor {
     ctx: Arc<AgentSharedContext>,
-    llm_backend: Arc<dyn LlmBackend>,
     model_name: String,
     model_alias: Option<String>,
     tools: Arc<ToolRunner>,
     prefix: crate::agent::prefix::PrefixManager,
     compactor: crate::agent::compactor::TurnCompactor,
     signal_processor: crate::agent::tool_signals::ToolSignalProcessor,
-    plan_actions: crate::agent::plan_actions::PlanActionHandler,
     sub_agents: crate::agent::sub_coordinator::SubAgentCoordinator,
     local: TurnLocalState,
     /// 决策引擎（含冷却逻辑，由引擎内部管理）。
@@ -113,13 +111,23 @@ pub enum TurnDecision {
 }
 
 impl TurnExecutor {
-    pub fn new(ctx: Arc<AgentSharedContext>, llm_backend: Arc<dyn LlmBackend>) -> Self {
+    /// Build an executor for the session's configured model.
+    pub fn new(ctx: Arc<AgentSharedContext>) -> Self {
+        let resolved = crate::config::model_resolver(&ctx.config).resolve(&ctx.config.model);
+        Self::new_for_model(ctx, resolved)
+    }
+
+    /// Build an executor for one resolved model target; this is the single
+    /// construction path (no post-construction model override).
+    pub(crate) fn new_for_model(
+        ctx: Arc<AgentSharedContext>,
+        resolved: crate::config::ResolvedModel,
+    ) -> Self {
         let tools = Arc::new(ToolRunner::new(Arc::new(
             crate::context::ToolContext::from(ctx.as_ref()),
         )));
         let prefix = crate::agent::prefix::PrefixManager::new(ctx.clone());
         let mut sub_agent_config = ctx.config.clone();
-        let resolved = crate::config::model_resolver(&ctx.config).resolve(&ctx.config.model);
         if let Some(alias) = resolved.alias.as_deref() {
             sub_agent_config
                 .model_aliases
@@ -130,7 +138,6 @@ impl TurnExecutor {
         }
         Self {
             ctx: ctx.clone(),
-            llm_backend,
             model_name: resolved.actual,
             model_alias: resolved.alias,
             tools,
@@ -139,11 +146,7 @@ impl TurnExecutor {
             signal_processor: crate::agent::tool_signals::ToolSignalProcessor::from_config(
                 &ctx.config.signal,
             ),
-            plan_actions: crate::agent::plan_actions::PlanActionHandler,
-            sub_agents: crate::agent::sub_coordinator::SubAgentCoordinator::new(
-                ctx.clone(),
-                sub_agent_config.clone(),
-            ),
+            sub_agents: crate::agent::sub_coordinator::SubAgentCoordinator::new(ctx.clone()),
             sub_agent_config,
             local: TurnLocalState::default(),
             decision_engine: crate::agent::decision::DecisionEngine::from_config(
@@ -155,28 +158,6 @@ impl TurnExecutor {
                     .expect("built-in tool catalog was validated during context construction"),
             ),
         }
-    }
-
-    pub(crate) fn with_model_target(
-        mut self,
-        model_name: impl Into<String>,
-        model_alias: Option<String>,
-    ) -> Self {
-        self.model_name = model_name.into();
-        self.model_alias = model_alias;
-        if let Some(alias) = self.model_alias.as_deref() {
-            self.sub_agent_config
-                .model_aliases
-                .insert(alias.to_string(), self.model_name.clone());
-            self.sub_agent_config.model = alias.to_string();
-        } else {
-            self.sub_agent_config.model = self.model_name.clone();
-        }
-        self.sub_agents = crate::agent::sub_coordinator::SubAgentCoordinator::new(
-            self.ctx.clone(),
-            self.sub_agent_config.clone(),
-        );
-        self
     }
 
     fn model_label(&self) -> &str {
@@ -191,12 +172,6 @@ impl TurnExecutor {
     /// Number of tool calls that produced at least one tool_error signal.
     pub fn tool_error_count(&self) -> u32 {
         self.signal_processor.tool_error_count()
-    }
-
-    /// Collected signals from all tool calls in this turn.
-    #[cfg(test)]
-    pub fn collected_signals(&self) -> &[crate::guard::collector::Signal] {
-        self.signal_processor.collected_signals()
     }
 
     pub fn text(&self) -> &str {
@@ -406,13 +381,8 @@ impl TurnExecutor {
 
             // Phase 3: 工具执行
             if !calls.is_empty() {
-                self.execute_tools_inner(
-                    calls,
-                    belief.as_deref_mut(),
-                    &mut effects,
-                    &request_messages,
-                )
-                .await?;
+                self.execute_tools_inner(calls, belief.as_deref_mut(), &mut effects)
+                    .await?;
             }
 
             // 用户中断：跳过决策/证据注入/回滚，也不再发起下一次 LLM 请求。

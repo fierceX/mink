@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-09-11
+> 更新日期：2026-09-14
 
 ## 项目概览
 
@@ -107,6 +107,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - Plan 文件变更与 conversation 追加由 `plan-transaction.json` 可重放 journal 协调：未绑定操作回滚、已绑定操作幂等补齐（此文件任一时刻不可与 `plan.md`/对话历史存在分叉）。
 - todo 权威完整快照在 `todos.json`；TodoWrite/TodoAdvance 成功后追加增量事件与 `<current-todos>` 物化投影，不做逐请求前置投影；两者依赖 TodoRead，使用最高可见 revision 与稳定 ID，stale 失败后重读。
 - TodoWrite 只新增 pending/删除/替换正文，TodoAdvance 只做合法转换，均原子提交；session 恢复或压缩后若文件 revision 领先活跃历史只追加一次 TodoSync，历史领先文件时 fail closed。
+- PlanStore 由 `AgentSharedContext` 持有 session 唯一实例，`ToolContext` 克隆同一 Arc（事务锁唯一）；Plan 交接在工具阶段原地完成，无 handler/中转层。
 - 同一 active batch 可有多个 in_progress；结束前提醒最多注入一次；一个 session 的 TodoStore 由单个 runtime 持有，不支持跨进程并发写或外部热编辑。
 
 ### 信号系统
@@ -123,6 +124,8 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - approval 在构建 `ModelToolSurface` 时解析；`ToolRunner::execute_all()` 在 StormBreaker 前校验调用属于同一个 resolved surface；真实执行只接受 surface 内工具（disable flag 与沙箱策略不属于运行时合同）。
 - `execute_all()` 只并发连续只读工具；写入、执行、控制、SubAgent 工具按调用顺序串行执行。
 - `enabled_tools` 是唯一工具启用输入；`None` 用 catalog 默认集，空列表禁用全部，显式列表精确选择；`PythonSandbox` 是 explicit-only，仅显式列出时进入 surface。
+- 子代理终态由内部 `SubAgentStatus` 表达（Interrupted/TimedOut 不得映射为成功）；未完成子代理只在 `SubAgentBatch.pending`，每个任务只有一个结果发送点，`Drop` 必须 cancel+abort。
+- `TurnExecutor::new/new_for_model` 是模型与 backend 的唯一装配路径；禁止第二 backend 字段或构造后覆盖模型；`SubAgentCoordinator` 不持有 Config。
 - 默认 approval mode 是 `yolo`；`prompt` 无交互式 UI，fail closed。
 - `format_tool_result()` 是工具输出进入 LLM/UI 前的统一最大字节保护，超长写 `artifact://<id>`；`TurnExecutor` 写入 conversation 用 `conv_content`，为空用 `content`。
 - `Bash`/`Python` 必须在 `ToolContext.cwd` 下执行；Bash 未显式设 timeout 时用稳定全局 tool timeout。
@@ -133,6 +136,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - `ArtifactManager` 从已有 index 最大序号继续，正文独占创建，禁止覆盖恢复或 fork 继承的 artifact。
 - `AgentEventStream` 是 unbounded 可靠通道：可靠事件（工具调用/结果、stop/error/usage、控制事件）不丢；`Text`/`Thinking` 进度受 1 MiB pending 字节预算，超限丢弃并只通知一次；`outcome()` 必须主动排空并释放进度字节；丢弃未完成的 stream 等同取消 turn。
 - `EventLog` 关键事件（`prefix_snapshot`、signal rollback/replan/handover）必须经 `log_critical_event` 异步、有期限地等待 writer 写入应答（入队成功不算成功），同时响应 runtime cancel 与当前轮 `interrupt_current_turn()`（健康 writer 有宽限期（500ms/测试 150ms），仅停摆等待被提前结束）并传播失败；仍需产出 stream-json stdout；prefix 快照失败时不得更新前缀缓存；诊断事件可用 `send_best_effort` 但丢失必须计入报告。SSE 有界仅覆盖事件个数（1024）。
+- EventLog writer 独占文件/当前故障/损失计数（`WriterState`，无锁）；已报告损失水位仅在收到 FlushAck 后推进，取消 flush 不消费损失；生产不保留信号测试镜像与 stdout 计数，事实来源是 `result.signals`、events.jsonl 事件与真实 stdout。
 
 ### Read / Edit 协议
 

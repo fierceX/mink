@@ -68,13 +68,11 @@ impl super::TurnExecutor {
 
     /// 执行一轮中的所有工具调用（Phase 3）。
     /// 处理 Plan 状态转换、子代理生成与收集、结果定稿、信号采集和持久化。
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_tools_inner(
         &mut self,
         calls: Vec<ToolCallEvent>,
         mut belief: Option<&mut crate::agent::belief::BeliefTracker>,
         effects: &mut Vec<TurnEffect>,
-        _request_messages: &[serde_json::Value],
     ) -> Result<()> {
         self.local.tool_call_count += calls.len() as u32;
         let (calls_to_execute, mut guarded_results) = self.apply_signal_recovery_guard(calls);
@@ -104,16 +102,32 @@ impl super::TurnExecutor {
         guarded_results.append(&mut results);
         let results = guarded_results;
 
-        let mut prepared_results = Vec::new();
+        // Plan hand-off happens in place on the executed results: the tool
+        // already bound its journal; Confirm/Clear record the transition and
+        // keep their original effects text. No intermediate Vec/handler layer.
         let mut plan_transitions = Vec::new();
-        for mut result in results {
-            if let Some(command) = self.plan_actions.handle(&mut result, effects) {
-                plan_transitions.push((result.tool_use_id.clone(), command));
+        let mut results = results;
+        for result in &mut results {
+            let Some(command) = result.plan_command.take() else {
+                continue;
+            };
+            match command {
+                crate::tools::plan::PlanCommand::SetDraft => {}
+                crate::tools::plan::PlanCommand::Confirm => {
+                    effects.push("Plan confirmed.");
+                    plan_transitions.push((result.tool_use_id.clone(), command));
+                }
+                crate::tools::plan::PlanCommand::Clear => {
+                    effects.push("Plan cleared.");
+                    plan_transitions.push((result.tool_use_id.clone(), command));
+                }
             }
-            prepared_results.push(result);
         }
 
-        let mut processed_results = self.sub_agents.process(prepared_results).await;
+        let mut processed_results = self
+            .sub_agents
+            .process(results, &self.sub_agent_config)
+            .await;
         self.tools.finalize_deferred_results(&mut processed_results);
         for result in &mut processed_results {
             let model_label = self.model_label().to_string();

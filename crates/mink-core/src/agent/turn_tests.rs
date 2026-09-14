@@ -1,23 +1,37 @@
 use super::*;
+use crate::llm::client::LlmBackend;
 use crate::llm::mock::MockLlmBackend;
 use crate::protocol::{Event, StopEvent, TextEvent};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-struct OverflowOnceClient {
+struct OverflowThenRecoverBackend {
     calls: AtomicUsize,
 }
 
 #[async_trait::async_trait]
-impl LlmBackend for OverflowOnceClient {
+impl LlmBackend for OverflowThenRecoverBackend {
     fn name(&self) -> &str {
-        "overflow-once"
+        "overflow-then-recover"
     }
 
     async fn stream(
         &self,
-        _request: crate::llm::client::LlmRequest,
+        request: crate::llm::client::LlmRequest,
     ) -> Result<crate::llm::client::LlmResponseStream> {
+        if matches!(request.purpose, crate::runtime::LlmPurpose::Compaction) {
+            return Ok(crate::llm::client::LlmResponseStream {
+                events: Box::pin(futures::stream::iter(vec![
+                    Ok(Event::Text(crate::protocol::TextEvent {
+                        content: "Task focus: recover\nLatest request: continue\nProgress: compacted\nTool evidence: none\nReflections: none".into(),
+                    })),
+                    Ok(Event::Stop(crate::protocol::StopEvent {
+                        reason: "end_turn".into(),
+                    })),
+                ])),
+                attempt_count: 1,
+            });
+        }
         if self.calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
             anyhow::bail!("HTTP 400: maximum context length exceeded");
         }
@@ -40,8 +54,7 @@ async fn signal_recovery_decision_noops_when_signal_policy_is_off() {
     let ctx = crate::regression::test_context_for_agent("turn-signal-disabled")
         .await
         .unwrap();
-    let llm = Arc::new(MockLlmBackend::new("flash", vec![]));
-    let mut executor = TurnExecutor::new(ctx, llm);
+    let mut executor = TurnExecutor::new(ctx);
     let mut belief = crate::agent::belief::BeliefTracker::new(16);
     belief.observe(&[crate::guard::collector::Signal {
         kind: crate::guard::collector::SignalKind::ToolFailed,
@@ -78,7 +91,7 @@ async fn abort_replan_success_clears_signal_recovery_guard() {
     )
     .await
     .unwrap();
-    let mut executor = TurnExecutor::new(ctx, llm.clone());
+    let mut executor = TurnExecutor::new(ctx);
     executor.local.signal_recovery_guard = true;
     executor.local.guard_bypassed = false;
     executor.signal_processor.evidence_mut().hard_failures = 8;
@@ -124,8 +137,7 @@ async fn todo_sync_is_appended_once_when_file_revision_is_ahead() -> anyhow::Res
             ..Default::default()
         },
     )?;
-    let llm = Arc::new(MockLlmBackend::new("flash", vec![]));
-    let executor = TurnExecutor::new(ctx.clone(), llm);
+    let executor = TurnExecutor::new(ctx.clone());
     let mut messages = ctx.compaction.active_messages().await?;
 
     assert!(executor.reconcile_todo_state(&mut messages).await?);
@@ -163,8 +175,7 @@ async fn todo_final_guard_reminds_once_but_does_not_force_a_loop() -> anyhow::Re
             ..Default::default()
         },
     )?;
-    let llm = Arc::new(MockLlmBackend::new("flash", vec![]));
-    let mut executor = TurnExecutor::new(ctx.clone(), llm);
+    let mut executor = TurnExecutor::new(ctx.clone());
 
     assert!(executor.decide_next("stop", None, false).await?.is_none());
     assert_eq!(
@@ -205,8 +216,7 @@ async fn todo_final_guard_on_last_turn_records_reminder_but_stops() -> anyhow::R
             ..Default::default()
         },
     )?;
-    let llm = Arc::new(MockLlmBackend::new("flash", vec![]));
-    let mut executor = TurnExecutor::new(ctx.clone(), llm);
+    let mut executor = TurnExecutor::new(ctx.clone());
 
     assert_eq!(
         executor.decide_next("stop", None, true).await?,
@@ -246,8 +256,7 @@ async fn todo_progress_guard_appends_at_most_one_reminder_per_turn() -> anyhow::
             ..Default::default()
         },
     )?;
-    let llm = Arc::new(MockLlmBackend::new("flash", vec![]));
-    let mut executor = TurnExecutor::new(ctx.clone(), llm);
+    let mut executor = TurnExecutor::new(ctx.clone());
     executor.local.successful_work_calls_since_todo_advance = 8;
 
     executor.maybe_append_todo_progress_reminder().await?;
@@ -265,17 +274,9 @@ async fn todo_progress_guard_appends_at_most_one_reminder_per_turn() -> anyhow::
 
 #[tokio::test]
 async fn context_overflow_compacts_and_retries_only_once() -> anyhow::Result<()> {
-    let summary_backend = Arc::new(MockLlmBackend::new(
-            "summary-model",
-            vec![vec![
-                Ok(Event::Text(crate::protocol::TextEvent {
-                    content: "Task focus: recover\nLatest request: continue\nProgress: compacted\nTool evidence: none\nReflections: none".into(),
-                })),
-                Ok(Event::Stop(crate::protocol::StopEvent {
-                    reason: "end_turn".into(),
-                })),
-            ]],
-        ));
+    let llm = Arc::new(OverflowThenRecoverBackend {
+        calls: AtomicUsize::new(0),
+    });
     let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
         "turn-overflow-recovery",
         |config| {
@@ -284,7 +285,7 @@ async fn context_overflow_compacts_and_retries_only_once() -> anyhow::Result<()>
             config.context_compact_tail_tokens = 1_000;
             config.context_compact_max_output_tokens = 2_048;
         },
-        summary_backend,
+        llm.clone(),
     )
     .await?;
     for index in 0..3 {
@@ -299,10 +300,7 @@ async fn context_overflow_compacts_and_retries_only_once() -> anyhow::Result<()>
             )
             .await?;
     }
-    let llm = Arc::new(OverflowOnceClient {
-        calls: AtomicUsize::new(0),
-    });
-    let mut executor = TurnExecutor::new(ctx.clone(), llm.clone());
+    let mut executor = TurnExecutor::new(ctx.clone());
 
     let (decision, _) = executor.execute("continue", None).await?;
 
@@ -329,7 +327,6 @@ fn context_overflow_classifier_is_specific() {
 
 #[tokio::test]
 async fn context_overflow_after_visible_output_is_not_recoverable() -> anyhow::Result<()> {
-    let ctx = crate::regression::test_context_for_agent("turn-partial-overflow").await?;
     let backend = Arc::new(MockLlmBackend::new(
         "flash",
         vec![vec![
@@ -342,7 +339,13 @@ async fn context_overflow_after_visible_output_is_not_recoverable() -> anyhow::R
             })),
         ]],
     ));
-    let mut executor = TurnExecutor::new(ctx, backend);
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "turn-partial-overflow",
+        |_| {},
+        backend,
+    )
+    .await?;
+    let mut executor = TurnExecutor::new(ctx);
 
     let error = match executor.stream_llm_response(&[], "", &[], 0).await {
         Ok(_) => panic!("overflow after partial output should fail"),

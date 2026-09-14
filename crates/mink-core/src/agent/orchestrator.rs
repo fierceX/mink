@@ -234,23 +234,7 @@ impl OrchActor {
         // 跨轮重复失败可累积升级，单次偶然失败自然消退。
         self.belief.decay(self.ctx.config.signal.decay_per_input);
         self.refresh_title().await;
-        let prepared = self.prepare_turn().await;
-        let (model, mut executor) = match prepared {
-            Ok(v) => v,
-            Err(e) => {
-                self.ctx
-                    .display
-                    .render_error(&format!("Failed to prepare turn: {e}"));
-                self.refresh_title().await;
-                let result = self.finish_usage(
-                    TurnRunResult::failed(format!("failed to prepare turn: {e}")),
-                    &billing_turn_id,
-                );
-                self.log_turn_final(&result, started_at.elapsed().as_millis() as u64)
-                    .await;
-                return result;
-            }
-        };
+        let (model, mut executor) = self.prepare_turn();
 
         let result = match executor.execute(&input, Some(&mut self.belief)).await {
             Ok((decision, effects)) => {
@@ -284,7 +268,7 @@ impl OrchActor {
         result
     }
 
-    async fn prepare_turn(&mut self) -> Result<(String, TurnExecutor)> {
+    fn prepare_turn(&mut self) -> (String, TurnExecutor) {
         let resolved = self.resolve_active();
 
         self.ctx.log_event(crate::events::EventLog::TurnStart {
@@ -294,9 +278,9 @@ impl OrchActor {
             forced_model: self.forced_model.clone(),
         });
 
-        let executor = TurnExecutor::new(self.ctx.clone(), self.ctx.llm_backend.clone())
-            .with_model_target(resolved.actual.clone(), resolved.alias.clone());
-        Ok((resolved.actual, executor))
+        let model = resolved.actual.clone();
+        let executor = TurnExecutor::new_for_model(self.ctx.clone(), resolved);
+        (model, executor)
     }
 
     async fn post_process_turn(

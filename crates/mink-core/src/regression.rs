@@ -1,9 +1,8 @@
 use crate::agent::belief::BeliefTracker;
 use crate::agent::orchestrator::{OrchActor, OrchCmd};
-use crate::agent::plan_actions::PlanActionHandler;
 use crate::agent::prefix::PrefixManager;
 use crate::agent::sub_coordinator::{SubAgentCoordinator, SubAgentRunner};
-use crate::agent::sub_executor::{SubAgentExecutor, SubAgentResult};
+use crate::agent::sub_executor::{SubAgentExecutor, SubAgentResult, SubAgentStatus};
 use crate::agent::turn::{TurnDecision, TurnExecutor};
 use crate::config::{OutputFormat, ResolvedConfig as Config};
 use crate::context::{AgentSharedContext, ToolContext};
@@ -463,8 +462,13 @@ async fn run_orchestrator_user_input(
     Ok(())
 }
 
-fn llm_backend_from_mock(mock: Arc<MockLlmBackend>) -> Arc<dyn LlmBackend> {
-    mock
+/// Parse typed `signal` events from a flushed events.jsonl snapshot.
+pub(crate) fn parsed_signal_events(events_jsonl: &str) -> Vec<serde_json::Value> {
+    events_jsonl
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|value| value.get("type").and_then(serde_json::Value::as_str) == Some("signal"))
+        .collect()
 }
 
 fn internal_result(name: &str) -> ToolExecution {
@@ -488,15 +492,6 @@ fn internal_result(name: &str) -> ToolExecution {
         state_metadata: None,
         image_attachment: None,
     }
-}
-
-fn plan_result(name: &str, outcome: crate::tools::runner::ToolOutcome) -> ToolExecution {
-    let mut result = internal_result(name);
-    result.content = outcome.content;
-    result.plan_command = outcome.plan_command;
-    result.presentation = outcome.presentation;
-    result.needs_finalization = true;
-    result
 }
 
 #[path = "regression/fixture.rs"]

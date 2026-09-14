@@ -8,9 +8,11 @@ const ALLOWED_ROOTS: &[&str] = &["prelude", "runtime", "sdk_protocol"];
 /// The boundary check must not silently shrink when a consumer directory is
 /// missing or unreadable: both are test failures, not skips.
 fn rust_files(root: &Path, files: &mut Vec<PathBuf>) {
+    // Recursion only collects; the non-empty guarantee is checked at the
+    // consumer roots, so grouped subdirectories without direct .rs files are
+    // valid layouts.
     let entries = fs::read_dir(root)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", root.display()));
-    let mut count = 0;
     for entry in entries {
         let entry = entry
             .unwrap_or_else(|error| panic!("cannot read an entry of {}: {error}", root.display()));
@@ -19,14 +21,8 @@ fn rust_files(root: &Path, files: &mut Vec<PathBuf>) {
             rust_files(&path, files);
         } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
             files.push(path);
-            count += 1;
         }
     }
-    assert!(
-        count > 0,
-        "{} must contain at least one Rust source file",
-        root.display()
-    );
 }
 
 #[test]
@@ -47,7 +43,13 @@ fn workspace_consumers_only_use_supported_mink_modules() {
             "workspace consumer directory is missing: {}",
             root.display()
         );
+        let before = files.len();
         rust_files(&root, &mut files);
+        assert!(
+            files.len() > before,
+            "consumer root has no Rust source files: {}",
+            root.display()
+        );
     }
 
     let direct = regex::Regex::new(r"\bmink::([A-Za-z_][A-Za-z0-9_]*)").unwrap();

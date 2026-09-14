@@ -64,7 +64,7 @@ OrchActor (agent/orchestrator.rs)
 TurnExecutor (agent/turn.rs)
   │  单轮执行器：压缩 -> LLM stream -> scavenge -> 工具 -> 信号 -> 决策
   │  组合 PrefixManager / TurnCompactor / ToolSignalProcessor /
-  │  PlanActionHandler / SubAgentCoordinator
+  │  SubAgentCoordinator（模型与 backend 在构造时一次确定）
   ▼
 ┌─────── LLM 层 ────────┐
 │ llm/client.rs         │ LlmBackend 注入、OpenAI-compatible 流式客户端、重试、usage 采集、模型名解析、请求选项、缓存投影 seam 与校准门控
@@ -157,7 +157,7 @@ OrchActor.handle_user_input()
            ├── scavenge thinking/text 中遗漏的工具调用
            ├── store.add_assistant()
            ├── ToolRunner::execute_all()
-           ├── PlanActionHandler 将已完成的 PlanCommand 转换为 effect / 压缩请求
+           ├── 工具阶段原地完成 Plan 交接（PlanCommand → effect / append-only transition）
            ├── SubAgentCoordinator 启动/收集子代理
            ├── ToolRunner 统一定稿并保护延迟结果大小
            ├── ToolSignalProcessor 基于最终结果更新 belief
@@ -175,7 +175,7 @@ ToolExec::execute()
   -> format_dispatched_result() -> ToolExecution
        普通结果立即执行大小保护、bash noise filter、Read/Write summary 和 Edit conv content
        Plan/SubAgent 结果保留待定稿标记
-  -> PlanActionHandler / SubAgentCoordinator 完成延迟工作
+  -> SubAgentCoordinator 完成延迟工作（Plan 交接在工具阶段原地完成）
   -> finalize_deferred_results()
        对最终延迟结果执行大小保护，超限时写 artifact 并追加 artifact://<id>
   -> ToolSignalProcessor 采集最终结果
@@ -269,9 +269,8 @@ Server 生命周期：Ctrl+C → axum serve 停止 → idle reaper abort → `re
 | `agent/prefix.rs` | `PrefixManager`，构建/复用 immutable prefix；prefab 模式下从 session `events.jsonl` 的 `prefix_snapshot` 事件重建 |
 | `agent/compactor.rs` | `TurnCompactor`，封装同轮压缩防护 |
 | `agent/tool_signals.rs` | 工具信号采集和 belief 更新 |
-| `agent/plan_actions.rs` | 将已完成的 PlanCommand 转换为 turn effect 与 append-only transition |
-| `agent/sub_coordinator.rs` | SubAgent 工具调用的启动与结果注入 |
-| `agent/sub_executor.rs` | 子代理独立 session / fork session 执行 |
+| `agent/sub_coordinator.rs` | SubAgent 批次的唯一 pending 所有者：启动、可中断收集、cancel/Drop 清理；结果按输入序回填 |
+| `agent/sub_executor.rs` | 子代理独立 session / fork session 执行；`SubAgentStatus{Succeeded,Failed,Interrupted,TimedOut}` 终态只在边界转字符串 |
 | `agent/belief.rs` | `BeliefTracker` |
 | `agent/decision.rs` | `DecisionEngine` |
 | `agent/recovery_policy.rs` | 基于已解析语义能力生成恢复提示并校验恢复首个调用；与普通 Bash 执行策略相互独立 |
@@ -475,6 +474,15 @@ REPL/TUI 在 `mink-cli` 内把同一事件流投影为终端输出或 `TuiSignal
 ---
 
 ## Session 结构
+
+- **子代理所有权（S1/S2）**：批次未完成事实只在 `SubAgentBatch.pending`；每个任务只有一个 channel 发送点；收集循环监听 cancel/绝对 deadline/10ms interrupt tick；`Drop` 负责 cancel+abort。终态由 `SubAgentStatus` 表达，Interrupted 不再映射为成功。
+- **turn 装配（S3）**：`TurnExecutor::new/new_for_model` 是唯一构造路径，模型、`sub_agent_config` 与 coordinator 一次确定；主请求、压缩与子代理共用 `ctx.llm_backend`。
+- **Plan 所有权与交接（S4/S5）**：`AgentSharedContext.plan_store` 是 session 生命周期唯一实例；工具阶段原地 take `plan_command` 完成交接，不存在 handler/中转 Vec；启动期 `session/init.rs` 的恢复实例一次性使用后丢弃。
+- **信号事实（S8）**：生产不在 processor 内累计完整信号副本；测试通过 `result.signals` 或 events.jsonl 的 `type=signal` 事件观察。
+
+- **EventLog 所有权**：文件句柄、当前故障与已处理损失由 writer 线程独占（`WriterState`，无锁）；发送侧只持有队列、`send_lost` 原子与 init 错误锁；已报告损失水位在 `EventLogWriter.reported` 异步锁下推进。
+
+
 
 Session 目录保存 conversation、events、metadata、summary、stats 和 artifacts，并按实际功能
 生成 compaction、plan、todo、usage 和 prefab 状态文件。session 根目录由 `home`、`cwd`、`session_id`

@@ -2,7 +2,6 @@ use super::*;
 
 #[tokio::test]
 async fn safety_blocked_bash_emits_typed_signal_event() -> anyhow::Result<()> {
-    let h = harness("safety-signal").await?;
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         vec![
@@ -21,21 +20,26 @@ async fn safety_blocked_bash_emits_typed_signal_event() -> anyhow::Result<()> {
             }))],
         ],
     ));
-    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_backend_from_mock(llm));
+    let h = harness_with_backend("safety-signal", llm.clone()).await?;
+
+    let mut executor = TurnExecutor::new(h.ctx.clone());
     let (decision, _) = executor.execute("try unsafe command", None).await?;
     assert_eq!(decision, TurnDecision::Stop);
     // SafetyBlocked 是硬失败：计入 tool_error_count（对 TUI/SDK 的
     // turn 级错误指标），同时照常产生类型化 signal 事件。
     assert_eq!(executor.tool_error_count(), 1);
-    assert!(
-        executor
-            .collected_signals()
-            .iter()
-            .any(|s| matches!(s.kind, crate::guard::collector::SignalKind::SafetyBlocked))
-    );
     h.ctx.flush_event_log().await?;
     let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
-    assert!(events.contains(r#""type":"signal""#), "{events}");
+    let signals = crate::regression::parsed_signal_events(&events);
+    assert!(
+        signals.iter().any(|signal| {
+            signal
+                .get("signal_kind")
+                .and_then(serde_json::Value::as_str)
+                == Some("SafetyBlocked")
+        }),
+        "{events}"
+    );
     assert!(events.contains(r#""version":1"#), "{events}");
     assert!(events.contains("SafetyBlocked"), "{events}");
     Ok(())

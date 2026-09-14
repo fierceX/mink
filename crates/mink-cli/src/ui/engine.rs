@@ -76,10 +76,6 @@ impl TerminalDisplay {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn write_out(&self, s: &str) {
-        self.write_normalized(s);
-    }
-
     /// Write trusted renderer text (colors/title codes added here) after
     /// normalization; suppressed in stream-json mode.
     fn write_normalized(&self, s: &str) {
@@ -182,7 +178,7 @@ impl Display for TerminalDisplay {
             let state = self.lock_state();
             if state.prev_was_thinking && state.last_char != "\n" {
                 drop(state);
-                self.write_out("\n");
+                self.write_normalized("\n");
                 self.lock_state().last_char = "\n".into();
             }
         }
@@ -197,7 +193,7 @@ impl Display for TerminalDisplay {
             let state = self.lock_state();
             if state.last_char != "\n" {
                 drop(state);
-                self.write_out("\n");
+                self.write_normalized("\n");
                 self.lock_state().last_char = "\n".into();
             }
         }
@@ -213,7 +209,7 @@ impl Display for TerminalDisplay {
             let state = self.lock_state();
             if state.prev_was_thinking && state.last_char != "\n" {
                 drop(state);
-                self.write_out("\n");
+                self.write_normalized("\n");
                 self.lock_state().last_char = "\n".into();
             }
         }
@@ -229,7 +225,7 @@ impl Display for TerminalDisplay {
         let state = self.lock_state();
         if state.last_char != "\n" {
             drop(state);
-            self.write_out("\n");
+            self.write_normalized("\n");
             self.lock_state().last_char = "\n".into();
         }
     }
@@ -315,7 +311,7 @@ impl Display for TerminalDisplay {
         // Independent message block: do not share parser state with the main
         // stream in either direction.
         self.begin_stdout_message();
-        self.write_out(&format!(
+        self.write_normalized(&format!(
             "[sub-agent {}] {} (in={}, out={})\n",
             session_id, status, in_tokens, out_tokens,
         ));
@@ -323,18 +319,18 @@ impl Display for TerminalDisplay {
             // Each section is a complete message: reset the parser so an
             // unterminated sequence in thinking cannot swallow the body.
             self.begin_stdout_message();
-            self.write_out("── Thinking ──\n");
+            self.write_normalized("── Thinking ──\n");
             let filtered = self.write_untrusted_out(thinking);
             if !filtered.ends_with('\n') {
-                self.write_out("\n");
+                self.write_normalized("\n");
             }
         }
         if !text.is_empty() {
             self.begin_stdout_message();
-            self.write_out("── Text ──\n");
+            self.write_normalized("── Text ──\n");
             let filtered = self.write_untrusted_out(text);
             if !filtered.ends_with('\n') {
-                self.write_out("\n");
+                self.write_normalized("\n");
             }
         }
         self.begin_stdout_message();

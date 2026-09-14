@@ -2,7 +2,6 @@ use super::*;
 
 #[tokio::test]
 async fn signal_recovery_guard_blocks_first_write() -> anyhow::Result<()> {
-    let h = harness("guard-blocks-write").await?;
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         vec![
@@ -46,7 +45,9 @@ async fn signal_recovery_guard_blocks_first_write() -> anyhow::Result<()> {
             ],
         ],
     ));
-    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_backend_from_mock(llm));
+    let h = harness_with_backend("guard-blocks-write", llm.clone()).await?;
+
+    let mut executor = TurnExecutor::new(h.ctx.clone());
     let mut belief = BeliefTracker::new(16);
     let (decision, effects) = executor
         .execute("fail then write", Some(&mut belief))
@@ -78,7 +79,6 @@ async fn signal_recovery_guard_blocks_first_write() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn signal_recovery_guard_blocks_whole_batch() -> anyhow::Result<()> {
-    let h = harness("guard-blocks-batch").await?;
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         vec![
@@ -127,7 +127,9 @@ async fn signal_recovery_guard_blocks_whole_batch() -> anyhow::Result<()> {
             ],
         ],
     ));
-    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_backend_from_mock(llm));
+    let h = harness_with_backend("guard-blocks-batch", llm.clone()).await?;
+
+    let mut executor = TurnExecutor::new(h.ctx.clone());
     let mut belief = BeliefTracker::new(16);
     let (decision, effects) = executor
         .execute("fail then write twice", Some(&mut belief))
@@ -155,23 +157,32 @@ async fn signal_recovery_guard_blocks_whole_batch() -> anyhow::Result<()> {
         "{}",
         serde_json::to_string_pretty(&lines)?
     );
-    let guard_signals = executor
-        .collected_signals()
-        .iter()
+    h.ctx.flush_event_log().await?;
+    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    let guard_signals = crate::regression::parsed_signal_events(&events)
+        .into_iter()
         .filter(|signal| {
-            signal.source_tool == "Write"
-                && matches!(signal.kind, crate::guard::collector::SignalKind::ToolFailed)
+            signal
+                .get("source_tool")
+                .and_then(serde_json::Value::as_str)
+                == Some("Write")
+                && signal
+                    .get("signal_kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("ToolFailed")
         })
         .collect::<Vec<_>>();
-    assert_eq!(guard_signals.len(), 2);
-    assert!(guard_signals.iter().all(|signal| signal.severity == 0.9));
+    assert_eq!(guard_signals.len(), 2, "{events}");
+    assert!(
+        guard_signals.iter().all(|signal| {
+            signal.get("severity").and_then(serde_json::Value::as_f64) == Some(0.9)
+        })
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn signal_recovery_guard_allows_first_read() -> anyhow::Result<()> {
-    let h = harness("guard-allows-read").await?;
-    tokio::fs::write(h.cwd.join("ok.txt"), "ok\n").await?;
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         vec![
@@ -215,7 +226,9 @@ async fn signal_recovery_guard_allows_first_read() -> anyhow::Result<()> {
             ],
         ],
     ));
-    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_backend_from_mock(llm));
+    let h = harness_with_backend("guard-allows-read", llm.clone()).await?;
+    tokio::fs::write(h.cwd.join("ok.txt"), "ok\n").await?;
+    let mut executor = TurnExecutor::new(h.ctx.clone());
     let mut belief = BeliefTracker::new(16);
     let (decision, effects) = executor
         .execute("fail then read", Some(&mut belief))
@@ -230,26 +243,28 @@ async fn signal_recovery_guard_allows_first_read() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn stop_error_reasons_return_failed_and_unknown_reasons_stop() -> anyhow::Result<()> {
-    let h = harness("stop-reasons").await?;
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         vec![vec![Ok(Event::Stop(StopEvent {
             reason: "max_tokens".into(),
         }))]],
     ));
-    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_backend_from_mock(llm));
+    let h = harness_with_backend("stop-reasons", llm.clone()).await?;
+
+    let mut executor = TurnExecutor::new(h.ctx.clone());
     let (decision, effects) = executor.execute("too long", None).await?;
     assert_eq!(decision, TurnDecision::Failed("stop: max_tokens".into()));
     assert!(effects.is_empty());
 
-    let h = harness("unknown-stop").await?;
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         vec![vec![Ok(Event::Stop(StopEvent {
             reason: "content_filter".into(),
         }))]],
     ));
-    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_backend_from_mock(llm));
+    let h = harness_with_backend("unknown-stop", llm.clone()).await?;
+
+    let mut executor = TurnExecutor::new(h.ctx.clone());
     let (decision, effects) = executor.execute("unknown", None).await?;
     assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());
@@ -258,6 +273,12 @@ async fn stop_error_reasons_return_failed_and_unknown_reasons_stop() -> anyhow::
 
 #[tokio::test]
 async fn preflight_rejects_context_that_cannot_fit_the_request_budget() -> anyhow::Result<()> {
+    let llm = Arc::new(MockLlmBackend::new(
+        "flash",
+        vec![vec![Ok(Event::Stop(StopEvent {
+            reason: "end_turn".into(),
+        }))]],
+    ));
     let h = harness_with_config(
         "preflight-compact-path",
         false,
@@ -266,16 +287,11 @@ async fn preflight_rejects_context_that_cannot_fit_the_request_budget() -> anyho
             cfg.max_context_tokens = 1;
             cfg.context_compact_pct = 100;
         },
-        None,
+        Some(llm.clone()),
     )
     .await?;
-    let llm = Arc::new(MockLlmBackend::new(
-        "flash",
-        vec![vec![Ok(Event::Stop(StopEvent {
-            reason: "end_turn".into(),
-        }))]],
-    ));
-    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_backend_from_mock(llm));
+
+    let mut executor = TurnExecutor::new(h.ctx.clone());
     let error = executor
         .execute("large context estimate", None)
         .await
@@ -286,17 +302,6 @@ async fn preflight_rejects_context_that_cannot_fit_the_request_budget() -> anyho
 
 #[tokio::test]
 async fn clean_tool_call_with_belief_takes_decision_none_path() -> anyhow::Result<()> {
-    let h = harness_with_config(
-        "decision-none-path",
-        false,
-        300,
-        |cfg| {
-            cfg.max_turns = 1;
-        },
-        None,
-    )
-    .await?;
-    tokio::fs::write(h.cwd.join("clean.txt"), "clean\n").await?;
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         vec![vec![
@@ -310,7 +315,18 @@ async fn clean_tool_call_with_belief_takes_decision_none_path() -> anyhow::Resul
             })),
         ]],
     ));
-    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_backend_from_mock(llm));
+    let h = harness_with_config(
+        "decision-none-path",
+        false,
+        300,
+        |cfg| {
+            cfg.max_turns = 1;
+        },
+        Some(llm.clone()),
+    )
+    .await?;
+    tokio::fs::write(h.cwd.join("clean.txt"), "clean\n").await?;
+    let mut executor = TurnExecutor::new(h.ctx.clone());
     let mut belief = BeliefTracker::new(16);
     let (decision, effects) = executor.execute("read clean", Some(&mut belief)).await?;
     assert_eq!(decision, TurnDecision::MaxTurnsExceeded);
@@ -321,7 +337,6 @@ async fn clean_tool_call_with_belief_takes_decision_none_path() -> anyhow::Resul
 #[tokio::test]
 async fn soft_only_editloop_does_not_inject_above_warn_zone() -> anyhow::Result<()> {
     // 不注入任何消息（记录但不干预），避免打断正常的写->编译->修流程。
-    let h = harness("soft-only-no-inject").await?;
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         vec![
@@ -333,7 +348,9 @@ async fn soft_only_editloop_does_not_inject_above_warn_zone() -> anyhow::Result<
             }))],
         ],
     ));
-    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_backend_from_mock(llm));
+    let h = harness_with_backend("soft-only-no-inject", llm.clone()).await?;
+
+    let mut executor = TurnExecutor::new(h.ctx.clone());
     let mut belief = BeliefTracker::new(16);
     belief.observe(&[Signal {
         kind: SignalKind::EditLoop,
@@ -374,7 +391,6 @@ async fn soft_only_editloop_does_not_inject_above_warn_zone() -> anyhow::Result<
 
 #[tokio::test]
 async fn turn_injects_hint_after_failed_tool_and_continues() -> anyhow::Result<()> {
-    let h = harness("turn-inject-after-fail").await?;
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         vec![
@@ -398,7 +414,9 @@ async fn turn_injects_hint_after_failed_tool_and_continues() -> anyhow::Result<(
             ],
         ],
     ));
-    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_backend_from_mock(llm));
+    let h = harness_with_backend("turn-inject-after-fail", llm.clone()).await?;
+
+    let mut executor = TurnExecutor::new(h.ctx.clone());
     let mut belief = BeliefTracker::new(16);
     let (decision, effects) = executor
         .execute("run failing command", Some(&mut belief))
@@ -434,14 +452,6 @@ async fn turn_injects_hint_after_failed_tool_and_continues() -> anyhow::Result<(
 #[tokio::test]
 async fn turn_aborts_when_tool_failures_push_belief_too_low() -> anyhow::Result<()> {
     // SubAgent 不可用时，Full 策略的 Abort 直接进入用户接管。
-    let h = harness_with_config(
-        "turn-abort-after-failures",
-        false,
-        300,
-        |cfg| cfg.enabled_tools = Some(vec!["Bash".into()]),
-        None,
-    )
-    .await?;
     let calls = (0..8)
         .map(|idx| {
             Ok(Event::ToolCall(tool_call(
@@ -455,7 +465,16 @@ async fn turn_aborts_when_tool_failures_push_belief_too_low() -> anyhow::Result<
         }))))
         .collect::<Vec<_>>();
     let llm = Arc::new(MockLlmBackend::new("flash", vec![calls]));
-    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_backend_from_mock(llm));
+    let h = harness_with_config(
+        "turn-abort-after-failures",
+        false,
+        300,
+        |cfg| cfg.enabled_tools = Some(vec!["Bash".into()]),
+        Some(llm.clone()),
+    )
+    .await?;
+
+    let mut executor = TurnExecutor::new(h.ctx.clone());
     let mut belief = BeliefTracker::new(16);
     let (decision, effects) = executor
         .execute("run many failing commands", Some(&mut belief))
@@ -521,7 +540,7 @@ async fn abort_degrades_to_replan_then_continues() -> anyhow::Result<()> {
     let h = harness_with_backend("abort-degrade-to-replan", llm.clone()).await?;
 
     let ctx = h.ctx.clone();
-    let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
+    let mut executor = TurnExecutor::new(ctx);
     let mut belief = BeliefTracker::new(16);
     let (decision, effects) = executor
         .execute("run many failing commands", Some(&mut belief))
@@ -602,7 +621,7 @@ async fn second_warning_triggers_replan() -> anyhow::Result<()> {
     .await?;
 
     let ctx = h.ctx.clone();
-    let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
+    let mut executor = TurnExecutor::new(ctx);
     let mut belief = BeliefTracker::new(16);
     let (decision, effects) = executor
         .execute("recover via replan", Some(&mut belief))
@@ -691,7 +710,7 @@ async fn hashline_rollback_restores_last_read_baseline() -> anyhow::Result<()> {
     let h = harness_with_backend("hashline-rollback", llm.clone()).await?;
     tokio::fs::write(h.cwd.join("a.rs"), original).await?;
     let ctx = h.ctx.clone();
-    let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
+    let mut executor = TurnExecutor::new(ctx);
     let mut belief = BeliefTracker::new(16);
     let (decision, _) = executor
         .execute("edit then fail", Some(&mut belief))
@@ -720,7 +739,7 @@ async fn rollback_preserves_executable_permissions() -> anyhow::Result<()> {
     tokio::fs::write(h.cwd.join("a.rs"), original).await?;
     tokio::fs::set_permissions(h.cwd.join("a.rs"), std::fs::Permissions::from_mode(0o755)).await?;
     let ctx = h.ctx.clone();
-    let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
+    let mut executor = TurnExecutor::new(ctx);
     let mut belief = BeliefTracker::new(16);
     let (decision, _) = executor
         .execute("edit then fail", Some(&mut belief))
@@ -750,7 +769,7 @@ async fn rollback_preserves_private_permissions() -> anyhow::Result<()> {
     tokio::fs::write(h.cwd.join("a.rs"), original).await?;
     tokio::fs::set_permissions(h.cwd.join("a.rs"), std::fs::Permissions::from_mode(0o600)).await?;
     let ctx = h.ctx.clone();
-    let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
+    let mut executor = TurnExecutor::new(ctx);
     let mut belief = BeliefTracker::new(16);
     let (decision, _) = executor
         .execute("edit then fail", Some(&mut belief))
@@ -815,7 +834,7 @@ async fn replace_mode_rollback_restores_last_read_baseline() -> anyhow::Result<(
     .await?;
     tokio::fs::write(h.cwd.join("a.rs"), original).await?;
     let ctx = h.ctx.clone();
-    let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
+    let mut executor = TurnExecutor::new(ctx);
     let mut belief = BeliefTracker::new(16);
     let (decision, _) = executor
         .execute("edit then fail", Some(&mut belief))
@@ -881,7 +900,7 @@ async fn rollback_scope_limited_to_recent_edit_window() -> anyhow::Result<()> {
     let h = harness_with_backend("rollback-scope", llm.clone()).await?;
     tokio::fs::write(h.cwd.join("a.rs"), original).await?;
     let ctx = h.ctx.clone();
-    let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
+    let mut executor = TurnExecutor::new(ctx);
     let mut belief = BeliefTracker::new(16);
     let (decision, _) = executor
         .execute("edit then fail", Some(&mut belief))
@@ -927,7 +946,7 @@ async fn repeated_soft_failures_trigger_evidence_injection() -> anyhow::Result<(
     let h = harness_with_backend("repeated-soft-failures", llm.clone()).await?;
 
     let ctx = h.ctx.clone();
-    let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
+    let mut executor = TurnExecutor::new(ctx);
     let mut belief = BeliefTracker::new(16);
     let (decision, _) = executor.execute("soft failures", Some(&mut belief)).await?;
     assert_eq!(decision, TurnDecision::Stop);
@@ -998,7 +1017,7 @@ async fn clean_calls_do_not_open_soft_failure_gate() -> anyhow::Result<()> {
     )
     .await?;
     let ctx = h.ctx.clone();
-    let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
+    let mut executor = TurnExecutor::new(ctx);
     let mut belief = BeliefTracker::new(16);
     let (decision, _) = executor.execute("mostly clean", Some(&mut belief)).await?;
     assert_eq!(decision, TurnDecision::Stop);
@@ -1041,7 +1060,7 @@ async fn replan_setup_failure_degrades_to_handover() -> anyhow::Result<()> {
         .to_path_buf();
     tokio::fs::write(parent_session_dir.join("subagents"), b"").await?;
     let ctx = h.ctx.clone();
-    let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
+    let mut executor = TurnExecutor::new(ctx);
     let mut belief = BeliefTracker::new(16);
     let outcome = executor
         .execute("many failing commands", Some(&mut belief))
@@ -1086,31 +1105,30 @@ async fn signaled_bash_failure_is_a_hard_signal() -> anyhow::Result<()> {
     let h = harness_with_backend("signal-bash-signaled", llm.clone()).await?;
 
     let ctx = h.ctx.clone();
-    let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
+    let mut executor = TurnExecutor::new(ctx);
     let mut belief = BeliefTracker::new(16);
 
     let _ = executor
         .execute("run signaled command", Some(&mut belief))
         .await?;
 
-    let hard_failures = executor
-        .collected_signals()
+    h.ctx.flush_event_log().await?;
+    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    let signals = crate::regression::parsed_signal_events(&events);
+    let hard_failures = signals
         .iter()
         .filter(|signal| {
-            signal.source_tool == "Bash"
-                && matches!(signal.kind, crate::guard::collector::SignalKind::ToolFailed)
+            signal
+                .get("source_tool")
+                .and_then(serde_json::Value::as_str)
+                == Some("Bash")
+                && signal
+                    .get("signal_kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("ToolFailed")
         })
         .count();
-    assert_eq!(
-        hard_failures,
-        1,
-        "{:?}",
-        executor
-            .collected_signals()
-            .iter()
-            .map(|s| format!("{}/{:?}", s.source_tool, s.kind))
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(hard_failures, 1, "{signals:?}");
     Ok(())
 }
 
@@ -1166,7 +1184,7 @@ async fn replace_rollback_preserves_bom_and_crlf_shape() -> anyhow::Result<()> {
     .await?;
     tokio::fs::write(h.cwd.join("a.rs"), original).await?;
     let ctx = h.ctx.clone();
-    let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
+    let mut executor = TurnExecutor::new(ctx);
     let mut belief = BeliefTracker::new(16);
     let (decision, _) = executor
         .execute("edit then fail", Some(&mut belief))
@@ -1176,6 +1194,125 @@ async fn replace_rollback_preserves_bom_and_crlf_shape() -> anyhow::Result<()> {
     assert_eq!(
         on_disk, original,
         "rollback must restore the BOM/CRLF read baseline"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn interrupted_replan_does_not_inject_success_evidence() -> anyhow::Result<()> {
+    struct InterruptOnReplanBackend {
+        interrupt: std::sync::Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmBackend for InterruptOnReplanBackend {
+        fn name(&self) -> &str {
+            "interrupt-on-replan"
+        }
+
+        async fn stream(
+            &self,
+            _request: crate::llm::client::LlmRequest,
+        ) -> anyhow::Result<crate::llm::client::LlmResponseStream> {
+            use std::sync::atomic::Ordering;
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call == 1
+                && let Some(interrupt) = self
+                    .interrupt
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .as_ref()
+            {
+                // The replan child starts while the shared interrupt flips.
+                interrupt.store(true, Ordering::SeqCst);
+            }
+            let events = match call {
+                0 => (0..8)
+                    .map(|idx| {
+                        Ok(Event::ToolCall(tool_call(
+                            "Bash",
+                            &format!("call_fail_{idx}"),
+                            json!({"command": format!("false # {idx}")}),
+                        )))
+                    })
+                    .chain(std::iter::once(Ok(Event::Stop(StopEvent {
+                        reason: "tool_use".into(),
+                    }))))
+                    .collect::<Vec<_>>(),
+                1 => vec![
+                    Ok(Event::Text(TextEvent {
+                        content: "Plan: must not be injected after interrupt.".into(),
+                    })),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "end_turn".into(),
+                    })),
+                ],
+                _ => vec![
+                    Ok(Event::Text(TextEvent {
+                        content: "recovered".into(),
+                    })),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "end_turn".into(),
+                    })),
+                ],
+            };
+            Ok(crate::llm::client::LlmResponseStream {
+                events: Box::pin(futures::stream::iter(events)),
+                attempt_count: 1,
+            })
+        }
+    }
+
+    let llm = Arc::new(InterruptOnReplanBackend {
+        interrupt: std::sync::Mutex::new(None),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let h = harness_with_backend("replan-interrupt", llm.clone()).await?;
+    *llm.interrupt
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(h.ctx.interrupt.clone());
+
+    let mut executor = TurnExecutor::new(h.ctx.clone());
+    let mut belief = BeliefTracker::new(16);
+    let (decision, effects) = executor
+        .execute("run many failing commands", Some(&mut belief))
+        .await?;
+
+    // Replan refused the interrupted child, so the turn ends without the
+    // replan injection (handover/failed path), not with a fresh plan.
+    assert!(
+        matches!(decision, TurnDecision::Failed(_)),
+        "unexpected decision: {decision:?}"
+    );
+    assert!(effects.is_empty());
+
+    let lines = h.ctx.store.lines().await?;
+    assert!(
+        !lines.iter().any(|line| {
+            line["role"] == "user"
+                && line["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("[replan]"))
+        }),
+        "interrupted replan must not be injected: {}",
+        serde_json::to_string_pretty(&lines)?
+    );
+
+    h.ctx.flush_event_log().await?;
+    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    let replan_events: Vec<serde_json::Value> = events
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|value| {
+            value.get("type").and_then(serde_json::Value::as_str) == Some("signal_replan")
+        })
+        .collect();
+    assert!(
+        replan_events.iter().any(
+            |value| value.get("status").and_then(serde_json::Value::as_str) == Some("cancelled")
+        ),
+        "{events}"
     );
     Ok(())
 }

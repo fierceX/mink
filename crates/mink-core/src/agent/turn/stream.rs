@@ -87,7 +87,7 @@ impl super::TurnExecutor {
 
         // 建流 future 只创建一次并 pin：tick 分支不得重建它，否则会重复发请求。
         let mut establish = std::pin::pin!(crate::llm::client::stream_backend(
-            &self.llm_backend,
+            &self.ctx.llm_backend,
             &self.ctx,
             &self.model_name,
             self.model_alias.as_deref(),

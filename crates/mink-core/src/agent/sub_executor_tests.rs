@@ -251,3 +251,56 @@ async fn sub_agent_interrupt_is_shared_and_child_cancel_is_linked() -> anyhow::R
     );
     Ok(())
 }
+
+#[test]
+fn sub_agent_status_maps_to_strings_and_tool_status() {
+    use crate::tools::metadata::{ToolFailureKind, ToolStatus};
+
+    let cases = [
+        (SubAgentStatus::Succeeded, "ok", ToolStatus::Succeeded),
+        (
+            SubAgentStatus::Failed,
+            "failed",
+            ToolStatus::Failed(ToolFailureKind::Unknown),
+        ),
+        (
+            SubAgentStatus::Interrupted,
+            "cancelled",
+            ToolStatus::Interrupted,
+        ),
+        (
+            SubAgentStatus::TimedOut,
+            "timed_out",
+            ToolStatus::Failed(ToolFailureKind::Timeout),
+        ),
+    ];
+    for (status, text, tool_status) in cases {
+        assert_eq!(status.as_str(), text);
+        assert_eq!(status.to_tool_status(), tool_status);
+    }
+}
+
+#[tokio::test]
+async fn plan_store_is_stable_per_session_and_isolated_for_child() -> anyhow::Result<()> {
+    let parent = crate::regression::test_context_for_agent("plan-store-identity").await?;
+    let first = crate::context::ToolContext::from(parent.as_ref());
+    let second = crate::context::ToolContext::from(parent.as_ref());
+    assert!(
+        Arc::ptr_eq(&first.plan_store, &second.plan_store),
+        "same session must share one PlanStore/transition lock"
+    );
+
+    let child = SubAgentExecutor::new(
+        parent.clone(),
+        "plan-store-child".into(),
+        false,
+        parent.config.clone(),
+    )
+    .await?;
+    let child_tools = crate::context::ToolContext::from(child.child_ctx.as_ref());
+    assert!(
+        !Arc::ptr_eq(&first.plan_store, &child_tools.plan_store),
+        "sub-agent must own its PlanStore"
+    );
+    Ok(())
+}

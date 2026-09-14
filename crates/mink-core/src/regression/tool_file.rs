@@ -77,21 +77,9 @@ async fn hashline_read_edit_and_stale_recovery_flow() -> anyhow::Result<()> {
 #[tokio::test]
 async fn hashline_full_turn_persists_complete_edit_result_and_reuses_new_tag() -> anyhow::Result<()>
 {
-    let h = harness("hashline-turn-result").await?;
-    tokio::fs::write(h.cwd.join("turn.txt"), "one\ntwo\n").await?;
-    let runner = ToolRunner::new(Arc::new(ToolContext::from(h.ctx.as_ref())));
-    runner
-        .execute_all(vec![tool_call(
-            "Read",
-            "seed_turn",
-            json!({"path":"turn.txt"}),
-        )])
-        .await?;
     let original_tag = crate::tools::snapshot::compute_file_tag("one\ntwo\n");
-    tokio::fs::write(h.cwd.join("turn.txt"), "prefix\none\ntwo\n").await?;
     let first_text = "prefix\none\nTWO\n";
     let first_tag = crate::tools::snapshot::compute_file_tag(first_text);
-
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         vec![
@@ -125,7 +113,18 @@ async fn hashline_full_turn_persists_complete_edit_result_and_reuses_new_tag() -
             ],
         ],
     ));
-    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_backend_from_mock(llm));
+    let h = harness_with_backend("hashline-turn-result", llm.clone()).await?;
+    tokio::fs::write(h.cwd.join("turn.txt"), "one\ntwo\n").await?;
+    let runner = ToolRunner::new(Arc::new(ToolContext::from(h.ctx.as_ref())));
+    runner
+        .execute_all(vec![tool_call(
+            "Read",
+            "seed_turn",
+            json!({"path":"turn.txt"}),
+        )])
+        .await?;
+    tokio::fs::write(h.cwd.join("turn.txt"), "prefix\none\ntwo\n").await?;
+    let mut executor = TurnExecutor::new(h.ctx.clone());
     executor.execute("edit twice", None).await?;
 
     assert_eq!(

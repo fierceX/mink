@@ -25,9 +25,9 @@ pub async fn init_session_base_at(
 
     let store = Arc::new(ConversationStore::new(paths.conversation.clone()));
     store.ensure().await?;
-    // Recover Plan's cross-file journal before generic dangling-tool repair:
-    // a bound transaction owns the real successful Plan tool result, while an
-    // unbound transaction must first roll its filesystem mutation back.
+    // Boot-phase recovery instance only: it exists before the session context
+    // (and its lifetime PlanStore) is built, performs journal recovery, and is
+    // then dropped. It is not a second session-lifetime authority.
     crate::session::plan::PlanStore::new(paths.plan.clone(), paths.plan_draft.clone())
         .recover_pending(&store)
         .await?;

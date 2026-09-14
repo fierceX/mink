@@ -221,11 +221,15 @@ impl super::TurnExecutor {
             .log_critical_event(crate::events::EventLog::SignalReplan {
                 attempts: self.local.replan_attempts,
                 session_id: session_id.clone(),
-                status: result.status.clone(),
+                status: result.status.as_str().to_string(),
                 text_len: result.text.len(),
             })
             .await?;
-        if result.status != "ok" || result.text.trim().is_empty() {
+        if !matches!(
+            result.status,
+            crate::agent::sub_executor::SubAgentStatus::Succeeded
+        ) || result.text.trim().is_empty()
+        {
             return Ok(None);
         }
         let injection = format!(

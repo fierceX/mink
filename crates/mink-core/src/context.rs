@@ -154,10 +154,7 @@ impl From<&AgentSharedContext> for ToolContext {
             memo_epoch: ctx.memo_epoch.clone(),
             memo_mutation: ctx.memo_mutation.clone(),
             snapshots: ctx.snapshots.clone(),
-            plan_store: Arc::new(
-                PlanStore::new(ctx.plan_path.clone(), ctx.plan_draft_path.clone())
-                    .with_fault(ctx.persistence_fault.clone()),
-            ),
+            plan_store: ctx.plan_store.clone(),
             todo_store: ctx.todo_store.clone(),
             persistence_fault: ctx.persistence_fault.clone(),
             tool_config: ctx.tool_config.clone(),
@@ -281,6 +278,8 @@ pub struct AgentSharedContext {
     pub store: Arc<ConversationStore>,
     pub artifacts: Arc<ArtifactManager>,
     pub todo_store: Arc<TodoStore>,
+    /// Session-lifetime Plan store: one journal/transition lock per session.
+    pub(crate) plan_store: Arc<PlanStore>,
     /// Session-wide publish-fault latch (see `session::persistence`).
     pub(crate) persistence_fault: crate::session::persistence::PersistenceFault,
     pub read_memo: Arc<Mutex<crate::tools::read_memo::ReadMemo>>,
@@ -330,9 +329,6 @@ pub struct AgentSharedContext {
     pub(crate) event_log_writer: Option<EventLogWriter>,
     /// Serializes async prefix builds (held across the critical snapshot commit).
     pub(crate) prefix_build_lock: tokio::sync::Mutex<()>,
-    /// Test instrumentation: number of stream-json stdout emissions.
-    #[cfg(test)]
-    pub(crate) stream_json_emits: std::sync::atomic::AtomicU64,
     /// Per-context stream-json flush throttle. Deliberately not process-global:
     /// multiple embedded runtimes must not share one flush clock.
     pub(crate) stream_flush_last: Mutex<Option<Instant>>,
@@ -452,8 +448,6 @@ impl AgentSharedContext {
         if self.config.output_format != OutputFormat::StreamJson {
             return;
         }
-        #[cfg(test)]
-        self.stream_json_emits.fetch_add(1, Ordering::SeqCst);
         let mut stdout = std::io::stdout().lock();
         let write_result = writeln!(stdout, "{line}");
         let flush_result = if write_result.is_ok() && self.should_flush_stream_event(value) {

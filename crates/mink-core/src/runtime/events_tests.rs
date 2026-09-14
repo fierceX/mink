@@ -1,4 +1,5 @@
 use super::{AgentEvent, AgentEventKind, EventDispatcher, EventSink};
+use crate::protocol::{Event, StopEvent, TextEvent};
 use std::sync::Arc;
 
 #[test]
@@ -199,15 +200,14 @@ fn progress_budget_bounds_pending_bytes_and_counts_drops() {
     budget.release(0);
     assert_eq!(budget.pending(), min);
     assert!(budget.reserve(0));
-    // Saturating release must not underflow.
-    budget.release(1 << 20);
+    budget.release(8);
+    assert_eq!(budget.pending(), min);
+    budget.release(0);
     assert_eq!(budget.pending(), 0);
 }
 
 #[test]
 fn emitter_drops_progress_over_budget_but_keeps_reliable_events() {
-    use crate::protocol::{Event, StopEvent, TextEvent};
-
     let budget = super::ProgressBudget::new(super::PROGRESS_EVENT_MIN_BYTES);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let emitter =
@@ -321,4 +321,36 @@ fn empty_progress_deltas_are_charged_and_bounded() {
         budget.pending()
     );
     assert!(budget.dropped() > 0);
+}
+
+#[test]
+fn emitter_releases_progress_reservation_when_receiver_closed() {
+    let budget = super::ProgressBudget::new(super::PROGRESS_PENDING_BYTES_LIMIT);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let emitter =
+        super::TurnEventEmitter::new(crate::runtime::TurnId::new("turn-closed"), Some(tx), None)
+            .with_progress_budget(budget.clone());
+    drop(rx);
+
+    // Reserve succeeds, send fails, reservation must be returned (including
+    // the per-event structural minimum for empty deltas).
+    emitter.emit(AgentEventKind::Text {
+        content: "payload".into(),
+    });
+    assert_eq!(budget.pending(), 0);
+    emitter.emit(AgentEventKind::Text {
+        content: String::new(),
+    });
+    assert_eq!(budget.pending(), 0);
+    emitter.emit(AgentEventKind::Thinking {
+        content: "thought".into(),
+    });
+    assert_eq!(budget.pending(), 0);
+
+    // Reliable events never touch the budget.
+    emitter.emit(AgentEventKind::Stop {
+        reason: "end_turn".into(),
+    });
+    assert_eq!(budget.pending(), 0);
+    assert_eq!(budget.dropped(), 0);
 }

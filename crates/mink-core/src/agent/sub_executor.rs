@@ -11,10 +11,43 @@ use anyhow::{Result, bail};
 use std::path::{Component, Path};
 use std::sync::{Arc, Mutex};
 
+/// Terminal status of one sub-agent execution.
+///
+/// String conversion only happens at output boundaries (Display events,
+/// EventLog, tool status); internal decisions never compare strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubAgentStatus {
+    Succeeded,
+    Failed,
+    Interrupted,
+    TimedOut,
+}
+
+impl SubAgentStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "ok",
+            Self::Failed => "failed",
+            Self::Interrupted => "cancelled",
+            Self::TimedOut => "timed_out",
+        }
+    }
+
+    pub(crate) fn to_tool_status(self) -> crate::tools::metadata::ToolStatus {
+        use crate::tools::metadata::{ToolFailureKind, ToolStatus};
+        match self {
+            Self::Succeeded => ToolStatus::Succeeded,
+            Self::Failed => ToolStatus::Failed(ToolFailureKind::Unknown),
+            Self::Interrupted => ToolStatus::Interrupted,
+            Self::TimedOut => ToolStatus::Failed(ToolFailureKind::Timeout),
+        }
+    }
+}
+
 /// Result of a sub-agent execution.
 #[derive(Debug, Clone)]
 pub struct SubAgentResult {
-    pub status: String,
+    pub status: SubAgentStatus,
     pub thinking: String,
     pub text: String,
     pub usage: Stats,
@@ -196,85 +229,128 @@ impl SubAgentExecutor {
 
         let timeout_secs = child_ctx.tool_config.sub_agent_timeout_secs.max(1) as u64;
         let cancel = child_ctx.cancel.clone();
-        let result = tokio::select! {
-            result = self.run_impl(prompt) => result,
+        enum RunOutcome {
+            Done(Result<(TurnDecision, String, String)>),
+            TimedOut,
+        }
+        let outcome = tokio::select! {
+            result = self.run_impl(&prompt) => RunOutcome::Done(result),
             _ = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)) => {
                 cancel.cancel();
-                Err(anyhow::anyhow!("Sub-agent timed out after {timeout_secs}s"))
+                RunOutcome::TimedOut
             }
         };
 
         let captured_thinking = capture.take_thinking();
         let captured_text = capture.take_text();
-
         let stats = child_ctx.stats.snapshot().await;
+
+        let (status, thinking, text) = match outcome {
+            RunOutcome::Done(Ok((TurnDecision::Stop, thinking, text))) => (
+                SubAgentStatus::Succeeded,
+                if thinking.is_empty() {
+                    captured_thinking.clone()
+                } else {
+                    thinking
+                },
+                if text.is_empty() {
+                    captured_text.clone()
+                } else {
+                    text
+                },
+            ),
+            RunOutcome::Done(Ok((TurnDecision::Interrupted, _, _))) => (
+                SubAgentStatus::Interrupted,
+                captured_thinking.clone(),
+                if captured_text.is_empty() {
+                    "Sub-agent interrupted.".to_string()
+                } else {
+                    captured_text.clone()
+                },
+            ),
+            RunOutcome::Done(Ok((decision, _, _))) => {
+                let detail = match decision {
+                    TurnDecision::MaxTurnsExceeded => {
+                        "sub-agent max_turns exhausted before end_turn".to_string()
+                    }
+                    TurnDecision::Failed(message) => message,
+                    // Stop/Interrupted are matched above.
+                    TurnDecision::Stop | TurnDecision::Interrupted => unreachable!(),
+                };
+                (
+                    SubAgentStatus::Failed,
+                    captured_thinking.clone(),
+                    if captured_text.is_empty() {
+                        format!("Sub-agent failed: {detail}")
+                    } else {
+                        captured_text.clone()
+                    },
+                )
+            }
+            RunOutcome::Done(Err(error)) => (
+                SubAgentStatus::Failed,
+                captured_thinking.clone(),
+                if captured_text.is_empty() {
+                    format!("Sub-agent failed: {error}")
+                } else {
+                    captured_text.clone()
+                },
+            ),
+            RunOutcome::TimedOut => (
+                SubAgentStatus::TimedOut,
+                captured_thinking.clone(),
+                if captured_text.is_empty() {
+                    format!("Sub-agent timed out after {timeout_secs}s.")
+                } else {
+                    captured_text.clone()
+                },
+            ),
+        };
 
         // 向父 Display 发送完整子代理输出（TUI 用户可点击查看）
         parent_display.render_sub_agent_output(
             &session_id,
-            match &result {
-                Ok(_) => "ok",
-                Err(_) => "failed",
-            },
+            status.as_str(),
             &captured_thinking,
             &captured_text,
             stats.total_input_tokens,
             stats.total_output_tokens,
         );
 
-        match result {
-            Ok((thinking, text)) => SubAgentResult {
-                status: "ok".into(),
-                thinking: if thinking.is_empty() {
-                    captured_thinking
-                } else {
-                    thinking
-                },
-                text: if text.is_empty() { captured_text } else { text },
-                usage: stats,
-            },
-            Err(e) => SubAgentResult {
-                status: "failed".into(),
-                thinking: captured_thinking,
-                text: if captured_text.is_empty() {
-                    format!("Sub-agent failed: {e}")
-                } else {
-                    captured_text
-                },
-                usage: stats,
-            },
+        SubAgentResult {
+            status,
+            thinking,
+            text,
+            usage: stats,
         }
     }
 
-    async fn run_impl(self, prompt: String) -> Result<(String, String)> {
-        let resolved = crate::config::model_resolver(&self.child_ctx.config)
-            .resolve(&self.child_ctx.config.model);
-        let executor =
-            TurnExecutor::new(self.child_ctx.clone(), self.child_ctx.llm_backend.clone())
-                .with_model_target(resolved.actual, resolved.alias);
-        let mut executor = executor;
-        let (decision, _effects) = Box::pin(executor.execute(&prompt, None)).await?;
+    /// Run one child turn without consuming the executor, so callers can
+    /// classify the decision into a terminal status themselves.
+    async fn run_impl(&self, prompt: &str) -> Result<(TurnDecision, String, String)> {
+        let mut executor = TurnExecutor::new(self.child_ctx.clone());
+        let (decision, _effects) = Box::pin(executor.execute(prompt, None)).await?;
 
         match decision {
             TurnDecision::Stop => {
-                // Read back the assistant text from the CHILD store
+                // Read back the assistant text from the CHILD store.
                 let mut result_thinking = String::new();
                 let mut result_text = String::new();
                 if let Some(line) = self.child_store.last_assistant_message().await?
                     && let Some(content) = line.get("content").and_then(|v| v.as_array())
                 {
-                    for b in content {
-                        match b.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                    for block in content {
+                        match block.get("type").and_then(|t| t.as_str()).unwrap_or("") {
                             "thinking" => {
                                 if result_thinking.is_empty()
-                                    && let Some(t) = b.get("thinking").and_then(|v| v.as_str())
+                                    && let Some(t) = block.get("thinking").and_then(|v| v.as_str())
                                 {
                                     result_thinking = t.to_string();
                                 }
                             }
                             "text" => {
                                 if result_text.is_empty()
-                                    && let Some(t) = b.get("text").and_then(|v| v.as_str())
+                                    && let Some(t) = block.get("text").and_then(|v| v.as_str())
                                 {
                                     result_text = t.to_string();
                                 }
@@ -283,13 +359,9 @@ impl SubAgentExecutor {
                         }
                     }
                 }
-                Ok((result_thinking, result_text))
+                Ok((TurnDecision::Stop, result_thinking, result_text))
             }
-            TurnDecision::Interrupted => Ok((String::new(), "Sub-agent interrupted.".into())),
-            TurnDecision::MaxTurnsExceeded => Err(anyhow::anyhow!(
-                "sub-agent max_turns exhausted before end_turn"
-            )),
-            TurnDecision::Failed(msg) => Err(anyhow::anyhow!(msg)),
+            other => Ok((other, String::new(), String::new())),
         }
     }
 }

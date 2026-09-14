@@ -62,29 +62,22 @@ struct FlushAck {
     last_failure: Option<String>,
 }
 
-/// Loss accounting shared between the send side, the writer thread and the
-/// flush callers (ownership rules, see docs/DESIGN.md / Q1):
+/// Shared state between the send side and the writer thread.
 ///
+/// Ownership rules (see docs/DESIGN.md / Q1):
 /// - the send side counts enqueue failures (`send_lost`): writer init failure,
 ///   channel disconnect, queue rejection — a writer that never started or has
 ///   already exited cannot be responsible for them;
-/// - the writer counts what it actually failed to persist (`processed_lost`)
-///   and never waits for a caller confirmation;
-/// - flush callers are serialized by `flush_lock`; the caller that receives a
-///   barrier result advances `reported`, so a cancelled flush does not consume
-///   an unreported loss.
+/// - everything the writer thread owns exclusively lives in [`WriterState`]
+///   (file handle, current failure, processed losses) with no locks/atomics;
+/// - flush callers are serialized by `EventLogWriter.reported`; the caller
+///   that receives a barrier result advances the watermark, so a cancelled
+///   flush does not consume an unreported loss.
 struct EventLogState {
-    /// Current open/write failure (cleared once the file is writable again).
-    failure: Mutex<Option<String>>,
-    /// Cause of the most recent lost event (kept independently of `failure`:
-    /// a successful reopen clears writability but not the loss reason).
-    last_loss: Mutex<Option<String>>,
     /// Writer thread creation failure, surfaced on flush instead of silently
     /// turning into a disconnected queue.
     init_error: Mutex<Option<String>>,
     send_lost: AtomicUsize,
-    processed_lost: AtomicUsize,
-    reported: AtomicUsize,
     #[cfg(test)]
     processed_commands: AtomicUsize,
     #[cfg(test)]
@@ -94,18 +87,27 @@ struct EventLogState {
 impl Default for EventLogState {
     fn default() -> Self {
         Self {
-            failure: Mutex::new(None),
-            last_loss: Mutex::new(None),
             init_error: Mutex::new(None),
             send_lost: AtomicUsize::new(0),
-            processed_lost: AtomicUsize::new(0),
-            reported: AtomicUsize::new(0),
             #[cfg(test)]
             processed_commands: AtomicUsize::new(0),
             #[cfg(test)]
             critical_queued: AtomicUsize::new(0),
         }
     }
+}
+
+/// Writer-thread-exclusive state: no Mutex/Atomic, owned by `run_writer`.
+#[derive(Default)]
+struct WriterState {
+    file: Option<std::fs::File>,
+    /// Current open/write failure, cleared once the file is writable again.
+    failure: Option<String>,
+    /// Cause of the most recent lost event (kept independently of `failure`:
+    /// a successful reopen clears writability but not the loss reason).
+    last_loss: Option<String>,
+    /// Events the writer actually failed to persist.
+    processed_lost: usize,
 }
 
 /// Serializes event-log writes for one session.
@@ -122,7 +124,8 @@ pub(crate) struct EventLogWriter {
     tx: SyncSender<EventLogCmd>,
     warned: Arc<AtomicBool>,
     state: Arc<EventLogState>,
-    flush_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Reported-loss watermark; the guard also serializes flush callers.
+    reported: Arc<tokio::sync::Mutex<usize>>,
 }
 
 impl EventLogWriter {
@@ -147,6 +150,7 @@ impl EventLogWriter {
         let warned = Arc::new(AtomicBool::new(false));
         let state = Arc::new(EventLogState::default());
         let thread_warned = warned.clone();
+        #[cfg(test)]
         let thread_state = state.clone();
 
         #[cfg(test)]
@@ -158,6 +162,7 @@ impl EventLogWriter {
                     path,
                     rx,
                     &thread_warned,
+                    #[cfg(test)]
                     &thread_state,
                     #[cfg(test)]
                     thread_gate,
@@ -176,7 +181,7 @@ impl EventLogWriter {
             tx,
             warned,
             state,
-            flush_lock: Arc::new(tokio::sync::Mutex::new(())),
+            reported: Arc::new(tokio::sync::Mutex::new(0)),
         }
     }
 
@@ -363,12 +368,11 @@ impl EventLogWriter {
 
     /// Write barrier: report losses that happened at or before this barrier.
     ///
-    /// The writer returns a snapshot without waiting for any confirmation; the
-    /// caller (serialized by `flush_lock`) advances the reported watermark when
-    /// it actually receives the snapshot. A flush cancelled before its result
-    /// arrives therefore leaves the loss unreported for the next flush.
+    /// The writer returns a snapshot without waiting for any confirmation;
+    /// the reported watermark is advanced only after the snapshot arrives, so
+    /// a cancelled flush leaves its loss unreported for the next flush.
     pub(crate) async fn flush(&self) -> io::Result<()> {
-        let _guard = self.flush_lock.lock().await;
+        let mut reported = self.reported.lock().await;
         let started = std::time::Instant::now();
         let send_lost_before = self.state.send_lost.load(Ordering::SeqCst);
         let (done, done_rx) = oneshot::channel();
@@ -409,9 +413,8 @@ impl EventLogWriter {
         };
 
         let total_lost = send_lost_before.saturating_add(ack.processed_lost);
-        let reported = self.state.reported.load(Ordering::SeqCst);
-        if total_lost > reported {
-            self.state.reported.store(total_lost, Ordering::SeqCst);
+        if total_lost > *reported {
+            *reported = total_lost;
             let detail = ack
                 .last_loss
                 .or(ack.last_failure)
@@ -428,10 +431,10 @@ fn run_writer(
     path: PathBuf,
     rx: Receiver<EventLogCmd>,
     warned: &AtomicBool,
-    state: &EventLogState,
+    #[cfg(test)] state: &EventLogState,
     #[cfg(test)] gate: Option<Arc<EventLogWriterGate>>,
 ) {
-    let mut file = None;
+    let mut writer = WriterState::default();
 
     loop {
         // Paused before receiving, so a stalled writer leaves the queue
@@ -447,34 +450,24 @@ fn run_writer(
         state.processed_commands.fetch_add(1, Ordering::SeqCst);
         match command {
             EventLogCmd::Append(line) => {
-                if let Err(message) = write_event(&mut file, &path, warned, state, &line) {
+                if let Err(message) = write_event(&mut writer, &path, warned, &line) {
                     // Diagnostic event: count it as a loss the writer observed.
-                    record_loss(state, message);
+                    writer.processed_lost += 1;
+                    writer.last_loss = Some(message);
                 }
             }
             EventLogCmd::AppendCritical { line, done } => {
                 // Critical event: report the real open/write result back to
-                // the sender; do not count it as a silent loss (the caller
-                // decides whether to retry).
+                // the sender; the caller decides whether to retry, so this is
+                // not counted as a diagnostic loss.
                 let result =
-                    write_event(&mut file, &path, warned, state, &line).map_err(io::Error::other);
+                    write_event(&mut writer, &path, warned, &line).map_err(io::Error::other);
                 let _ = done.send(result);
             }
             EventLogCmd::Flush { done } => {
-                let processed_lost = state.processed_lost.load(Ordering::SeqCst);
-                let last_loss = state
-                    .last_loss
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .clone();
-                let failure = state
-                    .failure
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .clone();
-                let result = match file.as_mut() {
+                let result = match writer.file.as_mut() {
                     Some(file) => file.flush(),
-                    None => match failure.clone() {
+                    None => match writer.failure.clone() {
                         Some(message) => Err(io::Error::other(message)),
                         // No events have been written yet: flushing an empty
                         // session is a no-op, not an error.
@@ -483,15 +476,15 @@ fn run_writer(
                 };
                 let _ = done.send(FlushAck {
                     result,
-                    processed_lost,
-                    last_loss,
-                    last_failure: failure,
+                    processed_lost: writer.processed_lost,
+                    last_loss: writer.last_loss.clone(),
+                    last_failure: writer.failure.clone(),
                 });
             }
         }
     }
 
-    if let Some(file) = file.as_mut() {
+    if let Some(file) = writer.file.as_mut() {
         let _ = file.flush();
     }
 }
@@ -501,33 +494,32 @@ fn run_writer(
 /// The caller decides whether the failure is a counted loss (diagnostics) or
 /// reported back through an acknowledgement (critical events).
 fn write_event(
-    file: &mut Option<std::fs::File>,
+    writer: &mut WriterState,
     path: &std::path::Path,
     warned: &AtomicBool,
-    state: &EventLogState,
     line: &str,
 ) -> std::result::Result<(), String> {
-    if file.is_none() {
-        *file = open_append(path, warned, state);
-        if file.is_none() {
-            let message = state
-                .failure
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone()
-                .unwrap_or_else(|| "event log open failed".to_string());
-            return Err(message);
+    if writer.file.is_none() {
+        match open_append(path) {
+            Ok(file) => {
+                writer.file = Some(file);
+                writer.failure = None;
+            }
+            Err(message) => {
+                warn_once(warned, &message);
+                writer.failure = Some(message.clone());
+                return Err(message);
+            }
         }
     }
-    if let Some(handle) = file.as_mut()
-        && let Err(error) = writeln!(handle, "{line}")
-    {
+    let handle = writer.file.as_mut().expect("file opened above");
+    if let Err(error) = writeln!(handle, "{line}") {
         let message = format!("failed to write event log {}: {error}", path.display());
         warn_once(warned, &message);
-        set_failure(&state.failure, message.clone());
+        writer.failure = Some(message.clone());
         // Drop the handle and retry opening on the next event instead of
         // treating one failed write as permanent.
-        *file = None;
+        writer.file = None;
         return Err(message);
     }
     Ok(())
@@ -548,47 +540,12 @@ async fn stop_requested(cancel: &crate::cancel::CancellationToken, interrupt: &A
     }
 }
 
-fn open_append(
-    path: &std::path::Path,
-    warned: &AtomicBool,
-    state: &EventLogState,
-) -> Option<std::fs::File> {
-    match OpenOptions::new().create(true).append(true).open(path) {
-        Ok(file) => {
-            // A successful reopen only restores writability. Unreported losses
-            // stay accounted until a flush caller actually reports them.
-            clear_failure(&state.failure);
-            Some(file)
-        }
-        Err(error) => {
-            let message = format!("failed to open event log {}: {error}", path.display());
-            warn_once(warned, &message);
-            set_failure(&state.failure, message);
-            None
-        }
-    }
-}
-
-fn set_failure(failure: &Mutex<Option<String>>, message: String) {
-    *failure
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(message);
-}
-
-/// Record one lost event: monotonic counter plus the cause (kept separately
-/// from `failure`, which a successful reopen clears).
-fn record_loss(state: &EventLogState, message: String) {
-    state.processed_lost.fetch_add(1, Ordering::SeqCst);
-    *state
-        .last_loss
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(message);
-}
-
-fn clear_failure(failure: &Mutex<Option<String>>) {
-    *failure
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+fn open_append(path: &std::path::Path) -> std::result::Result<std::fs::File, String> {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| format!("failed to open event log {}: {error}", path.display()))
 }
 
 pub(crate) fn warn_once(warned: &AtomicBool, message: &str) {
@@ -816,7 +773,7 @@ mod tests {
             tx,
             warned: Arc::new(AtomicBool::new(false)),
             state: Arc::new(EventLogState::default()),
-            flush_lock: Arc::new(tokio::sync::Mutex::new(())),
+            reported: Arc::new(tokio::sync::Mutex::new(0)),
         };
 
         assert!(!writer.send(r#"{"index":"lost"}"#.to_string()));
@@ -838,7 +795,7 @@ mod tests {
             tx,
             warned: Arc::new(AtomicBool::new(false)),
             state,
-            flush_lock: Arc::new(tokio::sync::Mutex::new(())),
+            reported: Arc::new(tokio::sync::Mutex::new(0)),
         };
 
         let error = writer.flush().await.unwrap_err();
@@ -1040,7 +997,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn critical_commit_does_not_block_async_worker_when_queue_full() {
         let dir = std::env::temp_dir().join(format!(
             "mink-event-log-critical-full-{}-{}",
@@ -1084,9 +1041,12 @@ mod tests {
             "critical commit deadline: {:?}",
             started.elapsed()
         );
+        // Snapshot before awaiting the ticker: the count must only contain
+        // progress made while the commit was waiting on the full queue.
+        let progressed = ticks.load(Ordering::SeqCst);
         ticker.await.unwrap();
         assert!(
-            ticks.load(Ordering::SeqCst) >= 5,
+            progressed >= 5,
             "the async worker must keep progressing while the commit waits"
         );
 
