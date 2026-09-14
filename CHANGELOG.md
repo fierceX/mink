@@ -1,34 +1,6 @@
 # Changelog
 
-## Unreleased
-
-### 修复：工具写入、输出与展示语义
-
-- `Write` 改为原子写入（stage+fsync+rename），成功计数不再因后续 metadata 失败被误报为错误。
-- 工具输出超限且 artifact 落盘失败时给出明确说明，不再静默伪装成普通截断；artifact 标记字节纳入统一大小保护。
-- timeout/interrupt 不再以虚构 exit 124/130 展示；结构化 termination/status 保持不变，真实退出码语义不再混淆。
-- 未知工具名按 surface 拒绝（Blocked(ToolSurface)）并在 gate/storm 记账，不再落到底层 unknown 分支。
-- read memo 命中增加内容哈希确认（同秒同长度改写不再误命中）；hashline 多文件批处理中已提交文件立即失效 memo。
-- server registry 对 poison 锁的公共入口 fail-closed/可恢复；压缩摘要 Retry 不再混入上次尝试的输出；多余 Usage 事件记为 unreported（EMBEDDING 补充自定义 backend 语义）。
-
-### 修复：压缩与部分结果
-
-- 尾段真实 user 守卫不可满足时拒绝压缩（cut=0），不再静默返回不安全边界；启动边界修复写入 `startup_repair` 事件并把被跳过内容并入下次摘要输入。
-- 工具批次基础设施失败保留已完成真实结果，仅未执行调用标记 not executed，随后停止整轮（Plan journal 错误不降级）。
-
-
-### 修复：子代理中断不再报告为成功，收集等待可被停止
-
-- 子代理终态由内部 `SubAgentStatus{Succeeded,Failed,Interrupted,TimedOut}` 表达：Interrupted/TimedOut 不再落入“Ok 即成功”，coordinator 与恢复 replan 按准确状态映射工具结果与事件字符串（外部字段与协议不变）。
-- 子代理批次只有一个 pending 所有者：未知/重复结果按协议故障处理；收集循环响应 runtime cancel 与当前轮 interrupt；收集 future 被丢弃时 cancel+abort 未完成任务；结果仍按输入顺序回填。
-
-### 维护
-
-- turn 模型与 backend 一次装配：删除独立 executor backend 与 `with_model_target`，测试统一在 context 构建期注入 backend。
-- PlanStore 归属 session；Plan 工具阶段原地交接（删除 handler 与中转 Vec）；启动期 journal 恢复实例一次性使用。
-- 事件日志 writer 独占状态（无锁 WriterState）与单一 reported 水位；三个工具失败分支共用 `ToolExecOutput::failed`；生产不再累计信号测试镜像；stream-json 回归改验真实 stdout 子进程输出；进度发送失败回收预留；API 边界测试仅在消费根校验非空；删除 CLI `write_out` 薄包装。
-
-## v0.6.3 (2026-09-11)
+## v0.6.3 (2026-09-14)
 
 ### 新增：事件流进度预算与嵌入诊断接口
 
@@ -40,6 +12,26 @@
 
 - 公共 API 仅增量变化（新增 `AgentEventStream::progress_backlog()`，以及已有的 additive `set_model_with_outcome`）：无删除或破坏性签名变更；CLI 参数、`--print`/`--agent-jsonl` 协议与 `events.jsonl` 事件形状不变。
 - 行为变化汇总：进程失败分类改由执行事实决定；诊断事件在 writer 持续停摆时可见丢弃并计入丢失报告；取消/超时的建流请求会留下 `Unreported` 用量记录。
+- 行为变化汇总（0.6.3 内）：子代理中断不再记为成功且收集等待可停止；压缩守卫不可满足时拒绝压缩；启动边界修复写入 `startup_repair` 事件并把被跳过内容并入后续摘要；`Write` 原子写入、artifact 落盘失败可见；timeout/interrupt 不再输出虚构退出码；未知工具按 surface 拒绝；工具批次致命失败保留已完成结果。
+- 自定义 `LlmBackend` 语义补充：`Event::Retry` 会重置当前尝试累积的输出；每个请求只应发送一次 `Event::Usage`，额外 Usage 记一条 Unreported 诊断（详见 `docs/EMBEDDING.md`）。
+
+### 修复：子代理终态与收集中断
+
+- 子代理终态由内部 `SubAgentStatus{Succeeded,Failed,Interrupted,TimedOut}` 表达：Interrupted/TimedOut 不再落入“Ok 即成功”；coordinator 与恢复 replan 按准确状态映射工具结果与事件字符串（外部字段与协议不变）；replan 仅接受 Succeeded 且正文非空。
+- 子代理批次只有一个 pending 所有者：未知/重复结果按协议故障处理；收集循环响应 runtime cancel 与当前轮 interrupt；收集 future 被丢弃时 cancel+abort 未完成任务；结果仍按输入顺序回填。此前“中断后收集不返回”“中断子代理记为成功”两项复现已转为常规回归测试。
+
+### 修复：压缩守卫、启动修复与部分结果
+
+- cut 尾段真实 user 守卫不可满足时拒绝压缩（cut=0），不再静默返回 token 基线边界。
+- 启动边界修复写入 `startup_repair` 事件并把被跳过的内容并入后续摘要输入；repair loss 只在摘要成功提交后清空，失败/中断可重试。
+- 工具批次基础设施失败（自定义工具 panic/JoinError、Plan journal 绑定失败等）保留已完成真实结果并持久化，仅未执行调用标记 not executed，随后停止整轮；Plan journal 错误不降级为普通工具失败。
+
+### 修复：工具写入、输出与展示语义
+
+- `Write` 改为原子写入（stage+fsync+rename），成功计数不再因后续 metadata 失败被误报；hashline 多文件批处理中已提交文件立即失效读缓存。
+- 工具输出超限且 artifact 落盘失败时给出明确说明，不再静默伪装成普通截断；artifact 标记字节纳入统一大小保护。
+- timeout/interrupt 不再以虚构 exit 124/130 展示，结构化 termination/status 与真实退出码语义不变。
+- 未知工具名按 surface 拒绝（Blocked(ToolSurface)）并在 gate/storm 记账；read memo 命中增加内容哈希确认，同秒同长度改写不再误命中。
 
 ### 修复：事件日志可靠性与丢失可见
 
@@ -59,7 +51,6 @@
 
 - Bash/Python 的终止原因类型化传递到工具状态：运行库超时 → `Timeout`，运行库中断 → `Interrupted`，信号终止/非零退出 → `ProcessFailed`；输出中出现 `timeout` 等词不再覆盖真实原因，信号终止（无输出、退出码 `None`）不再落入 `Unknown`。
 - Bash 不再把命令自行 `exit 130` 标注为 `command interrupted`（该文本改由运行库中断路径添加）；模型可见文本、退出码展示与 JSONL 字段保持兼容，分类更正已同步 `docs/tools.md`。
-- 发送组 SIGTERM 后不再以直接子进程退出作为整组退出判据：宽限期内以 `kill(-pgid, 0)` 判定组存活（仅 `ESRCH` 视为不存在，`EPERM` 按存在处理），到期对残余组 SIGKILL 并在有界窗口确认清理结果；未确认清理时在工具结果中标注，不再暗示副作用已全部停止。主动 `setsid` 逃离的进程与非 Unix 进程树不在覆盖范围。
 
 ### 修复：请求取消/超时的用量记录
 
@@ -71,42 +62,15 @@
 - Edit/Write 的原子写入不再把目标 metadata 读取失败当作“目标不存在”继续：区分 NotFound 与真实错误（如符号链接循环），后者直接报错并保留原文件；已存在目标的权限继续先设置到临时文件再写入，提供最终权限时临时文件以 0600 创建，新建文件保持默认 umask。
 - `ImageCache` 提交后的目录同步失败不再被静默忽略：返回错误并保留“不支持目录 fsync（EINVAL/ENOTSUP）”的平台差异为 best-effort；错误语义为**发布后失败**（对象已可见但持久性未确认，不撤销已发布对象，重试走内容寻址去重）。
 
-### 修复：状态持久化的发布失败语义（fail-closed）
-
-- 原子替换区分**发布前失败**（旧文件不变）与**已发布但目录同步失败**：后者重读并比对完整预期快照、重做目录同步；无法恢复时闩锁 session 并返回 fatal 错误（要求重启），禁止按旧 revision 重试。`atomic_replace` 公开签名保持兼容。
-- 闩锁后的权威检查点：turn 与用户输入入口、手动压缩入口、同批工具派发前、所有 `publish_state` 入口；未派发的工具调用生成明确的“未执行”结果以保持 tool_call/result 配对。Todo、Plan 与压缩投影接入同一闩锁。
-- 压缩的权威 `context-state.json` 与派生 summary 分开处理：派生投影写入失败不再仅置 dirty 后返回成功，错误向上传播（dirty 仍保留供重试）。
-
-### 修复：回滚与状态写入的文件权限
-
-- 信号回滚与权限保留发布复用同一条带发布语义的写入路径：最终权限先设置到临时文件再发布；权限读取失败拒绝发布并记录 `SignalRollbackError`，失败不记为成功回滚。
-- 指定最终权限时，临时文件以 0600 创建（Unix），写入内容期间不存在更宽权限窗口；写入顺序为创建（限权）→ 写入 → 设置最终权限 → 文件 fsync → rename → 目录同步。ACL、所有者与扩展属性不在支持范围（仅 mode）。
-
-### 安全修复：终端输出清洗与消息边界
-
-- REPL 对不可信 payload（模型文本/thinking、工具摘要与结果预览、错误、子代理输出）先经共享控制序列清洗，renderer 的颜色/标题码在其后添加；控制序列清洗与布局归一分离，TUI 保留自身 tab/换行策略。
-- 解析状态按“连续流 / 完整消息”分界：thinking/text 块内跨 chunk 保留，类型切换、工具消息、stop/retry、每条错误、子代理 thinking/text 两段均 reset；未结束的 OSC 不再吞掉后续正文、下一条错误或下一轮输出；stdout/stderr 独立解析。
-- 非 TTY 输出装饰码维持现状（延期打磨）。
-
-### 安全修复：图片缓存有界读取
-
-- `ImageCache::read_bounded` 改为单句柄读取：Unix `O_NOFOLLOW | O_NONBLOCK` 拒绝符号链接、FIFO 不阻塞，句柄 fstat 拒绝非 regular file，`take(max_bytes + 1)` 限制实际读入后再做长度与摘要校验，避免检查与读取之间的替换或增长造成无界分配。
-- 去重的三个分支统一校验：已有对象必须与待提交内容长度一致且摘要一致。
-
-### 修复：CLI 控制反馈与 TUI 错误处理
-
-- `/compact` 与 `/model` 类控制操作的结果不再静默丢弃：展示压缩结果（含跳过原因）与切换成功提示，并同步实际模型标签与标题；标签来自 core 已解析结果（新增 additive `set_model_with_outcome`，原方法签名兼容）。
-- TUI 启动/渲染错误带上下文传播为进程失败（非零退出码），并保证先执行 shutdown；主错误与清理错误同时保留。
-
 ### 维护
 
-- `ImageFormat::extension()` 标记 deprecated（下一个破坏性版本移除）；删除死私有接口与冗余字段；收窄 `config` 模块级 `allow(dead_code)`；移除不可达的像素溢出分支（保留真实边长/像素/字节配额检查）。
 - 事件交付契约更新为：turn 可靠流保持 unbounded 但进度事件有 1 MiB 预算与结构最小值，observer 队列有界（1024）且溢出丢弃告警（详见 `docs/ARCHITECTURE.md`/`docs/DESIGN.md`）。
 - 按内聚拆分：`compaction` 1230→990+259、turn 抽出 `prepare_request`、server 抽出 `SessionSummary`；registry 租约/操作层整体拆分经评估延期（理由见 `docs/DESIGN.md`）。
 - 锁中毒逐类处理：可重建缓存恢复、权威状态 fail closed、不可错辅助函数显式 panic（分类表见 `docs/DESIGN.md`）。
 - 测试装配统一走生产组装并在构建期注入 backend（删除 `with_llm_backend` 字段复制）；公开边界覆盖 router/prefab；删除/合并低价值断言并附删测表。
 - 开发过程文档（行动计划/AUDIT/稳定性方案/收敛设计）移出版本控制并加入 `.gitignore`，仅本地保留。
-
+- 核心调用链收敛：turn 模型/backend 一次装配；PlanStore 归属 session 且 Plan 在工具阶段原地交接；事件日志 writer 独占无锁状态与单一已报告水位；三个失败结果分支共用构造；删除生产信号测试镜像与 stream-json 计数并改观察真实事件/stdout；进度发送失败回收预留；API 边界测试仅在消费根校验非空；删除 CLI `write_out` 薄包装。
+- 审计发现缺陷修复中的内部项：读缓存内容哈希、hashline 提交即失效、server registry poison 公共入口 fail-closed/可恢复、prefix 依赖指纹重算、摘要 Retry 清空、额外 Usage 记 unreported、canonical 路径一致、ANSI 噪声覆盖 CSI 私有参数与 OSC、catalog `explicit_only` 单源校验、image 测试遍历 `ALL`。
 ## v0.6.2 (2026-09-11)
 
 ### 修复：压缩请求丢失前缀缓存
@@ -153,11 +117,6 @@
 
 - `ImageFormat::extension()` 标记 deprecated（下一个破坏性版本移除）；删除死私有接口与冗余字段；收窄 `config` 模块级 `allow(dead_code)`；移除不可达的像素溢出分支（保留真实边长/像素/字节配额检查）。
 - `docs/ARCHITECTURE.md` 明确事件交付契约：turn 可靠流为 unbounded 队列、**当前没有慢消费者内存边界**；尽力 observer 队列有界（1024）且溢出丢弃告警。队列预算与慢消费者策略列为后续工作。
-- 按内聚拆分：`compaction` 1230→990+259、turn 抽出 `prepare_request`、server 抽出 `SessionSummary`；registry 租约/操作层整体拆分经评估延期（理由见 `docs/DESIGN.md`）。
-- 锁中毒逐类处理：可重建缓存恢复、权威状态 fail closed、不可错辅助函数显式 panic（分类表见 `docs/DESIGN.md`）。
-- 测试装配统一走生产组装并在构建期注入 backend（删除 `with_llm_backend` 字段复制）；公开边界覆盖 router/prefab；删除/合并低价值断言并附删测表。
-- 开发过程文档（行动计划/AUDIT/稳定性方案/收敛设计）移出版本控制并加入 `.gitignore`，仅本地保留。
-
 ## v0.6.1 (2026-09-08)
 
 ### Shift+Enter 换行

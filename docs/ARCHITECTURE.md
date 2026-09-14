@@ -465,7 +465,7 @@ REPL/TUI 在 `mink-cli` 内把同一事件流投影为终端输出或 `TuiSignal
 - **尽力 observer**（`EventSink` + `EventDispatcher`）：有界队列（容量 1024），溢出时丢弃最新事件并告警一次，适合遥测，不承担 UI 完整性；**observer 投递独立于 stream 进度预算**（慢 stream 消费者不会连带饿死 observer）。
 - **延期项（队列预算/慢消费者）**：合并增量、字节预算、落盘溢出或明确中止等策略尚未实现，在实现前不得宣称事件流已有内存边界。后续验收占位：`outcome`-only 消费、满队列行为、长流式输出下的积压字节与 RSS 压力测试。
 
-### 事件词汇职责与转换边界（Q10）
+### 事件词汇职责与转换边界
 
 - 三套词汇职责不同，**不要求互相派生**：`EventLog` 服务审计/持久化/信号证据（含 `prefix_snapshot`、`user_input`、压缩检查等领域专属事件，直接落盘）；`AgentEventKind` 服务 turn 内运行时流（含 `Prompt`/`ClearLine` 等展示事件）；`TuiSignal` 服务 UI。
 - 重叠转换只有两条边界，且都由 trait 强制穷尽：`Display` trait → `EventDisplay` → `AgentEventKind`；`Display` trait → `TuiDisplay` → `TuiSignal`。新增 `Display` 方法会在编译期要求所有前端实现；新增 `AgentEventKind` 变体会要求 `EventDisplay`/消费者处理。
@@ -475,10 +475,10 @@ REPL/TUI 在 `mink-cli` 内把同一事件流投影为终端输出或 `TuiSignal
 
 ## Session 结构
 
-- **子代理所有权（S1/S2）**：批次未完成事实只在 `SubAgentBatch.pending`；每个任务只有一个 channel 发送点；收集循环监听 cancel/绝对 deadline/10ms interrupt tick；`Drop` 负责 cancel+abort。终态由 `SubAgentStatus` 表达，Interrupted 不再映射为成功。
-- **turn 装配（S3）**：`TurnExecutor::new/new_for_model` 是唯一构造路径，模型、`sub_agent_config` 与 coordinator 一次确定；主请求、压缩与子代理共用 `ctx.llm_backend`。
-- **Plan 所有权与交接（S4/S5）**：`AgentSharedContext.plan_store` 是 session 生命周期唯一实例；工具阶段原地 take `plan_command` 完成交接，不存在 handler/中转 Vec；启动期 `session/init.rs` 的恢复实例一次性使用后丢弃。
-- **信号事实（S8）**：生产不在 processor 内累计完整信号副本；测试通过 `result.signals` 或 events.jsonl 的 `type=signal` 事件观察。
+- **子代理所有权**：批次未完成事实只在 `SubAgentBatch.pending`；每个任务只有一个 channel 发送点；收集循环监听 cancel/绝对 deadline/10ms interrupt tick；`Drop` 负责 cancel+abort。终态由 `SubAgentStatus` 表达，Interrupted 不再映射为成功。
+- **turn 装配**：`TurnExecutor::new/new_for_model` 是唯一构造路径，模型、`sub_agent_config` 与 coordinator 一次确定；主请求、压缩与子代理共用 `ctx.llm_backend`。
+- **Plan 所有权与交接**：`AgentSharedContext.plan_store` 是 session 生命周期唯一实例；工具阶段原地 take `plan_command` 完成交接，不存在 handler/中转 Vec；启动期 `session/init.rs` 的恢复实例一次性使用后丢弃。
+- **信号事实**：生产不在 processor 内累计完整信号副本；测试通过 `result.signals` 或 events.jsonl 的 `type=signal` 事件观察。
 
 - **EventLog 所有权**：文件句柄、当前故障与已处理损失由 writer 线程独占（`WriterState`，无锁）；发送侧只持有队列、`send_lost` 原子与 init 错误锁；已报告损失水位在 `EventLogWriter.reported` 异步锁下推进。
 
@@ -541,13 +541,13 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 
 ## 决策与拒绝的替代方案
 
-- **无依赖注入框架**：组装只在 `runtime/context_build.rs` 一个显式函数完成；测试经同一路径构建（Q6）。拒绝全局服务定位器与 builder 框架。
-- **三套事件词汇并存**：`EventLog`（审计/领域事件直接落盘）、`AgentEventKind`（turn 运行时流）、`TuiSignal`（UI）；只对重叠转换（Display → EventDisplay/TuiDisplay）做穷尽保真（Q10）。拒绝"唯一发射源"式合并与通用消息总线。
-- **配置前端未统一为共享 patch**：四个前端语义差异（None vs 空列表、map 合并、层级覆盖）已由矩阵与测试钉住；无证据表明收敛能减少映射点（Q9，D2=C）。若跨端漂移频发再引入 additive overrides。
-- **锁中毒逐类处理**：可重建缓存恢复；权威状态 fail closed；不可错的辅助函数显式 panic。拒绝"一律 into_inner()"机械恢复（Q12）。
-- **事件流不做有界 channel**：生产者等待容量会让 outcome-only 消费者死锁；改为进度事件生产者侧字节预算 + outcome 主动排空（Q13，D3=A）。丢弃 stream 仍等于取消 turn。
-- **工具声明保留 JSON schema + metadata 双源汇合**：catalog 加载时 1:1 校验；explicit-only 由声明携带，不做代码生成（Q11）。
-- **registry 租约/操作层未整体拆分**：活动 runtime 与租约共享私有字段集，拆分为跨文件 impl 只增加可见性调整而无行为收益；仅抽出 summary/usage 汇总（Q15）。
+- **无依赖注入框架**：组装只在 `runtime/context_build.rs` 一个显式函数完成；测试经同一路径构建。拒绝全局服务定位器与 builder 框架。
+- **三套事件词汇并存**：`EventLog`（审计/领域事件直接落盘）、`AgentEventKind`（turn 运行时流）、`TuiSignal`（UI）；只对重叠转换（Display → EventDisplay/TuiDisplay）做穷尽保真。拒绝"唯一发射源"式合并与通用消息总线。
+- **配置前端未统一为共享 patch**：四个前端语义差异（None vs 空列表、map 合并、层级覆盖）已由矩阵与测试钉住；暂无证据表明收敛能减少映射点。若跨端漂移频发再引入 additive overrides。
+- **锁中毒逐类处理**：可重建缓存恢复；权威状态 fail closed；不可错的辅助函数显式 panic。拒绝"一律 into_inner()"机械恢复。
+- **事件流不做有界 channel**：生产者等待容量会让 outcome-only 消费者死锁；改为进度事件生产者侧字节预算 + outcome 主动排空。丢弃 stream 仍等于取消 turn。
+- **工具声明保留 JSON schema + metadata 双源汇合**：catalog 加载时 1:1 校验；explicit-only 由声明携带，不做代码生成。
+- **registry 租约/操作层未整体拆分**：活动 runtime 与租约共享私有字段集，拆分为跨文件 impl 只增加可见性调整而无行为收益；仅抽出 summary/usage 汇总。
 - **fail-closed 用 session 闩锁而非重试**：发布后失败重读验证/重同步，无法恢复即闩锁并要求重启，避免在未验证状态上继续。
 
 ## 关键不变式

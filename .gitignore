@@ -41,3 +41,9 @@ docs/QUALITY_ACTION_PLAN-*.md
 docs/STABILITY_SIMPLIFICATION_PLAN-*.md
 docs/AUDIT-*.md
 docs/CORE_CLI_CONVERGENCE_DESIGN.md
+
+# 审核报告与实施计划（仅本地保留，不入库）
+docs/audits/
+docs/CORE_MAINTAINABILITY_*.md
+docs/QUALITY_CONVERGENCE_PLAN-*.md
+docs/QUALITY_DEEP_AUDIT-*.md

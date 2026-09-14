@@ -229,7 +229,7 @@ artifact 跟随 session 生命周期，不跨 session 共享。
 
 ---
 
-### 共享上下文生命周期表（Q8）
+### 共享上下文生命周期表
 
 `AgentSharedContext` 字段按生命周期分类；新增字段必须归入其中一类并登记重置点，不可凭名字猜测。
 
@@ -400,7 +400,7 @@ StormDecision::Suppress(reason) => {
 
 ## 主题五：信号驱动的信念系统
 
-> 实现收敛（S8）：`ToolSignalProcessor` 不再累计完整信号副本（原 `signals`/`collected_signals` 已删除）；事实来源是 `ToolExecution.signals` 与 events.jsonl 的 `type=signal` 事件。
+> 实现收敛：`ToolSignalProcessor` 不再累计完整信号副本（原 `signals`/`collected_signals` 已删除）；事实来源是 `ToolExecution.signals` 与 events.jsonl 的 `type=signal` 事件。
 
 信号系统是 Mink 的反馈回路：工具执行质量被采集为信号，合并为单一信念度 `B`，
 低信念时向 LLM 注入修正提示（或中止），构成闭环。完整设计（设计思想、信号采集、
@@ -571,9 +571,9 @@ session 恢复和重放仍可按需读取全部原始消息；`session://current
 
 恢复时会 replay 最近 10 轮 LLM 响应事件（从 events.jsonl 读取），在交互式终端重新渲染历史对话。
 
-### 事件日志丢失确认（D1 决策）
+### 事件日志丢失确认
 
-- **状态所有权（S6）**：writer 线程独占 `WriterState{file,failure,last_loss,processed_lost}`（无 Mutex/Atomic）；共享的只有发送侧 `send_lost` 原子、`init_error` 锁与测试计数。已报告损失水位由 `EventLogWriter.reported`（async Mutex，兼作 flush 串行化）持有，收到 FlushAck 后才推进；取消/超时的 flush 不消费未报告损失。
+- **状态所有权**：writer 线程独占 `WriterState{file,failure,last_loss,processed_lost}`（无 Mutex/Atomic）；共享的只有发送侧 `send_lost` 原子、`init_error` 锁与测试计数。已报告损失水位由 `EventLogWriter.reported`（async Mutex，兼作 flush 串行化）持有，收到 FlushAck 后才推进；取消/超时的 flush 不消费未报告损失。
 
 `events.jsonl` 由专用 writer 线程串行追加，队列有界（满时阻塞，不静默丢弃）。丢失的确认与报告遵循以下所有权规则：
 
@@ -583,7 +583,7 @@ session 恢复和重放仍可按需读取全部原始消息；`session://current
 - **报告语义**：`send_lost + processed_lost > reported` 时 flush 返回错误（含累计丢失数与最近一次丢失原因），并把水位推进到该值（报告一次）；重新打开文件只恢复可写状态，不清零未报告丢失。
 - **边界**：`flush` 是通道/处理屏障，不等于 `sync_all` 断电持久化；不引入请求序号或双向确认协议。
 
-### 事件流消费契约与进度预算（Q13，D3 决策 A）
+### 事件流消费契约与进度预算
 
 - 三种消费方式：持续消费（`recv()` 循环）；只要结果（直接 `outcome()`，**主动排空事件并释放进度字节**，不积累无界积压）；中途放弃（drop stream 按既有契约取消当前 turn，是消费者的显式选择）。
 - 进度事件（`Text`/`Thinking`）有 1 MiB 的 pending 字节预算：每个事件按 `max(payload, 128B)` 计费（空 delta 也占用队列槽位，不得零成本）；超限的 delta 仅对 stream 出口丢弃，并以一条可靠 `Info` 通知。**不把 agent 事件流改为 bounded channel**：生产者等待容量会让 outcome-only 消费者死锁。
@@ -602,7 +602,7 @@ session 恢复和重放仍可按需读取全部原始消息；`session://current
 - 诊断事件仍走 `send_best_effort`：满队列可见丢弃并计入丢失报告。`log_event` 收到关键事件时兜底走可靠路径并告警，契约调用点应显式使用 `log_critical_event`。
 - 反压边界表述精确化：SSE 队列（1024）只限制**事件个数**，不限制单事件字节与解析缓冲；runtime 可靠事件（工具结果等）不计入 1 MiB 进度预算。整条事件链路"内存完全有界"仍不成立。
 
-### shutdown 预算与日志回压（Q14）
+### shutdown 预算与日志回压
 
 - `shutdown` 的收尾阶段各有明确预算（生产 5s，测试 200ms）：gate/orchestrator、event dispatcher、event log、usage、stats、compaction projection 分别超时并把超时列为失败；**阻塞 IO（usage.flush）经 `spawn_blocking` 移出 async worker**（stats/projection 原本已在 blocking pool），超时只界定调用者等待，**"调用返回"不等于"后台写入完成"**，不谎报完成。
 - `EventLogWriter::flush` 用 `try_send` + async 重试至内部期限（生产 30s/测试 200ms），不阻塞 async worker；**异步调用方（turn/runtime 的 `log_event`）改用 `send_best_effort`**：队列满时可见地丢弃诊断事件并计入丢失报告，不再阻塞 tokio worker；同步测试仍可用阻塞 `send`。
@@ -780,7 +780,7 @@ surface 解析阶段 fail closed。
 
 ---
 
-### 配置语义矩阵与前端收敛决策（Q9）
+### 配置语义矩阵与前端收敛决策
 
 四个前端各有映射（core `AgentOptions`/`ResolvedConfig`、CLI `CliConfig`+TOML+overrides、server `AgentConfig` 分层 merge+env、Python dict）。字段语义按类固定，边界由对照测试钉住：
 
@@ -834,7 +834,7 @@ surface 解析阶段 fail closed。
 
 ---
 
-### 锁分类与中毒行为（Q12）
+### 锁分类与中毒行为
 
 锁按“中毒后能否继续使用”分类；不采用“一律恢复”，也不以 `unwrap()`→`expect()` 充当修复。
 
