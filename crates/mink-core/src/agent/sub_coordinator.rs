@@ -156,7 +156,7 @@ impl SubAgentCoordinator {
                             drop(permit);
                             sa
                         }
-                        Err(cancelled) => cancelled,
+                        Err(cancelled) => *cancelled,
                     };
                     let _ = tx.send((sub_idx, sa));
                 });
@@ -384,23 +384,25 @@ impl SubAgentCoordinator {
 async fn acquire_sub_agent_permit(
     sub_semaphore: Arc<tokio::sync::Semaphore>,
     cancel: &CancellationToken,
-) -> Result<tokio::sync::OwnedSemaphorePermit, SubAgentResult> {
+    // The failure is already classified; boxing keeps the Err variant cheap
+    // (clippy::result_large_err) without adding a second result type.
+) -> Result<tokio::sync::OwnedSemaphorePermit, Box<SubAgentResult>> {
     tokio::select! {
         permit = sub_semaphore.acquire_owned() => match permit {
             Ok(permit) => Ok(permit),
-            Err(_) => Err(SubAgentResult {
+            Err(_) => Err(Box::new(SubAgentResult {
                 status: SubAgentStatus::Failed,
                 thinking: String::new(),
                 text: "Sub-agent semaphore closed.".into(),
                 usage: Default::default(),
-            }),
+            })),
         },
-        _ = cancel.cancelled() => Err(SubAgentResult {
+        _ = cancel.cancelled() => Err(Box::new(SubAgentResult {
             status: SubAgentStatus::Interrupted,
             thinking: String::new(),
             text: "Sub-agent cancelled before execution.".into(),
             usage: Default::default(),
-        }),
+        })),
     }
 }
 
