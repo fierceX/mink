@@ -37,7 +37,13 @@ impl ArtifactManager {
     pub fn ensure(&self) -> Result<()> {
         std::fs::create_dir_all(&self.root)?;
         if !self.index_path.exists() {
-            std::fs::File::create(&self.index_path)?;
+            // Never `File::create` here: concurrent writers may already have
+            // appended a line, and create() truncates. Append-open both
+            // creates and preserves existing content.
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.index_path)?;
         }
         self.repair_index_tail()?;
         if self.counter.load(Ordering::SeqCst) == 0 {
