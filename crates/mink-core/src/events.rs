@@ -5,6 +5,26 @@ use crate::ui::{ArtifactDisplay, ToolPresentation};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+impl EventLog {
+    /// Contract-critical evidence that must not be silently dropped.
+    ///
+    /// Diagnostics may degrade under writer backpressure (loss is counted and
+    /// reported); these events are read back to reconstruct state (prefix
+    /// cache, signal recovery audits) and therefore require a reliable,
+    /// deadline-bounded commit whose failure reaches the caller.
+    pub fn is_critical(&self) -> bool {
+        matches!(
+            self,
+            EventLog::PrefixSnapshot { .. }
+                | EventLog::SignalRollback { .. }
+                | EventLog::SignalRollbackError { .. }
+                | EventLog::SignalReplan { .. }
+                | EventLog::SignalReplanError { .. }
+                | EventLog::SignalHandover { .. }
+        )
+    }
+}
+
 /// Typed events.jsonl vocabulary.
 ///
 /// `type` values and field names are the durable offline/replay contract and

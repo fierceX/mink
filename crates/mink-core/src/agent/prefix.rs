@@ -13,14 +13,18 @@ impl PrefixManager {
         Self { ctx }
     }
 
-    pub fn ensure(&self) -> Result<(String, Vec<serde_json::Value>)> {
+    pub async fn ensure(&self) -> Result<(String, Vec<serde_json::Value>)> {
         if let Some(source) = &self.ctx.prefix_source
             && let Some(prefix) = source.prefix(&self.ctx.events_path)
         {
             return Ok(prefix);
         }
 
-        loop {
+        // One async build gate: the std guard below is never held across the
+        // critical-event await (the future must stay Send).
+        let _build = self.ctx.prefix_build_lock.lock().await;
+
+        {
             let mut guard = self
                 .ctx
                 .immutable_prefix
@@ -34,55 +38,76 @@ impl PrefixManager {
                     ));
                 }
                 *guard = None;
-                drop(guard);
-                continue;
             }
+        }
 
-            let system_prompt = self.ctx.build_system_prompt()?;
-            // Static image-capability enhancement: when the frozen session
-            // capability supports images, the Read description is augmented
-            // here and cached inside ImmutablePrefix (v7 §3.4). Unsupported
-            // sessions leave the schema byte-for-byte unchanged.
-            let tools_json = crate::tools::surface::augment_read_schema_for_image(
-                self.ctx.tool_surface.schemas(),
-                &self.ctx.model_capabilities,
-            );
-            let workflows = crate::prompt::workflows::PromptWorkflowResolver::builtin()
-                .resolve(&self.ctx.tool_capabilities)?;
-            self.ctx
-                .log_event(crate::events::EventLog::PromptWorkflowResolution {
-                    active_workflows: workflows
-                        .ordered()
-                        .iter()
-                        .map(|spec| spec.id.to_string())
-                        .collect(),
-                    workflow_fingerprint: workflows.fingerprint().to_string(),
-                });
-            // The capability fingerprint joins the dependency fingerprint so
-            // any capability change forces a prefix rebuild (v7 §3.4).
-            let dependency_fingerprint = format!(
-                "mink-prefix-dependencies-v2\0{}\0{}\0{}\0{}\0{}",
-                self.ctx.capability_snapshot.dependency_fingerprint,
-                self.ctx.tool_surface.fingerprint(),
-                self.ctx.tool_capabilities.fingerprint(),
-                workflows.fingerprint(),
-                self.ctx.model_capabilities.capability_fingerprint,
-            );
-            let prefix = ImmutablePrefix::new(
-                system_prompt.clone(),
-                tools_json.clone(),
-                dependency_fingerprint.clone(),
-            );
-            self.ctx.log_event(crate::events::EventLog::PrefixSnapshot {
+        let system_prompt = self.ctx.build_system_prompt()?;
+        // Static image-capability enhancement: when the frozen session
+        // capability supports images, the Read description is augmented
+        // here and cached inside ImmutablePrefix (v7 §3.4). Unsupported
+        // sessions leave the schema byte-for-byte unchanged.
+        let tools_json = crate::tools::surface::augment_read_schema_for_image(
+            self.ctx.tool_surface.schemas(),
+            &self.ctx.model_capabilities,
+        );
+        let workflows = crate::prompt::workflows::PromptWorkflowResolver::builtin()
+            .resolve(&self.ctx.tool_capabilities)?;
+        self.ctx
+            .log_event(crate::events::EventLog::PromptWorkflowResolution {
+                active_workflows: workflows
+                    .ordered()
+                    .iter()
+                    .map(|spec| spec.id.to_string())
+                    .collect(),
+                workflow_fingerprint: workflows.fingerprint().to_string(),
+            });
+        // The capability fingerprint joins the dependency fingerprint so
+        // any capability change forces a prefix rebuild (v7 §3.4).
+        let dependency_fingerprint = format!(
+            "mink-prefix-dependencies-v2\0{}\0{}\0{}\0{}\0{}",
+            self.ctx.capability_snapshot.dependency_fingerprint,
+            self.ctx.tool_surface.fingerprint(),
+            self.ctx.tool_capabilities.fingerprint(),
+            workflows.fingerprint(),
+            self.ctx.model_capabilities.capability_fingerprint,
+        );
+        let prefix = ImmutablePrefix::new(
+            system_prompt.clone(),
+            tools_json.clone(),
+            dependency_fingerprint.clone(),
+        );
+        // Contract evidence: only cache the prefix once the writer confirmed
+        // the snapshot was actually written; a failure returns to the caller
+        // and the next ensure() rebuilds instead of faking a cache hit.
+        self.ctx
+            .log_critical_event(crate::events::EventLog::PrefixSnapshot {
                 version: Some(1),
                 fingerprint: prefix.fingerprint().to_string(),
-                dependency_fingerprint: dependency_fingerprint.clone(),
+                dependency_fingerprint,
                 system_prompt: system_prompt.clone(),
                 tools_json: tools_json.clone(),
-            });
+            })
+            .await
+            .map_err(|error| {
+                // A cancelled or interrupted turn must stay classified as
+                // interruption, not as an event-log failure.
+                if self.ctx.cancel.is_cancelled()
+                    || self.ctx.interrupt.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    anyhow::Error::new(crate::agent::turn::TurnInterrupted)
+                } else {
+                    error
+                }
+            })?;
+        {
+            let mut guard = self
+                .ctx
+                .immutable_prefix
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             *guard = Some(prefix);
-            return Ok((system_prompt, tools_json));
         }
+        Ok((system_prompt, tools_json))
     }
 
     #[cfg(test)]

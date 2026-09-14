@@ -1,19 +1,111 @@
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
 const EVENT_LOG_QUEUE_CAPACITY: usize = 1024;
 
+/// How long `flush` may retry a full queue before reporting a stalled writer.
+#[cfg(not(test))]
+const FLUSH_ENQUEUE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const FLUSH_ENQUEUE_DEADLINE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long `flush` may wait for the writer acknowledgement after the command
+/// was enqueued (queue-full retries use `FLUSH_ENQUEUE_DEADLINE`).
+#[cfg(not(test))]
+const FLUSH_ACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const FLUSH_ACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Deadline for committing contract-critical events.
+#[cfg(not(test))]
+pub(crate) const CRITICAL_ENQUEUE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+pub(crate) const CRITICAL_ENQUEUE_DEADLINE: std::time::Duration =
+    std::time::Duration::from_millis(200);
+
+/// Grace period where an in-flight acknowledgement may still land before a
+/// pending cancel/interrupt aborts the wait (a healthy writer acks far sooner;
+/// a stalled writer does not).
+#[cfg(not(test))]
+const CRITICAL_ACK_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+#[cfg(test)]
+const CRITICAL_ACK_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
+
 enum EventLogCmd {
     Append(String),
-    Flush {
+    /// Critical event with a per-event write acknowledgement: the sender
+    /// learns whether the writer actually opened/wrote the line.
+    AppendCritical {
+        line: String,
         done: oneshot::Sender<io::Result<()>>,
     },
+    Flush {
+        done: oneshot::Sender<FlushAck>,
+    },
+}
+
+/// Result of one write barrier, computed by the writer thread.
+struct FlushAck {
+    /// Current writability (flush of the open handle / last open failure).
+    result: io::Result<()>,
+    /// Losses the writer observed while processing commands (monotonic).
+    processed_lost: usize,
+    /// Last open/write failure that actually dropped an event, for the loss
+    /// report (the current `failure` may already be cleared by a reopen).
+    last_loss: Option<String>,
+    /// Last open/write failure text, for the loss report.
+    last_failure: Option<String>,
+}
+
+/// Loss accounting shared between the send side, the writer thread and the
+/// flush callers (ownership rules, see docs/DESIGN.md / Q1):
+///
+/// - the send side counts enqueue failures (`send_lost`): writer init failure,
+///   channel disconnect, queue rejection — a writer that never started or has
+///   already exited cannot be responsible for them;
+/// - the writer counts what it actually failed to persist (`processed_lost`)
+///   and never waits for a caller confirmation;
+/// - flush callers are serialized by `flush_lock`; the caller that receives a
+///   barrier result advances `reported`, so a cancelled flush does not consume
+///   an unreported loss.
+struct EventLogState {
+    /// Current open/write failure (cleared once the file is writable again).
+    failure: Mutex<Option<String>>,
+    /// Cause of the most recent lost event (kept independently of `failure`:
+    /// a successful reopen clears writability but not the loss reason).
+    last_loss: Mutex<Option<String>>,
+    /// Writer thread creation failure, surfaced on flush instead of silently
+    /// turning into a disconnected queue.
+    init_error: Mutex<Option<String>>,
+    send_lost: AtomicUsize,
+    processed_lost: AtomicUsize,
+    reported: AtomicUsize,
+    #[cfg(test)]
+    processed_commands: AtomicUsize,
+    #[cfg(test)]
+    critical_queued: AtomicUsize,
+}
+
+impl Default for EventLogState {
+    fn default() -> Self {
+        Self {
+            failure: Mutex::new(None),
+            last_loss: Mutex::new(None),
+            init_error: Mutex::new(None),
+            send_lost: AtomicUsize::new(0),
+            processed_lost: AtomicUsize::new(0),
+            reported: AtomicUsize::new(0),
+            #[cfg(test)]
+            processed_commands: AtomicUsize::new(0),
+            #[cfg(test)]
+            critical_queued: AtomicUsize::new(0),
+        }
+    }
 }
 
 /// Serializes event-log writes for one session.
@@ -24,46 +116,311 @@ enum EventLogCmd {
 /// backpressure path and bounds memory, matching the old synchronous writer's
 /// never-silently-drop behavior while keeping the common case off the tokio
 /// worker.
+
 #[derive(Clone)]
 pub(crate) struct EventLogWriter {
     tx: SyncSender<EventLogCmd>,
     warned: Arc<AtomicBool>,
+    state: Arc<EventLogState>,
+    flush_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl EventLogWriter {
     pub(crate) fn start(path: PathBuf) -> Self {
+        #[cfg(test)]
+        {
+            Self::start_impl(path, None)
+        }
+        #[cfg(not(test))]
+        {
+            Self::start_impl(path)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_paused(path: PathBuf, gate: Arc<EventLogWriterGate>) -> Self {
+        Self::start_impl(path, Some(gate))
+    }
+
+    fn start_impl(path: PathBuf, #[cfg(test)] gate: Option<Arc<EventLogWriterGate>>) -> Self {
         let (tx, rx) = sync_channel::<EventLogCmd>(EVENT_LOG_QUEUE_CAPACITY);
         let warned = Arc::new(AtomicBool::new(false));
-        let failure = Arc::new(Mutex::new(None));
+        let state = Arc::new(EventLogState::default());
         let thread_warned = warned.clone();
-        let thread_failure = failure.clone();
+        let thread_state = state.clone();
 
-        let _ = std::thread::Builder::new()
+        #[cfg(test)]
+        let thread_gate = gate.clone();
+        if let Err(error) = std::thread::Builder::new()
             .name("mink-event-log".to_string())
-            .spawn(move || run_writer(path, rx, &thread_warned, &thread_failure));
+            .spawn(move || {
+                run_writer(
+                    path,
+                    rx,
+                    &thread_warned,
+                    &thread_state,
+                    #[cfg(test)]
+                    thread_gate,
+                )
+            })
+        {
+            let message = format!("failed to start event log writer thread: {error}");
+            warn_once(&warned, &message);
+            *state
+                .init_error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(message);
+        }
 
-        Self { tx, warned }
+        Self {
+            tx,
+            warned,
+            state,
+            flush_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 
     /// Enqueue one JSON line. Blocks only when the bounded queue is full.
+    ///
+    /// Enqueue failures are counted here (the writer may not exist), and
+    /// surface on the next flush as unreported loss.
     pub(crate) fn send(&self, line: String) -> bool {
-        if self.tx.send(EventLogCmd::Append(line)).is_ok() {
-            true
-        } else {
-            warn_once(&self.warned, "event log writer is closed");
-            false
+        match self.tx.send(EventLogCmd::Append(line)) {
+            Ok(()) => true,
+            Err(_) => {
+                self.state.send_lost.fetch_add(1, Ordering::SeqCst);
+                warn_once(&self.warned, "event log writer is closed");
+                false
+            }
         }
     }
 
+    fn enqueue_failure(&self, detail: &str) -> io::Error {
+        let init = self
+            .state
+            .init_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let lost = self.state.send_lost.load(Ordering::SeqCst);
+        io::Error::other(match init {
+            Some(init) => format!("{init} ({detail}; lost {lost} event(s) before this barrier)"),
+            None => format!("{detail} (lost {lost} event(s) before this barrier)"),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn critical_queued(&self) -> u64 {
+        self.state.critical_queued.load(Ordering::SeqCst) as u64
+    }
+
+    /// Deadline- and cancel-bounded reliable commit for critical events.
+    ///
+    /// Returns the writer's **actual write result** (open/write), not just the
+    /// enqueue result, so callers never advance on a phantom success. Waits
+    /// are async: a full queue or a stalled writer cannot block a tokio worker
+    /// and the cancel token releases the wait immediately.
+    pub(crate) async fn send_critical_async(
+        &self,
+        line: String,
+        cancel: &crate::cancel::CancellationToken,
+        interrupt: &AtomicBool,
+        deadline: std::time::Duration,
+    ) -> io::Result<()> {
+        let started = std::time::Instant::now();
+        let aborted = || cancel.is_cancelled() || interrupt.load(Ordering::SeqCst);
+        let (done_tx, mut done_rx) = oneshot::channel();
+        let mut pending = Some(EventLogCmd::AppendCritical {
+            line,
+            done: done_tx,
+        });
+
+        // Fast path: a healthy writer commits without any waiting, so a
+        // pre-set interrupt does not discard instantly completable evidence.
+        // Enqueue without blocking the async worker.
+        loop {
+            let command = pending.take().expect("pending critical command");
+            match self.tx.try_send(command) {
+                Ok(()) => {
+                    #[cfg(test)]
+                    self.state.critical_queued.fetch_add(1, Ordering::SeqCst);
+                    break;
+                }
+                Err(std::sync::mpsc::TrySendError::Full(returned)) => {
+                    if aborted() {
+                        return Err(io::Error::other(
+                            "critical event wait aborted (cancel/interrupt) before the writer accepted it",
+                        ));
+                    }
+                    let remaining = deadline.saturating_sub(started.elapsed());
+                    if remaining.is_zero() {
+                        return Err(io::Error::other(format!(
+                            "event log queue full; critical event not enqueued within {deadline:?}"
+                        )));
+                    }
+                    pending = Some(returned);
+                    tokio::select! {
+                        biased;
+                        _ = stop_requested(cancel, interrupt) => {
+                            return Err(io::Error::other(
+                                "critical event wait aborted (cancel/interrupt) before the writer accepted it",
+                            ));
+                        }
+                        _ = tokio::time::sleep(remaining.min(std::time::Duration::from_millis(2))) => {}
+                    }
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(io::Error::other(
+                        "event log writer is closed; critical event not persisted",
+                    ));
+                }
+            }
+        }
+
+        // Wait for the writer's actual result.
+        let remaining = deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(io::Error::other(
+                "critical event enqueued but not acknowledged before the deadline",
+            ));
+        }
+        // Fast path: the acknowledgement may already be available.
+        match done_rx.try_recv() {
+            Ok(write_result) => return write_result,
+            Err(oneshot::error::TryRecvError::Closed) => {
+                return Err(io::Error::other(
+                    "event log writer dropped the critical acknowledgement",
+                ));
+            }
+            Err(oneshot::error::TryRecvError::Empty) => {}
+        }
+        // Let a healthy writer finish its in-flight acknowledgement before a
+        // pending cancel/interrupt aborts; only a genuinely stalled writer
+        // reaches the stop-aware wait below.
+        if aborted() {
+            match tokio::time::timeout(CRITICAL_ACK_GRACE.min(remaining), &mut done_rx).await {
+                Ok(Ok(write_result)) => return write_result,
+                Ok(Err(_)) => {
+                    return Err(io::Error::other(
+                        "event log writer dropped the critical acknowledgement",
+                    ));
+                }
+                Err(_) => {
+                    return Err(io::Error::other(
+                        "critical event wait aborted (cancel/interrupt) while awaiting the writer acknowledgement",
+                    ));
+                }
+            }
+        }
+        let remaining = deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(io::Error::other(
+                "event log writer did not acknowledge the critical event before the deadline",
+            ));
+        }
+        tokio::select! {
+            biased;
+            _ = stop_requested(cancel, interrupt) => Err(io::Error::other(
+                "critical event wait aborted (cancel/interrupt) while awaiting the writer acknowledgement",
+            )),
+            result = &mut done_rx => match result {
+                Ok(write_result) => write_result,
+                Err(_) => Err(io::Error::other(
+                    "event log writer dropped the critical acknowledgement",
+                )),
+            },
+            _ = tokio::time::sleep(remaining) => Err(io::Error::other(
+                "event log writer did not acknowledge the critical event before the deadline",
+            )),
+        }
+    }
+
+    /// Non-blocking enqueue for async callers (turn loop, runtime events).
+    ///
+    /// A full queue means the writer is stalled; blocking the async worker is
+    /// worse than a visible diagnostic drop, so the loss is counted and
+    /// reported by the next flush like any other unreported loss.
+    pub(crate) fn send_best_effort(&self, line: String) -> bool {
+        match self.tx.try_send(EventLogCmd::Append(line)) {
+            Ok(()) => true,
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                let lost = self.state.send_lost.fetch_add(1, Ordering::SeqCst) + 1;
+                warn_once(
+                    &self.warned,
+                    &format!(
+                        "event log queue is full; dropping diagnostic event ({lost} lost so far)"
+                    ),
+                );
+                false
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                self.state.send_lost.fetch_add(1, Ordering::SeqCst);
+                warn_once(&self.warned, "event log writer is closed");
+                false
+            }
+        }
+    }
+
+    /// Write barrier: report losses that happened at or before this barrier.
+    ///
+    /// The writer returns a snapshot without waiting for any confirmation; the
+    /// caller (serialized by `flush_lock`) advances the reported watermark when
+    /// it actually receives the snapshot. A flush cancelled before its result
+    /// arrives therefore leaves the loss unreported for the next flush.
     pub(crate) async fn flush(&self) -> io::Result<()> {
+        let _guard = self.flush_lock.lock().await;
+        let started = std::time::Instant::now();
+        let send_lost_before = self.state.send_lost.load(Ordering::SeqCst);
         let (done, done_rx) = oneshot::channel();
-        if self.tx.send(EventLogCmd::Flush { done }).is_err() {
-            return Err(io::Error::other("event log writer is closed"));
+        // Never block the async worker on the bounded queue: retry with async
+        // sleeps up to an internal deadline, then report a stalled writer so
+        // the caller (e.g. shutdown) can apply its own budget.
+        let enqueue_deadline = started + FLUSH_ENQUEUE_DEADLINE;
+        let mut command = Some(EventLogCmd::Flush { done });
+        loop {
+            let next = command.take().expect("flush command enqueued once");
+            match self.tx.try_send(next) {
+                Ok(()) => break,
+                Err(std::sync::mpsc::TrySendError::Full(returned)) => {
+                    if std::time::Instant::now() >= enqueue_deadline {
+                        return Err(self.enqueue_failure(
+                            "event log queue is full and the writer is not draining",
+                        ));
+                    }
+                    command = Some(returned);
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(self.enqueue_failure("event log writer is closed"));
+                }
+            }
         }
-        match done_rx.await {
-            Ok(result) => result,
-            Err(_) => Err(io::Error::other("event log writer dropped flush ack")),
+        let remaining = FLUSH_ACK_DEADLINE.saturating_sub(started.elapsed());
+        let ack = tokio::select! {
+            ack = done_rx => {
+                ack.map_err(|_| io::Error::other("event log writer dropped flush ack"))?
+            }
+            _ = tokio::time::sleep(remaining) => {
+                return Err(io::Error::other(format!(
+                    "event log flush was not acknowledged within {:?}; writer stalled",
+                    FLUSH_ACK_DEADLINE
+                )));
+            }
+        };
+
+        let total_lost = send_lost_before.saturating_add(ack.processed_lost);
+        let reported = self.state.reported.load(Ordering::SeqCst);
+        if total_lost > reported {
+            self.state.reported.store(total_lost, Ordering::SeqCst);
+            let detail = ack
+                .last_loss
+                .or(ack.last_failure)
+                .unwrap_or_else(|| "event log write failed".to_string());
+            return Err(io::Error::other(format!(
+                "event log lost {total_lost} event(s) that were never reported: {detail}"
+            )));
         }
+        ack.result
     }
 }
 
@@ -71,42 +428,65 @@ fn run_writer(
     path: PathBuf,
     rx: Receiver<EventLogCmd>,
     warned: &AtomicBool,
-    failure: &Mutex<Option<String>>,
+    state: &EventLogState,
+    #[cfg(test)] gate: Option<Arc<EventLogWriterGate>>,
 ) {
     let mut file = None;
 
-    while let Ok(command) = rx.recv() {
+    loop {
+        // Paused before receiving, so a stalled writer leaves the queue
+        // untouched (deterministic queue-full tests).
+        #[cfg(test)]
+        if let Some(gate) = &gate {
+            gate.wait_if_paused();
+        }
+        let Ok(command) = rx.recv() else {
+            break;
+        };
+        #[cfg(test)]
+        state.processed_commands.fetch_add(1, Ordering::SeqCst);
         match command {
             EventLogCmd::Append(line) => {
-                if file.is_none() {
-                    file = open_append(&path, warned, failure);
-                }
-                if let Some(handle) = file.as_mut()
-                    && let Err(error) = writeln!(handle, "{line}")
-                {
-                    let message = format!("failed to write event log {}: {error}", path.display());
-                    warn_once(warned, &message);
-                    set_failure(failure, message);
-                    // Drop the handle and retry opening on the next event
-                    // instead of treating one failed write as permanent.
-                    file = None;
+                if let Err(message) = write_event(&mut file, &path, warned, state, &line) {
+                    // Diagnostic event: count it as a loss the writer observed.
+                    record_loss(state, message);
                 }
             }
+            EventLogCmd::AppendCritical { line, done } => {
+                // Critical event: report the real open/write result back to
+                // the sender; do not count it as a silent loss (the caller
+                // decides whether to retry).
+                let result =
+                    write_event(&mut file, &path, warned, state, &line).map_err(io::Error::other);
+                let _ = done.send(result);
+            }
             EventLogCmd::Flush { done } => {
+                let processed_lost = state.processed_lost.load(Ordering::SeqCst);
+                let last_loss = state
+                    .last_loss
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
+                let failure = state
+                    .failure
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
                 let result = match file.as_mut() {
                     Some(file) => file.flush(),
-                    None => match failure
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .clone()
-                    {
+                    None => match failure.clone() {
                         Some(message) => Err(io::Error::other(message)),
                         // No events have been written yet: flushing an empty
                         // session is a no-op, not an error.
                         None => Ok(()),
                     },
                 };
-                let _ = done.send(result);
+                let _ = done.send(FlushAck {
+                    result,
+                    processed_lost,
+                    last_loss,
+                    last_failure: failure,
+                });
             }
         }
     }
@@ -116,36 +496,144 @@ fn run_writer(
     }
 }
 
+/// Attempt one append; returns a diagnosable message on open/write failure.
+///
+/// The caller decides whether the failure is a counted loss (diagnostics) or
+/// reported back through an acknowledgement (critical events).
+fn write_event(
+    file: &mut Option<std::fs::File>,
+    path: &std::path::Path,
+    warned: &AtomicBool,
+    state: &EventLogState,
+    line: &str,
+) -> std::result::Result<(), String> {
+    if file.is_none() {
+        *file = open_append(path, warned, state);
+        if file.is_none() {
+            let message = state
+                .failure
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+                .unwrap_or_else(|| "event log open failed".to_string());
+            return Err(message);
+        }
+    }
+    if let Some(handle) = file.as_mut()
+        && let Err(error) = writeln!(handle, "{line}")
+    {
+        let message = format!("failed to write event log {}: {error}", path.display());
+        warn_once(warned, &message);
+        set_failure(&state.failure, message.clone());
+        // Drop the handle and retry opening on the next event instead of
+        // treating one failed write as permanent.
+        *file = None;
+        return Err(message);
+    }
+    Ok(())
+}
+
+/// Completes as soon as the runtime cancel token fires or the current turn
+/// is interrupted (the public `interrupt_current_turn()` flag). Polling the
+/// atomic keeps this dependency-free and prompt (<=5 ms).
+async fn stop_requested(cancel: &crate::cancel::CancellationToken, interrupt: &AtomicBool) {
+    loop {
+        if interrupt.load(Ordering::SeqCst) {
+            return;
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
+        }
+    }
+}
+
 fn open_append(
     path: &std::path::Path,
     warned: &AtomicBool,
-    failure: &Mutex<Option<String>>,
+    state: &EventLogState,
 ) -> Option<std::fs::File> {
     match OpenOptions::new().create(true).append(true).open(path) {
         Ok(file) => {
-            clear_failure(failure);
+            // A successful reopen only restores writability. Unreported losses
+            // stay accounted until a flush caller actually reports them.
+            clear_failure(&state.failure);
             Some(file)
         }
         Err(error) => {
             let message = format!("failed to open event log {}: {error}", path.display());
             warn_once(warned, &message);
-            set_failure(failure, message);
+            set_failure(&state.failure, message);
             None
         }
     }
 }
 
 fn set_failure(failure: &Mutex<Option<String>>, message: String) {
-    *failure.lock().unwrap_or_else(|error| error.into_inner()) = Some(message);
+    *failure
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(message);
+}
+
+/// Record one lost event: monotonic counter plus the cause (kept separately
+/// from `failure`, which a successful reopen clears).
+fn record_loss(state: &EventLogState, message: String) {
+    state.processed_lost.fetch_add(1, Ordering::SeqCst);
+    *state
+        .last_loss
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(message);
 }
 
 fn clear_failure(failure: &Mutex<Option<String>>) {
-    *failure.lock().unwrap_or_else(|error| error.into_inner()) = None;
+    *failure
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 }
 
 pub(crate) fn warn_once(warned: &AtomicBool, message: &str) {
     if !warned.swap(true, Ordering::SeqCst) {
         eprintln!("[mink] Warning: {message}");
+    }
+}
+
+/// Test-only stall gate: pauses one writer thread at command boundaries so
+/// queue-full / shutdown-deadline behavior can be tested deterministically
+/// without affecting other writers.
+#[cfg(test)]
+pub(crate) struct EventLogWriterGate {
+    paused: Mutex<bool>,
+    cv: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl EventLogWriterGate {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            paused: Mutex::new(false),
+            cv: std::sync::Condvar::new(),
+        })
+    }
+
+    pub(crate) fn set_paused(&self, paused: bool) {
+        *self
+            .paused
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = paused;
+        self.cv.notify_all();
+    }
+
+    fn wait_if_paused(&self) {
+        let mut paused = self
+            .paused
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while *paused {
+            paused = self
+                .cv
+                .wait(paused)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
     }
 }
 
@@ -243,6 +731,151 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 
+    #[tokio::test]
+    async fn unreported_loss_surfaces_on_first_flush() {
+        let (root, missing_dir, path, writer) = loss_scenario();
+
+        // Wait until the writer actually processed the unopenable event.
+        wait_processed(&writer, 1).await;
+        tokio::fs::create_dir_all(&missing_dir).await.unwrap();
+        assert!(writer.send(r#"{"index":"kept"}"#.to_string()));
+        wait_processed(&writer, 2).await;
+
+        // Recovery must not hide the earlier loss: the first flush after it
+        // still reports.
+        let error = writer.flush().await.unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("lost 1 event(s)"), "{message}");
+        assert!(message.contains("failed to open"), "{message}");
+
+        // Reported once: the next flush is clean and the file has the kept line.
+        writer.flush().await.unwrap();
+        let contents = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(contents.contains("kept"), "{contents}");
+        assert!(!contents.contains("lost"), "{contents}");
+
+        drop(writer);
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn dropped_flush_ack_does_not_consume_loss() {
+        let (root, missing_dir, path, writer) = loss_scenario();
+        wait_processed(&writer, 1).await;
+        tokio::fs::create_dir_all(&missing_dir).await.unwrap();
+        assert!(writer.send(r#"{"index":"kept"}"#.to_string()));
+        wait_processed(&writer, 2).await;
+
+        // A barrier whose ack is dropped must not advance the watermark.
+        let (done, done_rx) = oneshot::channel();
+        writer
+            .tx
+            .send(EventLogCmd::Flush { done })
+            .expect("writer alive");
+        drop(done_rx);
+        wait_processed(&writer, 3).await;
+
+        // The writer kept consuming while no caller confirmed.
+        assert!(writer.send(r#"{"index":"after-dropped"}"#.to_string()));
+        wait_processed(&writer, 4).await;
+
+        let error = writer.flush().await.unwrap_err();
+        assert!(error.to_string().contains("lost 1 event(s)"), "{error}");
+        writer.flush().await.unwrap();
+        let contents = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(contents.contains("after-dropped"), "{contents}");
+
+        drop(writer);
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn serialized_flush_reports_once() {
+        let (root, missing_dir, _path, writer) = loss_scenario();
+        wait_processed(&writer, 1).await;
+        tokio::fs::create_dir_all(&missing_dir).await.unwrap();
+        assert!(writer.send(r#"{"index":"kept"}"#.to_string()));
+        wait_processed(&writer, 2).await;
+
+        let first = writer.flush().await;
+        let second = writer.flush().await;
+        assert!(first.is_err(), "{first:?}");
+        assert!(second.is_ok(), "{second:?}");
+
+        drop(writer);
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn enqueue_failure_is_counted_without_writer() {
+        // Receiver already gone: there is no writer to account for the loss,
+        // so the send side must do it and flush must report it directly.
+        let (tx, rx) = sync_channel::<EventLogCmd>(1);
+        drop(rx);
+        let writer = EventLogWriter {
+            tx,
+            warned: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(EventLogState::default()),
+            flush_lock: Arc::new(tokio::sync::Mutex::new(())),
+        };
+
+        assert!(!writer.send(r#"{"index":"lost"}"#.to_string()));
+        let error = writer.flush().await.unwrap_err();
+        assert!(error.to_string().contains("lost 1 event(s)"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn writer_init_failure_is_observable() {
+        let (tx, rx) = sync_channel::<EventLogCmd>(1);
+        drop(rx);
+        let state = Arc::new(EventLogState::default());
+        *state
+            .init_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some("failed to start event log writer thread: injected".to_string());
+        let writer = EventLogWriter {
+            tx,
+            warned: Arc::new(AtomicBool::new(false)),
+            state,
+            flush_lock: Arc::new(tokio::sync::Mutex::new(())),
+        };
+
+        let error = writer.flush().await.unwrap_err();
+        assert!(
+            error.to_string().contains("failed to start"),
+            "init failure must be observable on flush: {error}"
+        );
+    }
+
+    fn loss_scenario() -> (PathBuf, PathBuf, PathBuf, EventLogWriter) {
+        let root = std::env::temp_dir().join(format!(
+            "mink-event-log-loss-{}-{}",
+            std::process::id(),
+            uuid_like()
+        ));
+        let missing_dir = root.join("missing");
+        let path = missing_dir.join("events.jsonl");
+        let writer = EventLogWriter::start(path.clone());
+        assert!(writer.send(r#"{"index":"lost"}"#.to_string()));
+        (root, missing_dir, path, writer)
+    }
+
+    /// Deterministic processing barrier: waits until the writer thread has
+    /// consumed `count` commands (test-only counter), with a failure timeout.
+    async fn wait_processed(writer: &EventLogWriter, count: usize) {
+        for _ in 0..400 {
+            if writer.state.processed_commands.load(Ordering::SeqCst) >= count {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!(
+            "writer did not process {count} commands; processed={}",
+            writer.state.processed_commands.load(Ordering::SeqCst)
+        );
+    }
+
     fn uuid_like() -> String {
         format!(
             "{:x}",
@@ -251,5 +884,317 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         )
+    }
+    #[tokio::test]
+    async fn flush_does_not_block_when_queue_full_and_writer_is_paused() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-event-log-full-{}-{}",
+            std::process::id(),
+            uuid_like()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("events.jsonl");
+        let gate = EventLogWriterGate::new();
+        gate.set_paused(true);
+        let writer = EventLogWriter::start_paused(path.clone(), gate.clone());
+
+        // Fill the bounded queue exactly (no blocking send), with the writer stalled.
+        for index in 0..EVENT_LOG_QUEUE_CAPACITY {
+            assert!(writer.send(format!("{{\"index\":{index}}}")));
+        }
+
+        // flush must report instead of blocking the async worker forever
+        // (test-only enqueue deadline is 200 ms).
+        let started = std::time::Instant::now();
+        let error = writer.flush().await.unwrap_err();
+        assert!(error.to_string().contains("not draining"), "{error}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "flush must not block the async worker: {:?}",
+            started.elapsed()
+        );
+
+        // An independent async task keeps running while the writer is stalled.
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let ticks_task = ticks.clone();
+        let ticker = tokio::spawn(async move {
+            for _ in 0..3 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                ticks_task.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        ticker.await.unwrap();
+        assert!(
+            ticks.load(Ordering::SeqCst) >= 2,
+            "runtime must keep progressing while the event-log writer is stalled"
+        );
+
+        // Release the writer: everything drains exactly once and flush recovers.
+        gate.set_paused(false);
+        let mut recovered = false;
+        for _ in 0..400 {
+            if writer.flush().await.is_ok() {
+                recovered = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(recovered, "flush must recover after the writer resumes");
+
+        let contents = tokio::fs::read_to_string(&path).await.unwrap();
+        let lines = contents.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), EVENT_LOG_QUEUE_CAPACITY);
+        let unique = lines.iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            unique.len(),
+            EVENT_LOG_QUEUE_CAPACITY,
+            "no duplicate or lost events after recovery"
+        );
+
+        drop(writer);
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn best_effort_enqueue_degrades_visibly_when_writer_is_stalled() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-event-log-besteffort-{}-{}",
+            std::process::id(),
+            uuid_like()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("events.jsonl");
+        let gate = EventLogWriterGate::new();
+        gate.set_paused(true);
+        let writer = EventLogWriter::start_paused(path.clone(), gate.clone());
+
+        for index in 0..EVENT_LOG_QUEUE_CAPACITY {
+            assert!(writer.send_best_effort(format!("{{\"index\":{index}}}")));
+        }
+        assert!(
+            !writer.send_best_effort("{\"index\":\"overflow\"}".to_string()),
+            "a full queue must drop the diagnostic event instead of blocking"
+        );
+
+        let error = writer.flush().await.unwrap_err();
+        assert!(error.to_string().contains("lost 1 event(s)"), "{error}");
+
+        gate.set_paused(false);
+        let mut recovered = false;
+        for _ in 0..400 {
+            if writer.flush().await.is_ok() {
+                recovered = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(recovered);
+        drop(writer);
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn critical_commit_reports_real_write_failure() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-event-log-critical-io-{}-{}",
+            std::process::id(),
+            uuid_like()
+        ));
+        let path = dir.join("missing").join("events.jsonl");
+        let writer = EventLogWriter::start(path.clone());
+        let cancel = crate::cancel::CancellationToken::new();
+
+        let error = writer
+            .send_critical_async(
+                "{\"type\":\"prefix_snapshot\"}".to_string(),
+                &cancel,
+                &AtomicBool::new(false),
+                CRITICAL_ENQUEUE_DEADLINE,
+            )
+            .await
+            .expect_err("an open failure must reach the critical sender");
+        assert!(error.to_string().contains("failed to open"), "{error}");
+
+        // Recovery: create the directory and retry; the writer reopens.
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        writer
+            .send_critical_async(
+                "{\"type\":\"prefix_snapshot\"}".to_string(),
+                &cancel,
+                &AtomicBool::new(false),
+                CRITICAL_ENQUEUE_DEADLINE,
+            )
+            .await
+            .expect("critical commit must succeed after recovery");
+        writer.flush().await.unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents
+                .lines()
+                .filter(|line| line.contains("prefix_snapshot"))
+                .count(),
+            1,
+            "the failed attempt must not leave a phantom event"
+        );
+        drop(writer);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn critical_commit_does_not_block_async_worker_when_queue_full() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-event-log-critical-full-{}-{}",
+            std::process::id(),
+            uuid_like()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        let gate = EventLogWriterGate::new();
+        gate.set_paused(true);
+        let writer = EventLogWriter::start_paused(path.clone(), gate.clone());
+        for index in 0..EVENT_LOG_QUEUE_CAPACITY {
+            assert!(writer.send_best_effort(format!("{{\"index\":{index}}}")));
+        }
+
+        // An independent async task must keep progressing while the critical
+        // commit waits for capacity.
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let ticker_ticks = ticks.clone();
+        let ticker = tokio::spawn(async move {
+            for _ in 0..10 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                ticker_ticks.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        let cancel = crate::cancel::CancellationToken::new();
+        let started = std::time::Instant::now();
+        let error = writer
+            .send_critical_async(
+                "{\"type\":\"prefix_snapshot\"}".to_string(),
+                &cancel,
+                &AtomicBool::new(false),
+                CRITICAL_ENQUEUE_DEADLINE,
+            )
+            .await
+            .expect_err("a stalled full queue must hit the deadline");
+        assert!(error.to_string().contains("not enqueued within"), "{error}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "critical commit deadline: {:?}",
+            started.elapsed()
+        );
+        ticker.await.unwrap();
+        assert!(
+            ticks.load(Ordering::SeqCst) >= 5,
+            "the async worker must keep progressing while the commit waits"
+        );
+
+        // Release the writer: the critical commit retries successfully.
+        gate.set_paused(false);
+        writer
+            .send_critical_async(
+                "{\"type\":\"prefix_snapshot\"}".to_string(),
+                &cancel,
+                &AtomicBool::new(false),
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .expect("critical commit must succeed after drain");
+        writer.flush().await.unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("prefix_snapshot")
+        );
+        drop(writer);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn critical_commit_is_released_by_cancel() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-event-log-critical-cancel-{}-{}",
+            std::process::id(),
+            uuid_like()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        let gate = EventLogWriterGate::new();
+        gate.set_paused(true);
+        let writer = EventLogWriter::start_paused(path.clone(), gate.clone());
+        for index in 0..EVENT_LOG_QUEUE_CAPACITY {
+            assert!(writer.send_best_effort(format!("{{\"index\":{index}}}")));
+        }
+
+        let cancel = crate::cancel::CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task_writer = writer.clone();
+        let handle = tokio::spawn(async move {
+            task_writer
+                .send_critical_async(
+                    "{\"type\":\"prefix_snapshot\"}".to_string(),
+                    &task_cancel,
+                    &AtomicBool::new(false),
+                    std::time::Duration::from_secs(5),
+                )
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        cancel.cancel();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("cancel must release the critical commit")
+            .unwrap()
+            .expect_err("cancelled commit must report an error");
+        assert!(error.to_string().contains("aborted"), "{error}");
+
+        gate.set_paused(false);
+        drop(writer);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn critical_commit_is_released_by_turn_interrupt() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-event-log-critical-interrupt-{}-{}",
+            std::process::id(),
+            uuid_like()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        let gate = EventLogWriterGate::new();
+        gate.set_paused(true);
+        let writer = EventLogWriter::start_paused(path.clone(), gate.clone());
+        for index in 0..EVENT_LOG_QUEUE_CAPACITY {
+            assert!(writer.send_best_effort(format!("{{\"index\":{index}}}")));
+        }
+
+        let cancel = crate::cancel::CancellationToken::new();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        let task_writer = writer.clone();
+        let task_interrupt = interrupt.clone();
+        let handle = tokio::spawn(async move {
+            task_writer
+                .send_critical_async(
+                    "{\"type\":\"prefix_snapshot\"}".to_string(),
+                    &cancel,
+                    &task_interrupt,
+                    std::time::Duration::from_secs(5),
+                )
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        interrupt.store(true, Ordering::SeqCst);
+        let error = tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("turn interrupt must release the critical commit")
+            .unwrap()
+            .expect_err("interrupted commit must report an error");
+        assert!(error.to_string().contains("aborted"), "{error}");
+
+        gate.set_paused(false);
+        drop(writer);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

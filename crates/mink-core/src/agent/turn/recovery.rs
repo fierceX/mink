@@ -111,23 +111,24 @@ impl super::TurnExecutor {
             if normalized == snapshot.text {
                 continue; // 幂等：磁盘内容已与基线一致。
             }
-            let restored = crate::tools::snapshot::restore_text_shape(
-                snapshot.bom,
-                snapshot.crlf,
-                &snapshot.text,
-            );
+            let restored = crate::tools::snapshot::TextShape {
+                bom: snapshot.bom,
+                crlf: snapshot.crlf,
+            }
+            .restore(&snapshot.text);
             // 权限必须在发布前设置到临时文件上（发布后再 chmod 会留下
             // 错误权限窗口，chmod 失败还会被忽略）。读取失败则拒绝发布。
             let permissions = match std::fs::metadata(&full) {
                 Ok(meta) => meta.permissions(),
                 Err(error) => {
                     self.ctx
-                        .log_event(crate::events::EventLog::SignalRollbackError {
+                        .log_critical_event(crate::events::EventLog::SignalRollbackError {
                             path: full.display().to_string(),
                             error: format!(
                                 "cannot read permissions; refusing to publish rollback: {error}"
                             ),
-                        });
+                        })
+                        .await?;
                     continue;
                 }
             };
@@ -138,10 +139,11 @@ impl super::TurnExecutor {
                 &self.ctx.persistence_fault,
             ) {
                 self.ctx
-                    .log_event(crate::events::EventLog::SignalRollbackError {
+                    .log_critical_event(crate::events::EventLog::SignalRollbackError {
                         path: full.display().to_string(),
                         error: error.to_string(),
-                    });
+                    })
+                    .await?;
                 if self.ctx.persistence_fault.info().is_some() {
                     // Published-but-unsynced without successful recovery:
                     // fail closed instead of continuing on unknown state.
@@ -158,9 +160,11 @@ impl super::TurnExecutor {
             }));
         }
         if !rolled_back.is_empty() {
-            self.ctx.log_event(crate::events::EventLog::SignalRollback {
-                files: rolled_back.clone(),
-            });
+            self.ctx
+                .log_critical_event(crate::events::EventLog::SignalRollback {
+                    files: rolled_back.clone(),
+                })
+                .await?;
             self.ctx.display.render_info(&format!(
                 "Signal rollback: restored {} file(s) to their last read snapshot",
                 rolled_back.len()
@@ -200,11 +204,12 @@ impl super::TurnExecutor {
             Ok(executor) => executor,
             Err(error) => {
                 self.ctx
-                    .log_event(crate::events::EventLog::SignalReplanError {
+                    .log_critical_event(crate::events::EventLog::SignalReplanError {
                         attempts: self.local.replan_attempts,
                         session_id: session_id.clone(),
                         error: error.to_string(),
-                    });
+                    })
+                    .await?;
                 self.ctx.display.render_info(&format!(
                     "Signal replan unavailable: {error}; falling back to evidence/guard",
                 ));
@@ -212,12 +217,14 @@ impl super::TurnExecutor {
             }
         };
         let result = executor.execute(report).await;
-        self.ctx.log_event(crate::events::EventLog::SignalReplan {
-            attempts: self.local.replan_attempts,
-            session_id: session_id.clone(),
-            status: result.status.clone(),
-            text_len: result.text.len(),
-        });
+        self.ctx
+            .log_critical_event(crate::events::EventLog::SignalReplan {
+                attempts: self.local.replan_attempts,
+                session_id: session_id.clone(),
+                status: result.status.clone(),
+                text_len: result.text.len(),
+            })
+            .await?;
         if result.status != "ok" || result.text.trim().is_empty() {
             return Ok(None);
         }
@@ -411,17 +418,19 @@ impl super::TurnExecutor {
                     }
                     let budget = self.ctx.config.signal.evidence_max_chars;
                     let batch = self.signal_processor.evidence().render(budget, b);
-                    self.ctx.log_event(crate::events::EventLog::SignalHandover {
-                        belief: b,
-                        edited_paths: self.signal_processor.evidence().edited_paths.clone(),
-                        evidence: batch.text.clone(),
-                        options: vec![
-                            "retry".into(),
-                            "rollback_and_retry".into(),
-                            "replan".into(),
-                            "abandon".into(),
-                        ],
-                    });
+                    self.ctx
+                        .log_critical_event(crate::events::EventLog::SignalHandover {
+                            belief: b,
+                            edited_paths: self.signal_processor.evidence().edited_paths.clone(),
+                            evidence: batch.text.clone(),
+                            options: vec![
+                                "retry".into(),
+                                "rollback_and_retry".into(),
+                                "replan".into(),
+                                "abandon".into(),
+                            ],
+                        })
+                        .await?;
                     self.ctx.display.render_error(&format!(
                         "DecisionEngine: handing over (belief {b:.2}).\n{}",
                         batch.text

@@ -328,6 +328,11 @@ pub struct AgentSharedContext {
     /// fallback, so unset writers discard (with one warning) instead of
     /// silently writing through a different path.
     pub(crate) event_log_writer: Option<EventLogWriter>,
+    /// Serializes async prefix builds (held across the critical snapshot commit).
+    pub(crate) prefix_build_lock: tokio::sync::Mutex<()>,
+    /// Test instrumentation: number of stream-json stdout emissions.
+    #[cfg(test)]
+    pub(crate) stream_json_emits: std::sync::atomic::AtomicU64,
     /// Per-context stream-json flush throttle. Deliberately not process-global:
     /// multiple embedded runtimes must not share one flush clock.
     pub(crate) stream_flush_last: Mutex<Option<Instant>>,
@@ -399,10 +404,73 @@ impl AgentSharedContext {
         self.usage.scope(kind, self.config.session_id.clone())
     }
 
+    /// Reliable, deadline- and cancel-bounded commit for critical events.
+    ///
+    /// Returns the writer's actual write result (not merely "enqueued"), then
+    /// keeps the stream-json stdout behaviour of `log_event`: stdout is
+    /// emitted for both entry points through one shared implementation.
+    pub(crate) async fn log_critical_event(
+        &self,
+        event: crate::events::EventLog,
+    ) -> anyhow::Result<()> {
+        debug_assert!(
+            event.is_critical(),
+            "log_critical_event requires a critical event"
+        );
+        let value = serde_json::to_value(&event)?;
+        let line = serde_json::to_string(&value)?;
+        let persisted = if self.config.log_events {
+            match &self.event_log_writer {
+                Some(writer) => writer
+                    .send_critical_async(
+                        line.clone(),
+                        &self.cancel,
+                        &self.interrupt,
+                        crate::session::event_log::CRITICAL_ENQUEUE_DEADLINE,
+                    )
+                    .await
+                    .map_err(|error| anyhow::anyhow!("{error}")),
+                None => {
+                    let message =
+                        "event log writer is not configured; critical event not persisted";
+                    self.warn_event_log_once(message);
+                    Err(anyhow::anyhow!("{message}"))
+                }
+            }
+        } else {
+            Ok(())
+        };
+        // Compatibility: critical events keep the previous stdout behaviour
+        // even when the file commit failed (observability is independent).
+        self.emit_stream_json(&value, &line);
+        persisted
+    }
+
+    /// One implementation of the stream-json stdout path for every entry
+    /// point (`log_event`, `log_raw_event`, `log_critical_event`).
+    fn emit_stream_json(&self, value: &Value, line: &str) {
+        if self.config.output_format != OutputFormat::StreamJson {
+            return;
+        }
+        #[cfg(test)]
+        self.stream_json_emits.fetch_add(1, Ordering::SeqCst);
+        let mut stdout = std::io::stdout().lock();
+        let write_result = writeln!(stdout, "{line}");
+        let flush_result = if write_result.is_ok() && self.should_flush_stream_event(value) {
+            stdout.flush()
+        } else {
+            Ok(())
+        };
+        if let Err(e) = write_result.and(flush_result) {
+            self.warn_event_log_once(&format!("failed to write stream-json event: {e}"));
+        }
+    }
+
     /// Append a typed event to events.jsonl. In stream-json mode, also emit
     /// to stdout. Persistence requires a configured `EventLogWriter`; callers
     /// that build a context by hand (tests, embedded builders) inject one.
     pub fn log_event(&self, event: crate::events::EventLog) {
+        let critical = event.is_critical();
         let value = match serde_json::to_value(event) {
             Ok(value) => value,
             Err(e) => {
@@ -417,25 +485,32 @@ impl AgentSharedContext {
                 return;
             }
         };
-        if self.config.log_events {
+        if critical {
+            // Critical events must use `log_critical_event` (reliable, bounded,
+            // propagates failures). Reaching this generic path is a caller
+            // bug: never fail silently, but do not block a sync caller either.
+            debug_assert!(
+                false,
+                "critical events must be logged via log_critical_event"
+            );
+            self.warn_event_log_once(
+                "critical event logged through log_event; use log_critical_event for a reliable commit",
+            );
+            if self.config.log_events
+                && let Some(writer) = &self.event_log_writer
+            {
+                writer.send_best_effort(line.clone());
+            }
+        } else if self.config.log_events {
             if let Some(writer) = &self.event_log_writer {
-                writer.send(line.clone());
+                // Async turn paths must not block on writer backpressure: an
+                // overflow is counted and surfaces on the next flush.
+                writer.send_best_effort(line.clone());
             } else {
                 self.warn_event_log_once("event log writer is not configured; event discarded");
             }
         }
-        if self.config.output_format == OutputFormat::StreamJson {
-            let mut stdout = std::io::stdout().lock();
-            let write_result = writeln!(stdout, "{line}");
-            let flush_result = if write_result.is_ok() && self.should_flush_stream_event(&value) {
-                stdout.flush()
-            } else {
-                Ok(())
-            };
-            if let Err(e) = write_result.and(flush_result) {
-                self.warn_event_log_once(&format!("failed to write stream-json event: {e}"));
-            }
-        }
+        self.emit_stream_json(&value, &line);
     }
 
     /// Append a raw JSON event line to events.jsonl (and stream-json stdout
@@ -456,18 +531,7 @@ impl AgentSharedContext {
                 self.warn_event_log_once("event log writer is not configured; event discarded");
             }
         }
-        if self.config.output_format == OutputFormat::StreamJson {
-            let mut stdout = std::io::stdout().lock();
-            let write_result = writeln!(stdout, "{line}");
-            let flush_result = if write_result.is_ok() && self.should_flush_stream_event(&value) {
-                stdout.flush()
-            } else {
-                Ok(())
-            };
-            if let Err(e) = write_result.and(flush_result) {
-                self.warn_event_log_once(&format!("failed to write stream-json event: {e}"));
-            }
-        }
+        self.emit_stream_json(&value, &line);
     }
 
     pub(crate) async fn flush_event_log(&self) -> std::io::Result<()> {
