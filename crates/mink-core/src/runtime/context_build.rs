@@ -52,6 +52,13 @@ pub(crate) struct BuiltAgentContext {
     pub is_new: bool,
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    /// Internal test injection: use this writer instead of opening the
+    /// session's own events.jsonl (no production API change).
+    pub(crate) static TEST_EVENT_LOG_WRITER: Option<crate::session::event_log::EventLogWriter>;
+}
+
 pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<BuiltAgentContext> {
     let mut config = params.config.clone();
     config.session_id = params.session_id.clone();
@@ -108,9 +115,13 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         }
         Arc::new(router)
     };
-    let event_log_writer = config
-        .log_events
-        .then(|| crate::session::event_log::EventLogWriter::start(paths.events.clone()));
+    let event_log_writer = config.log_events.then(|| {
+        #[cfg(test)]
+        if let Ok(Some(writer)) = TEST_EVENT_LOG_WRITER.try_with(|writer| writer.clone()) {
+            return writer;
+        }
+        crate::session::event_log::EventLogWriter::start(paths.events.clone())
+    });
     let compaction = Arc::new(
         CompactionEngine::new(
             store.clone(),
@@ -181,6 +192,9 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         interrupt: params.interrupt,
         event_log_warned: AtomicBool::new(false),
         event_log_writer,
+        prefix_build_lock: tokio::sync::Mutex::new(()),
+        #[cfg(test)]
+        stream_json_emits: std::sync::atomic::AtomicU64::new(0),
         stream_flush_last: Mutex::new(None),
     });
     ctx.log_event(crate::events::EventLog::ToolSurface {

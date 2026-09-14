@@ -5,7 +5,7 @@ use crate::ui::{
     ToolPresentation,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,11 +198,103 @@ impl EventDispatcher {
     }
 }
 
+/// Default pending-progress budget for a live turn stream (1 MiB).
+pub(crate) const PROGRESS_PENDING_BYTES_LIMIT: usize = 1 << 20;
+
+/// Minimum bytes charged per progress event: queue-slot and structural
+/// overhead must count even for empty deltas (zero-length events would
+/// otherwise consume unbounded slots for free).
+pub(crate) const PROGRESS_EVENT_MIN_BYTES: usize = 128;
+
+/// Producer-side byte budget for coalescible progress events.
+///
+/// Text/Thinking deltas are display progress: when the pending (sent but not
+/// yet consumed) progress bytes exceed the budget, further deltas are dropped
+/// and one reliable notice is emitted instead. Reliable events (tool results,
+/// stop/error, control updates) are never dropped; the bound therefore covers
+/// the unbounded-growth case without introducing producer blocking (a bounded
+/// channel would deadlock `outcome()`-only consumers).
+pub(crate) struct ProgressBudget {
+    limit: usize,
+    pending: AtomicUsize,
+    dropped: AtomicU64,
+    notice_sent: AtomicBool,
+}
+
+impl ProgressBudget {
+    pub(crate) fn new(limit: usize) -> Arc<Self> {
+        Arc::new(Self {
+            limit,
+            pending: AtomicUsize::new(0),
+            dropped: AtomicU64::new(0),
+            notice_sent: AtomicBool::new(false),
+        })
+    }
+
+    /// Reserve one progress delta (payload length + per-event minimum);
+    /// `false` means the delta must be dropped (caller emits the notice).
+    pub(crate) fn reserve(&self, payload_len: usize) -> bool {
+        let bytes = payload_len.max(PROGRESS_EVENT_MIN_BYTES);
+        let mut current = self.pending.load(Ordering::Acquire);
+        loop {
+            if current.saturating_add(bytes) > self.limit {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+            match self.pending.compare_exchange_weak(
+                current,
+                current + bytes,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Release consumed progress bytes (same charge as `reserve`).
+    pub(crate) fn release(&self, payload_len: usize) {
+        let bytes = payload_len.max(PROGRESS_EVENT_MIN_BYTES);
+        let _ = self
+            .pending
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(current.saturating_sub(bytes))
+            });
+    }
+
+    fn should_notice(&self) -> bool {
+        !self.notice_sent.swap(true, Ordering::AcqRel)
+    }
+
+    /// Pending (sent but not yet consumed) progress bytes, including the
+    /// per-event structural minimum.
+    pub(crate) fn pending(&self) -> usize {
+        self.pending.load(Ordering::Acquire)
+    }
+
+    /// Number of progress deltas dropped for exceeding the budget.
+    pub(crate) fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+impl AgentEventKind {
+    /// Progress deltas eligible for budget-based dropping.
+    pub(crate) fn progress_len(&self) -> Option<usize> {
+        match self {
+            Self::Text { content } | Self::Thinking { content } => Some(content.len()),
+            _ => None,
+        }
+    }
+}
+
 pub(crate) struct TurnEventEmitter {
     turn_id: TurnId,
     next_sequence: AtomicU64,
     tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
     dispatcher: Option<Arc<EventDispatcher>>,
+    progress_budget: Option<Arc<ProgressBudget>>,
 }
 
 impl TurnEventEmitter {
@@ -216,20 +308,57 @@ impl TurnEventEmitter {
             next_sequence: AtomicU64::new(1),
             tx,
             dispatcher,
+            progress_budget: None,
         }
     }
 
+    /// Attach a pending-progress byte budget (used by `stream_turn`).
+    pub(crate) fn with_progress_budget(mut self, budget: Arc<ProgressBudget>) -> Self {
+        self.progress_budget = Some(budget);
+        self
+    }
+
     pub(crate) fn emit(&self, kind: AgentEventKind) {
-        let event = AgentEvent {
+        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
+        let make_event = |kind| AgentEvent {
             turn_id: Some(self.turn_id.clone()),
-            sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
+            sequence,
             kind,
         };
+
+        // Stream exit: bounded progress budget (only when a stream subscriber
+        // exists). Reliable events always pass.
         if let Some(tx) = &self.tx {
-            let _ = tx.send(event.clone());
+            let stream_kind = match &self.progress_budget {
+                Some(budget) => match kind.progress_len() {
+                    Some(bytes) => {
+                        if budget.reserve(bytes) {
+                            Some(kind.clone())
+                        } else if budget.should_notice() {
+                            Some(AgentEventKind::Info {
+                                message: format!(
+                                    "live progress output exceeded the pending {} KiB budget; deltas were dropped for this stream (the final result is unaffected)",
+                                    budget.limit / 1024
+                                ),
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    None => Some(kind.clone()),
+                },
+                None => Some(kind.clone()),
+            };
+            if let Some(stream_kind) = stream_kind {
+                let _ = tx.send(make_event(stream_kind));
+            }
         }
+
+        // Observer exit: independent delivery policy (EventDispatcher owns its
+        // own bounded queue and overflow handling). A slow stream consumer must
+        // not starve the observer.
         if let Some(dispatcher) = &self.dispatcher {
-            dispatcher.dispatch(event);
+            dispatcher.dispatch(make_event(kind));
         }
     }
 }
