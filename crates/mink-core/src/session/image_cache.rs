@@ -215,20 +215,38 @@ fn verify_existing_object(target: &Path, expected_len: usize, id: &str) -> Resul
     Ok(())
 }
 
+/// Sync one directory after the object was linked.
+///
+/// Call this only **after** the content-addressed object is published:
+/// an error here means the object is visible but its durability is not
+/// confirmed. Opening the directory failing is a real error (the bucket must
+/// exist); filesystems that cannot fsync directories (EINVAL/ENOTSUP) are
+/// treated as "unsupported" and stay best-effort.
 fn sync_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
-        if let Ok(dir) = std::fs::File::open(path)
-            && let Err(error) = dir.sync_all()
-        {
+        let dir = std::fs::File::open(path).with_context(|| {
+            format!(
+                "failed to open directory {} for sync (image object may be published but its durability is unconfirmed)",
+                path.display()
+            )
+        })?;
+        if let Err(error) = dir.sync_all() {
             let unsupported = error
                 .raw_os_error()
                 .is_some_and(|code| code == libc::EINVAL || code == libc::ENOTSUP);
             if !unsupported {
-                return Err(error.into());
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to sync directory {} (image object may be published but its durability is unconfirmed)",
+                        path.display()
+                    )
+                });
             }
         }
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -243,6 +261,21 @@ mod tests {
             std::thread::current().name().unwrap_or("t")
         ));
         (ImageCache::new(&home), home)
+    }
+
+    #[test]
+    fn directory_open_failure_is_reported_not_swallowed() {
+        let missing = std::env::temp_dir().join(format!(
+            "mink-image-sync-missing-{}-{}",
+            std::process::id(),
+            uuid_tail()
+        ));
+        let _ = std::fs::remove_dir_all(&missing);
+        let error = sync_directory(&missing)
+            .expect_err("opening a missing directory for sync must be reported");
+        let message = error.to_string();
+        assert!(message.contains("sync"), "{message}");
+        assert!(message.contains("durability"), "{message}");
     }
 
     #[test]

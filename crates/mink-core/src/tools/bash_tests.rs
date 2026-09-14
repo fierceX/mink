@@ -128,7 +128,7 @@ fn execute_in_dir_uses_requested_cwd() {
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("marker.txt"), "ok").unwrap();
 
-    let (result, code) = execute_with_interrupt_in_dir(
+    let (result, code, _) = execute_with_interrupt_in_dir(
         "test -f marker.txt && echo found",
         None,
         600,

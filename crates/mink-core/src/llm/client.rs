@@ -362,7 +362,7 @@ impl LlmBackend for OpenAiCompatibleBackend {
                 attempt_count: failure.attempt_count,
                 error: failure.error,
             })?;
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(SSE_QUEUE_CAPACITY);
         let cancel = request.cancel.linked_child_token();
         AsyncLlClient::spawn_stream_task(resp, cancel.clone(), tx);
         Ok(LlmResponseStream {
@@ -376,6 +376,22 @@ pub struct AsyncLlClient {
     client: reqwest::Client,
     api_url: String,
     api_key: String,
+}
+
+/// Bounded producer→consumer queue for one SSE response.
+///
+/// The producer (`spawn_stream_task`) uses async sends: when the consumer is
+/// slow the network read backpressures instead of accumulating unbounded
+/// events. Dropping the consumer (cancel/abandon) makes sends fail and the
+/// task exits.
+const SSE_QUEUE_CAPACITY: usize = 1024;
+
+/// Outcome of forwarding buffered SSE events.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SseSendStatus {
+    Delivered,
+    /// Cancelled: the caller must stop without waiting for capacity.
+    Stopped,
 }
 
 pub(crate) struct SendFailure {
@@ -408,19 +424,20 @@ impl AsyncLlClient {
     fn spawn_stream_task(
         resp: reqwest::Response,
         cancel: crate::cancel::CancellationToken,
-        tx: mpsc::UnboundedSender<Result<Event>>,
+        tx: mpsc::Sender<Result<Event>>,
     ) {
         tokio::spawn(async move {
             let mut byte_stream = resp.bytes_stream();
             let mut buf: Vec<u8> = Vec::new();
             let mut decode_errors = 0u32;
             let mut clean_end = false;
-
             let mut parser = OpenAIParser::new();
+            let mut pending: Vec<Event> = Vec::new();
+
             'outer: loop {
                 tokio::select! {
                     _ = cancel.cancelled() => {
-                        tx.send(Ok(Event::Stop(crate::protocol::StopEvent { reason: "interrupted".into() }))).ok();
+                        AsyncLlClient::try_send_interrupted(&tx);
                         clean_end = true;
                         break 'outer;
                     }
@@ -434,20 +451,28 @@ impl AsyncLlClient {
                                     let l = line.trim();
                                     if l.is_empty() { continue; }
                                     let full = format!("{l}\n");
-                                    match parser.process_line(&full, &mut |e| { tx.send(Ok(e)).ok(); Ok(()) }) {
+                                    let parsed = parser.process_line(&full, &mut |e| {
+                                        pending.push(e);
+                                        Ok(())
+                                    });
+                                    if AsyncLlClient::send_events(&tx, &mut pending, &cancel).await == SseSendStatus::Stopped {
+                                        clean_end = true;
+                                        break 'outer;
+                                    }
+                                    match parsed {
                                         Ok(true) => {
                                             clean_end = true;
                                             break 'outer;
                                         }
                                         Err(e) => {
                                             if is_fatal_parser_error(&e) {
-                                                tx.send(Err(e)).ok();
+                                                let _ = AsyncLlClient::send_one(&tx, Err(e), &cancel).await;
                                                 clean_end = true;
                                                 break 'outer;
                                             }
                                             decode_errors += 1;
                                             if decode_errors > MAX_STREAM_ERRORS {
-                                                tx.send(Err(e)).ok();
+                                                let _ = AsyncLlClient::send_one(&tx, Err(e), &cancel).await;
                                                 clean_end = true;
                                                 break 'outer;
                                             }
@@ -459,7 +484,7 @@ impl AsyncLlClient {
                             Some(Err(e)) => {
                                 decode_errors += 1;
                                 if decode_errors > MAX_STREAM_ERRORS {
-                                    tx.send(Err(anyhow::anyhow!("stream: {e}"))).ok();
+                                    let _ = AsyncLlClient::send_one(&tx, Err(anyhow::anyhow!("stream: {e}")), &cancel).await;
                                     clean_end = true;
                                     break 'outer;
                                 }
@@ -473,23 +498,25 @@ impl AsyncLlClient {
                                     let l = line.trim();
                                     if !l.is_empty() {
                                         let full = format!("{l}\n");
-                                        match parser.process_line(
-                                            &full,
-                                            &mut |e| {
-                                                tx.send(Ok(e)).ok();
-                                                Ok(())
-                                            },
-                                        ) {
+                                        let parsed = parser.process_line(&full, &mut |e| {
+                                            pending.push(e);
+                                            Ok(())
+                                        });
+                                        if AsyncLlClient::send_events(&tx, &mut pending, &cancel).await == SseSendStatus::Stopped {
+                                            clean_end = true;
+                                            break 'outer;
+                                        }
+                                        match parsed {
                                             Ok(true) => clean_end = true,
                                             Ok(false) => {}
                                             Err(e) => {
                                                 if is_fatal_parser_error(&e) {
-                                                    tx.send(Err(e)).ok();
+                                                    let _ = AsyncLlClient::send_one(&tx, Err(e), &cancel).await;
                                                     clean_end = true;
                                                 } else {
                                                     decode_errors += 1;
                                                     if decode_errors > MAX_STREAM_ERRORS {
-                                                        tx.send(Err(e)).ok();
+                                                        let _ = AsyncLlClient::send_one(&tx, Err(e), &cancel).await;
                                                         clean_end = true;
                                                     }
                                                 }
@@ -503,21 +530,59 @@ impl AsyncLlClient {
                     }
                 }
             }
+
             if !clean_end
                 && let Err(e) = parser.finish_eof(&mut |e| {
-                    tx.send(Ok(e)).ok();
+                    pending.push(e);
                     Ok(())
                 })
             {
-                tx.send(Err(e)).ok();
+                let _ = AsyncLlClient::send_one(&tx, Err(e), &cancel).await;
             }
             parser
                 .flush(&mut |e| {
-                    tx.send(Ok(e)).ok();
+                    pending.push(e);
                     Ok(())
                 })
                 .ok();
+            let _ = AsyncLlClient::send_events(&tx, &mut pending, &cancel).await;
         });
+    }
+
+    /// Forward buffered parser events; every blocking send also observes the
+    /// cancel token, so a stalled (but alive) consumer cannot pin the task.
+    async fn send_events(
+        tx: &mpsc::Sender<Result<Event>>,
+        events: &mut Vec<Event>,
+        cancel: &crate::cancel::CancellationToken,
+    ) -> SseSendStatus {
+        for event in events.drain(..) {
+            if !AsyncLlClient::send_one(tx, Ok(event), cancel).await {
+                return SseSendStatus::Stopped;
+            }
+        }
+        SseSendStatus::Delivered
+    }
+
+    /// Send one item while observing cancel; `false` means stop the task.
+    async fn send_one(
+        tx: &mpsc::Sender<Result<Event>>,
+        item: Result<Event>,
+        cancel: &crate::cancel::CancellationToken,
+    ) -> bool {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => false,
+            result = tx.send(item) => result.is_ok(),
+        }
+    }
+
+    /// Best-effort interruption notice: never waits for capacity (the
+    /// consumer may be stalled), so cancel handling cannot deadlock.
+    fn try_send_interrupted(tx: &mpsc::Sender<Result<Event>>) {
+        let _ = tx.try_send(Ok(Event::Stop(crate::protocol::StopEvent {
+            reason: "interrupted".into(),
+        })));
     }
 
     async fn send_with_retry(
@@ -667,14 +732,14 @@ pub(crate) async fn stream_backend(
         Ok::<_, anyhow::Error>(messages)
     })
     .await??;
-    let capture = ctx.usage.capture(
+    let mut usage_guard = crate::session::usage::UsageGuard::new(ctx.usage.capture(
         ctx.usage_scope(if ctx.is_sub_agent {
             UsageKind::SubAgent
         } else {
             UsageKind::Agent
         }),
         model_name.to_string(),
-    );
+    ));
     let request = LlmRequest {
         purpose,
         model: model_name.to_string(),
@@ -712,10 +777,13 @@ pub(crate) async fn stream_backend(
         }
         Err(error) => {
             let attempt_count = request_failure_attempt_count(&error);
-            record_unreported(&capture, attempt_count, format!("request_failed: {error}"));
+            usage_guard.record_unreported(attempt_count, format!("request_failed: {error}"));
             return Err(error);
         }
     };
+    let capture = usage_guard
+        .take()
+        .expect("usage guard transferred exactly once");
     Ok(Box::pin(MeteredStream::new(
         response.events,
         capture,
@@ -739,7 +807,7 @@ fn can_retry(attempt: u32, start: std::time::Instant) -> bool {
 }
 
 pub struct SseEventStream {
-    rx: mpsc::UnboundedReceiver<Result<Event>>,
+    rx: mpsc::Receiver<Result<Event>>,
     cancel: crate::cancel::CancellationToken,
 }
 

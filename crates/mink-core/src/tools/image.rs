@@ -262,10 +262,12 @@ mod tests {
     }
 
     #[test]
-    fn format_mime_is_non_empty() {
-        for format in ImageFormat::ALL {
-            assert!(!format.mime().is_empty());
-        }
+    fn format_mime_mapping_is_exact() {
+        // "non-empty" cannot catch a swapped mapping; assert the real values.
+        assert_eq!(ImageFormat::Png.mime(), "image/png");
+        assert_eq!(ImageFormat::Jpeg.mime(), "image/jpeg");
+        assert_eq!(ImageFormat::Gif.mime(), "image/gif");
+        assert_eq!(ImageFormat::Webp.mime(), "image/webp");
     }
 }
 

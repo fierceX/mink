@@ -288,6 +288,8 @@ impl super::runner::ToolExec for PythonSandboxTool {
             super::metadata::ToolResultKind::Command,
         )
         .storm_exempt()
+        // 仅在 enabled_tools 显式列出时进入工具面。
+        .explicit_only()
         .mutating()
     }
 
@@ -352,6 +354,7 @@ impl super::runner::ToolExec for PythonSandboxTool {
             plan_command: None,
             state_metadata: None,
             presentation: None,
+            termination: None,
         })
     }
 }

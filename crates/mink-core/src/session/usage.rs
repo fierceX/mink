@@ -372,6 +372,49 @@ pub(crate) fn read_records(path: &Path) -> Result<Vec<UsageRecord>> {
     Ok(records)
 }
 
+/// Owns the single completion right of one usage capture.
+///
+/// Created before a backend request starts; on success the capture is
+/// transferred to `MeteredStream`, on explicit failure it is consumed by an
+/// unreported record. If the owning future is dropped (caller cancelled or a
+/// deadline fired) the guard records exactly one unknown-usage entry: an
+/// in-flight request must not vanish silently from the journal.
+///
+/// Deliberately not `Clone` (unlike `UsageCapture`) so at most one record can
+/// be produced for one request.
+pub(crate) struct UsageGuard {
+    capture: Option<UsageCapture>,
+}
+
+impl UsageGuard {
+    pub(crate) fn new(capture: UsageCapture) -> Self {
+        Self {
+            capture: Some(capture),
+        }
+    }
+
+    /// Transfer ownership to the stream that will record the real usage.
+    pub(crate) fn take(&mut self) -> Option<UsageCapture> {
+        self.capture.take()
+    }
+
+    /// Record one unreported entry (explicit error/cancel paths).
+    pub(crate) fn record_unreported(&mut self, attempt_count: u32, reason: impl Into<String>) {
+        let Some(capture) = self.capture.take() else {
+            return;
+        };
+        if let Err(error) = capture.unreported(attempt_count, reason) {
+            eprintln!("[mink] Warning: failed to record LLM usage: {error}");
+        }
+    }
+}
+
+impl Drop for UsageGuard {
+    fn drop(&mut self) {
+        self.record_unreported(1, "request_cancelled_before_usage");
+    }
+}
+
 #[cfg(test)]
 #[path = "usage_tests.rs"]
 mod tests;

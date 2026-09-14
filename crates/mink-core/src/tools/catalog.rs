@@ -4,7 +4,8 @@ use anyhow::{Result, bail, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 
-const FEATURE_GATED_TOOLS: &[(&str, &str)] = &[("PythonSandbox", "python-sandbox")];
+/// (tool, required feature, explicit-only activation).
+const FEATURE_GATED_TOOLS: &[(&str, &str, bool)] = &[("PythonSandbox", "python-sandbox", true)];
 
 #[derive(Clone)]
 pub struct CatalogTool {
@@ -54,7 +55,10 @@ impl ToolCatalog {
             );
         }
 
-        let feature_gates: BTreeMap<_, _> = FEATURE_GATED_TOOLS.iter().copied().collect();
+        let feature_gates: BTreeMap<_, _> = FEATURE_GATED_TOOLS
+            .iter()
+            .map(|(name, feature, explicit_only)| (*name, (*feature, *explicit_only)))
+            .collect();
         let mut ordered = Vec::with_capacity(schemas.len());
         let mut by_name = BTreeMap::new();
         for schema in schemas {
@@ -67,15 +71,22 @@ impl ToolCatalog {
                 !by_name.contains_key(&name),
                 "duplicate schema for tool '{name}'"
             );
-            let availability = if let Some(metadata) = registry.remove(name.as_str()) {
-                ToolBuildAvailability::Compiled { metadata }
-            } else if let Some(required_feature) = feature_gates.get(name.as_str()) {
-                ToolBuildAvailability::FeatureUnavailable { required_feature }
+            let (availability, explicit_only) = if let Some(metadata) =
+                registry.remove(name.as_str())
+            {
+                let explicit_only = metadata.explicit_only;
+                (ToolBuildAvailability::Compiled { metadata }, explicit_only)
+            } else if let Some((required_feature, explicit_only)) = feature_gates.get(name.as_str())
+            {
+                (
+                    ToolBuildAvailability::FeatureUnavailable { required_feature },
+                    *explicit_only,
+                )
             } else {
                 bail!("schema for '{name}' has no compiled executor or feature declaration");
             };
             by_name.insert(name.clone(), ordered.len());
-            let default_activation = if name == "PythonSandbox" {
+            let default_activation = if explicit_only {
                 ToolDefaultActivation::ExplicitOnly
             } else {
                 ToolDefaultActivation::Enabled
@@ -93,7 +104,7 @@ impl ToolCatalog {
             "compiled executors missing schemas: {}",
             registry.keys().cloned().collect::<Vec<_>>().join(", ")
         );
-        for (name, _) in FEATURE_GATED_TOOLS {
+        for (name, _, _) in FEATURE_GATED_TOOLS {
             ensure!(
                 by_name.contains_key(*name),
                 "feature declaration references unknown tool '{name}'"

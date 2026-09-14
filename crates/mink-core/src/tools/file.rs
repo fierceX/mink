@@ -1,4 +1,5 @@
 use crate::resources::selector::{select_text_lines, split_read_path_selection};
+use crate::tools::snapshot::TextShape;
 use crate::tools::surface::FilesystemBackend;
 use anyhow::{Result, anyhow, bail, ensure};
 use similar::{ChangeTag, TextDiff};
@@ -716,86 +717,87 @@ fn format_read_only_virtual(display_path: &str, start_line: usize, content: &str
     out
 }
 
-#[derive(Debug, Clone)]
-struct TextShape {
-    bom: bool,
-    crlf: bool,
+/// Existing-target permissions, distinguishing "absent" from "cannot read":
+/// a swallowed metadata error would publish the file under wrong permissions.
+enum ExistingTarget {
+    Absent,
+    Present(std::fs::Permissions),
 }
 
-fn decode_text_shape(raw: &str) -> (TextShape, String) {
-    let bom = raw.starts_with('\u{feff}');
-    let without_bom = raw.strip_prefix('\u{feff}').unwrap_or(raw);
-    // 仅当文件至少有一个 LF，且全部 LF 都是 CRLF 的一部分才按 CRLF 恢复。
-    // Iterator::all 对空集合恒为 true："" 和 "hello" 没有 LF，必须显式
-    // 排除，否则无换行内容会被误判为 CRLF。
-    let bytes = without_bom.as_bytes();
-    let has_lf = bytes.contains(&b'\n');
-    let crlf = has_lf
-        && bytes
-            .iter()
-            .enumerate()
-            .all(|(i, b)| *b != b'\n' || (i > 0 && bytes[i - 1] == b'\r'));
-    (
-        TextShape { bom, crlf },
-        crate::tools::snapshot::normalize_snapshot_text(without_bom),
-    )
-}
-
-fn restore_text_shape(shape: &TextShape, normalized: &str) -> String {
-    let text = if shape.crlf {
-        normalized.replace('\n', "\r\n")
-    } else {
-        normalized.to_string()
-    };
-    if shape.bom {
-        format!("\u{feff}{text}")
-    } else {
-        text
+fn existing_target(path: &Path) -> Result<ExistingTarget> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(ExistingTarget::Present(metadata.permissions())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ExistingTarget::Absent),
+        Err(error) => Err(anyhow!(
+            "failed to read metadata for {}: {error}",
+            path.display()
+        )),
     }
 }
 
-fn atomic_write(path: &Path, content: &str) -> Result<()> {
-    use std::io::Write as _;
+/// Create a hidden staging file next to `target`.
+///
+/// When the target already exists (final permissions known), the staging file
+/// is created restrictively (0600 on Unix) so content is never stored with
+/// wider permissions than the final target; new files keep the default umask
+/// mode, matching previous user-file behavior.
+fn stage_temp_file(
+    target: &Path,
+    kind: &str,
+    restrict: bool,
+) -> Result<(std::fs::File, std::path::PathBuf)> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let name = path
+    let name = target
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("file");
-    let temporary = parent.join(format!(".{name}.mink-edit-{}-{stamp}", std::process::id()));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
-    if let Ok(metadata) = std::fs::metadata(path)
-        && let Err(error) = file.set_permissions(metadata.permissions())
-    {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(error.into());
+    let temporary = parent.join(format!(".{name}.{kind}-{}-{stamp}", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if restrict {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    if let Err(error) = file
-        .write_all(content.as_bytes())
-        .and_then(|_| file.sync_all())
-    {
+    #[cfg(not(unix))]
+    let _ = restrict;
+    let file = options.open(&temporary)?;
+    Ok((file, temporary))
+}
+
+fn atomic_write(path: &Path, content: &str) -> Result<()> {
+    use std::io::Write as _;
+
+    let existing = existing_target(path)?;
+    let (mut file, temporary) = stage_temp_file(
+        path,
+        "mink-edit",
+        matches!(existing, ExistingTarget::Present(_)),
+    )?;
+    let result = (|| -> Result<()> {
+        if let ExistingTarget::Present(permissions) = &existing {
+            file.set_permissions(permissions.clone())?;
+        }
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
-        return Err(error.into());
     }
-    if let Err(error) = std::fs::rename(&temporary, path) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(error.into());
-    }
-    Ok(())
+    result
 }
 
 fn move_file_noclobber(source: &Path, destination: &Path, replacement: Option<&str>) -> Result<()> {
     use std::io::Write as _;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
@@ -806,22 +808,14 @@ fn move_file_noclobber(source: &Path, destination: &Path, replacement: Option<&s
     );
 
     if let Some(content) = replacement {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let name = destination
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("file");
-        let temporary = parent.join(format!(".{name}.mink-move-{}-{stamp}", std::process::id()));
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
+        let source_permissions = std::fs::metadata(source)
+            .map(|metadata| metadata.permissions())
+            .ok();
+        let (mut file, temporary) =
+            stage_temp_file(destination, "mink-move", source_permissions.is_some())?;
         let operation = (|| -> Result<()> {
-            if let Ok(metadata) = std::fs::metadata(source) {
-                file.set_permissions(metadata.permissions())?;
+            if let Some(permissions) = source_permissions {
+                file.set_permissions(permissions)?;
             }
             file.write_all(content.as_bytes())?;
             file.sync_all()?;
@@ -923,7 +917,7 @@ fn execute_hashline_edit(
             ctx.tool_config.file_write_max_bytes,
             canonical.display()
         );
-        let (shape, normalized) = decode_text_shape(&original);
+        let (shape, normalized) = TextShape::decode(&original);
         let current_tag = crate::tools::snapshot::compute_file_tag(&normalized);
         let authored_anchors = crate::tools::hashline::anchor_lines(authored);
         let versions = store.versions(&canonical, &authored.tag);
@@ -1100,7 +1094,7 @@ fn execute_hashline_edit(
                     "Error: MV destination is also a source path in this Hashline batch: {}",
                     destination.display()
                 );
-                let final_text = restore_text_shape(&shape, &updated);
+                let final_text = shape.restore(&updated);
                 ensure!(
                     final_text.len() <= ctx.tool_config.file_write_max_bytes,
                     "Error: moved file would exceed file_write_max_bytes"
@@ -1150,7 +1144,7 @@ fn execute_hashline_edit(
                     outcome.no_mutation = true;
                     return Ok(outcome);
                 }
-                let final_text = restore_text_shape(&shape, &updated);
+                let final_text = shape.restore(&updated);
                 ensure!(
                     final_text.len() <= ctx.tool_config.file_write_max_bytes,
                     "Error: edited file would exceed file_write_max_bytes"
@@ -1177,7 +1171,7 @@ fn execute_hashline_edit(
     for (index, item) in prepared.into_iter().enumerate() {
         let result: Result<String> = (|| match item.action {
             HashlineAction::Write { updated, shape } => {
-                let final_text = restore_text_shape(&shape, &updated);
+                let final_text = shape.restore(&updated);
                 atomic_write(&item.path, &final_text)?;
                 let (diff, added, removed) =
                     inline_diff(&item.display_path, &item.normalized_original, &updated)?;
@@ -1235,7 +1229,7 @@ fn execute_hashline_edit(
                 updated,
                 shape,
             } => {
-                let final_text = restore_text_shape(&shape, &updated);
+                let final_text = shape.restore(&updated);
                 let replacement =
                     (updated != item.normalized_original).then_some(final_text.as_str());
                 move_file_noclobber(&item.path, &destination, replacement)?;
@@ -1551,7 +1545,7 @@ fn execute_replace_edit(
             original.len() <= ctx.tool_config.file_write_max_bytes,
             "Error: file too large for Edit"
         );
-        let (shape, normalized) = decode_text_shape(&original);
+        let (shape, normalized) = TextShape::decode(&original);
         let old_text = crate::tools::snapshot::normalize_snapshot_text(&edit.old_text);
         let new_text = crate::tools::snapshot::normalize_snapshot_text(&edit.new_text);
         let result = crate::tools::replace::replace_text(
@@ -1585,7 +1579,7 @@ fn execute_replace_edit(
             ));
             continue;
         }
-        let final_text = restore_text_shape(&shape, &result.content);
+        let final_text = shape.restore(&result.content);
         ensure!(
             final_text.len() <= ctx.tool_config.file_write_max_bytes,
             "Error: edited file would exceed file_write_max_bytes"
@@ -1665,6 +1659,7 @@ fn tool_outcome(content: String) -> super::runner::ToolOutcome {
         plan_command: None,
         state_metadata: None,
         presentation: None,
+        termination: None,
     }
 }
 

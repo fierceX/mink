@@ -193,14 +193,46 @@ fn process_group_alive(child_pid: u32) -> bool {
     errno != Some(libc::ESRCH)
 }
 
+/// How a child process actually terminated. Structured facts from the
+/// supervision layer; failure classification must prefer these over text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessTermination {
+    /// Normal exit with an exit code (0 or non-zero).
+    Exited(i32),
+    /// Killed by a signal (signal number).
+    Signaled(i32),
+    /// The runtime deadline fired and the process tree was terminated.
+    TimedOut,
+    /// The user/agent interrupt path terminated the process tree.
+    Interrupted,
+}
+
 /// Outcome of waiting for a child process with timeout/interrupt enforcement.
 pub(crate) struct ChildCompletion {
     pub exit_code: Option<i32>,
+    /// Signal number when the child was killed by a signal (Unix).
+    pub signal: Option<i32>,
     pub timed_out: bool,
     pub interrupted: bool,
     /// Cleanup status of the process group after a timeout/interrupt
     /// termination. `NotAttempted` when the child exited on its own.
     pub tree_cleanup: ProcessTreeCleanup,
+}
+
+impl ChildCompletion {
+    /// Structured termination reason, derived from the supervision facts
+    /// (timeout/interrupt flags take precedence over the raw exit status).
+    pub(crate) fn termination(&self) -> ProcessTermination {
+        if self.interrupted {
+            ProcessTermination::Interrupted
+        } else if self.timed_out {
+            ProcessTermination::TimedOut
+        } else if let Some(signal) = self.signal {
+            ProcessTermination::Signaled(signal)
+        } else {
+            ProcessTermination::Exited(self.exit_code.unwrap_or(-1))
+        }
+    }
 }
 
 /// Wait for the child to exit (killing the process tree on timeout or
@@ -222,9 +254,13 @@ pub(crate) fn wait_child_with_output(
     let mut timed_out = false;
     let mut interrupted = false;
     let mut tree_cleanup = ProcessTreeCleanup::NotAttempted;
+    let mut signal = None;
     let exit_code = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status.code(),
+            Ok(Some(status)) => {
+                signal = signal_of(&status);
+                break status.code();
+            }
             Ok(None) => {
                 if interrupt.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst)) {
                     tree_cleanup = terminate_child_process_tree(child);
@@ -244,10 +280,23 @@ pub(crate) fn wait_child_with_output(
     join_output_readers_bounded(readers);
     Ok(ChildCompletion {
         exit_code,
+        signal,
         timed_out,
         interrupted,
         tree_cleanup,
     })
+}
+
+/// Signal number when the child was terminated by a signal.
+#[cfg(unix)]
+fn signal_of(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+
+#[cfg(not(unix))]
+fn signal_of(_status: &std::process::ExitStatus) -> Option<i32> {
+    None
 }
 
 /// Put spawned Unix children in their own process group so timeout/cancel can

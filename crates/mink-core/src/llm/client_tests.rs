@@ -1,62 +1,11 @@
 use super::*;
 use crate::cancel::CancellationToken;
-use crate::config::{OutputFormat, ResolvedConfig as Config};
-use crate::context::{AgentSharedContext, ToolConfig};
-use crate::session::compaction::CompactionEngine;
-use crate::session::paths;
-use crate::session::stats::StatsTracker;
-use crate::session::store::ConversationStore;
-use crate::ui::{Display, StatsSnapshot};
+use crate::context::AgentSharedContext;
 use serde_json::json;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-
-struct TestDisplay {
-    messages: Mutex<Vec<String>>,
-}
-
-impl TestDisplay {
-    fn new() -> Self {
-        Self {
-            messages: Mutex::new(Vec::new()),
-        }
-    }
-}
-
-impl Display for TestDisplay {
-    fn render_thinking(&self, _content: &str) {}
-    fn render_text(&self, _content: &str) {}
-    fn render_tool_call(&self, _call: &crate::ui::ToolCallDisplay<'_>) {}
-    fn render_tool_result(&self, _result: &crate::ui::PresentedToolResultDisplay<'_>) {}
-    fn render_stop(&self, _reason: &str) {}
-    fn render_signal(&self, _kind: &str, _severity: f64, _message: &str) {}
-    fn render_error(&self, message: &str) {
-        self.messages
-            .lock()
-            .unwrap()
-            .push(format!("error:{message}"));
-    }
-    fn render_retry(&self) {}
-    fn render_info(&self, msg: &str) {
-        self.messages.lock().unwrap().push(msg.to_string());
-    }
-    fn render_title_update(&self, _model: &str, _stats: &StatsSnapshot) {}
-    fn render_sub_agent_status(&self, _sid: &str, _st: &str, _it: u64, _ot: u64) {}
-    fn render_sub_agent_output(
-        &self,
-        _sid: &str,
-        _st: &str,
-        _th: &str,
-        _tx: &str,
-        _it: u64,
-        _ot: u64,
-    ) {
-    }
-    fn render_prompt(&self) {}
-    fn render_clear_line(&self) {}
-}
 
 #[tokio::test]
 #[ignore = "requires local loopback sockets"]
@@ -239,6 +188,20 @@ impl LlmBackend for FailingBackend {
     }
 }
 
+struct NeverEstablishingBackend;
+
+#[async_trait::async_trait]
+impl LlmBackend for NeverEstablishingBackend {
+    fn name(&self) -> &str {
+        "never-establishing"
+    }
+
+    async fn stream(&self, _request: LlmRequest) -> Result<LlmResponseStream> {
+        futures::future::pending::<()>().await;
+        unreachable!()
+    }
+}
+
 struct AttemptFailingBackend;
 
 #[async_trait::async_trait]
@@ -327,118 +290,7 @@ async fn backend_request_preserves_request_failure_attempt_count() -> anyhow::Re
 }
 
 async fn test_context(name: &str, api_url: &str) -> anyhow::Result<Arc<AgentSharedContext>> {
-    static CNT: AtomicU64 = AtomicU64::new(0);
-    let n = CNT.fetch_add(1, Ordering::SeqCst);
-    let root = std::env::temp_dir().join(format!(
-        "mink-client-test-{}-{name}-{n}",
-        std::process::id()
-    ));
-    let home = root.join("home");
-    let cwd = root.join("workspace");
-    tokio::fs::create_dir_all(&home).await?;
-    tokio::fs::create_dir_all(&cwd).await?;
-    let spaths = paths::paths_for(&home, &cwd, "client");
-    let store = Arc::new(ConversationStore::new(spaths.conversation.clone()));
-    store.ensure().await?;
-    let stats = StatsTracker::load(&spaths.stats).await?;
-    let usage = crate::session::usage::UsageJournal::new(spaths.usage.clone());
-    let artifacts = Arc::new(crate::session::artifacts::ArtifactManager::new(
-        spaths.artifacts.clone(),
-    ));
-    artifacts.ensure()?;
-    let cfg = Config {
-        model: "flash".into(),
-        api_key: "secret-key".into(),
-        base_url: api_url.to_string(),
-        output_format: OutputFormat::Human,
-        ..Default::default()
-    };
-    let capability_snapshot = Arc::new(crate::capabilities::CapabilitySnapshot::load_default(
-        &cwd,
-        &home,
-        &cfg.skills,
-    )?);
-    let llm_backend = Arc::new(OpenAiCompatibleBackend::deepseek_defaults());
-    let persistence_fault = crate::session::persistence::PersistenceFault::default();
-    let compaction = Arc::new(
-        CompactionEngine::new(
-            store.clone(),
-            spaths.summary.clone(),
-            api_url.to_string(),
-            &cfg,
-            stats.clone(),
-            usage.clone(),
-            "client".into(),
-            Arc::new(TestDisplay::new()),
-            CancellationToken::new(),
-            Arc::new(AtomicBool::new(false)),
-            llm_backend.clone(),
-            None,
-        )?
-        .with_fault(persistence_fault.clone()),
-    );
-    let tool_config = ToolConfig::from_config(&cfg);
-    let todo_store = Arc::new(
-        crate::session::todo::TodoStore::load(spaths.todos.clone())?
-            .with_fault(persistence_fault.clone()),
-    );
-    let (tool_resolution_context, tool_surface, tool_capabilities) =
-        crate::context::resolve_tool_runtime(&tool_config, false, false, &[])?;
-    Ok(Arc::new(AgentSharedContext {
-        config: cfg.clone(),
-        cwd: cwd.clone(),
-        home,
-        session_layout: crate::session::paths::SessionLayout::ProjectScoped,
-        api_url: api_url.to_string(),
-        llm_backend,
-        store,
-        artifacts,
-        todo_store,
-        persistence_fault,
-        read_memo: Arc::new(Mutex::new(crate::tools::read_memo::ReadMemo::new())),
-        memo_epoch: compaction.memo_epoch(),
-        memo_mutation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        snapshots: Arc::new(Mutex::new(
-            crate::tools::snapshot::FileSnapshotStore::default(),
-        )),
-        stats,
-        usage,
-        compaction,
-        cancel: CancellationToken::new(),
-        display: Arc::new(TestDisplay::new()),
-        sub_stream_tx: None,
-        read_only_fs: None,
-        vfs_scope: crate::tools::vfs::VfsScope {
-            resource_session_id: "client".into(),
-            agent_session_id: "client".into(),
-        },
-        resource_router: Arc::new(crate::resources::ResourceRouter::with_builtin_handlers()),
-        capability_snapshot,
-        tool_config,
-        tool_resolution_context,
-        tool_surface,
-        tool_capabilities,
-        custom_tools: Arc::new(Vec::new()),
-        prefix_source: None,
-        model_capabilities: Arc::new(
-            crate::capabilities::model_capabilities::SessionModelCapabilities::unsupported("test"),
-        ),
-        image_cache: Arc::new(crate::session::image_cache::ImageCache::new(
-            &std::env::temp_dir(),
-        )),
-        this_turn_image_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        warned_image_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        events_path: spaths.events,
-        summary_path: spaths.summary,
-        plan_path: spaths.plan,
-        plan_draft_path: spaths.plan_draft,
-        immutable_prefix: Mutex::new(None),
-        is_sub_agent: false,
-        interrupt: Arc::new(AtomicBool::new(false)),
-        event_log_warned: AtomicBool::new(false),
-        event_log_writer: None,
-        stream_flush_last: Mutex::new(None),
-    }))
+    crate::regression::test_context_for_agent_with_api_url(name, api_url).await
 }
 
 fn http_response(status: u16, headers: &[(&str, &str)], body: &str) -> String {
@@ -553,4 +405,167 @@ async fn stream_eof_residual_frame_without_trailing_newline_is_parsed() -> anyho
     assert_eq!(text, "tail");
     assert_eq!(stop.as_deref(), Some("stop"));
     Ok(())
+}
+
+#[tokio::test]
+async fn dropped_establishment_future_records_unknown_usage_once() -> anyhow::Result<()> {
+    let ctx = test_context("backend-establish-cancelled", "https://example.invalid/v1").await?;
+    let backend: Arc<dyn LlmBackend> = Arc::new(NeverEstablishingBackend);
+    let result = tokio::time::timeout(
+        tokio::time::Duration::from_millis(50),
+        stream_backend(
+            &backend,
+            &ctx,
+            "custom-model",
+            None,
+            &[json!({"role":"user","content":"ping"})],
+            &[],
+            "system",
+        ),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "the establishment future must still be pending"
+    );
+
+    let records = ctx.usage.all_records()?;
+    assert_eq!(
+        records.len(),
+        1,
+        "a cancelled request must record exactly one unknown-usage entry: {records:?}"
+    );
+    assert_eq!(
+        records[0].status,
+        crate::session::usage::UsageStatus::Unreported
+    );
+    assert_eq!(records[0].kind, crate::session::usage::UsageKind::Agent);
+    assert_eq!(records[0].model, "custom-model");
+    assert!(records[0].tokens.is_none());
+    assert!(
+        records[0]
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("cancelled")),
+        "{:?}",
+        records[0].reason
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn sse_producer_backpressures_instead_of_buffering_unbounded() {
+    use crate::protocol::{Event, TextEvent};
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let mut pending = vec![
+        Event::Text(TextEvent {
+            content: "a".into(),
+        }),
+        Event::Text(TextEvent {
+            content: "b".into(),
+        }),
+    ];
+
+    let cancel = crate::cancel::CancellationToken::new();
+    let blocked = tokio::time::timeout(
+        tokio::time::Duration::from_millis(50),
+        super::AsyncLlClient::send_events(&tx, &mut pending, &cancel),
+    )
+    .await;
+    assert!(
+        blocked.is_err(),
+        "a bounded producer must wait for capacity instead of buffering"
+    );
+
+    // The cancelled send drained the in-flight event; refill and verify the
+    // producer resumes once the consumer frees capacity.
+    let first = rx.recv().await.expect("first event queued");
+    assert!(first.is_ok());
+    pending.push(Event::Text(TextEvent {
+        content: "c".into(),
+    }));
+    let finished = tokio::time::timeout(
+        tokio::time::Duration::from_secs(1),
+        super::AsyncLlClient::send_events(&tx, &mut pending, &cancel),
+    )
+    .await
+    .expect("capacity must unblock the producer");
+    assert_eq!(finished, super::SseSendStatus::Delivered);
+    assert!(rx.recv().await.is_some());
+}
+
+#[tokio::test]
+async fn sse_producer_stops_when_consumer_is_dropped() {
+    use crate::protocol::{Event, StopEvent};
+
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    drop(rx);
+    let mut pending = vec![Event::Stop(StopEvent {
+        reason: "end_turn".into(),
+    })];
+    let cancel = crate::cancel::CancellationToken::new();
+    assert_eq!(
+        super::AsyncLlClient::send_events(&tx, &mut pending, &cancel).await,
+        super::SseSendStatus::Stopped,
+        "a dropped consumer must stop the producer instead of accumulating"
+    );
+}
+
+#[tokio::test]
+async fn sse_send_events_observes_cancel_with_a_live_receiver() {
+    use crate::protocol::{Event, TextEvent};
+
+    // Receiver stays alive but never consumes: only the cancel token can
+    // release the blocked send (drop-the-receiver is a different path).
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let cancel = crate::cancel::CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task_finished = finished.clone();
+    let handle = tokio::spawn(async move {
+        let mut pending = vec![
+            Event::Text(TextEvent {
+                content: "a".into(),
+            }),
+            Event::Text(TextEvent {
+                content: "b".into(),
+            }),
+        ];
+        let status = super::AsyncLlClient::send_events(&tx, &mut pending, &task_cancel).await;
+        task_finished.store(true, std::sync::atomic::Ordering::SeqCst);
+        status
+    });
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+    assert!(
+        !finished.load(std::sync::atomic::Ordering::SeqCst),
+        "the producer is expected to be blocked on the full queue"
+    );
+
+    cancel.cancel();
+    let status = tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
+        .await
+        .expect("cancel must release a full-queue send")
+        .unwrap();
+    assert_eq!(status, super::SseSendStatus::Stopped);
+}
+
+#[tokio::test]
+async fn sse_cancelled_interruption_notice_never_waits_for_capacity() {
+    use crate::protocol::{Event, TextEvent};
+
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    tx.try_send(Ok(Event::Text(TextEvent {
+        content: "filler".into(),
+    })))
+    .unwrap();
+
+    let started = std::time::Instant::now();
+    super::AsyncLlClient::try_send_interrupted(&tx);
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(50),
+        "interruption notice must not wait for capacity: {:?}",
+        started.elapsed()
+    );
 }

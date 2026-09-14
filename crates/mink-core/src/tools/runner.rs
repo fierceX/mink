@@ -49,6 +49,9 @@ pub struct ToolOutcome {
     pub plan_command: Option<PlanCommand>,
     pub state_metadata: Option<serde_json::Value>,
     pub presentation: Option<ToolPresentation>,
+    /// Structured process termination, set by command tools (Bash/Python).
+    /// Runner failure classification prefers this over output text.
+    pub(crate) termination: Option<crate::tools::process::ProcessTermination>,
 }
 
 impl ToolOutcome {
@@ -65,6 +68,7 @@ impl ToolOutcome {
             plan_command: None,
             state_metadata: None,
             presentation: None,
+            termination: None,
         }
     }
 
@@ -777,7 +781,7 @@ async fn execute_custom(
             let status = if output.success {
                 ToolStatus::Succeeded
             } else {
-                failed_status(&output.content, output.exit_code)
+                failed_status(&output.content, output.exit_code, None)
             };
             ToolExecOutput {
                 content: output.content,
@@ -807,7 +811,7 @@ async fn execute_custom(
                 no_mutation: false,
                 memo_candidate: None,
                 spawns_sub_agent: false,
-                status: failed_status(&detail, None),
+                status: failed_status(&detail, None, None),
                 diagnostics: Vec::new(),
                 plan_command: None,
                 state_metadata: None,
@@ -869,7 +873,30 @@ impl ToolPolicyGate<'_> {
     }
 }
 
-fn failed_status(content: &str, exit_code: Option<i32>) -> ToolStatus {
+fn failed_status(
+    content: &str,
+    exit_code: Option<i32>,
+    termination: Option<crate::tools::process::ProcessTermination>,
+) -> ToolStatus {
+    use crate::tools::process::ProcessTermination;
+    // Structured supervision facts win over output text: a command that
+    // merely printed the word "timeout" (or exited 130 on purpose) must not
+    // be reclassified by keyword sniffing.
+    if let Some(termination) = termination {
+        match termination {
+            ProcessTermination::Interrupted => return ToolStatus::Interrupted,
+            ProcessTermination::TimedOut => {
+                return ToolStatus::Failed(ToolFailureKind::Timeout);
+            }
+            ProcessTermination::Signaled(_) => {
+                return ToolStatus::Failed(ToolFailureKind::ProcessFailed);
+            }
+            ProcessTermination::Exited(0) => {}
+            ProcessTermination::Exited(_) => {
+                return ToolStatus::Failed(ToolFailureKind::ProcessFailed);
+            }
+        }
+    }
     let kind = crate::tools::metadata::classify_failure_kind(content, exit_code);
     if kind == ToolFailureKind::Aborted && content.to_lowercase().contains("interrupt") {
         ToolStatus::Interrupted
@@ -891,7 +918,7 @@ fn dispatch_tool(
                 let status = if outcome.success {
                     ToolStatus::Succeeded
                 } else {
-                    failed_status(&outcome.content, outcome.exit_code)
+                    failed_status(&outcome.content, outcome.exit_code, outcome.termination)
                 };
                 ToolExecOutput {
                     content: outcome.content,
@@ -924,7 +951,7 @@ fn dispatch_tool(
                     // sub-agent: the coordinator would launch a child with raw
                     // fields even though the executor rejected the input.
                     spawns_sub_agent: false,
-                    status: failed_status(&detail, None),
+                    status: failed_status(&detail, None, None),
                     diagnostics: Vec::new(),
                     plan_command: None,
                     state_metadata: None,

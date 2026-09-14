@@ -224,3 +224,36 @@ fn natural_exit_reports_not_attempted() {
     assert!(!completion.interrupted);
     assert_eq!(completion.tree_cleanup, ProcessTreeCleanup::NotAttempted);
 }
+
+#[test]
+fn child_completion_termination_prefers_supervision_facts() {
+    let completion = |exit_code, signal, timed_out, interrupted| ChildCompletion {
+        exit_code,
+        signal,
+        timed_out,
+        interrupted,
+        tree_cleanup: ProcessTreeCleanup::NotAttempted,
+    };
+    assert_eq!(
+        completion(Some(130), None, false, true).termination(),
+        ProcessTermination::Interrupted
+    );
+    assert_eq!(
+        completion(Some(124), None, true, false).termination(),
+        ProcessTermination::TimedOut
+    );
+    assert_eq!(
+        completion(None, Some(15), false, false).termination(),
+        ProcessTermination::Signaled(15)
+    );
+    assert_eq!(
+        completion(Some(2), None, false, false).termination(),
+        ProcessTermination::Exited(2)
+    );
+    // A signal that arrived with the timeout flag still reports the timeout:
+    // the supervision fact that mink enforced the deadline wins.
+    assert_eq!(
+        completion(None, Some(9), true, false).termination(),
+        ProcessTermination::TimedOut
+    );
+}

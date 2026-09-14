@@ -136,6 +136,8 @@ impl ModelToolSurface {
                 mutating: definition.mutating,
                 storm_exempt: definition.storm_exempt,
                 spawns_sub_agent: false,
+                explicit_only: definition.activation
+                    == crate::runtime::ToolActivation::ExplicitOnly,
             };
             match authorize_tool(&metadata, config) {
                 ToolAuthorization::Allowed => {}

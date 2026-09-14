@@ -1038,3 +1038,111 @@ async fn latched_fault_halts_tool_batch_without_side_effects() {
     );
     let _ = std::fs::remove_dir_all(shared.home.as_path());
 }
+
+fn bash_call(id: &str, input: serde_json::Value) -> ToolCallEvent {
+    ToolCallEvent {
+        name: "Bash".into(),
+        id: id.into(),
+        input_json: input,
+        fields: BTreeMap::new(),
+        parse_error: None,
+    }
+}
+
+async fn run_bash(
+    name: &str,
+    input: serde_json::Value,
+    pre_interrupt: bool,
+) -> crate::tools::runner::ToolExecution {
+    let shared = crate::regression::test_context_for_agent(name)
+        .await
+        .unwrap();
+    if pre_interrupt {
+        shared
+            .interrupt
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    let ctx = crate::context::ToolContext::from(shared.as_ref());
+    let runner = ToolRunner::new(Arc::new(ctx));
+    let mut results = runner
+        .execute_all(vec![bash_call("call-bash", input)])
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    results.remove(0)
+}
+
+fn failed_kind(result: &crate::tools::runner::ToolExecution) -> ToolFailureKind {
+    match result.status {
+        ToolStatus::Failed(kind) => kind,
+        other => panic!("expected Failed status, got {other:?}: {}", result.content),
+    }
+}
+
+#[tokio::test]
+async fn bash_timeout_word_in_output_is_not_timeout() {
+    // A normal non-zero exit whose output merely contains the word "timeout"
+    // must not be classified as a timeout.
+    let result = run_bash(
+        "runner-bash-text-timeout",
+        serde_json::json!({"command": "printf timeout; exit 2"}),
+        false,
+    )
+    .await;
+    assert_eq!(failed_kind(&result), ToolFailureKind::ProcessFailed);
+}
+
+#[tokio::test]
+async fn bash_self_exit_130_is_process_failed() {
+    // Exit 130 on purpose is an ordinary failure, not a mink interruption.
+    let result = run_bash(
+        "runner-bash-self-130",
+        serde_json::json!({"command": "exit 130"}),
+        false,
+    )
+    .await;
+    assert_eq!(failed_kind(&result), ToolFailureKind::ProcessFailed);
+    assert!(
+        !result.content.contains("command interrupted"),
+        "{}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn bash_signaled_process_is_process_failed() {
+    let result = run_bash(
+        "runner-bash-signaled",
+        serde_json::json!({"command": "kill -TERM $$"}),
+        false,
+    )
+    .await;
+    assert_eq!(failed_kind(&result), ToolFailureKind::ProcessFailed);
+}
+
+#[tokio::test]
+async fn bash_runtime_timeout_is_timeout() {
+    let result = run_bash(
+        "runner-bash-timeout",
+        serde_json::json!({"command": "sleep 5", "timeout": 1}),
+        false,
+    )
+    .await;
+    assert_eq!(failed_kind(&result), ToolFailureKind::Timeout);
+}
+
+#[tokio::test]
+async fn bash_runtime_interrupt_is_interrupted() {
+    let result = run_bash(
+        "runner-bash-interrupt",
+        serde_json::json!({"command": "sleep 5"}),
+        true,
+    )
+    .await;
+    assert!(
+        matches!(result.status, ToolStatus::Interrupted),
+        "{:?}: {}",
+        result.status,
+        result.content
+    );
+}

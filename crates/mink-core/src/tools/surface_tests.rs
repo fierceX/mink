@@ -205,3 +205,19 @@ fn compiled_python_sandbox_requires_runtime_enablement() {
             .has("PythonSandbox")
     );
 }
+
+#[test]
+fn enabled_tools_none_is_default_set_and_empty_list_disables_all() {
+    let mut config = ToolConfig::from_config(&Config::default());
+
+    // None → catalog default set (representative providers are active).
+    config.enabled_tools = None;
+    let surface = resolve(&config, AgentRole::Primary, false).unwrap();
+    assert!(surface.has("Read"));
+    assert!(surface.has("Edit"));
+
+    // Some(empty) → no tools at all (distinct from "no override").
+    config.enabled_tools = Some(Vec::new());
+    let surface = resolve(&config, AgentRole::Primary, false).unwrap();
+    assert!(surface.names().next().is_none());
+}

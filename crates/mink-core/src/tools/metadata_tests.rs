@@ -42,18 +42,23 @@ fn failure_adapter_covers_stable_failure_kinds() {
 }
 
 #[test]
-fn status_exposes_failure_without_reading_display_text() {
-    assert_eq!(
-        ToolStatus::Failed(ToolFailureKind::ArgumentInvalid).failure_kind(),
-        Some(ToolFailureKind::ArgumentInvalid)
-    );
-    assert_eq!(
-        ToolStatus::Interrupted.failure_kind(),
-        Some(ToolFailureKind::Aborted)
-    );
-    assert_eq!(ToolStatus::Succeeded.failure_kind(), None);
-    assert_eq!(
-        ToolStatus::Blocked(ToolBlocker::RecoveryGuard).failure_kind(),
-        None
-    );
+fn status_matrix_exposes_failure_kind_without_reading_display_text() {
+    // Real process/tool outcomes → structured status (no display-text parsing).
+    let cases = [
+        (
+            ToolStatus::Failed(ToolFailureKind::ArgumentInvalid),
+            Some(ToolFailureKind::ArgumentInvalid),
+        ),
+        (
+            ToolStatus::Failed(ToolFailureKind::Timeout),
+            Some(ToolFailureKind::Timeout),
+        ),
+        (ToolStatus::Interrupted, Some(ToolFailureKind::Aborted)),
+        (ToolStatus::Blocked(ToolBlocker::ToolSurface), None),
+        (ToolStatus::Blocked(ToolBlocker::RecoveryGuard), None),
+        (ToolStatus::Succeeded, None),
+    ];
+    for (status, expected) in cases {
+        assert_eq!(status.failure_kind(), expected, "{status:?}");
+    }
 }

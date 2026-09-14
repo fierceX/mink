@@ -55,19 +55,53 @@ fn snapshot_preserves_bom_and_crlf_shape() {
     assert!(snapshot.bom);
     assert!(snapshot.crlf);
     assert_eq!(
-        crate::tools::snapshot::restore_text_shape(snapshot.bom, snapshot.crlf, &snapshot.text),
+        crate::tools::snapshot::TextShape {
+            bom: snapshot.bom,
+            crlf: snapshot.crlf,
+        }
+        .restore(&snapshot.text),
         "\u{feff}a\r\nb\r\n"
     );
 }
 
 #[test]
-fn text_shape_detection_keeps_plain_lf_and_no_newline_content() {
-    let (bom, crlf) = detect_text_shape("a\nb\n");
-    assert!(!bom);
-    assert!(!crlf);
-    let (bom, crlf) = detect_text_shape("\u{feff}no-newline");
-    assert!(bom);
-    assert!(!crlf);
+fn text_shape_matrix_round_trips_bom_crlf_and_plain_inputs() {
+    // The single format matrix for TextShape: normal edits, snapshots and
+    // signal rollback all trust these rules.
+    let cases = [
+        (
+            "\u{feff}a\r\nb\r\n",
+            true,
+            true,
+            "a\nb\n",
+            "\u{feff}a\r\nb\r\n",
+        ),
+        ("a\r\nb\r\n", false, true, "a\nb\n", "a\r\nb\r\n"),
+        ("a\r\nb\nc", false, false, "a\nb\nc", "a\nb\nc"),
+        ("a\nb\n", false, false, "a\nb\n", "a\nb\n"),
+        ("", false, false, "", ""),
+        ("hello", false, false, "hello", "hello"),
+        (
+            "\u{feff}no-newline",
+            true,
+            false,
+            "no-newline",
+            "\u{feff}no-newline",
+        ),
+        // Bare CR (old-Mac) is normalized to LF and never treated as CRLF.
+        ("a\rb\rc", false, false, "a\nb\nc", "a\nb\nc"),
+    ];
+    for (raw, bom, crlf, normalized_expected, restored_expected) in cases {
+        let (shape, normalized) = crate::tools::snapshot::TextShape::decode(raw);
+        assert_eq!(shape.bom, bom, "bom for {raw:?}");
+        assert_eq!(shape.crlf, crlf, "crlf for {raw:?}");
+        assert_eq!(normalized, normalized_expected, "normalized for {raw:?}");
+        assert_eq!(
+            shape.restore(&normalized),
+            restored_expected,
+            "restored for {raw:?}"
+        );
+    }
 }
 
 #[test]

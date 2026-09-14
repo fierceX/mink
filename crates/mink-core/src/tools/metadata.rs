@@ -167,6 +167,8 @@ pub struct ToolMetadata {
     pub mutating: bool,
     pub storm_exempt: bool,
     pub spawns_sub_agent: bool,
+    /// 仅在显式列出时进入工具面（如 PythonSandbox），默认集不启用。
+    pub explicit_only: bool,
 }
 
 impl ToolMetadata {
@@ -182,6 +184,7 @@ impl ToolMetadata {
             mutating: false,
             storm_exempt: false,
             spawns_sub_agent: false,
+            explicit_only: false,
         }
     }
 
@@ -197,6 +200,11 @@ impl ToolMetadata {
 
     pub const fn spawns_sub_agent(mut self) -> Self {
         self.spawns_sub_agent = true;
+        self
+    }
+
+    pub const fn explicit_only(mut self) -> Self {
+        self.explicit_only = true;
         self
     }
 }

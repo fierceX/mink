@@ -32,6 +32,18 @@ pub fn execute_with_interrupt(
     default_timeout: i32,
     interrupt: Option<&AtomicBool>,
 ) -> Result<(String, Option<i32>)> {
+    execute_with_termination(command, timeout_secs, default_timeout, interrupt)
+        .map(|(out, code, _)| (out, code))
+}
+
+/// Test helper exposing the structured termination reason.
+#[cfg(test)]
+pub fn execute_with_termination(
+    command: &str,
+    timeout_secs: Option<u64>,
+    default_timeout: i32,
+    interrupt: Option<&AtomicBool>,
+) -> Result<(String, Option<i32>, super::process::ProcessTermination)> {
     execute_with_interrupt_in_dir(command, timeout_secs, default_timeout, 600, interrupt, None)
 }
 
@@ -42,7 +54,7 @@ fn execute_with_interrupt_in_dir(
     max_timeout: i32,
     interrupt: Option<&AtomicBool>,
     cwd: Option<&Path>,
-) -> Result<(String, Option<i32>)> {
+) -> Result<(String, Option<i32>, super::process::ProcessTermination)> {
     if command.trim().is_empty() {
         bail!("Error: no command provided");
     }
@@ -61,7 +73,7 @@ fn execute_with_interrupt_in_dir(
     // 退出码由 runner 层统一加 "Exit code: N" header（tools.json 契约），
     // 此处不再重复追加。
     let out = String::from_utf8_lossy(&sync.stdout).to_string();
-    Ok((out, sync.code))
+    Ok((out, sync.code, sync.termination))
 }
 
 fn execute_sync(
@@ -120,7 +132,10 @@ fn execute_sync(
             "\n[... truncated, command timed out after {} seconds ...]",
             timeout.as_secs()
         ));
-    } else if completion.exit_code == Some(130) {
+    } else if completion.interrupted {
+        // Only the runtime interrupt path adds this label: a program that
+        // exits with 130 itself is an ordinary non-zero exit, not an
+        // interruption of the command by mink.
         out.push_str("\n[... command interrupted ...]");
     }
     if completion.tree_cleanup == crate::tools::process::ProcessTreeCleanup::Unconfirmed {
@@ -132,12 +147,14 @@ fn execute_sync(
     Ok(SyncOutput {
         stdout: out.into_bytes(),
         code: completion.exit_code,
+        termination: completion.termination(),
     })
 }
 
 struct SyncOutput {
     stdout: Vec<u8>,
     code: Option<i32>,
+    termination: crate::tools::process::ProcessTermination,
 }
 
 pub struct BashTool;
@@ -268,7 +285,7 @@ impl BashTool {
             Some(ctx.interrupt.as_ref()),
             Some(&ctx.cwd),
         )
-        .map(|(s, code)| super::runner::ToolOutcome {
+        .map(|(s, code, termination)| super::runner::ToolOutcome {
             content: s,
             conversation_content: String::new(),
             is_bash: true,
@@ -280,6 +297,7 @@ impl BashTool {
             plan_command: None,
             state_metadata: None,
             presentation: None,
+            termination: Some(termination),
         })
     }
 }

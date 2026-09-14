@@ -208,3 +208,26 @@ fn feature_unavailable_is_not_reported_as_unknown() {
     );
     assert!(!error.contains("unknown tool"), "{error}");
 }
+
+#[test]
+fn explicit_only_activation_comes_from_declaration_not_tool_name() {
+    let catalog = ToolCatalog::builtin().expect("catalog");
+    let sandbox = catalog.get("PythonSandbox").expect("sandbox declared");
+    assert_eq!(
+        sandbox.default_activation,
+        ToolDefaultActivation::ExplicitOnly,
+        "PythonSandbox must stay explicit-only whether or not its feature is compiled"
+    );
+    // Every other built-in tool keeps the default-enabled activation.
+    for tool in catalog
+        .iter()
+        .filter(|tool| tool.name.as_str() != "PythonSandbox")
+    {
+        assert_eq!(
+            tool.default_activation,
+            ToolDefaultActivation::Enabled,
+            "{}",
+            tool.name
+        );
+    }
+}

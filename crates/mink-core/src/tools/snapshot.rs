@@ -397,31 +397,58 @@ pub fn normalize_snapshot_text(content: &str) -> String {
 }
 
 /// Detect the original text shape (UTF-8 BOM and uniform CRLF) so callers can
-/// restore it after writing normalized snapshot text.
-pub(crate) fn detect_text_shape(content: &str) -> (bool, bool) {
-    let bom = content.starts_with('\u{feff}');
-    let without_bom = content.strip_prefix('\u{feff}').unwrap_or(content);
-    // 仅当文件至少有一个 LF，且全部 LF 都是 CRLF 的一部分才按 CRLF 恢复。
-    // Iterator::all 对空集合恒为 true："" 和 "hello" 没有 LF，必须显式
-    // 排除，否则无换行内容会被误判为 CRLF。
-    let bytes = without_bom.as_bytes();
-    let has_lf = bytes.contains(&b'\n');
-    let crlf = has_lf
-        && bytes
-            .iter()
-            .enumerate()
-            .all(|(i, b)| *b != b'\n' || (i > 0 && bytes[i - 1] == b'\r'));
-    (bom, crlf)
+/// BOM/CRLF shape of one text file. This is the single implementation shared
+/// by normal edits, snapshots and signal rollback; callers must not grow a
+/// second copy of the detection/restore rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TextShape {
+    pub bom: bool,
+    pub crlf: bool,
 }
 
-/// Restore BOM/CRLF shape around normalized LF text.
-pub(crate) fn restore_text_shape(bom: bool, crlf: bool, normalized: &str) -> String {
-    let text = if crlf {
-        normalized.replace('\n', "\r\n")
-    } else {
-        normalized.to_string()
-    };
-    if bom { format!("\u{feff}{text}") } else { text }
+impl TextShape {
+    pub(crate) fn detect(content: &str) -> Self {
+        let bom = content.starts_with('\u{feff}');
+        let without_bom = content.strip_prefix('\u{feff}').unwrap_or(content);
+        // 仅当文件至少有一个 LF，且全部 LF 都是 CRLF 的一部分才按 CRLF 恢复。
+        // Iterator::all 对空集合恒为 true："" 和 "hello" 没有 LF，必须显式
+        // 排除，否则无换行内容会被误判为 CRLF。
+        let bytes = without_bom.as_bytes();
+        let has_lf = bytes.contains(&b'\n');
+        let crlf = has_lf
+            && bytes
+                .iter()
+                .enumerate()
+                .all(|(i, b)| *b != b'\n' || (i > 0 && bytes[i - 1] == b'\r'));
+        Self { bom, crlf }
+    }
+
+    /// Detect the shape and return the LF-normalized body (BOM stripped).
+    pub(crate) fn decode(raw: &str) -> (Self, String) {
+        let shape = Self::detect(raw);
+        let without_bom = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+        (shape, normalize_snapshot_text(without_bom))
+    }
+
+    /// Restore BOM/CRLF shape around normalized LF text.
+    pub(crate) fn restore(&self, normalized: &str) -> String {
+        let text = if self.crlf {
+            normalized.replace('\n', "\r\n")
+        } else {
+            normalized.to_string()
+        };
+        if self.bom {
+            format!("\u{feff}{text}")
+        } else {
+            text
+        }
+    }
+}
+
+/// Tuple view of [`TextShape::detect`] for snapshot bookkeeping.
+pub(crate) fn detect_text_shape(content: &str) -> (bool, bool) {
+    let shape = TextShape::detect(content);
+    (shape.bom, shape.crlf)
 }
 
 pub fn compute_file_tag(content: &str) -> String {

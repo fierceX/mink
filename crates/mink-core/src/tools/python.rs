@@ -21,6 +21,7 @@ pub fn execute_script_with_interrupt(
     interrupt: Option<&AtomicBool>,
 ) -> Result<(String, String, Option<i32>)> {
     execute_script_with_interrupt_in_dir(script, timeout_secs, interrupt, None, 30, 600)
+        .map(|(stdout, stderr, code, _)| (stdout, stderr, code))
 }
 
 fn execute_script_with_interrupt_in_dir(
@@ -30,7 +31,12 @@ fn execute_script_with_interrupt_in_dir(
     cwd: Option<&Path>,
     default_timeout: i32,
     max_timeout: i32,
-) -> Result<(String, String, Option<i32>)> {
+) -> Result<(
+    String,
+    String,
+    Option<i32>,
+    crate::tools::process::ProcessTermination,
+)> {
     if script.trim().is_empty() {
         bail!("Error: no Python script provided");
     }
@@ -107,7 +113,12 @@ fn execute_script_with_interrupt_in_dir(
         );
     }
 
-    Ok((stdout, stderr, completion.exit_code))
+    Ok((
+        stdout,
+        stderr,
+        completion.exit_code,
+        completion.termination(),
+    ))
 }
 
 pub struct PythonTool;
@@ -133,7 +144,7 @@ impl super::runner::ToolExec for PythonTool {
         let args = super::process::PythonScriptArgs::parse(input)?;
         let script = args.resolve_script(&ctx.cwd)?;
 
-        let (stdout, stderr, exit_code) = execute_script_with_interrupt_in_dir(
+        let (stdout, stderr, exit_code, termination) = execute_script_with_interrupt_in_dir(
             &script,
             args.timeout,
             Some(ctx.interrupt.as_ref()),
@@ -167,6 +178,7 @@ impl super::runner::ToolExec for PythonTool {
             plan_command: None,
             state_metadata: None,
             presentation: None,
+            termination: Some(termination),
         })
     }
 }

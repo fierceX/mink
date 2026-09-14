@@ -2,14 +2,6 @@ use super::*;
 use crate::tools::runner::ToolExec;
 
 #[test]
-fn text_shape_round_trips_bom_and_crlf() {
-    let original = "\u{feff}a\r\nb\r\n";
-    let (shape, normalized) = decode_text_shape(original);
-    assert_eq!(normalized, "a\nb\n");
-    assert_eq!(restore_text_shape(&shape, &normalized), original);
-}
-
-#[test]
 fn numbered_hashline_format_uses_bracket_header() {
     assert_eq!(
         format_hashline_read("src/a.rs", "A1B2", 4, "a\nb"),
@@ -57,36 +49,6 @@ fn replace_suffix_recovery_rejects_ambiguity() {
 }
 
 #[test]
-fn text_shape_uniform_crlf_and_mixed_eol() {
-    // 全 CRLF 文件往返保持不变。
-    let original = "a\r\nb\r\n";
-    let (shape, normalized) = decode_text_shape(original);
-    assert!(shape.crlf);
-    assert_eq!(restore_text_shape(&shape, &normalized), original);
-
-    // 混合行尾不再因第一个换行是 CRLF 而被整体改写为 CRLF：
-    // 统一按 LF 处理（确定性归一，而非全文件 EOL 翻转）。
-    let mixed = "a\r\nb\nc";
-    let (shape, normalized) = decode_text_shape(mixed);
-    assert!(!shape.crlf);
-    assert_eq!(normalized, "a\nb\nc");
-    assert_eq!(restore_text_shape(&shape, &normalized), "a\nb\nc");
-}
-
-#[test]
-fn text_shape_empty_and_no_lf_inputs_are_lf() {
-    for (original, expected) in [("", ""), ("hello", "hello"), ("a\rb\rc", "a\nb\nc")] {
-        let (shape, normalized) = decode_text_shape(original);
-        assert!(
-            !shape.crlf,
-            "input {original:?} must not be classified as CRLF"
-        );
-        assert_eq!(normalized, expected);
-        assert_eq!(restore_text_shape(&shape, &normalized), expected);
-    }
-}
-
-#[test]
 fn memo_end_line_open_ended_reads_cover_eof() {
     // 开放式选择器：end_line=None 表示覆盖 start..EOF，
     // 重复的 `path:N` 请求可以命中 memo。
@@ -120,4 +82,49 @@ async fn replace_mode_write_records_rollback_baseline() {
         .latest_read_snapshot(&path)
         .expect("Replace-mode Write must update the rollback baseline");
     assert_eq!(baseline.text, "new content\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_write_reports_target_metadata_error() {
+    use std::os::unix::fs::symlink;
+
+    let dir = std::env::temp_dir().join(format!("mink-atomic-meta-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("loop.txt");
+    // Self-referential symlink: metadata() fails with ELOOP, which is NOT
+    // "target absent" and must not be swallowed.
+    symlink("loop.txt", &path).unwrap();
+
+    let error = atomic_write(&path, "content").expect_err("metadata error must be reported");
+    assert!(error.to_string().contains("metadata"), "{error}");
+    assert!(
+        std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the target must be untouched"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_write_preserves_existing_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join(format!("mink-atomic-perm-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a.rs");
+    std::fs::write(&path, "old").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    atomic_write(&path, "new").unwrap();
+
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "existing permissions must survive the write");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    let _ = std::fs::remove_dir_all(&dir);
 }
