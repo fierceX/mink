@@ -1,5 +1,69 @@
 # Changelog
 
+## Unreleased
+
+### 修复（复核）：关键提交响应当前轮中断，flush 等待有期限
+
+- 关键事件提交等待现在同时响应 runtime cancel 与 `interrupt_current_turn()`（当前轮 interrupt）：writer 停摆时中断可立即结束等待并保持 Interrupted 分类；健康 writer 的提交有宽限期（500ms/测试 150ms），不会被在途取消误伤。
+- `EventLogWriter::flush` 的确认等待纳入内部期限：writer 停摆时 turn 收尾不再无限挂起，而是按期限上报错误。
+- 测试：公开 `interrupt_current_turn()` + 暂停 writer 场景（中断及时结束、恢复后下一轮仍可运行）；winter 级中断释放；组合变异验证测试能捕获依赖缺失。
+
+
+### 修复（复核）：关键事件等待真实写入结果，提交异步可取消并保留 stream-json 输出
+
+- 关键事件（prefix_snapshot、signal rollback/replan/handover）经 `AppendCritical` 携带单次写入应答：只有 writer 实际 open/write 成功才算成功，入队不再被当作完成；prefix 仅在应答成功后更新缓存。
+- 提交改为异步、有期限、可取消（不再用 `thread::sleep` 轮询阻塞异步线程）；取消保持 turn interruption 分类。
+- 关键事件继续输出 stream-json stdout（与 `log_event`/`log_raw_event` 共用同一实现），恢复既有兼容行为。
+
+
+### 修复（复核）：关键事件可靠提交，SSE 发送可取消
+
+- `EventLog` 区分关键契约事件（`prefix_snapshot`、signal rollback/replan/handover）与诊断事件：关键事件经 `log_critical_event` 有期限可靠提交，失败传播给调用方；prefix 快照失败时不再更新前缀缓存（下次重建重试，不产生缓存命中假象）。
+- 诊断事件继续 best-effort（可见丢弃 + 丢失报告）；`log_event` 收到关键事件时兜底走可靠路径并告警。
+- SSE 生产者在满队列发送期间同时监听取消；取消时的中断通知不再等待容量（保留 receiver 的停滞消费者也不能钉住任务）。
+- 文档精确化资源边界：SSE 队列仅限事件个数，不含单事件字节与解析缓冲；runtime 可靠事件不计入进度预算，整链路"内存完全有界"不成立。
+
+
+### 修复（复核）：shutdown 阻塞 IO 移出 async worker，异步日志入队不再阻塞
+
+- `usage.flush()` 改为经 `spawn_blocking` 执行并由 shutdown 阶段预算约束；stats/projection 原本已在 blocking pool。超时只界定调用者等待，不谎报后台写入完成。
+- 异步 turn/runtime 的 `log_event` 改用 `send_best_effort`：writer 停摆导致队列满时可见地丢弃诊断事件并计入丢失报告，不再阻塞 tokio worker；同步路径仍可用阻塞 `send`。
+- 测试：真实阻塞闭包的阶段超时有界；paused-writer 下 best-effort 入队不阻塞且丢失可见；正常 runtime 的 shutdown 在预算内完成。
+
+### 修复（复核）：事件出口解耦、进度结构计费与上游 SSE 有界
+
+- observer（EventDispatcher）投递独立于 stream 进度预算：慢 stream 消费者不再连带丢弃 observer 的增量。
+- 进度事件按 `max(payload, 128B)` 计费：空 delta 也占用队列槽位，不能零成本绕开预算。
+- 上游 SSE 生产者队列改为有界（1024）并使用 async send 背压；消费者被丢弃后生产者退出，不再无界堆积。
+
+
+### 修复：用户文件写入不再吞掉目标 metadata 错误
+
+- Edit/Write 的原子写入此前把目标 metadata 读取失败当作"目标不存在"继续：现在区分 NotFound 与真实错误（如符号链接循环），后者直接报错并保留原文件。
+- 已存在目标的权限继续先设置到临时文件再写入；提供最终权限时临时文件以 0600 创建，内容不会落在宽权限文件中；新建文件保持默认 umask。发布与目录同步承诺不变。
+
+### 修复：图片对象目录同步失败不再被静默忽略
+
+- `ImageCache` 提交后的目录同步此前把“打开目录失败”当作成功；现在返回错误，并保留“不支持目录 fsync（EINVAL/ENOTSUP）”的平台差异为 best-effort。
+- 错误语义明确为**发布后失败**：对象已可见但持久性未确认，不撤销已发布对象（重试走内容寻址去重），错误信息包含该语义。
+
+### 修复：取消/超时的建流请求留下未知用量记录
+
+- 建流阶段被取消（Ctrl+C）或首事件期限到期时，已开始的 backend 请求此前不会出现在 usage journal；现在使用唯一完成权的 `UsageGuard`，取消路径记录一条 `Unreported`（tokens/费用为 None，不虚构重试次数）。
+- 压缩摘要请求使用同一 guard（`compaction_interrupted`/`request_failed`）；成功路径移交给 `MeteredStream`，每个请求最多一条记录；本地图片投影失败（尚未发出请求）不记录。
+
+### 修复：进程失败分类依据执行事实而非输出文本
+
+- Bash/Python 的终止原因类型化传递到工具状态：运行库超时 → `Timeout`，运行库中断 → `Interrupted`，信号终止/非零退出 → `ProcessFailed`。输出中出现 `timeout` 等词不再覆盖真实原因（例如打印 `timeout` 后 `exit 2` 不再被判为超时）。
+- Bash 不再把命令自行 `exit 130` 标注为 `command interrupted`（该文本改由运行库中断路径添加）；信号终止（无输出、退出码 `None`）不再落入 `Unknown`。
+- 模型可见文本、退出码展示与 JSONL 字段保持兼容；分类更正已同步 `docs/tools.md`。
+
+### 修复：事件日志恢复后不再掩盖未报告的丢失
+
+- 事件日志 writer 修复了“写入失败 → 文件重新打开成功 → flush 报成功”的路径：现在的 flush 屏障会报告此前累计且尚未报告的丢失（含最近一次丢失原因），并在报告一次后推进确认水位；取消/超时的 flush 不消费丢失。
+- 丢失统计按所有权拆分：发送侧计入初始化/通道失败，writer 只累计实际未能持久化的事件；writer 不等待调用方确认。writer 线程创建失败在 flush 时显式可见，不再伪装成队列断开。
+- 语义细节见 `docs/DESIGN.md` 的“事件日志丢失确认”。
+
 ## v0.6.2 (2026-09-11)
 
 ### 修复：压缩请求丢失前缀缓存

@@ -6,7 +6,7 @@ use crate::agent::sub_coordinator::{SubAgentCoordinator, SubAgentRunner};
 use crate::agent::sub_executor::{SubAgentExecutor, SubAgentResult};
 use crate::agent::turn::{TurnDecision, TurnExecutor};
 use crate::config::{OutputFormat, ResolvedConfig as Config};
-use crate::context::{AgentSharedContext, ToolConfig, ToolContext};
+use crate::context::{AgentSharedContext, ToolContext};
 use crate::guard::collector::{Signal, SignalKind};
 use crate::llm::client::{
     LlmBackend, LlmPurpose, LlmRequest, LlmResponseStream, OpenAiCompatibleBackend,
@@ -15,7 +15,6 @@ use crate::llm::mock::MockLlmBackend;
 use crate::protocol::{
     ErrorEvent, Event, RetryEvent, StopEvent, TextEvent, ThinkingEvent, ToolCallEvent, UsageEvent,
 };
-use crate::session::compaction::CompactionEngine;
 use crate::session::paths;
 use crate::tools::catalog::ToolCatalog;
 use crate::tools::runner::{ToolExecution, ToolRunner};
@@ -229,9 +228,19 @@ impl Display for NoopDisplay {
 }
 
 struct TestHarness {
-    ctx: Arc<AgentSharedContext>,
+    pub(crate) ctx: Arc<AgentSharedContext>,
     cwd: PathBuf,
     display: Arc<NoopDisplay>,
+}
+
+/// Test harness whose context (agent requests and compaction alike) is built
+/// with `llm_backend` through the production assembly: no post-build field
+/// copying, so both exits share one backend.
+async fn harness_with_backend(
+    name: &str,
+    llm_backend: Arc<dyn crate::llm::client::LlmBackend>,
+) -> anyhow::Result<TestHarness> {
+    harness_with_config(name, false, 300, |_| {}, Some(llm_backend)).await
 }
 
 async fn harness(name: &str) -> anyhow::Result<TestHarness> {
@@ -249,6 +258,25 @@ pub(crate) async fn test_context_for_agent_with_config(
     Ok(harness_with_config(name, false, 300, configure, None)
         .await?
         .ctx)
+}
+
+/// Test context with a custom API endpoint and the client-test API key.
+pub(crate) async fn test_context_for_agent_with_api_url(
+    name: &str,
+    api_url: &str,
+) -> anyhow::Result<Arc<AgentSharedContext>> {
+    Ok(harness_with_config(
+        name,
+        false,
+        300,
+        |cfg| {
+            cfg.base_url = api_url.to_string();
+            cfg.api_key = "secret-key".into();
+        },
+        None,
+    )
+    .await?
+    .ctx)
 }
 
 pub(crate) async fn test_context_for_agent_with_config_and_backend(
@@ -278,6 +306,37 @@ async fn harness_with_config(
     configure: impl FnOnce(&mut Config),
     llm_backend: Option<Arc<dyn LlmBackend>>,
 ) -> anyhow::Result<TestHarness> {
+    harness_inner(
+        name,
+        is_sub_agent,
+        sub_agent_timeout_secs,
+        configure,
+        llm_backend,
+        None,
+    )
+    .await
+}
+
+/// Internal test hook: build the harness with an injected event-log writer so
+/// real writer failures (missing directory, stalled queue) can be exercised
+/// without touching production APIs.
+pub(crate) async fn context_with_event_log(
+    name: &str,
+    writer: crate::session::event_log::EventLogWriter,
+) -> anyhow::Result<Arc<AgentSharedContext>> {
+    Ok(harness_inner(name, false, 300, |_| {}, None, Some(writer))
+        .await?
+        .ctx)
+}
+
+async fn harness_inner(
+    name: &str,
+    is_sub_agent: bool,
+    sub_agent_timeout_secs: i32,
+    configure: impl FnOnce(&mut Config),
+    llm_backend: Option<Arc<dyn LlmBackend>>,
+    event_log_writer: Option<crate::session::event_log::EventLogWriter>,
+) -> anyhow::Result<TestHarness> {
     static CNT: AtomicU64 = AtomicU64::new(0);
     let n = CNT.fetch_add(1, Ordering::SeqCst);
     let root = std::env::temp_dir().join(format!(
@@ -290,9 +349,6 @@ async fn harness_with_config(
     tokio::fs::create_dir_all(&home).await?;
     tokio::fs::create_dir_all(&cwd).await?;
 
-    let sid = "regression";
-    let spaths = paths::paths_for(&home, &cwd, sid);
-    let (store, stats, artifacts) = crate::session::init::init_session_base_at(&spaths).await?;
     let mut cfg = Config {
         model: "flash".into(),
         api_key: "test-key".into(),
@@ -306,101 +362,55 @@ async fn harness_with_config(
     };
     cfg.prompt.clear();
     configure(&mut cfg);
+    let api_url = crate::config::api_url(&cfg);
 
-    let usage = crate::session::usage::UsageJournal::new(spaths.usage.clone());
+    // Single assembly authority: test contexts go through the same production
+    // path as real runtimes. Tests supply only config, temp dirs and doubles.
     let display = Arc::new(NoopDisplay::new());
-    let capability_snapshot = Arc::new(crate::capabilities::CapabilitySnapshot::load_default(
-        &cwd,
-        &home,
-        &cfg.skills,
-    )?);
     let llm_backend = llm_backend.unwrap_or_else(|| {
         Arc::new(crate::llm::client::OpenAiCompatibleBackend::deepseek_defaults())
     });
-    let cancel = crate::cancel::CancellationToken::new();
-    let interrupt = Arc::new(AtomicBool::new(false));
-    let event_log_writer = crate::session::event_log::EventLogWriter::start(spaths.events.clone());
-    let persistence_fault = crate::session::persistence::PersistenceFault::default();
-    let compaction = Arc::new(
-        CompactionEngine::new(
-            store.clone(),
-            spaths.summary.clone(),
-            crate::config::api_url(&cfg),
-            &cfg,
-            stats.clone(),
-            usage.clone(),
-            cfg.session_id.clone(),
-            display.clone(),
-            cancel.clone(),
-            interrupt.clone(),
-            llm_backend.clone(),
-            Some(event_log_writer.clone()),
-        )?
-        .with_fault(persistence_fault.clone()),
-    );
-    let tool_config = ToolConfig::from_config(&cfg);
-    let todo_store = Arc::new(
-        crate::session::todo::TodoStore::load(spaths.todos.clone())?
-            .with_fault(persistence_fault.clone()),
-    );
-    let (tool_resolution_context, tool_surface, tool_capabilities) =
-        crate::context::resolve_tool_runtime(&tool_config, is_sub_agent, false, &[])?;
-    let ctx = Arc::new(AgentSharedContext {
-        config: cfg.clone(),
-        cwd: cwd.clone(),
-        home,
-        session_layout: paths::SessionLayout::ProjectScoped,
-        api_url: crate::config::api_url(&cfg),
-        llm_backend,
-        store,
-        artifacts,
-        todo_store,
-        persistence_fault,
-        read_memo: Arc::new(Mutex::new(crate::tools::read_memo::ReadMemo::new())),
-        memo_epoch: compaction.memo_epoch(),
-        memo_mutation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        snapshots: Arc::new(Mutex::new(
-            crate::tools::snapshot::FileSnapshotStore::default(),
-        )),
-        stats,
-        usage,
-        compaction,
-        cancel,
-        display: display.clone(),
-        sub_stream_tx: None,
-        read_only_fs: None,
-        vfs_scope: crate::tools::vfs::VfsScope {
-            resource_session_id: sid.into(),
-            agent_session_id: sid.into(),
+    let build = crate::runtime::context_build::build_agent_context(
+        crate::runtime::context_build::AgentContextBuild {
+            config: cfg,
+            home: home.clone(),
+            cwd: cwd.clone(),
+            session_id: "regression".into(),
+            session_layout: paths::SessionLayout::ProjectScoped,
+            resolved_paths: None,
+            api_url,
+            display: display.clone(),
+            sub_stream_tx: None,
+            cancel: crate::cancel::CancellationToken::new(),
+            interrupt: Arc::new(AtomicBool::new(false)),
+            is_sub_agent,
+            usage_journal: None,
+            read_only_fs: None,
+            resource_session_id: "regression".into(),
+            resource_handlers: Vec::new(),
+            skill_providers: Vec::new(),
+            runtime_skills: Vec::new(),
+            skill_discovery_policy: crate::capabilities::SkillDiscoveryPolicy::Defaults,
+            llm_backend,
+            resource_router: None,
+            capability_snapshot: None,
+            custom_tools: Vec::new(),
+            prefix_source: None,
         },
-        resource_router: Arc::new(crate::resources::ResourceRouter::with_builtin_handlers()),
-        capability_snapshot,
-        tool_config,
-        tool_resolution_context,
-        tool_surface,
-        tool_capabilities,
-        custom_tools: Arc::new(Vec::new()),
-        prefix_source: None,
-        model_capabilities: Arc::new(
-            crate::capabilities::model_capabilities::SessionModelCapabilities::unsupported("test"),
-        ),
-        image_cache: Arc::new(crate::session::image_cache::ImageCache::new(
-            &std::env::temp_dir(),
-        )),
-        this_turn_image_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        warned_image_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        events_path: spaths.events,
-        summary_path: spaths.summary,
-        plan_path: spaths.plan,
-        plan_draft_path: spaths.plan_draft,
-        immutable_prefix: Mutex::new(None),
-        is_sub_agent,
-        interrupt,
-        event_log_warned: AtomicBool::new(false),
-        event_log_writer: Some(event_log_writer),
-        stream_flush_last: Mutex::new(None),
-    });
-    Ok(TestHarness { ctx, cwd, display })
+    );
+    let built = match event_log_writer {
+        Some(writer) => {
+            crate::runtime::context_build::TEST_EVENT_LOG_WRITER
+                .scope(Some(writer), build)
+                .await?
+        }
+        None => build.await?,
+    };
+    Ok(TestHarness {
+        ctx: built.ctx,
+        cwd,
+        display,
+    })
 }
 
 fn tool_call(name: &str, id: &str, input: serde_json::Value) -> ToolCallEvent {
@@ -429,11 +439,10 @@ fn tool_call(name: &str, id: &str, input: serde_json::Value) -> ToolCallEvent {
 
 async fn run_orchestrator_user_input(
     ctx: Arc<AgentSharedContext>,
-    llm: Arc<dyn LlmBackend>,
     input: &str,
 ) -> anyhow::Result<()> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let actor = OrchActor::new(test_context_with_llm_backend(ctx, llm), rx);
+    let actor = OrchActor::new(ctx, rx);
     let handle = tokio::spawn(actor.run());
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let turn_id = crate::runtime::TurnId::new("test-turn");
@@ -452,58 +461,6 @@ async fn run_orchestrator_user_input(
     drop(tx);
     handle.await??;
     Ok(())
-}
-
-fn test_context_with_llm_backend(
-    ctx: Arc<AgentSharedContext>,
-    llm_backend: Arc<dyn LlmBackend>,
-) -> Arc<AgentSharedContext> {
-    Arc::new(AgentSharedContext {
-        config: ctx.config.clone(),
-        cwd: ctx.cwd.clone(),
-        home: ctx.home.clone(),
-        session_layout: ctx.session_layout,
-        api_url: ctx.api_url.clone(),
-        llm_backend,
-        store: ctx.store.clone(),
-        artifacts: ctx.artifacts.clone(),
-        todo_store: ctx.todo_store.clone(),
-        persistence_fault: ctx.persistence_fault.clone(),
-        read_memo: ctx.read_memo.clone(),
-        memo_epoch: ctx.memo_epoch.clone(),
-        memo_mutation: ctx.memo_mutation.clone(),
-        snapshots: ctx.snapshots.clone(),
-        stats: ctx.stats.clone(),
-        usage: ctx.usage.clone(),
-        compaction: ctx.compaction.clone(),
-        cancel: ctx.cancel.clone(),
-        display: ctx.display.clone(),
-        sub_stream_tx: ctx.sub_stream_tx.clone(),
-        read_only_fs: ctx.read_only_fs.clone(),
-        vfs_scope: ctx.vfs_scope.clone(),
-        resource_router: ctx.resource_router.clone(),
-        capability_snapshot: ctx.capability_snapshot.clone(),
-        tool_config: ctx.tool_config.clone(),
-        tool_resolution_context: ctx.tool_resolution_context,
-        tool_surface: ctx.tool_surface.clone(),
-        tool_capabilities: ctx.tool_capabilities.clone(),
-        custom_tools: ctx.custom_tools.clone(),
-        prefix_source: ctx.prefix_source.clone(),
-        model_capabilities: ctx.model_capabilities.clone(),
-        image_cache: ctx.image_cache.clone(),
-        this_turn_image_ids: ctx.this_turn_image_ids.clone(),
-        warned_image_ids: ctx.warned_image_ids.clone(),
-        events_path: ctx.events_path.clone(),
-        summary_path: ctx.summary_path.clone(),
-        plan_path: ctx.plan_path.clone(),
-        plan_draft_path: ctx.plan_draft_path.clone(),
-        immutable_prefix: Mutex::new(None),
-        is_sub_agent: ctx.is_sub_agent,
-        interrupt: ctx.interrupt.clone(),
-        event_log_warned: AtomicBool::new(false),
-        event_log_writer: ctx.event_log_writer.clone(),
-        stream_flush_last: Mutex::new(None),
-    })
 }
 
 fn llm_backend_from_mock(mock: Arc<MockLlmBackend>) -> Arc<dyn LlmBackend> {
@@ -556,3 +513,61 @@ mod tool_boundary;
 mod tool_file;
 #[path = "regression/turn.rs"]
 mod turn;
+
+#[tokio::test]
+async fn harness_backend_is_used_by_the_compaction_engine() -> anyhow::Result<()> {
+    let summary = "Task focus: backend
+Latest request: reuse
+Progress: none\nTool evidence: none\nReflections: none";
+    let llm = Arc::new(MockLlmBackend::new(
+        "flash",
+        vec![vec![
+            Ok(Event::Text(TextEvent {
+                content: summary.into(),
+            })),
+            Ok(Event::Stop(StopEvent {
+                reason: "end_turn".into(),
+            })),
+        ]],
+    ));
+    let h = harness_with_config(
+        "backend-reaches-compaction",
+        false,
+        300,
+        |config| {
+            config.max_context_tokens = 64_000;
+            config.context_reserve_tokens = 12_000;
+            config.context_compact_tail_tokens = 16_000;
+            config.context_compact_max_output_tokens = 2_048;
+        },
+        Some(llm.clone()),
+    )
+    .await?;
+    for index in 0..4 {
+        h.ctx
+            .store
+            .add_user(&format!("request {index}: {}", "x".repeat(8_000)))
+            .await?;
+        h.ctx
+            .store
+            .add_assistant(&format!("progress {index}: {}", "y".repeat(8_000)), "", &[])
+            .await?;
+    }
+
+    let resolved = crate::config::model_resolver(&h.ctx.config).resolve(&h.ctx.config.model);
+    let (compacted, _) = h
+        .ctx
+        .compaction
+        .evaluate_and_compact(
+            "manual",
+            50_000,
+            crate::llm::client::LlmModelTarget::new(&resolved.actual, resolved.alias.as_deref()),
+        )
+        .await?;
+
+    assert!(
+        compacted,
+        "compaction through the harness must use the injected backend"
+    );
+    Ok(())
+}

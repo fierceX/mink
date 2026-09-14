@@ -19,6 +19,20 @@ struct CapturingSummaryBackend {
     requests: Mutex<Vec<CapturedSummaryRequest>>,
 }
 
+struct PendingEstablishSummaryBackend;
+
+#[async_trait::async_trait]
+impl LlmBackend for PendingEstablishSummaryBackend {
+    fn name(&self) -> &str {
+        "pending-establish-summary"
+    }
+
+    async fn stream(&self, _request: LlmRequest) -> Result<crate::llm::client::LlmResponseStream> {
+        futures::future::pending::<()>().await;
+        unreachable!()
+    }
+}
+
 struct PendingSummaryBackend;
 
 #[async_trait::async_trait]
@@ -1260,6 +1274,106 @@ async fn summary_projection_failure_fails_compaction() -> anyhow::Result<()> {
     assert!(
         state.active_start > 0,
         "authoritative state is committed before the derived projection fails"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_compaction_records_unknown_usage() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "compact-cancelled-usage",
+        |config| {
+            config.max_context_tokens = 64_000;
+            config.context_reserve_tokens = 12_000;
+            config.context_compact_tail_tokens = 16_000;
+            config.context_compact_max_output_tokens = 2_048;
+        },
+        Arc::new(PendingEstablishSummaryBackend),
+    )
+    .await?;
+    for index in 0..4 {
+        ctx.store
+            .add_user(&format!("request {index}: {}", "x".repeat(8_000)))
+            .await?;
+        ctx.store
+            .add_assistant(&format!("progress {index}: {}", "y".repeat(8_000)), "", &[])
+            .await?;
+    }
+    let interrupt = ctx.interrupt.clone();
+    let engine = ctx.compaction.clone();
+    let usage = ctx.usage.clone();
+    let model = ctx.config.model.clone();
+    let resolver = crate::config::model_resolver(&ctx.config);
+    let task = tokio::spawn(async move {
+        let resolved = resolver.resolve(&model);
+        engine
+            .evaluate_and_compact(
+                "manual",
+                50_000,
+                LlmModelTarget::new(&resolved.actual, resolved.alias.as_deref()),
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    interrupt.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .expect("cancelled compaction must finish")
+        .expect("join");
+    assert!(result.is_err(), "compaction must report the interruption");
+
+    let records = usage.all_records()?;
+    let unknown = records
+        .iter()
+        .filter(|record| {
+            record.status == crate::session::usage::UsageStatus::Unreported
+                && record.kind == crate::session::usage::UsageKind::Compaction
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        unknown.len(),
+        1,
+        "cancelled compaction must leave one unknown-usage record: {records:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn memo_epoch_is_shared_and_bumped_by_compaction() -> anyhow::Result<()> {
+    use std::sync::atomic::Ordering;
+
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "compact-memo-epoch",
+        |config| {
+            config.max_context_tokens = 64_000;
+            config.context_reserve_tokens = 12_000;
+            config.context_compact_tail_tokens = 16_000;
+            config.context_compact_max_output_tokens = 2_048;
+        },
+        summary_backend(),
+    )
+    .await?;
+    assert!(
+        Arc::ptr_eq(&ctx.memo_epoch, &ctx.compaction.memo_epoch()),
+        "context and compaction engine must share one memo epoch"
+    );
+    for index in 0..4 {
+        ctx.store
+            .add_user(&format!("request {index}: {}", "x".repeat(8_000)))
+            .await?;
+        ctx.store
+            .add_assistant(&format!("progress {index}: {}", "y".repeat(8_000)), "", &[])
+            .await?;
+    }
+    let before = ctx.memo_epoch.load(Ordering::SeqCst);
+
+    let (compacted, _) = compact(&ctx, "manual", 50_000).await?;
+
+    assert!(compacted);
+    assert!(
+        ctx.memo_epoch.load(Ordering::SeqCst) > before,
+        "compaction commit must bump the shared memo epoch"
     );
     Ok(())
 }

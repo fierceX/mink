@@ -182,8 +182,6 @@ async fn sub_agent_collection_enters_timeout_even_when_more_than_limit_are_launc
 
 #[tokio::test]
 async fn sub_agent_executor_with_mock_llm_captures_child_output() -> anyhow::Result<()> {
-    let h = harness("sub-executor-mock").await?;
-    h.ctx.store.add_user("parent context").await?;
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         vec![vec![
@@ -201,7 +199,9 @@ async fn sub_agent_executor_with_mock_llm_captures_child_output() -> anyhow::Res
             })),
         ]],
     ));
-    let parent = test_context_with_llm_backend(h.ctx.clone(), llm);
+    let h = harness_with_backend("sub-executor-mock", llm.clone()).await?;
+    h.ctx.store.add_user("parent context").await?;
+    let parent = h.ctx.clone();
     let executor = SubAgentExecutor::new(
         parent.clone(),
         "sub_mock".into(),

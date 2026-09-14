@@ -226,6 +226,55 @@ impl TurnExecutor {
 
 impl TurnExecutor {
     /// Execute a full turn: send user input, stream response, execute tools, decide next.
+    /// Phase 0 for one inner iteration: auto compaction, one-shot token
+    /// estimation, preflight compaction, and the hard input-budget check.
+    async fn prepare_request(
+        &mut self,
+        messages: &mut Vec<serde_json::Value>,
+        system_prompt: &mut String,
+        tools_json: &mut Vec<serde_json::Value>,
+    ) -> Result<(Vec<serde_json::Value>, usize)> {
+        // Phase 0: 上下文压缩（auto 触发在 maybe_compact 内部估算一次）
+        self.try_compact("auto", messages, system_prompt, tools_json)
+            .await?;
+        let mut request_messages = self.project_request_messages(messages)?;
+        let input_limit = crate::session::compaction::request_input_limit(&self.ctx.config);
+        // preflight 只在 auto 未压缩时评估；压缩发生后必须重估。
+        // 估算只做一次并复用（避免同轮对相同输入的全量重复估算）。
+        let estimated_tokens = if !self.compactor.compacted_this_turn() {
+            let estimated = crate::llm::transport::estimate_openai_context_tokens(
+                &request_messages,
+                tools_json,
+                system_prompt,
+            )?;
+            if estimated > input_limit {
+                self.try_compact("preflight", messages, system_prompt, tools_json)
+                    .await?;
+                request_messages = self.project_request_messages(messages)?;
+                crate::llm::transport::estimate_openai_context_tokens(
+                    &request_messages,
+                    tools_json,
+                    system_prompt,
+                )?
+            } else {
+                estimated
+            }
+        } else {
+            crate::llm::transport::estimate_openai_context_tokens(
+                &request_messages,
+                tools_json,
+                system_prompt,
+            )?
+        };
+        if estimated_tokens > input_limit {
+            anyhow::bail!(
+                "context remains over the request input budget after compaction: \
+                 estimated {estimated_tokens} tokens, limit {input_limit}"
+            );
+        }
+        Ok((request_messages, estimated_tokens))
+    }
+
     pub async fn execute(
         &mut self,
         user_input: &str,
@@ -256,56 +305,32 @@ impl TurnExecutor {
         let mut overflow_recovery_attempted = false;
         let max_turns = self.ctx.max_turns() as usize;
 
-        let (mut system_prompt, mut tools_json) = self.ensure_prefix()?;
+        let (mut system_prompt, mut tools_json) = match self.ensure_prefix().await {
+            Ok(prefix) => prefix,
+            Err(error) if error.downcast_ref::<TurnInterrupted>().is_some() => {
+                self.ctx.display.render_stop("interrupted");
+                return Ok((TurnDecision::Interrupted, effects));
+            }
+            Err(error) => return Err(error),
+        };
         messages = self.ctx.compaction.active_messages().await?;
         while turn < max_turns {
             turn += 1;
 
-            // Phase 0: 上下文压缩（auto 触发在 maybe_compact 内部估算一次）
-            self.try_compact("auto", &mut messages, &mut system_prompt, &mut tools_json)
-                .await?;
-            let mut request_messages = self.project_request_messages(&messages)?;
-            let input_limit = crate::session::compaction::request_input_limit(&self.ctx.config);
-            // preflight 只在 auto 未压缩时评估；压缩发生后必须重估。
-            // 估算只做一次并复用（避免同轮对相同输入的全量重复估算）。
-            let estimated_tokens = if !self.compactor.compacted_this_turn() {
-                let estimated = crate::llm::transport::estimate_openai_context_tokens(
-                    &request_messages,
-                    &tools_json,
-                    &system_prompt,
-                )?;
-                if estimated > input_limit {
-                    self.try_compact(
-                        "preflight",
-                        &mut messages,
-                        &mut system_prompt,
-                        &mut tools_json,
-                    )
-                    .await?;
-                    request_messages = self.project_request_messages(&messages)?;
-                    crate::llm::transport::estimate_openai_context_tokens(
-                        &request_messages,
-                        &tools_json,
-                        &system_prompt,
-                    )?
-                } else {
-                    estimated
+            let (mut request_messages, current_context_tokens) = match self
+                .prepare_request(&mut messages, &mut system_prompt, &mut tools_json)
+                .await
+            {
+                Ok(prepared) => prepared,
+                Err(error) if error.downcast_ref::<TurnInterrupted>().is_some() => {
+                    // Cancellation during request preparation (including a
+                    // prefix snapshot commit waiting on the event log) keeps
+                    // the "interrupted" classification.
+                    self.ctx.display.render_stop("interrupted");
+                    return Ok((TurnDecision::Interrupted, effects));
                 }
-            } else {
-                crate::llm::transport::estimate_openai_context_tokens(
-                    &request_messages,
-                    &tools_json,
-                    &system_prompt,
-                )?
+                Err(error) => return Err(error),
             };
-            if estimated_tokens > input_limit {
-                anyhow::bail!(
-                    "context remains over the request input budget after compaction: \
-                     estimated {estimated_tokens} tokens, limit {input_limit}"
-                );
-            }
-            // 当前请求上下文估计（每轮更新，随 usage 事件广播给前端指标行）
-            let current_context_tokens = estimated_tokens;
 
             // Phase 1: LLM 流式响应
             let stream_output = loop {

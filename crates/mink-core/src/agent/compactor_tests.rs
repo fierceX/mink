@@ -46,7 +46,7 @@ async fn maybe_compact_success_refreshes_context_and_prefix() -> anyhow::Result<
             .await?;
     }
     let prefix = PrefixManager::new(ctx.clone());
-    let (_old_prompt, _old_tools) = prefix.ensure()?;
+    let (_old_prompt, _old_tools) = prefix.ensure().await?;
     let mut compactor = TurnCompactor::new(ctx.clone(), prefix);
     let mut messages = ctx.store.lines().await?;
     let mut system_prompt = String::new();

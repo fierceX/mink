@@ -39,22 +39,33 @@ impl CaptureDisplay {
         }
     }
     fn take_thinking(&self) -> String {
-        std::mem::take(&mut *self.thinking.lock().unwrap())
+        std::mem::take(
+            &mut *self
+                .thinking
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        )
     }
     fn take_text(&self) -> String {
-        std::mem::take(&mut *self.text.lock().unwrap())
+        std::mem::take(&mut *self.text.lock().unwrap_or_else(|error| error.into_inner()))
     }
 }
 
 impl Display for CaptureDisplay {
     fn render_thinking(&self, c: &str) {
-        self.thinking.lock().unwrap().push_str(c);
+        self.thinking
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push_str(c);
         if let Some(sink) = &self.stream_sink {
             sink.render_sub_agent_stream(&self.session_id, SubAgentStreamKind::Thinking, c);
         }
     }
     fn render_text(&self, c: &str) {
-        self.text.lock().unwrap().push_str(c);
+        self.text
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push_str(c);
         if let Some(sink) = &self.stream_sink {
             sink.render_sub_agent_stream(&self.session_id, SubAgentStreamKind::Text, c);
         }

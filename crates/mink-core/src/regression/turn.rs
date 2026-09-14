@@ -569,3 +569,75 @@ async fn latched_fault_blocks_turn_before_tools_and_history() -> anyhow::Result<
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn session_fault_latch_is_shared_with_plan_and_todo_stores() -> anyhow::Result<()> {
+    let h = harness("fault-latch-sharing").await?;
+    let _ = h
+        .ctx
+        .persistence_fault
+        .raise(std::path::Path::new("state.json"), "injected fault");
+
+    let tool_ctx = crate::context::ToolContext::from(h.ctx.as_ref());
+    let plan_error = tool_ctx
+        .plan_store
+        .set_draft("draft body", 1024)
+        .expect_err("a latched session must reject Plan writes");
+    assert!(
+        plan_error.to_string().contains("persistence fault"),
+        "{plan_error}"
+    );
+
+    let todo_error = h
+        .ctx
+        .todo_store
+        .apply_structure(0, crate::session::todo::TodoChanges::default())
+        .expect_err("a latched session must reject Todo writes");
+    assert!(
+        todo_error.to_string().contains("persistence fault"),
+        "{todo_error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn critical_events_keep_stream_json_stdout_output() -> anyhow::Result<()> {
+    let h = crate::regression::harness_with_config(
+        "critical-stream-json",
+        false,
+        300,
+        |config| config.output_format = crate::config::OutputFormat::StreamJson,
+        None,
+    )
+    .await?;
+    let ctx = h.ctx.clone();
+    let before = ctx
+        .stream_json_emits
+        .load(std::sync::atomic::Ordering::SeqCst);
+
+    ctx.log_critical_event(crate::events::EventLog::PrefixSnapshot {
+        version: Some(1),
+        fingerprint: "fp".into(),
+        dependency_fingerprint: "dep".into(),
+        system_prompt: "prompt".into(),
+        tools_json: Vec::new(),
+    })
+    .await?;
+    assert_eq!(
+        ctx.stream_json_emits
+            .load(std::sync::atomic::Ordering::SeqCst),
+        before + 1,
+        "critical events must still reach the stream-json stdout path"
+    );
+
+    ctx.log_event(crate::events::EventLog::Stop {
+        reason: "end_turn".into(),
+    });
+    assert_eq!(
+        ctx.stream_json_emits
+            .load(std::sync::atomic::Ordering::SeqCst),
+        before + 2,
+        "non-critical events keep the same shared emitter"
+    );
+    Ok(())
+}

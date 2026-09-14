@@ -68,6 +68,14 @@ while let Some(ev) = stream.recv().await {
 let outcome = stream.outcome().await?;
 ```
 
+消费契约（三种方式，按需选择）：
+
+- **持续消费**：如上循环 `recv()`；事件流是可靠通道，Reliable 事件（工具调用/结果、stop/error/usage、控制事件）不丢。
+- **只要最终结果**：创建流后直接 `outcome()`；它会主动排空事件并释放进度字节，不会因未消费而积累无界积压。也可以直接用 `run_turn()`。
+- **中途放弃**：丢弃 stream 会按既有契约取消当前 turn（消费者显式放弃）。若不希望取消，请不要丢弃未完成的流。
+
+可合并的进度事件（`Text`/`Thinking`）受 1 MiB pending 字节预算约束：慢消费者下超限的增量会被丢弃，并以一条 `Info` 事件说明；最终结果不受影响。`stream.progress_backlog()` 返回 `(pending_bytes, dropped_deltas)` 供诊断。
+
 需要从多个任务共享同一 runtime 时，调用 `rt.handle()` 获取可克隆的
 `AgentRuntimeHandle`。handle 只提供 `run_turn`、`stream_turn`、`compact`、`set_model`
 和 interrupt，所有克隆共享同一个 Busy 门禁；只有原始 `AgentRuntime` 拥有

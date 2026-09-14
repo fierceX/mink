@@ -35,3 +35,9 @@ node_modules/
 data/
 test-results/
 playwright-report/
+
+# 开发过程文档（仅本地保留，不入库）
+docs/QUALITY_ACTION_PLAN-*.md
+docs/STABILITY_SIMPLIFICATION_PLAN-*.md
+docs/AUDIT-*.md
+docs/CORE_CLI_CONVERGENCE_DESIGN.md

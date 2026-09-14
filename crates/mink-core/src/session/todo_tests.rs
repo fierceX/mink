@@ -451,3 +451,20 @@ fn visible_revision_rejects_corrupt_internal_metadata() {
     })];
     assert!(visible_revision(&messages).is_err());
 }
+
+#[test]
+fn poisoned_state_lock_rejects_writes_but_reads_keep_last_snapshot() {
+    let (root, store) = store("poison");
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = store.state.lock().unwrap();
+        panic!("inject poison");
+    }));
+
+    let error = store
+        .apply_structure(0, TodoChanges::default())
+        .expect_err("a poisoned authoritative lock must fail closed");
+    assert!(error.to_string().contains("poisoned"), "{error}");
+    // Reads still expose the last consistent in-memory snapshot.
+    let _ = store.snapshot();
+    let _ = std::fs::remove_dir_all(root);
+}

@@ -1403,9 +1403,8 @@ async fn dropping_a_stream_cancels_then_releases_the_turn_gate() {
     let home = unique_temp_dir("mock-drop-stream-home");
     let cwd = unique_temp_dir("mock-drop-stream-cwd");
     tokio::fs::create_dir_all(&cwd).await.unwrap();
-    let runtime = build_runtime(runtime_config_with_blocking_mock(&home, &cwd))
-        .await
-        .unwrap();
+    let (config, _entered) = runtime_config_with_blocking_mock(&home, &cwd);
+    let runtime = build_runtime(config).await.unwrap();
 
     drop(runtime.stream_turn("blocking").unwrap());
     let replacement = tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
@@ -1422,7 +1421,12 @@ async fn dropping_a_stream_cancels_then_releases_the_turn_gate() {
     .await
     .expect("dropped stream did not release its permit");
     let outcome = replacement.outcome().await.unwrap();
-    assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+    assert_eq!(
+        outcome.status,
+        crate::agent::orchestrator::TurnStatus::Ok,
+        "{:?}",
+        outcome.error
+    );
 
     runtime.shutdown().await.unwrap();
     let _ = tokio::fs::remove_dir_all(home).await;
@@ -1556,6 +1560,8 @@ async fn consecutive_turn_outcomes_keep_their_own_text() {
 /// Text+Stop (for testing recovery).
 struct InterruptTestMockLlmBackend {
     calls: std::sync::Mutex<u32>,
+    /// Signalled when the turn actually reaches the LLM stream call.
+    entered: Arc<tokio::sync::Notify>,
 }
 
 struct InterruptibleCompactionBackend;
@@ -1600,6 +1606,7 @@ impl crate::llm::client::LlmBackend for InterruptTestMockLlmBackend {
         &self,
         _request: crate::runtime::LlmRequest,
     ) -> anyhow::Result<crate::runtime::LlmResponseStream> {
+        self.entered.notify_one();
         let mut c = self.calls.lock().unwrap();
         *c += 1;
         if *c == 1 {
@@ -1627,7 +1634,7 @@ impl crate::llm::client::LlmBackend for InterruptTestMockLlmBackend {
 fn runtime_config_with_blocking_mock(
     home: &std::path::Path,
     cwd: &std::path::Path,
-) -> AgentRuntimeConfig {
+) -> (AgentRuntimeConfig, Arc<tokio::sync::Notify>) {
     let cfg = Config {
         model: "flash".into(),
         api_key: "test-key".into(),
@@ -1637,10 +1644,12 @@ fn runtime_config_with_blocking_mock(
         ..Config::default()
     };
     let mut rt_config = AgentRuntimeConfig::from_config(cfg, home.to_path_buf(), cwd.to_path_buf());
+    let entered = Arc::new(tokio::sync::Notify::new());
     rt_config.llm_backend = Some(Arc::new(InterruptTestMockLlmBackend {
         calls: std::sync::Mutex::new(0),
+        entered: entered.clone(),
     }));
-    rt_config
+    (rt_config, entered)
 }
 
 #[tokio::test]
@@ -1649,16 +1658,18 @@ async fn interrupt_mid_turn_returns_interrupted_and_next_turn_works() {
     let cwd = unique_temp_dir("mock-int-cwd");
     tokio::fs::create_dir_all(&cwd).await.unwrap();
 
-    let runtime = build_runtime(runtime_config_with_blocking_mock(&home, &cwd))
-        .await
-        .unwrap();
+    let (config, entered) = runtime_config_with_blocking_mock(&home, &cwd);
+    let runtime = build_runtime(config).await.unwrap();
 
     let runtime_handle = runtime.handle();
     let turn_handle = runtime_handle.clone();
     let task = tokio::spawn(async move { turn_handle.run_turn("blocking turn").await });
 
-    // Let the orchestrator enter the LLM stream loop.
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    // Deterministic phase barrier: the backend signals when the turn reaches
+    // the LLM stream call (no sleep-based guessing).
+    tokio::time::timeout(tokio::time::Duration::from_secs(2), entered.notified())
+        .await
+        .expect("turn must reach the LLM stream call");
 
     // The orchestrator's turn executor polls this flag every 25 ms.
     runtime_handle.interrupt_current_turn();
@@ -1684,6 +1695,8 @@ async fn interrupt_mid_turn_returns_interrupted_and_next_turn_works() {
 #[derive(Default)]
 struct PendingEstablishBackend {
     calls: std::sync::Mutex<u32>,
+    /// Signalled when `stream()` is actually entered.
+    entered: Arc<tokio::sync::Notify>,
 }
 
 #[async_trait::async_trait]
@@ -1697,6 +1710,7 @@ impl crate::llm::client::LlmBackend for PendingEstablishBackend {
         _request: crate::runtime::LlmRequest,
     ) -> anyhow::Result<crate::runtime::LlmResponseStream> {
         use crate::protocol::{Event, StopEvent, TextEvent};
+        self.entered.notify_one();
         let call = {
             let mut calls = self.calls.lock().unwrap();
             *calls += 1;
@@ -1779,8 +1793,13 @@ async fn interrupt_during_stream_establishment_returns_interrupted_and_next_turn
     let handle = runtime.handle();
     let turn_handle = handle.clone();
     let task = tokio::spawn(async move { turn_handle.run_turn("blocking establish").await });
-    // Let the request reach the non-returning backend.stream() future.
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    // Deterministic barrier: wait until the non-returning stream() is entered.
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(2),
+        backend.entered.notified(),
+    )
+    .await
+    .expect("request must reach backend.stream()");
     handle.interrupt_current_turn();
 
     let outcome = tokio::time::timeout(tokio::time::Duration::from_secs(2), task)
@@ -1793,6 +1812,18 @@ async fn interrupt_during_stream_establishment_returns_interrupted_and_next_turn
         crate::agent::orchestrator::TurnStatus::Interrupted
     );
     assert!(*backend.calls.lock().unwrap() >= 1);
+    let unknown = outcome
+        .usage_records
+        .iter()
+        .filter(|record| record.status == crate::session::usage::UsageStatus::Unreported)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        unknown.len(),
+        1,
+        "interrupted establishment must leave one unknown-usage record: {:?}",
+        outcome.usage_records
+    );
+    assert!(unknown[0].tokens.is_none());
 
     let outcome2 = tokio::time::timeout(
         tokio::time::Duration::from_secs(5),
@@ -1830,7 +1861,12 @@ async fn interrupt_with_disabled_first_event_timeout_still_ends_establishment() 
     let handle = runtime.handle();
     let turn_handle = handle.clone();
     let task = tokio::spawn(async move { turn_handle.run_turn("blocking establish").await });
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(2),
+        backend.entered.notified(),
+    )
+    .await
+    .expect("request must reach backend.stream()");
     handle.interrupt_current_turn();
 
     let outcome = tokio::time::timeout(tokio::time::Duration::from_secs(2), task)
@@ -2209,9 +2245,8 @@ async fn explicit_stream_cancel_releases_the_turn_gate_after_outcome() {
     let home = unique_temp_dir("mock-cancel-stream-home");
     let cwd = unique_temp_dir("mock-cancel-stream-cwd");
     tokio::fs::create_dir_all(&cwd).await.unwrap();
-    let runtime = build_runtime(runtime_config_with_blocking_mock(&home, &cwd))
-        .await
-        .unwrap();
+    let (config, _entered) = runtime_config_with_blocking_mock(&home, &cwd);
+    let runtime = build_runtime(config).await.unwrap();
 
     let stream = runtime.stream_turn("blocking").unwrap();
     stream.cancel();
@@ -2221,7 +2256,12 @@ async fn explicit_stream_cancel_releases_the_turn_gate_after_outcome() {
         crate::agent::orchestrator::TurnStatus::Interrupted
     );
     let recovered = runtime.run_turn("recovery").await.unwrap();
-    assert_eq!(recovered.status, crate::agent::orchestrator::TurnStatus::Ok);
+    assert_eq!(
+        recovered.status,
+        crate::agent::orchestrator::TurnStatus::Ok,
+        "{:?}",
+        recovered.error
+    );
 
     runtime.shutdown().await.unwrap();
     let _ = tokio::fs::remove_dir_all(home).await;
@@ -3047,6 +3087,234 @@ impl crate::llm::client::LlmBackend for RetryThenPendingBackend {
             events: Box::pin(retries.chain(futures::stream::pending())),
             attempt_count: 1,
         })
+    }
+}
+
+#[tokio::test]
+async fn public_interrupt_current_turn_releases_a_stalled_critical_commit() {
+    use crate::session::event_log::{EventLogWriter, EventLogWriterGate};
+
+    let home = unique_temp_dir("interrupt-critical-home");
+    let cwd = unique_temp_dir("interrupt-critical-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+
+    let backend = Arc::new(crate::llm::mock::MockLlmBackend::new(
+        "flash",
+        vec![
+            vec![
+                Ok(crate::protocol::Event::Text(crate::protocol::TextEvent {
+                    content: "first".into(),
+                })),
+                Ok(crate::protocol::Event::Stop(crate::protocol::StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+            vec![
+                Ok(crate::protocol::Event::Text(crate::protocol::TextEvent {
+                    content: "second".into(),
+                })),
+                Ok(crate::protocol::Event::Stop(crate::protocol::StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+        ],
+    ));
+    let gate = EventLogWriterGate::new();
+    let writer = EventLogWriter::start_paused(home.join("stalled-events.jsonl"), gate.clone());
+
+    let config = runtime_config_with_backend(&home, &cwd, backend, |_| {});
+    let runtime = crate::runtime::context_build::TEST_EVENT_LOG_WRITER
+        .scope(Some(writer.clone()), build_runtime(config))
+        .await
+        .unwrap();
+    let handle = runtime.handle();
+
+    // Stall the writer only after construction: the turn below must then
+    // remain inside the critical acknowledgement wait.
+    gate.set_paused(true);
+    let first = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.run_turn("first").await })
+    };
+
+    let mut waited = 0;
+    while writer.critical_queued() == 0 && waited < 400 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+        waited += 1;
+    }
+    assert!(
+        writer.critical_queued() >= 1,
+        "the prefix commit must reach the writer queue before we interrupt"
+    );
+
+    let started = std::time::Instant::now();
+    handle.interrupt_current_turn();
+    // Resume the writer now that the interrupt released the commit wait: the
+    // per-turn flush afterwards is healthy again (the stalled-wait release is
+    // already established by queued=1 + prompt abort below).
+    gate.set_paused(false);
+    let outcome = tokio::time::timeout(tokio::time::Duration::from_secs(2), first)
+        .await
+        .expect("interrupt_current_turn must release the stalled critical commit")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        outcome.status,
+        crate::agent::orchestrator::TurnStatus::Interrupted,
+        "interrupt must classify as Interrupted, not as an event-log error: {:?}",
+        outcome.error
+    );
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(1200),
+        "interrupt must not wait for the production deadline: {:?}",
+        started.elapsed()
+    );
+    let second = tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        handle.run_turn("second"),
+    )
+    .await
+    .expect("second turn must not hang after recovery")
+    .unwrap();
+    assert_eq!(
+        second.status,
+        crate::agent::orchestrator::TurnStatus::Ok,
+        "{:?}",
+        second.error
+    );
+
+    tokio::time::timeout(tokio::time::Duration::from_secs(10), runtime.shutdown())
+        .await
+        .expect("shutdown must not hang after recovery")
+        .unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+#[tokio::test]
+async fn shutdown_completes_within_stage_budget_on_real_path() {
+    let home = unique_temp_dir("shutdown-budget-home");
+    let cwd = unique_temp_dir("shutdown-budget-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let runtime = build_runtime(runtime_config_with_mock(&home, &cwd, mock_llm_with_usage()))
+        .await
+        .unwrap();
+    let _ = runtime.run_turn("shutdown budget").await.unwrap();
+
+    let started = std::time::Instant::now();
+    runtime.shutdown().await.unwrap();
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "real shutdown flush stages must stay within budget: {:?}",
+        started.elapsed()
+    );
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+/// Emits `chunks` text deltas of `chunk_bytes` each (bounded-stream tests).
+struct TextStormBackend {
+    chunks: usize,
+    chunk_bytes: usize,
+    emitted: Arc<std::sync::atomic::AtomicUsize>,
+    finished: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::llm::client::LlmBackend for TextStormBackend {
+    fn name(&self) -> &str {
+        "text-storm"
+    }
+
+    async fn stream(
+        &self,
+        _request: crate::runtime::LlmRequest,
+    ) -> anyhow::Result<crate::runtime::LlmResponseStream> {
+        use crate::protocol::{Event, StopEvent, TextEvent};
+        use futures::StreamExt as _;
+        let emitted = self.emitted.clone();
+        let finished = self.finished.clone();
+        let total = self.chunks;
+        let chunk = "x".repeat(self.chunk_bytes);
+        let storm = futures::stream::iter(0..self.chunks).map(move |_| {
+            if emitted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == total {
+                finished.notify_waiters();
+            }
+            Ok(Event::Text(TextEvent {
+                content: chunk.clone(),
+            }))
+        });
+        let stop = futures::stream::iter(vec![Ok(Event::Stop(StopEvent {
+            reason: "end_turn".into(),
+        }))]);
+        Ok(crate::runtime::LlmResponseStream {
+            events: Box::pin(storm.chain(stop)),
+            attempt_count: 1,
+        })
+    }
+}
+
+#[tokio::test]
+async fn slow_consumer_bounds_pending_progress_bytes_and_outcome_drains() {
+    // Two fixed loads from the Q13 verification spec (8 MiB / 32 MiB).
+    for mebibytes in [8usize, 32] {
+        let home = unique_temp_dir(&format!("storm-{mebibytes}-home"));
+        let cwd = unique_temp_dir(&format!("storm-{mebibytes}-cwd"));
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let chunks = mebibytes * 1024; // 1 KiB per delta
+        let backend = Arc::new(TextStormBackend {
+            chunks,
+            chunk_bytes: 1024,
+            emitted: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            finished: Arc::new(tokio::sync::Notify::new()),
+        });
+        // 32 MiB of deltas also produce 32k diagnostic audit events; this test
+        // targets the client-side progress budget, so the audit log is off to
+        // avoid queue-loss noise unrelated to the budget under test.
+        let runtime = build_runtime(runtime_config_with_backend(
+            &home,
+            &cwd,
+            backend.clone(),
+            |cfg| cfg.log_events = false,
+        ))
+        .await
+        .unwrap();
+
+        // Slow consumer: never call recv(); wait until the producer has
+        // emitted every delta so the backlog is at its peak.
+        let stream = runtime.stream_turn("text storm").unwrap();
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(60),
+            backend.finished.notified(),
+        )
+        .await
+        .expect("producer must finish the storm");
+        let emitted = backend.emitted.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            emitted, chunks,
+            "producer must finish the {mebibytes} MiB storm"
+        );
+
+        let (pending, dropped) = stream.progress_backlog();
+        assert!(
+            pending <= 1 << 20,
+            "pending progress bytes must stay within the budget at {mebibytes} MiB: {pending}"
+        );
+        assert!(
+            dropped > 0,
+            "{mebibytes} MiB of deltas against a 1 MiB budget must drop over-limit deltas"
+        );
+
+        // outcome() drains the rest: the result is available and the backlog
+        // is released as the stream is consumed.
+        let outcome = stream.outcome().await.unwrap();
+        assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
     }
 }
 

@@ -71,51 +71,8 @@ impl RegistryError {
 
 pub type RegistryResult<T> = std::result::Result<T, RegistryError>;
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SessionSummary {
-    pub project_key: String,
-    pub corrupt: bool,
-    pub id: String,
-    pub alias: Option<String>,
-    pub title: Option<String>,
-    pub cwd: String,
-    pub created_at: String,
-    pub updated_at: String,
-    pub modified_secs: Option<u64>,
-    /// Server-side runtime state: free (disk only) | active | running.
-    pub status: &'static str,
-    pub path: String,
-    /// Usage 汇总（usage.jsonl）：会话累计 tokens，无记录时为 0。
-    pub tokens_in: u64,
-    pub tokens_out: u64,
-    pub cache_read_tokens: u64,
-    /// 最近一次请求的上下文估计（usage.jsonl 最后记录 input+cache），0 表示无记录
-    pub last_context_tokens: u64,
-}
-
-/// 逐行读取 usage.jsonl 并汇总 tokens。缺失表示尚无用量；单个会话的
-/// usage 读取错误（包括 I/O 级损坏）降级为零，避免拖垮整个会话列表。
-fn summarize_usage(dir: &Path) -> (u64, u64, u64, u64) {
-    match runtime_session::SessionReader::new(dir).usage_snapshot() {
-        Ok(usage) => (
-            usage.summary.tokens.input_tokens,
-            usage.summary.tokens.output_tokens,
-            usage
-                .summary
-                .tokens
-                .cache_read_tokens
-                .saturating_add(usage.summary.tokens.cache_creation_tokens),
-            usage.last_context_tokens,
-        ),
-        Err(error) => {
-            eprintln!(
-                "[mink-server] warning: failed to summarize usage for {}: {error:#}",
-                dir.display()
-            );
-            (0, 0, 0, 0)
-        }
-    }
-}
+pub use crate::session::summary::SessionSummary;
+pub(crate) use crate::session::summary::summarize_usage;
 
 struct ActiveSession {
     runtime: Arc<SessionRuntime>,
@@ -350,7 +307,7 @@ impl Registry {
         // 锁内只做“决定”，所有 .await 都在锁外（std MutexGuard 是 !Send，
         // 且词法层面“可能被后续分支使用”会让 future 非 Send）。
         {
-            let mut active = self.active.lock().unwrap();
+            let mut active = self.lock_active_state()?;
             match active.get(&locator).map(|session| session.runtime.phase()) {
                 Some(crate::session::runtime::RuntimePhase::Idle)
                 | Some(crate::session::runtime::RuntimePhase::Running)
@@ -393,7 +350,7 @@ impl Registry {
 
         // 同一 locator 的 operation lock 覆盖最终 recheck、构造与 lease 转移。
         {
-            let mut active = self.active.lock().unwrap();
+            let mut active = self.lock_active_state()?;
             active.insert(
                 locator,
                 ActiveSession {
@@ -428,7 +385,7 @@ impl Registry {
         id: &str,
         project: Option<&str>,
     ) -> RegistryResult<Option<SessionLocator>> {
-        let active = self.active.lock().unwrap();
+        let active = self.lock_active_state()?;
         let candidates = active
             .keys()
             .filter(|locator| {
@@ -469,7 +426,7 @@ impl Registry {
         input: String,
     ) -> RegistryResult<()> {
         let locator = self.required_active_locator(id, project)?;
-        let active = self.active.lock().unwrap();
+        let active = self.lock_active_state()?;
         let session = active
             .get(&locator)
             .ok_or_else(|| RegistryError::NotFound(format!("session {id} is not open")))?;
@@ -502,7 +459,7 @@ impl Registry {
 
     fn interrupt_inner(&self, id: &str, project: Option<&str>) -> RegistryResult<()> {
         let locator = self.required_active_locator(id, project)?;
-        let active = self.active.lock().unwrap();
+        let active = self.lock_active_state()?;
         let session = active
             .get(&locator)
             .ok_or_else(|| RegistryError::NotFound(format!("session {id} is not open")))?;
@@ -529,19 +486,43 @@ impl Registry {
         let operation_lock = self.operation_lock(&locator);
         let _operation = operation_lock.lock().await;
         let runtime = {
-            let active = self.active.lock().unwrap();
+            let active = self.lock_active_state()?;
             let session = active
                 .get(&locator)
                 .ok_or_else(|| RegistryError::NotFound(format!("session {id} is not open")))?;
             session.runtime.clone()
         };
         let shutdown_result = runtime.shutdown().await;
-        self.active.lock().unwrap().remove(&locator);
+        self.lock_active_state()?.remove(&locator);
         shutdown_result.map_err(RegistryError::Internal)
     }
 
+    /// Fail-closed error for poisoned registry state locks.
+    ///
+    /// `active` / `operation_locks` / `create_locks` guard active runtimes and
+    /// leases: after a panic mid-update their invariants cannot be trusted, so
+    /// callers that can report an error must refuse the operation instead of
+    /// continuing on unverified state.
+    fn poisoned(&self, area: &str) -> RegistryError {
+        RegistryError::Internal(anyhow::anyhow!(
+            "{area} lock poisoned by a previous panic; restart the server to recover"
+        ))
+    }
+
+    /// Fallible state lock used by operations that can report an error.
+    fn lock_active_state(
+        &self,
+    ) -> RegistryResult<std::sync::MutexGuard<'_, HashMap<SessionLocator, ActiveSession>>> {
+        self.active
+            .lock()
+            .map_err(|_| self.poisoned("session registry state"))
+    }
+
     fn operation_lock(&self, locator: &SessionLocator) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self.operation_locks.lock().unwrap();
+        let mut locks = self
+            .operation_locks
+            .lock()
+            .unwrap_or_else(|_| panic!("operation lock table poisoned; restart the server"));
         locks.retain(|_, lock| lock.strong_count() > 0);
         if let Some(lock) = locks.get(locator).and_then(std::sync::Weak::upgrade) {
             return lock;
@@ -552,7 +533,10 @@ impl Registry {
     }
 
     fn create_lock(&self, locator: &CreateLocator) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self.create_locks.lock().unwrap();
+        let mut locks = self
+            .create_locks
+            .lock()
+            .unwrap_or_else(|_| panic!("create lock table poisoned; restart the server"));
         locks.retain(|_, lock| lock.strong_count() > 0);
         if let Some(lock) = locks.get(locator).and_then(std::sync::Weak::upgrade) {
             return lock;
@@ -563,7 +547,12 @@ impl Registry {
     }
 
     fn active_status(&self, locator: &SessionLocator) -> Option<&'static str> {
-        let mut active = self.active.lock().unwrap();
+        // Infallible signature: a poisoned state lock is unrecoverable here,
+        // so fail fast with an explicit message instead of continuing.
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|_| panic!("session registry state lock poisoned; restart the server"));
         match active.get(locator).map(|session| session.runtime.phase()) {
             Some(crate::session::runtime::RuntimePhase::Running)
             | Some(crate::session::runtime::RuntimePhase::Cancelling)
@@ -595,7 +584,7 @@ impl Registry {
         };
         if let Some(runtime) = active_session {
             runtime.shutdown().await.map_err(RegistryError::Internal)?;
-            self.active.lock().unwrap().remove(&locator);
+            self.lock_active_state()?.remove(&locator);
         }
         if !dir.is_dir() {
             return Err(RegistryError::NotFound(format!("session {id} not found")));
@@ -921,6 +910,26 @@ mod tests {
             "mink-server-{label}-{}-{nonce}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn poisoned_state_lock_fails_closed() {
+        let dir = unique_temp_dir("poison");
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = Registry::new(dir.clone(), "flash".into(), 4);
+
+        // Simulate a panic while the state lock was held.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = registry.active.lock().expect("state lock");
+            panic!("inject poison");
+        }));
+
+        let error = match registry.lock_active_state() {
+            Ok(_) => panic!("poisoned state lock must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("poisoned"), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

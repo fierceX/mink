@@ -131,6 +131,8 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - 子代理 fork 在 runtime 初始化前以目录级克隆继承父 session 状态；子代理复用父 `LlmBackend` 与当前活动模型。
 - Prefab 模式用标准 `prefix_snapshot` 事件记录特殊前缀，不创建 `prefab-*.json`；重组只允许写入全新 conversation，已有会话不重写模板、不得修改 conversation；普通 runtime 忽略该事件中的 Prefab 前缀；`mink-prefab` 提供独立 seeder 与可选 `mink-integration` 适配层。
 - `ArtifactManager` 从已有 index 最大序号继续，正文独占创建，禁止覆盖恢复或 fork 继承的 artifact。
+- `AgentEventStream` 是 unbounded 可靠通道：可靠事件（工具调用/结果、stop/error/usage、控制事件）不丢；`Text`/`Thinking` 进度受 1 MiB pending 字节预算，超限丢弃并只通知一次；`outcome()` 必须主动排空并释放进度字节；丢弃未完成的 stream 等同取消 turn。
+- `EventLog` 关键事件（`prefix_snapshot`、signal rollback/replan/handover）必须经 `log_critical_event` 异步、有期限地等待 writer 写入应答（入队成功不算成功），同时响应 runtime cancel 与当前轮 `interrupt_current_turn()`（健康 writer 有宽限期（500ms/测试 150ms），仅停摆等待被提前结束）并传播失败；仍需产出 stream-json stdout；prefix 快照失败时不得更新前缀缓存；诊断事件可用 `send_best_effort` 但丢失必须计入报告。SSE 有界仅覆盖事件个数（1024）。
 
 ### Read / Edit 协议
 

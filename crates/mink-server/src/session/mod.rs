@@ -2,6 +2,7 @@ pub mod agent_config;
 pub mod config;
 pub mod registry;
 pub mod runtime;
+pub(crate) mod summary;
 
 /// Serializes tests that write process-global environment variables
 /// (`MODEL` / `HOME` / `MINK_HOME` / `DEEPSEEK_*`). Rust test threads run in

@@ -461,9 +461,16 @@ REPL/TUI 在 `mink-cli` 内把同一事件流投影为终端输出或 `TuiSignal
 
 ### 事件交付契约（可靠流 vs 尽力 observer）
 
-- **turn 可靠流**（`AgentEventStream`）：`stream_turn` 返回的每 turn 事件流是可靠交付通道，宿主必须消费 `recv()` 直到结束或用 `outcome()` 等待结果；内部为 unbounded 队列，**当前没有慢消费者内存边界**（未消费的事件会在内存中累计）。
-- **尽力 observer**（`EventSink` + `EventDispatcher`）：有界队列（容量 1024），溢出时丢弃最新事件并告警一次，适合遥测，不承担 UI 完整性。
+- **turn 可靠流**（`AgentEventStream`）：`stream_turn` 返回的每 turn 事件流是可靠交付通道，宿主必须消费 `recv()` 直到结束或用 `outcome()` 等待结果；内部为 unbounded 队列。边界策略：可靠事件由结构约束（工具结果受 `format_tool_result` 上限），`Text`/`Thinking` 进度受 1 MiB pending 预算（含每事件 128B 结构最小值），`outcome()` 主动排空；上游 SSE 生产者队列有界（1024）并 async 背压。
+- **EventLog 两级提交**：契约关键事件（`prefix_snapshot`、signal rollback/replan/handover）经 `log_critical_event` 异步、有期限，并同时响应 runtime cancel 与当前轮 interrupt（健康 writer 有宽限期（500ms/测试 150ms）快速成功），等待 writer 单次写入应答（入队≠写入），失败向调用方传播，并保持 stream-json stdout 输出；`flush` 的 ack 等待同样有期限；诊断事件走 `send_best_effort`（可见丢弃 + 丢失报告）。SSE 队列有界仅指事件个数，单事件字节/解析缓冲与 runtime 可靠事件仍不在预算内。
+- **尽力 observer**（`EventSink` + `EventDispatcher`）：有界队列（容量 1024），溢出时丢弃最新事件并告警一次，适合遥测，不承担 UI 完整性；**observer 投递独立于 stream 进度预算**（慢 stream 消费者不会连带饿死 observer）。
 - **延期项（队列预算/慢消费者）**：合并增量、字节预算、落盘溢出或明确中止等策略尚未实现，在实现前不得宣称事件流已有内存边界。后续验收占位：`outcome`-only 消费、满队列行为、长流式输出下的积压字节与 RSS 压力测试。
+
+### 事件词汇职责与转换边界（Q10）
+
+- 三套词汇职责不同，**不要求互相派生**：`EventLog` 服务审计/持久化/信号证据（含 `prefix_snapshot`、`user_input`、压缩检查等领域专属事件，直接落盘）；`AgentEventKind` 服务 turn 内运行时流（含 `Prompt`/`ClearLine` 等展示事件）；`TuiSignal` 服务 UI。
+- 重叠转换只有两条边界，且都由 trait 强制穷尽：`Display` trait → `EventDisplay` → `AgentEventKind`；`Display` trait → `TuiDisplay` → `TuiSignal`。新增 `Display` 方法会在编译期要求所有前端实现；新增 `AgentEventKind` 变体会要求 `EventDisplay`/消费者处理。
+- 字段保真由 `runtime::events_tests::event_display_preserves_overlapping_event_fields` 与 `tui::tests::tui_display_preserves_tool_call_and_title_fields` 钉住；领域专属事件不经 `AgentEvent` 派生，TUI 信号不反向喂给 `EventLog`；不建通用消息总线。
 
 ---
 
@@ -523,6 +530,17 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 - 普通 runtime 忽略 Prefab `prefix_snapshot`；只有 `prefab` feature 编译进来且通过 CLI/Rust API 启用 Prefab 时该事件才生效。
 
 ---
+
+## 决策与拒绝的替代方案
+
+- **无依赖注入框架**：组装只在 `runtime/context_build.rs` 一个显式函数完成；测试经同一路径构建（Q6）。拒绝全局服务定位器与 builder 框架。
+- **三套事件词汇并存**：`EventLog`（审计/领域事件直接落盘）、`AgentEventKind`（turn 运行时流）、`TuiSignal`（UI）；只对重叠转换（Display → EventDisplay/TuiDisplay）做穷尽保真（Q10）。拒绝"唯一发射源"式合并与通用消息总线。
+- **配置前端未统一为共享 patch**：四个前端语义差异（None vs 空列表、map 合并、层级覆盖）已由矩阵与测试钉住；无证据表明收敛能减少映射点（Q9，D2=C）。若跨端漂移频发再引入 additive overrides。
+- **锁中毒逐类处理**：可重建缓存恢复；权威状态 fail closed；不可错的辅助函数显式 panic。拒绝"一律 into_inner()"机械恢复（Q12）。
+- **事件流不做有界 channel**：生产者等待容量会让 outcome-only 消费者死锁；改为进度事件生产者侧字节预算 + outcome 主动排空（Q13，D3=A）。丢弃 stream 仍等于取消 turn。
+- **工具声明保留 JSON schema + metadata 双源汇合**：catalog 加载时 1:1 校验；explicit-only 由声明携带，不做代码生成（Q11）。
+- **registry 租约/操作层未整体拆分**：活动 runtime 与租约共享私有字段集，拆分为跨文件 impl 只增加可见性调整而无行为收益；仅抽出 summary/usage 汇总（Q15）。
+- **fail-closed 用 session 闩锁而非重试**：发布后失败重读验证/重同步，无法恢复即闩锁并要求重启，避免在未验证状态上继续。
 
 ## 关键不变式
 

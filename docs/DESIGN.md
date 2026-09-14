@@ -229,6 +229,23 @@ artifact 跟随 session 生命周期，不跨 session 共享。
 
 ---
 
+### 共享上下文生命周期表（Q8）
+
+`AgentSharedContext` 字段按生命周期分类；新增字段必须归入其中一类并登记重置点，不可凭名字猜测。
+
+| 生命周期 | 字段（代表） | 共享/重置方式 |
+|---|---|---|
+| 构建期冻结 | `config`、`api_url`、`session_layout`、`cwd`/`home`、`capability_snapshot`、`tool_config`、`tool_surface`、`tool_capabilities`、`tool_resolution_context`、`model_capabilities`、`resource_router`、`vfs_scope` | 构建后不变；变更需重建 prefix/session |
+| 会话级服务 | `store`、`artifacts`、`todo_store`（`ToolContext.plan_store`）、`snapshots`、`stats`、`usage`、`compaction`、`read_memo`、`memo_epoch`、`memo_mutation`、`persistence_fault`、`event_log_writer`、`image_cache` | Arc 共享；同一 session 内唯一；闩锁/epoch 必须跨 Turn/Tool/压缩共享 |
+| 跨请求去重 | `warned_image_ids` | **会话级**，不得当作每轮状态清空 |
+| 每轮重置 | `interrupt`、`this_turn_image_ids` | `TurnExecutor::reset_local_state` 重置；子代理与父**共享** `interrupt`，子代理局部超时只取消自己的 linked cancel 令牌 |
+| 惰性/节流 | `immutable_prefix`、`stream_flush_last`、`event_log_warned` | prefix 失效重建；`stream_flush_last` 为 **context 级**节流（非每轮）；`event_log_warned` 整个会话只警告一次 |
+| 关键共享关系（有定向测试） | `interrupt`（父→子共享）、`cancel`（`linked_child_token`：父→子传播，子不波及父）、`memo_epoch`（压缩提交后 bump 对工具可见）、`persistence_fault`（Todo/Plan/Compaction/Turn 共享同一闩锁） | 见 `sub_agent_interrupt_is_shared_and_child_cancel_is_linked`、`memo_epoch_is_shared_and_bumped_by_compaction`、`session_fault_latch_is_shared_with_plan_and_todo_stores` |
+
+分组重构仅在生命周期表能证明减少重复或改善所有权时进行；`warned_image_ids` 与 `stream_flush_last` 不得因命名被误归为每轮状态。
+
+---
+
 ## 主题三：上下文压缩
 
 ### 显式策略参数
@@ -552,6 +569,48 @@ session 恢复和重放仍可按需读取全部原始消息；`session://current
 
 恢复时会 replay 最近 10 轮 LLM 响应事件（从 events.jsonl 读取），在交互式终端重新渲染历史对话。
 
+### 事件日志丢失确认（D1 决策）
+
+`events.jsonl` 由专用 writer 线程串行追加，队列有界（满时阻塞，不静默丢弃）。丢失的确认与报告遵循以下所有权规则：
+
+- **发送侧计数**：writer 线程创建失败、通道断开、入队拒绝由发送侧计入 `send_lost`——不存在的 writer 无法承担统计。
+- **writer 计数**：writer 只累计其在处理中实际未能持久化的事件（open/write 失败）为单调 `processed_lost`，并在每个 Flush 屏障返回快照；**writer 不等待调用方确认，也不因等待而停止消费**。事件丢失原因单独记录，不因后续重新打开成功而被清除。
+- **确认水位**：flush 调用方串行化；只有实际收到屏障结果的调用方推进共享 `reported` 水位。取消/超时发生在收到结果之前时不推进，因此同一批丢失会在下一次 flush 再次报告。
+- **报告语义**：`send_lost + processed_lost > reported` 时 flush 返回错误（含累计丢失数与最近一次丢失原因），并把水位推进到该值（报告一次）；重新打开文件只恢复可写状态，不清零未报告丢失。
+- **边界**：`flush` 是通道/处理屏障，不等于 `sync_all` 断电持久化；不引入请求序号或双向确认协议。
+
+### 事件流消费契约与进度预算（Q13，D3 决策 A）
+
+- 三种消费方式：持续消费（`recv()` 循环）；只要结果（直接 `outcome()`，**主动排空事件并释放进度字节**，不积累无界积压）；中途放弃（drop stream 按既有契约取消当前 turn，是消费者的显式选择）。
+- 进度事件（`Text`/`Thinking`）有 1 MiB 的 pending 字节预算：每个事件按 `max(payload, 128B)` 计费（空 delta 也占用队列槽位，不得零成本）；超限的 delta 仅对 stream 出口丢弃，并以一条可靠 `Info` 通知。**不把 agent 事件流改为 bounded channel**：生产者等待容量会让 outcome-only 消费者死锁。
+- 可靠事件（工具调用/结果、stop/error/usage、控制事件）不进预算也不丢弃；其总量由结构约束：工具调用/结果数受 turn 机制限制、payload 受 `format_tool_result` 上限约束。**上游 SSE 生产者队列已改为有界（1024）并用 async send 背压**；observer 通道保持有界（溢出丢弃并告警）。
+- 验证：单元（预算边界、空 delta 计费、一次性通知、可靠事件不被丢弃、**stream 不消费时 observer 仍收到全部增量**）+ SSE（满容量背压、丢弃消费者后生产者退出）+ 集成（8 MiB 与 32 MiB 两档慢消费：pending ≤ 1 MiB、dropped > 0、`outcome()` 正常完成）。
+- **范围限定（复核结论）**：本项证明的是“进度事件与上游 SSE 队列有界 + 可靠事件结构有界”；可靠事件突发（大量工具结果）的峰值字节未做定量测量，属 deferred 验证项。
+
+### 关键事件与诊断事件（复核修复）
+
+- `EventLog::is_critical()` 定义契约关键事件：`PrefixSnapshot`、`SignalRollback(Error)`、`SignalReplan(Error)`、`SignalHandover`。这些事件会被读回重建状态（前缀缓存、恢复审计），必须**可靠、有期限**地提交。
+- 关键事件走 `log_critical_event`（async）：`AppendCritical` 携带单次写入应答，调用方等待的是 **writer 的真实 open/write 结果**（入队成功不算成功）；等待为异步、有期限（生产 5s/测试 200ms），同时响应 **runtime cancel 与当前轮 interrupt**（`interrupt_current_turn()` 设置的同一标志），不阻塞 tokio worker。
+- 等待语义：健康 writer 的提交不被打断（先给 500ms/测试 150ms 宽限拿到在途应答）；只有真正停摆的等待才被 cancel/interrupt 提前结束。失败返回给调用方；调用方不得按成功推进（prefix 失败不更新缓存、下一次 `ensure()` 重建；信号恢复失败向上传播）；cancel/interrupt 统一保持 interruption 分类。
+- `EventLogWriter::flush` 的应答等待同样受内部期限约束（超时返回错误，不再无限等待 ack），orchestrator 每轮 flush 在 writer 停摆时也不会挂起整个 turn。
+- 关键事件同时沿用 `log_event` 的 stream-json stdout 输出：三条入口共用同一个 `emit_stream_json` 实现，避免关键事件从既有协议输出中消失。
+- 诊断事件仍走 `send_best_effort`：满队列可见丢弃并计入丢失报告。`log_event` 收到关键事件时兜底走可靠路径并告警，契约调用点应显式使用 `log_critical_event`。
+- 反压边界表述精确化：SSE 队列（1024）只限制**事件个数**，不限制单事件字节与解析缓冲；runtime 可靠事件（工具结果等）不计入 1 MiB 进度预算。整条事件链路"内存完全有界"仍不成立。
+
+### shutdown 预算与日志回压（Q14）
+
+- `shutdown` 的收尾阶段各有明确预算（生产 5s，测试 200ms）：gate/orchestrator、event dispatcher、event log、usage、stats、compaction projection 分别超时并把超时列为失败；**阻塞 IO（usage.flush）经 `spawn_blocking` 移出 async worker**（stats/projection 原本已在 blocking pool），超时只界定调用者等待，**"调用返回"不等于"后台写入完成"**，不谎报完成。
+- `EventLogWriter::flush` 用 `try_send` + async 重试至内部期限（生产 30s/测试 200ms），不阻塞 async worker；**异步调用方（turn/runtime 的 `log_event`）改用 `send_best_effort`**：队列满时可见地丢弃诊断事件并计入丢失报告，不再阻塞 tokio worker；同步测试仍可用阻塞 `send`。
+- 超时后写入线程保持单一所有权：不启动第二个 writer、不接管未完成状态；未完成状态如实上报。
+- 证据：paused-writer 测试（队列满时 flush 有界返回、`send_best_effort` 不阻塞且丢失可见、恢复后 1024 条事件不丢不重）；`flush_stage` 与 `flush_stage_blocking` 期限单测（含真实阻塞闭包）；正常 runtime 的真实 shutdown 在预算内完成。端到端"暂停真实 writer + shutdown"及磁盘挂死注入需要生产测试开关，列为 deferred 验证项；本项不宣称已覆盖真实磁盘阻塞的最坏时延。
+
+### 请求取消与未上报用量
+
+- 每个已发出的 backend 请求在请求开始处创建 `UsageGuard`（唯一完成权，不可 Clone）；建流成功移交给 `MeteredStream`，显式失败由 guard 记录 `request_failed`。
+- 调用方取消/首事件 deadline 丢弃建流 future 时，guard 在 Drop 中记录一条 `Unreported`（reason 含 `request_cancelled_before_usage`，`attempt_count` 为 1，tokens/费用为 None，不虚构重试次数）——已开始的请求不会从 journal 消失。
+- 本地图片投影失败发生在请求进入 backend 之前，不产生记录（不伪装成已发出请求）。
+- 压缩（compaction）使用同一 guard：`compaction_interrupted`/`request_failed` 各记一条；流中断由 `MeteredStream` Drop 兜底，保证每个请求最多一条记录。
+
 ### Prefab 会话播种
 
 `prefab` feature 的定位是 session 初始化后的重组：在 `AgentRuntime` 完成正常 session 构建后，Prefab 模块检查目标 session 目录，必要时把模板轨迹写入 conversation/events，并通过标准 `prefix_snapshot` 事件记录特殊 system prompt/tools，使首次 LLM 请求已经带有“读 AGENTS.md → 加载完整使用说明 → Ready”的完整历史。运行时不会在重组后回调 `mink-prefab`，agent loop 不感知重组过程。
@@ -716,6 +775,20 @@ surface 解析阶段 fail closed。
 
 ---
 
+### 配置语义矩阵与前端收敛决策（Q9）
+
+四个前端各有映射（core `AgentOptions`/`ResolvedConfig`、CLI `CliConfig`+TOML+overrides、server `AgentConfig` 分层 merge+env、Python dict）。字段语义按类固定，边界由对照测试钉住：
+
+| 语义类别 | 代表字段 | 缺省（未提供） | 显式空 | 合并/替换 |
+|---|---|---|---|---|
+| 标量 Option | `model`、`max_tokens`、各 timeout | 保持上一层/默认 | 解析器拒绝空串 | 后层覆盖（`pick`） |
+| 三态列表 | `enabled_tools` | `None`＝默认工具集 | `Some([])`＝禁用全部 | 后层整体替换，不合并 |
+| 映射 | `model_aliases`、`approval`、`openai_extra_body` | 空表 | —— | 逐键合并，同键后层覆盖 |
+| 子表 | `sandbox`、`sandbox_python` | —— | —— | 逐字段 pick 合并 |
+| 前端专属优先级 | CLI `--config`、server env | —— | —— | env > project > user > defaults |
+
+**决策 D2＝暂缓统一入口（选项 C）**：共享 patch 需要为上述每类语义建模并跨 crate 公开新类型；当前没有证据表明收敛能减少映射点（各前端的解析与层级合并本身不可省）。本轮以矩阵 + 边界测试收尾（`enabled_tools_none_is_default_set_and_empty_list_disables_all`、`merge_overrides_present_fields_and_keeps_absent_ones`、`merge_container_semantics_are_explicit`）；若后续跨端不一致频繁出现，再以本矩阵为规格引入 additive overrides。
+
 ## 主题十一：并发模型
 
 ### 异步边界
@@ -755,6 +828,20 @@ surface 解析阶段 fail closed。
 4. 子代理使用 linked child token 接收父取消；子代理超时只取消自身，不取消父会话
 
 ---
+
+### 锁分类与中毒行为（Q12）
+
+锁按“中毒后能否继续使用”分类；不采用“一律恢复”，也不以 `unwrap()`→`expect()` 充当修复。
+
+| 类别 | 位置 | 中毒行为 | 依据 |
+|---|---|---|---|
+| 可重建/派生 | `read_memo`、`snapshots`、`immutable_prefix`、`stream_flush_last`、子代理 Capture 显示缓冲、event-log writer 内部状态 | 取回数据继续（单次插入/替换，无跨字段不变式；显示缓冲允许丢失） | 派生数据可由源重建，继续使用不会伪装已验证状态 |
+| 权威内存状态 | `TodoStore.state` | **写路径 fail closed**：`lock_for_write()` 闩锁 session 并返回错误；读路径取最后一致快照 | panic 中断可能留下撕裂 revision；恢复需重启 |
+| 文件事务串行化 | `PlanStore.transition_lock` | 取回继续；真相在文件/journal，恢复由 `recover_pending`/`ensure_no_pending_transaction` 重放完成 | 锁只做串行化，不承载内存不变式 |
+| 租约/活动状态（server） | `Registry.active`/`operation_locks`/`create_locks` | 可返回错误的操作经 `lock_active_state()` 返回 `Internal`（要求重启 server）；签名不可错的辅助函数显式 panic 并注明原因 | 活动 runtime 与租约不可在未验证状态下继续 |
+| Tokio Mutex | server 操作/创建互斥 | 无中毒机制；取消一致性由既有 gate/取消测试覆盖 | Tokio 锁不具备 poisoning 语义 |
+
+新增锁必须归入上表某一类并配对应测试；缓存类恢复需说明数据为何自洽，状态类不得静默继续。
 
 ## 主题十二：系统提示词构建
 

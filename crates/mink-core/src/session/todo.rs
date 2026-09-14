@@ -152,13 +152,27 @@ impl TodoStore {
             .clone()
     }
 
+    /// Authoritative state guard for write paths.
+    ///
+    /// A panic while the lock was held may leave revision/items torn;
+    /// continuing would persist unverified state, so latch the session and
+    /// refuse the write. Reads keep using the last in-memory snapshot.
+    fn lock_for_write(&self) -> Result<std::sync::MutexGuard<'_, TodoSnapshot>> {
+        self.state.lock().map_err(|_| {
+            self.fault.raise(
+                &self.path,
+                "todo state lock poisoned by a previous panic; restart the session",
+            )
+        })
+    }
+
     pub fn apply_structure(
         &self,
         base_revision: u64,
         changes: TodoChanges,
     ) -> Result<TodoStructureResult> {
         self.fault.check()?;
-        let mut guard = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut guard = self.lock_for_write()?;
         ensure!(
             guard.revision == base_revision,
             "stale todo revision: expected {}, got {base_revision}; read the current todo state and retry",
@@ -301,7 +315,7 @@ impl TodoStore {
         transitions: TodoTransitions,
     ) -> Result<TodoTransitionResult> {
         self.fault.check()?;
-        let mut guard = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut guard = self.lock_for_write()?;
         ensure!(
             guard.revision == base_revision,
             "stale todo revision: expected {}, got {base_revision}; read the current todo state and retry",

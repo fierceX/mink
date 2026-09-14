@@ -2881,3 +2881,60 @@ async fn resumed_prefab_session_is_visible_in_tui() {
     std::fs::remove_dir_all(&home).unwrap();
     std::fs::remove_dir_all(&cwd).unwrap();
 }
+
+#[test]
+fn tui_display_preserves_tool_call_and_title_fields() {
+    use crate::ui::{StatsSnapshot, ToolCallDisplay};
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let display = TuiDisplay::new(tx);
+
+    let input = serde_json::json!({"path": "a.rs"});
+    display.render_tool_call(&ToolCallDisplay {
+        tool_use_id: "call_9",
+        tool_name: "Read",
+        summary: "Read a.rs",
+        input: Some(&input),
+    });
+    match rx.recv().unwrap() {
+        TuiSignal::ToolCall {
+            tool_use_id,
+            tool_name,
+            summary,
+        } => {
+            assert_eq!(tool_use_id.as_deref(), Some("call_9"));
+            assert_eq!(tool_name, "Read");
+            assert_eq!(summary, "Read a.rs");
+        }
+        other => panic!("unexpected signal: {other:?}"),
+    }
+
+    let stats = StatsSnapshot {
+        current_turn_count: 3,
+        agent_request_count: 5,
+        total_input_tokens: 100,
+        total_output_tokens: 40,
+        current_context_tokens: 1200,
+        max_context_tokens: 64_000,
+        total_cache_read_tokens: 20,
+        total_cache_creation_tokens: 10,
+        belief: 0.75,
+    };
+    display.render_title_update("flash", &stats);
+    match rx.recv().unwrap() {
+        TuiSignal::TitleUpdate(model, delivered) => {
+            assert_eq!(model, "flash");
+            assert_eq!(delivered.current_turn_count, stats.current_turn_count);
+            assert_eq!(delivered.agent_request_count, stats.agent_request_count);
+            assert_eq!(delivered.total_input_tokens, stats.total_input_tokens);
+            assert_eq!(delivered.total_output_tokens, stats.total_output_tokens);
+            assert_eq!(
+                delivered.current_context_tokens,
+                stats.current_context_tokens
+            );
+            assert_eq!(delivered.max_context_tokens, stats.max_context_tokens);
+            assert_eq!(delivered.belief, stats.belief);
+        }
+        other => panic!("unexpected signal: {other:?}"),
+    }
+}

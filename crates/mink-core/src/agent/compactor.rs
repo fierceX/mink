@@ -82,7 +82,7 @@ impl TurnCompactor {
             .await?;
         if did_compact {
             self.compacted_this_turn = true;
-            (*system_prompt, *tools_json) = self.prefix.ensure()?;
+            (*system_prompt, *tools_json) = self.prefix.ensure().await?;
             *messages = self.ctx.compaction.active_messages().await?;
             return Ok(true);
         }

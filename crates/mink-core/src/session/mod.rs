@@ -1,6 +1,7 @@
 pub mod artifacts;
 pub(crate) mod atomic_file;
 pub mod compaction;
+pub(crate) mod compaction_cut;
 pub mod compaction_input;
 pub(crate) mod event_log;
 pub mod image_cache;

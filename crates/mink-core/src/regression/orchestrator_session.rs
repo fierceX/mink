@@ -35,7 +35,6 @@ async fn send_user_input(
 
 #[tokio::test]
 async fn orchestrator_user_input_runs_turn_and_logs_tracking() -> anyhow::Result<()> {
-    let h = harness("orch-user-input").await?;
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         vec![vec![
@@ -47,7 +46,8 @@ async fn orchestrator_user_input_runs_turn_and_logs_tracking() -> anyhow::Result
             })),
         ]],
     ));
-    run_orchestrator_user_input(h.ctx.clone(), llm, "say hi").await?;
+    let h = harness_with_backend("orch-user-input", llm.clone()).await?;
+    run_orchestrator_user_input(h.ctx.clone(), "say hi").await?;
     let lines = h.ctx.store.lines().await?;
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[0]["role"], "user");
@@ -117,7 +117,6 @@ async fn orchestrator_model_command_updates_display() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn orchestrator_forced_model_title_survives_turn_refreshes() -> anyhow::Result<()> {
-    let h = harness("orch-forced-model-title").await?;
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let llm = Arc::new(MockLlmBackend::new(
         "pro",
@@ -130,7 +129,8 @@ async fn orchestrator_forced_model_title_survives_turn_refreshes() -> anyhow::Re
             })),
         ]],
     ));
-    let actor = OrchActor::new(test_context_with_llm_backend(h.ctx.clone(), llm), rx);
+    let h = harness_with_backend("orch-forced-model-title", llm.clone()).await?;
+    let actor = OrchActor::new(h.ctx.clone(), rx);
     let handle = tokio::spawn(actor.run());
     send_set_model(&tx, "pro").await?;
     let result = send_user_input(&tx, "say hi").await?;
@@ -217,14 +217,14 @@ async fn orchestrator_flash_command_resets_forced_model_display() -> anyhow::Res
 
 #[tokio::test]
 async fn orchestrator_renders_failed_turn_decision() -> anyhow::Result<()> {
-    let h = harness("orch-failed-turn").await?;
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         vec![vec![Ok(Event::Stop(StopEvent {
             reason: "max_tokens".into(),
         }))]],
     ));
-    run_orchestrator_user_input(h.ctx.clone(), llm, "hit limit").await?;
+    let h = harness_with_backend("orch-failed-turn", llm.clone()).await?;
+    run_orchestrator_user_input(h.ctx.clone(), "hit limit").await?;
     assert!(
         h.display
             .info
@@ -240,12 +240,12 @@ async fn orchestrator_renders_failed_turn_decision() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn orchestrator_logs_stream_error_from_turn() -> anyhow::Result<()> {
-    let h = harness("orch-stream-error").await?;
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         vec![vec![Err(anyhow::anyhow!("stream connection timeout"))]],
     ));
-    run_orchestrator_user_input(h.ctx.clone(), llm, "fail stream").await?;
+    let h = harness_with_backend("orch-stream-error", llm.clone()).await?;
+    run_orchestrator_user_input(h.ctx.clone(), "fail stream").await?;
     assert!(
         h.display
             .info
@@ -400,7 +400,7 @@ async fn orchestrator_manual_compact_failure_is_logged() -> anyhow::Result<()> {
 async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()> {
     let h = harness("plan-actions").await?;
     let prefix = PrefixManager::new(h.ctx.clone());
-    let (stable_prompt, stable_tools) = prefix.ensure()?;
+    let (stable_prompt, stable_tools) = prefix.ensure().await?;
     let stable_fingerprint = h
         .ctx
         .immutable_prefix
@@ -450,7 +450,7 @@ async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()
     );
     assert!(!h.ctx.plan_draft_path.exists());
     assert!(matches!(effects.as_slice(), ["Plan confirmed."]));
-    let (after_confirm_prompt, after_confirm_tools) = prefix.ensure()?;
+    let (after_confirm_prompt, after_confirm_tools) = prefix.ensure().await?;
     assert_eq!(after_confirm_prompt, stable_prompt);
     assert_eq!(after_confirm_tools, stable_tools);
     assert_eq!(
@@ -499,7 +499,7 @@ async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()
             crate::tools::plan::PlanCommand::Clear,
         )
         .await?;
-    let (after_clear_prompt, after_clear_tools) = prefix.ensure()?;
+    let (after_clear_prompt, after_clear_tools) = prefix.ensure().await?;
     assert_eq!(after_clear_prompt, stable_prompt);
     assert_eq!(after_clear_tools, stable_tools);
     Ok(())
@@ -683,7 +683,7 @@ async fn plan_draft_empty_content_cancels_and_reports_cancellation() -> anyhow::
 async fn todo_tools_persist_incremental_state_and_reject_stale_writes() -> anyhow::Result<()> {
     let h = harness("todo-persistence").await?;
     let prefix = PrefixManager::new(h.ctx.clone());
-    let stable_prefix = prefix.ensure()?;
+    let stable_prefix = prefix.ensure().await?;
     assert!(!stable_prefix.0.contains("<current-todos"));
     let tool_ctx = crate::context::ToolContext::from(h.ctx.as_ref());
     let created = crate::tools::runner::ToolExec::execute(
@@ -764,6 +764,6 @@ async fn todo_tools_persist_incremental_state_and_reject_stale_writes() -> anyho
     let reloaded = crate::session::todo::TodoStore::load(todo_path)?;
     assert_eq!(reloaded.snapshot(), before);
     assert_eq!(reloaded.snapshot().revision, 4);
-    assert_eq!(prefix.ensure()?, stable_prefix);
+    assert_eq!(prefix.ensure().await?, stable_prefix);
     Ok(())
 }

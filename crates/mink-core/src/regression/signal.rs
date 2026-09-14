@@ -485,7 +485,6 @@ async fn turn_aborts_when_tool_failures_push_belief_too_low() -> anyhow::Result<
 #[tokio::test]
 async fn abort_degrades_to_replan_then_continues() -> anyhow::Result<()> {
     // fresh 子代理产出新计划后父代理继续本轮（不再直接失败）。
-    let h = harness("abort-degrade-to-replan").await?;
     let parent_failures = (0..8)
         .map(|idx| {
             Ok(Event::ToolCall(tool_call(
@@ -519,7 +518,9 @@ async fn abort_degrades_to_replan_then_continues() -> anyhow::Result<()> {
         "flash",
         vec![parent_failures, replan_child, parent_continue],
     ));
-    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let h = harness_with_backend("abort-degrade-to-replan", llm.clone()).await?;
+
+    let ctx = h.ctx.clone();
     let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
     let mut belief = BeliefTracker::new(16);
     let (decision, effects) = executor
@@ -552,14 +553,6 @@ async fn abort_degrades_to_replan_then_continues() -> anyhow::Result<()> {
 async fn second_warning_triggers_replan() -> anyhow::Result<()> {
     // 触发 fresh 子代理重新规划，成功后跳过恢复守卫。
     // （cooldown_turns=0 让两次 Warning 相邻出现，精确锻炼该升级路径。）
-    let h = harness_with_config(
-        "second-warning-replan",
-        false,
-        300,
-        |cfg| cfg.signal.cooldown_turns = 0,
-        None,
-    )
-    .await?;
     let failing_batch = |prefix: &str| {
         (0..3)
             .map(|idx| {
@@ -599,7 +592,16 @@ async fn second_warning_triggers_replan() -> anyhow::Result<()> {
             parent_finish,
         ],
     ));
-    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let h = harness_with_config(
+        "second-warning-replan",
+        false,
+        300,
+        |cfg| cfg.signal.cooldown_turns = 0,
+        Some(llm.clone()),
+    )
+    .await?;
+
+    let ctx = h.ctx.clone();
     let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
     let mut belief = BeliefTracker::new(16);
     let (decision, effects) = executor
@@ -680,15 +682,15 @@ fn rollback_script_after_edit(tag: &str) -> Vec<Vec<anyhow::Result<Event>>> {
 #[tokio::test]
 async fn hashline_rollback_restores_last_read_baseline() -> anyhow::Result<()> {
     // 最后一次 Read 记录的基线（而不是 record_edit 记录的编辑后内容）。
-    let h = harness("hashline-rollback").await?;
     let original = "line1\nline2\nline3\n";
-    tokio::fs::write(h.cwd.join("a.rs"), original).await?;
     let tag = crate::tools::snapshot::compute_file_tag(original);
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         rollback_script_after_edit(&tag),
     ));
-    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let h = harness_with_backend("hashline-rollback", llm.clone()).await?;
+    tokio::fs::write(h.cwd.join("a.rs"), original).await?;
+    let ctx = h.ctx.clone();
     let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
     let mut belief = BeliefTracker::new(16);
     let (decision, _) = executor
@@ -708,16 +710,16 @@ async fn hashline_rollback_restores_last_read_baseline() -> anyhow::Result<()> {
 async fn rollback_preserves_executable_permissions() -> anyhow::Result<()> {
     // 回滚经 atomic_replace 换文件时必须保留原权限（可执行脚本 +x）。
     use std::os::unix::fs::PermissionsExt;
-    let h = harness("rollback-perms").await?;
     let original = "#!/bin/sh\necho hi\n";
-    tokio::fs::write(h.cwd.join("a.rs"), original).await?;
-    tokio::fs::set_permissions(h.cwd.join("a.rs"), std::fs::Permissions::from_mode(0o755)).await?;
     let tag = crate::tools::snapshot::compute_file_tag(original);
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         rollback_script_after_edit(&tag),
     ));
-    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let h = harness_with_backend("rollback-perms", llm.clone()).await?;
+    tokio::fs::write(h.cwd.join("a.rs"), original).await?;
+    tokio::fs::set_permissions(h.cwd.join("a.rs"), std::fs::Permissions::from_mode(0o755)).await?;
+    let ctx = h.ctx.clone();
     let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
     let mut belief = BeliefTracker::new(16);
     let (decision, _) = executor
@@ -738,16 +740,16 @@ async fn rollback_preserves_executable_permissions() -> anyhow::Result<()> {
 async fn rollback_preserves_private_permissions() -> anyhow::Result<()> {
     // 权限在临时文件上先设置再发布：0600 文件回滚后不能变成默认 0644。
     use std::os::unix::fs::PermissionsExt;
-    let h = harness("rollback-private-perms").await?;
     let original = "secret = true\n";
-    tokio::fs::write(h.cwd.join("a.rs"), original).await?;
-    tokio::fs::set_permissions(h.cwd.join("a.rs"), std::fs::Permissions::from_mode(0o600)).await?;
     let tag = crate::tools::snapshot::compute_file_tag(original);
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         rollback_script_after_edit(&tag),
     ));
-    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let h = harness_with_backend("rollback-private-perms", llm.clone()).await?;
+    tokio::fs::write(h.cwd.join("a.rs"), original).await?;
+    tokio::fs::set_permissions(h.cwd.join("a.rs"), std::fs::Permissions::from_mode(0o600)).await?;
+    let ctx = h.ctx.clone();
     let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
     let mut belief = BeliefTracker::new(16);
     let (decision, _) = executor
@@ -765,16 +767,7 @@ async fn rollback_preserves_private_permissions() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn replace_mode_rollback_restores_last_read_baseline() -> anyhow::Result<()> {
-    let h = harness_with_config(
-        "replace-rollback",
-        false,
-        300,
-        |cfg| cfg.edit_mode = crate::config::EditMode::Replace,
-        None,
-    )
-    .await?;
     let original = "line1\nline2\nline3\n";
-    tokio::fs::write(h.cwd.join("a.rs"), original).await?;
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         vec![
@@ -812,7 +805,16 @@ async fn replace_mode_rollback_restores_last_read_baseline() -> anyhow::Result<(
             ],
         ],
     ));
-    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let h = harness_with_config(
+        "replace-rollback",
+        false,
+        300,
+        |cfg| cfg.edit_mode = crate::config::EditMode::Replace,
+        Some(llm.clone()),
+    )
+    .await?;
+    tokio::fs::write(h.cwd.join("a.rs"), original).await?;
+    let ctx = h.ctx.clone();
     let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
     let mut belief = BeliefTracker::new(16);
     let (decision, _) = executor
@@ -829,9 +831,7 @@ async fn replace_mode_rollback_restores_last_read_baseline() -> anyhow::Result<(
 
 #[tokio::test]
 async fn rollback_scope_limited_to_recent_edit_window() -> anyhow::Result<()> {
-    let h = harness("rollback-scope").await?;
     let original = "line1\nline2\nline3\n";
-    tokio::fs::write(h.cwd.join("a.rs"), original).await?;
     let tag = crate::tools::snapshot::compute_file_tag(original);
     let mut script = vec![
         vec![
@@ -855,7 +855,6 @@ async fn rollback_scope_limited_to_recent_edit_window() -> anyhow::Result<()> {
             })),
         ],
     ];
-    // 6 个成功的 Bash（互不相同，避免 StormBreaker 抑制）把编辑挤出回滚窗口。
     let mut clean_batch: Vec<anyhow::Result<Event>> = (0..6)
         .map(|idx| {
             Ok(Event::ToolCall(tool_call(
@@ -869,7 +868,6 @@ async fn rollback_scope_limited_to_recent_edit_window() -> anyhow::Result<()> {
         reason: "tool_use".into(),
     })));
     script.push(clean_batch);
-    // 11 次失败（α=11 由 8 次干净调用推高；β=12 > α 才进入警告区）。
     script.push(failing_batch_n(11, "fail"));
     script.push(vec![
         Ok(Event::Text(TextEvent {
@@ -880,7 +878,9 @@ async fn rollback_scope_limited_to_recent_edit_window() -> anyhow::Result<()> {
         })),
     ]);
     let llm = Arc::new(MockLlmBackend::new("flash", script));
-    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let h = harness_with_backend("rollback-scope", llm.clone()).await?;
+    tokio::fs::write(h.cwd.join("a.rs"), original).await?;
+    let ctx = h.ctx.clone();
     let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
     let mut belief = BeliefTracker::new(16);
     let (decision, _) = executor
@@ -897,7 +897,6 @@ async fn rollback_scope_limited_to_recent_edit_window() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn repeated_soft_failures_trigger_evidence_injection() -> anyhow::Result<()> {
-    let h = harness("repeated-soft-failures").await?;
     let soft_failure_batch = |n: usize| {
         vec![
             Ok(Event::ToolCall(tool_call(
@@ -925,7 +924,9 @@ async fn repeated_soft_failures_trigger_evidence_injection() -> anyhow::Result<(
             ],
         ],
     ));
-    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let h = harness_with_backend("repeated-soft-failures", llm.clone()).await?;
+
+    let ctx = h.ctx.clone();
     let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
     let mut belief = BeliefTracker::new(16);
     let (decision, _) = executor.execute("soft failures", Some(&mut belief)).await?;
@@ -949,17 +950,6 @@ async fn clean_calls_do_not_open_soft_failure_gate() -> anyhow::Result<()> {
     // 成功调用不得推高 soft_failures 计数。14 次干净调用 + 1 次软失败
     // 使 B≈0.905 落在 [warn=0.90, remind=0.95) 区间，门控成为唯一决定因素：
     // 计数正确（soft=1）→ 沉默；计数被干净调用污染（=15）→ 误注入。
-    let h = harness_with_config(
-        "soft-gate-clean",
-        false,
-        300,
-        |cfg| {
-            cfg.signal.remind_threshold = 0.95;
-            cfg.signal.warn_threshold = 0.90;
-        },
-        None,
-    )
-    .await?;
     let mut clean_batch: Vec<anyhow::Result<Event>> = (0..14)
         .map(|idx| {
             Ok(Event::ToolCall(tool_call(
@@ -996,7 +986,18 @@ async fn clean_calls_do_not_open_soft_failure_gate() -> anyhow::Result<()> {
             ],
         ],
     ));
-    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let h = harness_with_config(
+        "soft-gate-clean",
+        false,
+        300,
+        |cfg| {
+            cfg.signal.remind_threshold = 0.95;
+            cfg.signal.warn_threshold = 0.90;
+        },
+        Some(llm.clone()),
+    )
+    .await?;
+    let ctx = h.ctx.clone();
     let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
     let mut belief = BeliefTracker::new(16);
     let (decision, _) = executor.execute("mostly clean", Some(&mut belief)).await?;
@@ -1017,18 +1018,6 @@ async fn clean_calls_do_not_open_soft_failure_gate() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn replan_setup_failure_degrades_to_handover() -> anyhow::Result<()> {
-    let h = harness("replan-setup-failure").await?;
-    // 预置冲突使 SubAgentExecutor::new 失败：subagents 路径是普通文件而非
-    // 目录时，任何 child home 都无法创建（replan id 唯一化后无法预知具体
-    // 目录名，用父目录类型冲突作为确定性故障注入点）。
-    let parent_session_dir = h
-        .ctx
-        .store
-        .path()
-        .parent()
-        .expect("parent conversation has a session directory")
-        .to_path_buf();
-    tokio::fs::write(parent_session_dir.join("subagents"), b"").await?;
     let calls = (0..8)
         .map(|idx| {
             Ok(Event::ToolCall(tool_call(
@@ -1042,7 +1031,16 @@ async fn replan_setup_failure_degrades_to_handover() -> anyhow::Result<()> {
         }))))
         .collect::<Vec<_>>();
     let llm = Arc::new(MockLlmBackend::new("flash", vec![calls]));
-    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let h = harness_with_backend("replan-setup-failure", llm.clone()).await?;
+    let parent_session_dir = h
+        .ctx
+        .store
+        .path()
+        .parent()
+        .expect("parent conversation has a session directory")
+        .to_path_buf();
+    tokio::fs::write(parent_session_dir.join("subagents"), b"").await?;
+    let ctx = h.ctx.clone();
     let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
     let mut belief = BeliefTracker::new(16);
     let outcome = executor
@@ -1054,6 +1052,130 @@ async fn replan_setup_failure_degrades_to_handover() -> anyhow::Result<()> {
         TurnDecision::Failed(
             "signal handover: reliability belief fell below the abort threshold".into()
         )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn signaled_bash_failure_is_a_hard_signal() -> anyhow::Result<()> {
+    // Runner → signal path: a command killed by a signal is ProcessFailed
+    // (structured termination), not Unknown from empty output text.
+    let llm = Arc::new(MockLlmBackend::new(
+        "flash",
+        vec![
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "Bash",
+                    "call_kill",
+                    json!({"command": "kill -TERM $$"}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_use".into(),
+                })),
+            ],
+            vec![
+                Ok(Event::Text(crate::protocol::TextEvent {
+                    content: "done".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+        ],
+    ));
+    let h = harness_with_backend("signal-bash-signaled", llm.clone()).await?;
+
+    let ctx = h.ctx.clone();
+    let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
+    let mut belief = BeliefTracker::new(16);
+
+    let _ = executor
+        .execute("run signaled command", Some(&mut belief))
+        .await?;
+
+    let hard_failures = executor
+        .collected_signals()
+        .iter()
+        .filter(|signal| {
+            signal.source_tool == "Bash"
+                && matches!(signal.kind, crate::guard::collector::SignalKind::ToolFailed)
+        })
+        .count();
+    assert_eq!(
+        hard_failures,
+        1,
+        "{:?}",
+        executor
+            .collected_signals()
+            .iter()
+            .map(|s| format!("{}/{:?}", s.source_tool, s.kind))
+            .collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn replace_rollback_preserves_bom_and_crlf_shape() -> anyhow::Result<()> {
+    // Integration path for the shared TextShape rules: the rollback writes
+    // the read baseline back with the original BOM/CRLF bytes.
+    let original = "\u{feff}line1\r\nline2\r\nline3\r\n";
+    let llm = Arc::new(MockLlmBackend::new(
+        "flash",
+        vec![
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "Read",
+                    "call_read",
+                    json!({"path":"a.rs:1-10"}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_use".into(),
+                })),
+            ],
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "Edit",
+                    "call_edit",
+                    json!({
+                        "path": "a.rs",
+                        "edits": [{"old_text": "line1", "new_text": "lineX", "all": false}],
+                    }),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_use".into(),
+                })),
+            ],
+            failing_batch_n(5, "fail"),
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content: "done".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+        ],
+    ));
+    let h = harness_with_config(
+        "replace-rollback-shape",
+        false,
+        300,
+        |cfg| cfg.edit_mode = crate::config::EditMode::Replace,
+        Some(llm.clone()),
+    )
+    .await?;
+    tokio::fs::write(h.cwd.join("a.rs"), original).await?;
+    let ctx = h.ctx.clone();
+    let mut executor = TurnExecutor::new(ctx, llm_backend_from_mock(llm));
+    let mut belief = BeliefTracker::new(16);
+    let (decision, _) = executor
+        .execute("edit then fail", Some(&mut belief))
+        .await?;
+    assert_eq!(decision, TurnDecision::Stop);
+    let on_disk = tokio::fs::read_to_string(h.cwd.join("a.rs")).await?;
+    assert_eq!(
+        on_disk, original,
+        "rollback must restore the BOM/CRLF read baseline"
     );
     Ok(())
 }

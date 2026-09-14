@@ -264,7 +264,8 @@ cargo build --release
 - 恢复首步守卫生效后，首个 Bash 调用还要单独满足 `FocusedVerificationExec`。这只是
   恢复首步资格，不改变普通 Bash 的误用拦截；
 - 显式 `timeout` 为 `1..=tool_timeout_max` 时按原值执行；超过 `tool_timeout_max` 直接报错（fail closed），`0` 回退到全局 `tool_timeout`；未设置 `tool_timeout` 时默认值稳定夹在 5 到 `tool_timeout_max` 秒之间。`tool_timeout_max` 默认 600 秒，可在 `[tools]` 中配置，最低 5 秒。
-- Ctrl+C / interrupt 会尝试中断子进程，返回 exit code 130 语义。
+- Ctrl+C / interrupt 会尝试中断子进程，返回 exit code 130 语义；只有运行库中断路径会标注 `command interrupted`，命令自行 `exit 130` 属于普通非零退出。
+- 失败分类优先采用进程监督事实（超时 → `Timeout`，中断 → `Interrupted`，信号终止/非零退出 → `ProcessFailed`）；输出文本中的 `timeout` 等词不会改变分类。
 - stdout 和 stderr 合并返回，非零退出码会追加提示。
 
 ## `Python`
@@ -282,6 +283,7 @@ cargo build --release
 - 在当前会话 `cwd` 下使用 `python3 -B -W ignore -c` 执行。
 - 显式 `timeout` 为 `1..=tool_timeout_max` 时按原值执行；超过 `tool_timeout_max` 直接报错（fail closed），`0` 回退到全局 `tool_timeout`；未设置 `tool_timeout` 时默认值稳定夹在 5 到 `tool_timeout_max` 秒之间。`tool_timeout_max` 默认 600 秒，可在 `[tools]` 中配置，最低 5 秒。
 - Ctrl+C / interrupt 会杀掉脚本并返回 interrupted 提示。
+- 失败分类同样基于进程监督事实（超时/中断/信号终止/非零退出），不依赖输出关键词。
 
 ## `PythonSandbox`
 
@@ -508,3 +510,17 @@ runtime 启动时 fail closed。
 - 子代理完成时会通过 parent display 发送完整 thinking/text。
 - tool result 会注入父会话，格式为 `[sub-agent <id>] <status> (in=<n>, out=<n>) ...`。
 - 超时后未完成项返回 `Sub-agent timed out after <n>s.`，并取消对应子代理。
+
+## 工具事实权威表（Q11）
+
+同一事实只有一个权威声明点；新增工具按表中位置填写，不做代码生成：
+
+| 事实 | 权威来源 | 校验 |
+|---|---|---|
+| 工具名、模型可见 schema、顺序 | `assets/tools.json` | catalog 加载时与 executor 1:1 校验：schema 重复、缺少 executor、executor 缺少 schema、feature 声明指向未知工具均报错 |
+| approval tier、结果类型、mutating、spawns_sub_agent、storm 豁免、explicit-only | 各工具 `ToolExec::metadata()`（一个工具一处） | `resolve_tool_runtime`/approval 与 surface 测试 |
+| 执行绑定 | `tool_registry()` | catalog 加载时建立 name → executor 映射 |
+| 功能门控 | `FEATURE_GATED_TOOLS`（含 explicit-only 标记） | 未编译时激活方式与编译期 metadata 声明一致 |
+| 参数与行为说明 | 本文档（非规范性） | `additionalProperties:false` 与 serde 字段一致性测试 |
+
+结论：运行时事实已单源（metadata），schema/顺序单源（JSON），二者在 catalog 汇合校验；本轮只消除 `PythonSandbox` 的名称特判（改由声明携带 explicit-only），不引入 ToolSpec 或生成流水线。

@@ -3,18 +3,30 @@ use std::path::{Path, PathBuf};
 
 const ALLOWED_ROOTS: &[&str] = &["prelude", "runtime", "sdk_protocol"];
 
+/// Collect every Rust file under `root`.
+///
+/// The boundary check must not silently shrink when a consumer directory is
+/// missing or unreadable: both are test failures, not skips.
 fn rust_files(root: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    let entries = fs::read_dir(root)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", root.display()));
+    let mut count = 0;
+    for entry in entries {
+        let entry = entry
+            .unwrap_or_else(|error| panic!("cannot read an entry of {}: {error}", root.display()));
         let path = entry.path();
         if path.is_dir() {
             rust_files(&path, files);
         } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
             files.push(path);
+            count += 1;
         }
     }
+    assert!(
+        count > 0,
+        "{} must contain at least one Rust source file",
+        root.display()
+    );
 }
 
 #[test]
@@ -24,10 +36,17 @@ fn workspace_consumers_only_use_supported_mink_modules() {
     let roots = [
         workspace.join("crates/mink-cli/src"),
         workspace.join("crates/mink-server/src"),
+        workspace.join("crates/mink-router/src"),
+        workspace.join("crates/mink-prefab/src"),
         core.join("examples"),
     ];
     let mut files = Vec::new();
     for root in roots {
+        assert!(
+            root.is_dir(),
+            "workspace consumer directory is missing: {}",
+            root.display()
+        );
         rust_files(&root, &mut files);
     }
 

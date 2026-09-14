@@ -355,3 +355,19 @@ fn faulted_session_rejects_plan_writes() {
     assert!(error.to_string().contains("persistence fault"), "{error}");
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn poisoned_transition_lock_recovers_through_journal_replay() {
+    let (root, store) = store("poison-transition");
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = store.transition_lock.lock().unwrap();
+        panic!("inject poison");
+    }));
+
+    // The transition lock only serializes file-based state; recovery is the
+    // existing journal/transaction replay, so a new write must succeed.
+    store
+        .set_draft("draft body", 1024)
+        .expect("journal replay must recover from a poisoned transition lock");
+    let _ = std::fs::remove_dir_all(root);
+}

@@ -1,8 +1,8 @@
 use super::*;
 
 impl super::TurnExecutor {
-    pub(super) fn ensure_prefix(&self) -> Result<(String, Vec<serde_json::Value>)> {
-        self.prefix.ensure()
+    pub(super) async fn ensure_prefix(&self) -> Result<(String, Vec<serde_json::Value>)> {
+        self.prefix.ensure().await
     }
 
     pub(super) fn project_request_messages(

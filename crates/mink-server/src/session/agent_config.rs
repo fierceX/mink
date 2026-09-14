@@ -633,6 +633,61 @@ fn apply_sandbox_python(options: AgentOptions, file: &SandboxPythonConfigFile) -
 }
 
 #[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    #[test]
+    fn merge_overrides_present_fields_and_keeps_absent_ones() {
+        let base = AgentConfig {
+            model: Some("base-model".into()),
+            enabled_tools: Some(vec!["Read".into()]),
+            ..Default::default()
+        };
+        let over = AgentConfig {
+            model: Some("over-model".into()),
+            ..Default::default()
+        };
+
+        let merged = merge(base, over);
+
+        assert_eq!(merged.model.as_deref(), Some("over-model"));
+        assert_eq!(merged.enabled_tools, Some(vec!["Read".into()]));
+    }
+
+    #[test]
+    fn merge_container_semantics_are_explicit() {
+        let base = AgentConfig {
+            enabled_tools: Some(vec!["Read".into()]),
+            model_aliases: [("a".to_string(), "base".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let over = AgentConfig {
+            // An explicit empty list replaces the base selection (it does not
+            // mean "keep base"), matching CLI layering.
+            enabled_tools: Some(Vec::new()),
+            model_aliases: [("b".to_string(), "over".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+
+        let merged = merge(base, over);
+
+        assert_eq!(merged.enabled_tools, Some(Vec::new()));
+        assert_eq!(
+            merged.model_aliases.get("a").map(String::as_str),
+            Some("base")
+        );
+        assert_eq!(
+            merged.model_aliases.get("b").map(String::as_str),
+            Some("over")
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
