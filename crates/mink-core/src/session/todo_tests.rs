@@ -464,6 +464,12 @@ fn poisoned_state_lock_rejects_writes_but_reads_keep_last_snapshot() {
         .apply_structure(0, TodoChanges::default())
         .expect_err("a poisoned authoritative lock must fail closed");
     assert!(error.to_string().contains("poisoned"), "{error}");
+    // The poison also latches the persistence fault: every later write is
+    // rejected for that reason, not just the first poisoned access.
+    let second = store
+        .apply_structure(0, TodoChanges::default())
+        .expect_err("latched fault must keep rejecting writes");
+    assert!(second.to_string().contains("persistence fault"), "{second}");
     // Reads still expose the last consistent in-memory snapshot.
     let _ = store.snapshot();
     let _ = std::fs::remove_dir_all(root);

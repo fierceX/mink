@@ -388,7 +388,34 @@ impl FileSnapshotStore {
 }
 
 pub fn canonical_snapshot_path(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    // Not-yet-existing files (e.g. an MV destination before creation) must
+    // still agree with the canonical path used after creation: canonicalize
+    // the nearest existing ancestor and re-append the missing components.
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut current = path;
+    loop {
+        match std::fs::canonicalize(current) {
+            Ok(mut canonical) => {
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return canonical;
+            }
+            Err(_) => {
+                let Some(name) = current.file_name() else {
+                    return path.to_path_buf();
+                };
+                missing.push(name.to_os_string());
+                match current.parent() {
+                    Some(parent) if !parent.as_os_str().is_empty() => current = parent,
+                    _ => return path.to_path_buf(),
+                }
+            }
+        }
+    }
 }
 
 pub fn normalize_snapshot_text(content: &str) -> String {

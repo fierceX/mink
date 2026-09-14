@@ -131,6 +131,33 @@ async fn add_tool_history(ctx: &crate::context::AgentSharedContext) -> anyhow::R
     Ok(())
 }
 
+/// Extend a short history so the tail-user guard can be satisfied: a third
+/// real user turn gives the cut a boundary while keeping two users in tail.
+async fn add_follow_up_turn(ctx: &crate::context::AgentSharedContext) -> anyhow::Result<()> {
+    ctx.store
+        .add_assistant(
+            "Re-running after the fix.",
+            "second private reasoning",
+            &[crate::protocol::ToolCallEvent {
+                name: "Bash".into(),
+                id: "bash-2".into(),
+                input_json: json!({"command":"cargo test --lib"}),
+                fields: Default::default(),
+                parse_error: None,
+            }],
+        )
+        .await?;
+    ctx.store
+        .add_tool_results(&[crate::tools::runner::ToolExecution::test_result(
+            "bash-2",
+            "Bash",
+            "Process completed with exit code 0.",
+        )])
+        .await?;
+    ctx.store.add_user("and update the changelog").await?;
+    Ok(())
+}
+
 async fn compact(
     ctx: &crate::context::AgentSharedContext,
     trigger: &str,
@@ -625,6 +652,7 @@ async fn summary_tool_call_fails_explicitly_without_advancing_context() -> anyho
     )
     .await?;
     add_tool_history(&ctx).await?;
+    add_follow_up_turn(&ctx).await?;
     let before = ctx.compaction.active_messages().await?;
 
     let error = compact(&ctx, "manual", 0).await.unwrap_err();
@@ -805,6 +833,7 @@ async fn startup_repairs_legacy_cut_on_internal_user_message() -> anyhow::Result
     };
     crate::session::atomic_file::atomic_replace(&state_path, &serde_json::to_vec_pretty(&state)?)?;
 
+    let writer = crate::session::event_log::EventLogWriter::start(ctx.events_path.clone());
     let engine = CompactionEngine::new(
         ctx.store.clone(),
         ctx.summary_path.clone(),
@@ -817,10 +846,35 @@ async fn startup_repairs_legacy_cut_on_internal_user_message() -> anyhow::Result
         ctx.cancel.clone(),
         ctx.interrupt.clone(),
         summary_backend(),
-        None,
+        Some(writer.clone()),
     )?;
     engine.validate_startup().await?;
     assert_eq!(engine.current_state()?.active_start, 3);
+
+    // The skipped message is carried into the next summary input…
+    let active = ctx.store.lines_from(3).await?;
+    let input =
+        engine.build_summary_input(&active, 1, None, false, LlmModelTarget::new("flash", None))?;
+    let serialized = serde_json::to_string(&input.messages)?;
+    assert!(
+        serialized.contains("plain injected text"),
+        "skipped startup-repair history missing from summary input: {serialized}"
+    );
+    // A second attempt (e.g. after a failed/interrupted request) must still
+    // carry the loss: building the input must not consume it.
+    let retry =
+        engine.build_summary_input(&active, 1, None, false, LlmModelTarget::new("flash", None))?;
+    let retry_serialized = serde_json::to_string(&retry.messages)?;
+    assert!(
+        retry_serialized.contains("plain injected text"),
+        "repair loss must survive a failed summary attempt: {retry_serialized}"
+    );
+
+    // …and the repair itself is visible as an event.
+    writer.flush().await?;
+    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    assert!(events.contains("startup_repair"), "{events}");
+    assert!(events.contains("skipped 1 message(s)"), "{events}");
     Ok(())
 }
 
@@ -922,6 +976,7 @@ async fn enabled_input_reduction_changes_only_the_summary_request() -> anyhow::R
     )
     .await?;
     add_tool_history(&ctx).await?;
+    add_follow_up_turn(&ctx).await?;
 
     let full_history = ctx.store.lines().await?;
     let (compacted, _) = ctx
@@ -973,6 +1028,7 @@ async fn disabled_input_reduction_sends_original_structured_history() -> anyhow:
     )
     .await?;
     add_tool_history(&ctx).await?;
+    add_follow_up_turn(&ctx).await?;
 
     assert!(compact(&ctx, "manual", 0).await?.0);
 
@@ -1374,6 +1430,147 @@ async fn memo_epoch_is_shared_and_bumped_by_compaction() -> anyhow::Result<()> {
     assert!(
         ctx.memo_epoch.load(Ordering::SeqCst) > before,
         "compaction commit must bump the shared memo epoch"
+    );
+    Ok(())
+}
+
+#[test]
+fn cut_refuses_when_tail_user_guard_cannot_be_satisfied_without_dropping_all() {
+    // Audit R1 scenario A: candidate/safe boundary after the last real user
+    // would leave zero real users in the tail; the cut must refuse.
+    let messages = vec![
+        json!({"role":"user","content":"first constraint"}),
+        json!({"role":"assistant","content":[{"type":"tool_use","id":"a","name":"Read","input":{"path":"x"}}]}),
+        json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"short"}]}),
+        json!({"role":"user","content":"second constraint"}),
+        json!({"role":"assistant","content":[{"type":"text","text":"x".repeat(5000)},{"type":"tool_use","id":"b","name":"Read","input":{"path":"y"}}]}),
+        json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"b","content":"short"}]}),
+    ];
+    let cut = find_compaction_cut_point(&messages, 1000);
+    assert_eq!(cut, 0, "guard cannot be met: compaction must be refused");
+}
+
+#[test]
+fn cut_refuses_when_only_one_real_user_precedes_candidate() {
+    // Audit R1 scenario B: safe boundary (assistant) has one real user after
+    // it and only one before; satisfying two tail users would reach index 0.
+    let messages = vec![
+        json!({"role":"user","content":"head constraint"}),
+        json!({"role":"assistant","content":[{"type":"tool_use","id":"a","name":"Read","input":{"path":"x"}}]}),
+        json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"short"}]}),
+        json!({"role":"assistant","content":[{"type":"text","text":"y".repeat(5000)},{"type":"tool_use","id":"b","name":"Read","input":{"path":"y"}}]}),
+        json!({"role":"user","content":"tail constraint"}),
+    ];
+    let cut = find_compaction_cut_point(&messages, 1000);
+    assert_eq!(cut, 0, "guard cannot be met: compaction must be refused");
+}
+
+#[tokio::test]
+async fn summary_retry_discards_partial_output() -> anyhow::Result<()> {
+    let backend = Arc::new(MockLlmBackend::new(
+        "summary-retry",
+        vec![vec![
+            Ok(Event::Text(TextEvent {
+                content: "stale partial summary".into(),
+            })),
+            Ok(Event::Retry(crate::protocol::RetryEvent {})),
+            Ok(Event::Text(TextEvent {
+                content: "fresh summary answer".into(),
+            })),
+            Ok(Event::Stop(StopEvent {
+                reason: "end_turn".into(),
+            })),
+        ]],
+    ));
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "compact-summary-retry",
+        |config| {
+            config.max_context_tokens = 64_000;
+            config.context_reserve_tokens = 8_000;
+            config.context_compact_tail_tokens = 1;
+        },
+        backend,
+    )
+    .await?;
+    add_tool_history(&ctx).await?;
+    add_follow_up_turn(&ctx).await?;
+
+    assert!(compact(&ctx, "manual", 0).await?.0);
+    let summary = ctx.compaction.read_summary().await.expect("summary");
+    assert!(summary.contains("fresh summary answer"), "{summary}");
+    assert!(
+        !summary.contains("stale partial summary"),
+        "retry must discard the aborted attempt's output: {summary}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn startup_repair_loss_cleared_only_after_successful_commit() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "compact-repair-clear",
+        |config| {
+            config.context_compact_tail_tokens = 1;
+        },
+        summary_backend(),
+    )
+    .await?;
+    ctx.store.add_user("head constraint").await?;
+    ctx.store.add_assistant("ack", "", &[]).await?;
+    ctx.store.add_runtime_user("plain injected text").await?;
+    ctx.store.add_user("second constraint").await?;
+    ctx.store.add_assistant("mid", "", &[]).await?;
+    ctx.store.add_user("third constraint").await?;
+    ctx.store.add_assistant("mid2", "", &[]).await?;
+    ctx.store.add_user("fourth constraint").await?;
+
+    let state_path = ctx.summary_path.with_file_name("context-state.json");
+    let state = CompactionState {
+        active_start: 2,
+        summary: "authoritative summary".into(),
+    };
+    crate::session::atomic_file::atomic_replace(&state_path, &serde_json::to_vec_pretty(&state)?)?;
+
+    let engine = CompactionEngine::new(
+        ctx.store.clone(),
+        ctx.summary_path.clone(),
+        ctx.config.base_url.clone(),
+        &ctx.config,
+        ctx.stats.clone(),
+        ctx.usage.clone(),
+        ctx.config.session_id.clone(),
+        ctx.display.clone(),
+        ctx.cancel.clone(),
+        ctx.interrupt.clone(),
+        summary_backend(),
+        None,
+    )?;
+    engine.validate_startup().await?;
+
+    let active = ctx.store.lines_from(3).await?;
+    let before =
+        engine.build_summary_input(&active, 5, None, true, LlmModelTarget::new("flash", None))?;
+    assert!(
+        serde_json::to_string(&before.messages)?.contains("plain injected text"),
+        "repair loss must be present before the commit"
+    );
+
+    let (compacted, _) = engine
+        .evaluate_and_compact("manual", 0, LlmModelTarget::new("flash", None))
+        .await?;
+    assert!(compacted, "history must be compactable after the repair");
+
+    let new_active = ctx.store.lines_from(8).await?;
+    let after = engine.build_summary_input(
+        &new_active,
+        0,
+        None,
+        true,
+        LlmModelTarget::new("flash", None),
+    )?;
+    assert!(
+        !serde_json::to_string(&after.messages)?.contains("plain injected text"),
+        "a committed summary consumed the repair loss; it must not be fed again"
     );
     Ok(())
 }

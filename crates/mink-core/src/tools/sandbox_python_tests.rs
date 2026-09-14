@@ -27,7 +27,7 @@ fn synthetic_wasm_timeout_and_cancel_terminate_execution() {
     let started = std::time::Instant::now();
     let (_, timeout_error, timeout_code) =
         execute_in_sandbox_at("", &wasm, &dir, &[], &[], &[], &dir, 1024, 1, None).unwrap();
-    assert_eq!(timeout_code, Some(124));
+    assert_eq!(timeout_code, None);
     assert!(timeout_error.contains("timed out"));
     // 验证 1s 超时确实终止执行而非挂死；并行全量测试时 wasmtime
     // JIT 编译与调度争抢会让启动延迟超过 3s，放宽上界避免负载抖动误报。
@@ -47,7 +47,7 @@ fn synthetic_wasm_timeout_and_cancel_terminate_execution() {
         Some(&interrupt),
     )
     .unwrap();
-    assert_eq!(cancel_code, Some(130));
+    assert_eq!(cancel_code, None);
     assert!(cancel_error.contains("cancelled"));
     let _ = std::fs::remove_dir_all(dir);
 }

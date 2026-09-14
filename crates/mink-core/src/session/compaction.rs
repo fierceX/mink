@@ -108,6 +108,9 @@ pub struct CompactionEngine {
     /// Shared session publish-fault latch for context-state and projection
     /// writes.
     fault: crate::session::persistence::PersistenceFault,
+    /// Messages skipped by startup boundary repair; carried into the next
+    /// summarization input so they are not silently lost.
+    startup_repair_loss: Mutex<Vec<Value>>,
 }
 
 pub(crate) use crate::session::compaction_cut::*;
@@ -163,6 +166,7 @@ impl CompactionEngine {
             projection_dirty: AtomicBool::new(false),
             event_log_writer,
             fault: Default::default(),
+            startup_repair_loss: Mutex::new(Vec::new()),
         })
     }
 
@@ -272,6 +276,25 @@ impl CompactionEngine {
             .find(|&index| is_safe_context_start(&active[index]))
             .unwrap_or(active.len());
         let repaired_start = state.active_start.saturating_add(repaired_relative);
+        let skipped: Vec<Value> = active[..repaired_relative].to_vec();
+        if !skipped.is_empty() {
+            // Visibility first: the skipped range is recorded even when the
+            // process dies before the next summarization.
+            self.write_event(crate::events::EventLog::Compact {
+                version: Some(1),
+                trigger: "startup_repair".into(),
+                result: format!(
+                    "skipped {} message(s) from index {} to {} (unsafe legacy boundary)",
+                    skipped.len(),
+                    state.active_start,
+                    repaired_start
+                ),
+            });
+            *self
+                .startup_repair_loss
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = skipped;
+        }
         let next = CompactionState {
             active_start: repaired_start,
             summary: state.summary,
@@ -390,6 +413,13 @@ impl CompactionEngine {
             summary: summary.clone(),
         };
         self.commit_state(next).await?;
+        // The committed summary consumed the startup-repair loss (every
+        // summary input includes the current loss); only a successful commit
+        // may clear it, so a failed/interrupted attempt keeps it for retry.
+        *self
+            .startup_repair_loss
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Vec::new();
         let result = format!(
             "compacted_at_trigger={trigger}_kept={}_input_reduction={}_input_mode={}_aligned_messages={}_aligned_estimated_tokens={}_reduced_suffix_messages={}_fallback_reason={}",
             kept.len(),
@@ -683,6 +713,14 @@ impl CompactionEngine {
                 Event::ToolCall(call) if invalid_tool_call.is_none() => {
                     invalid_tool_call = Some((call.name, call.id));
                 }
+                Event::Retry(_) => {
+                    // The summary stream restarts: partial output from the
+                    // aborted attempt must not leak into the final summary.
+                    output.clear();
+                    stop_reason.clear();
+                    last_error.clear();
+                    invalid_tool_call = None;
+                }
                 _ => {}
             }
         }
@@ -722,6 +760,15 @@ impl CompactionEngine {
         {
             source_messages.push(plan);
         }
+        // Startup boundary repair removed these messages from the projection;
+        // include them in every summary attempt until one actually commits.
+        // Taking them here would re-lose them when the request fails.
+        let repair_loss = self
+            .startup_repair_loss
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        source_messages.extend(repair_loss.iter().cloned());
         let dynamic_prefix_len = source_messages.len();
         source_messages.extend(crate::llm::image_projection::project_consumed_attachments(
             active,
@@ -860,6 +907,9 @@ impl CompactionEngine {
         if let Some(summary) = previous_summary.filter(|summary| !summary.trim().is_empty()) {
             history.push(compacted_summary_message(summary));
         }
+        // Also present in the fallback (no recent agent request): startup
+        // repair losses must reach the summary whichever path is taken.
+        history.extend(repair_loss);
         history.extend(crate::llm::image_projection::project_consumed_attachments(
             dropped,
         ));

@@ -159,7 +159,7 @@ fn timeout_path_kills_term_ignoring_grandchild() {
     .expect("wait failed");
 
     assert!(completion.timed_out);
-    assert_eq!(completion.exit_code, Some(124));
+    assert_eq!(completion.exit_code, None);
     assert!(!pid_alive(grandchild), "timeout must stop the whole group");
     assert_eq!(completion.tree_cleanup, ProcessTreeCleanup::Confirmed);
     let _ = std::fs::remove_dir_all(dir);
@@ -190,7 +190,7 @@ fn interrupt_path_kills_term_ignoring_grandchild() {
     setter.join().expect("interrupt setter panicked");
 
     assert!(completion.interrupted);
-    assert_eq!(completion.exit_code, Some(130));
+    assert_eq!(completion.exit_code, None);
     assert!(
         !pid_alive(grandchild),
         "interrupt must stop the whole group"

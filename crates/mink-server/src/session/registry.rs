@@ -142,9 +142,7 @@ impl Registry {
     /// three-pane UI groups sessions by workspace directory.
     pub async fn list(&self) -> Result<Vec<SessionSummary>> {
         let active_status = self
-            .active
-            .lock()
-            .unwrap()
+            .lock_active_state()?
             .iter()
             .map(|(locator, session)| {
                 (
@@ -371,13 +369,11 @@ impl Registry {
         project: Option<&str>,
     ) -> RegistryResult<Option<Arc<SessionRuntime>>> {
         let locator = self.active_locator(id, project)?;
-        Ok(locator.and_then(|locator| {
-            self.active
-                .lock()
-                .unwrap()
-                .get(&locator)
-                .map(|a| a.runtime.clone())
-        }))
+        let Some(locator) = locator else {
+            return Ok(None);
+        };
+        let active = self.lock_active_state()?;
+        Ok(active.get(&locator).map(|a| a.runtime.clone()))
     }
 
     fn active_locator(
@@ -575,13 +571,10 @@ impl Registry {
         let locator = locator_from_dir(&dir, id);
         let operation_lock = self.operation_lock(&locator);
         let _operation = operation_lock.lock().await;
-        let active_session = {
-            self.active
-                .lock()
-                .unwrap()
-                .get(&locator)
-                .map(|session| session.runtime.clone())
-        };
+        let active_session = self
+            .lock_active_state()?
+            .get(&locator)
+            .map(|session| session.runtime.clone());
         if let Some(runtime) = active_session {
             runtime.shutdown().await.map_err(RegistryError::Internal)?;
             self.lock_active_state()?.remove(&locator);
@@ -614,19 +607,23 @@ impl Registry {
         let locator = self.active_locator(id, project)?;
         Ok(locator
             .and_then(|locator| {
-                self.active
+                // Pure-read status: recover a poisoned lock instead of
+                // panicking the request path.
+                let guard = self
+                    .active
                     .lock()
-                    .unwrap()
-                    .get(&locator)
-                    .map(|a| a.runtime.running())
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                guard.get(&locator).map(|a| a.runtime.running())
             })
             .unwrap_or(false))
     }
 
     pub fn idle_session_ids(&self, minimum_idle: Duration) -> Vec<(String, String)> {
-        self.active
+        let guard = self
+            .active
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard
             .iter()
             .filter(|(_, session)| {
                 session
@@ -640,9 +637,7 @@ impl Registry {
 
     pub async fn shutdown_all(&self) -> Result<()> {
         let ids = self
-            .active
-            .lock()
-            .unwrap()
+            .lock_active_state()?
             .keys()
             .cloned()
             .collect::<Vec<_>>();
@@ -1221,5 +1216,45 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod poison_public_tests {
+    use super::*;
+
+    fn test_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "mink-server-{label}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    #[tokio::test]
+    async fn poisoned_state_lock_does_not_panic_public_entries() {
+        let dir = test_dir("poison-public");
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = Registry::new(dir.clone(), "flash".into(), 4);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = registry.active.lock().expect("state lock");
+            panic!("inject poison");
+        }));
+
+        assert!(registry.list().await.is_err(), "list must fail closed");
+        assert!(
+            registry.active_runtime("missing", None).is_err(),
+            "active_runtime must fail closed"
+        );
+        assert!(
+            registry.shutdown_all().await.is_err(),
+            "shutdown_all must fail closed"
+        );
+        // Pure-read helpers recover the poisoned lock instead of panicking.
+        assert!(registry.idle_session_ids(Duration::from_secs(0)).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

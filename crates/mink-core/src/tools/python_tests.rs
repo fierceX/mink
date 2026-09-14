@@ -61,7 +61,7 @@ fn unrestricted_scripts_execute() {
 fn timeout_kills_long_script() {
     let (stdout, _, code) = execute_script("import time; time.sleep(10)", Some(1)).unwrap();
     assert!(stdout.contains("timed out"));
-    assert_eq!(code, Some(124));
+    assert_eq!(code, None);
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn interrupt_kills_long_script() {
         Some(&interrupt),
     )
     .unwrap();
-    assert_eq!(code, Some(130));
+    assert_eq!(code, None);
     assert!(stdout.contains("interrupted"));
     assert!(!stdout.contains("done"));
 }

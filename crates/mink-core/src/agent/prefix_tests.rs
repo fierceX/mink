@@ -177,3 +177,40 @@ async fn prefix_waits_for_real_writer_result_and_retries_after_recovery() -> any
     let _ = std::fs::remove_dir_all(dir);
     Ok(())
 }
+
+#[tokio::test]
+async fn stale_dependency_fingerprint_forces_prefix_rebuild() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent("prefix-stale-dependency").await?;
+    let manager = PrefixManager::new(ctx.clone());
+    let (system_prompt, tools_json) = manager.ensure().await?;
+
+    // Self-consistent cache entry: its fingerprint verifies, but the recorded
+    // dependency fingerprint no longer matches the session capabilities.
+    let stale_dependency = "stale-dependency".to_string();
+    let stale_fingerprint = crate::session::prefix::ImmutablePrefix::compute_fingerprint(
+        &system_prompt,
+        &tools_json,
+        Some(&stale_dependency),
+    );
+    *ctx.immutable_prefix
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(
+        crate::session::prefix::ImmutablePrefix::new_with_fingerprint(
+            system_prompt.clone(),
+            tools_json.clone(),
+            stale_dependency.clone(),
+            stale_fingerprint.clone(),
+        ),
+    );
+
+    let (rebuilt_prompt, _) = manager.ensure().await?;
+    let guard = ctx
+        .immutable_prefix
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let rebuilt = guard.as_ref().expect("prefix cached after rebuild");
+    assert_eq!(rebuilt.system_prompt(), rebuilt_prompt);
+    assert_ne!(rebuilt.dependency_fingerprint(), stale_dependency);
+    assert_ne!(rebuilt.fingerprint(), stale_fingerprint);
+    Ok(())
+}

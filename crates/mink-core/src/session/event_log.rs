@@ -14,8 +14,9 @@ const FLUSH_ENQUEUE_DEADLINE: std::time::Duration = std::time::Duration::from_se
 #[cfg(test)]
 const FLUSH_ENQUEUE_DEADLINE: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// How long `flush` may wait for the writer acknowledgement after the command
-/// was enqueued (queue-full retries use `FLUSH_ENQUEUE_DEADLINE`).
+/// How long `flush` may wait for the writer acknowledgement. The deadline is
+/// measured from `flush()` entry: enqueue retries (`FLUSH_ENQUEUE_DEADLINE`)
+/// and the ack wait share the same start instant.
 #[cfg(not(test))]
 const FLUSH_ACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(test)]
@@ -843,6 +844,10 @@ mod tests {
         )
     }
     #[tokio::test]
+    // Cross-runtime progress is asserted as a soft check here; the strict
+    // single-thread proof lives in
+    // `critical_commit_does_not_block_async_worker_when_queue_full`
+    // (`current_thread` + pre-await snapshot).
     async fn flush_does_not_block_when_queue_full_and_writer_is_paused() {
         let dir = std::env::temp_dir().join(format!(
             "mink-event-log-full-{}-{}",

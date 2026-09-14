@@ -13,6 +13,27 @@ impl PrefixManager {
         Self { ctx }
     }
 
+    /// Dependency fingerprint of the current session capabilities.
+    fn current_dependency_fingerprint(&self) -> Result<String> {
+        let workflows = crate::prompt::workflows::PromptWorkflowResolver::builtin()
+            .resolve(&self.ctx.tool_capabilities)?;
+        Ok(self.dependency_fingerprint(&workflows))
+    }
+
+    fn dependency_fingerprint(
+        &self,
+        workflows: &crate::prompt::workflows::ResolvedPromptWorkflows,
+    ) -> String {
+        format!(
+            "mink-prefix-dependencies-v2\0{}\0{}\0{}\0{}\0{}",
+            self.ctx.capability_snapshot.dependency_fingerprint,
+            self.ctx.tool_surface.fingerprint(),
+            self.ctx.tool_capabilities.fingerprint(),
+            workflows.fingerprint(),
+            self.ctx.model_capabilities.capability_fingerprint,
+        )
+    }
+
     pub async fn ensure(&self) -> Result<(String, Vec<serde_json::Value>)> {
         if let Some(source) = &self.ctx.prefix_source
             && let Some(prefix) = source.prefix(&self.ctx.events_path)
@@ -31,12 +52,17 @@ impl PrefixManager {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             if let Some(ref prefix) = *guard {
-                if prefix.verify_fingerprint() {
+                let current_dependency = self.current_dependency_fingerprint()?;
+                if prefix.verify_fingerprint()
+                    && prefix.dependency_fingerprint() == current_dependency
+                {
                     return Ok((
                         prefix.system_prompt().to_string(),
                         prefix.tools_json().to_vec(),
                     ));
                 }
+                // Self-consistent but stale dependencies (capability change)
+                // must rebuild instead of faking a cache hit.
                 *guard = None;
             }
         }
@@ -63,14 +89,7 @@ impl PrefixManager {
             });
         // The capability fingerprint joins the dependency fingerprint so
         // any capability change forces a prefix rebuild (v7 §3.4).
-        let dependency_fingerprint = format!(
-            "mink-prefix-dependencies-v2\0{}\0{}\0{}\0{}\0{}",
-            self.ctx.capability_snapshot.dependency_fingerprint,
-            self.ctx.tool_surface.fingerprint(),
-            self.ctx.tool_capabilities.fingerprint(),
-            workflows.fingerprint(),
-            self.ctx.model_capabilities.capability_fingerprint,
-        );
+        let dependency_fingerprint = self.dependency_fingerprint(&workflows);
         let prefix = ImmutablePrefix::new(
             system_prompt.clone(),
             tools_json.clone(),

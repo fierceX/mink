@@ -75,6 +75,15 @@ impl ToolCatalog {
                 registry.remove(name.as_str())
             {
                 let explicit_only = metadata.explicit_only;
+                // Single source of truth: a feature gate entry for a compiled
+                // tool must agree with its metadata, otherwise the two
+                // availability paths could disagree at runtime.
+                ensure!(
+                    feature_gates
+                        .get(name.as_str())
+                        .is_none_or(|(_, gated)| *gated == explicit_only),
+                    "explicit_only mismatch between metadata and feature gate for '{name}'"
+                );
                 (ToolBuildAvailability::Compiled { metadata }, explicit_only)
             } else if let Some((required_feature, explicit_only)) = feature_gates.get(name.as_str())
             {

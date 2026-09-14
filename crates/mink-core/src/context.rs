@@ -239,6 +239,9 @@ impl ToolContext {
         };
         let epoch = self.memo_epoch.load(Ordering::SeqCst);
         let mutation = self.memo_mutation.load(Ordering::SeqCst);
+        let content_hash = std::fs::read(path)
+            .ok()
+            .map(|bytes| crate::tools::read_memo::content_hash(&bytes));
         self.read_memo
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -251,6 +254,7 @@ impl ToolContext {
                 end_line,
                 epoch,
                 mutation,
+                content_hash,
             );
     }
 

@@ -816,6 +816,9 @@ pub(crate) struct MeteredStream<S> {
     capture: UsageCapture,
     attempt_count: u32,
     completed: bool,
+    /// Extra Usage events after the first are recorded once as unreported
+    /// instead of being silently dropped.
+    extra_usage_recorded: bool,
 }
 
 impl<S> MeteredStream<S> {
@@ -825,6 +828,7 @@ impl<S> MeteredStream<S> {
             capture,
             attempt_count,
             completed: false,
+            extra_usage_recorded: false,
         }
     }
 
@@ -864,6 +868,13 @@ where
                             format!("invalid_provider_usage: {error}"),
                         );
                     }
+                } else if !self.extra_usage_recorded {
+                    self.extra_usage_recorded = true;
+                    record_unreported(
+                        &self.capture,
+                        self.attempt_count,
+                        "provider_sent_extra_usage_event".to_string(),
+                    );
                 }
                 std::task::Poll::Ready(Some(Ok(Event::Usage(usage))))
             }

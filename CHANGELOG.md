@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### 修复：工具写入、输出与展示语义
+
+- `Write` 改为原子写入（stage+fsync+rename），成功计数不再因后续 metadata 失败被误报为错误。
+- 工具输出超限且 artifact 落盘失败时给出明确说明，不再静默伪装成普通截断；artifact 标记字节纳入统一大小保护。
+- timeout/interrupt 不再以虚构 exit 124/130 展示；结构化 termination/status 保持不变，真实退出码语义不再混淆。
+- 未知工具名按 surface 拒绝（Blocked(ToolSurface)）并在 gate/storm 记账，不再落到底层 unknown 分支。
+- read memo 命中增加内容哈希确认（同秒同长度改写不再误命中）；hashline 多文件批处理中已提交文件立即失效 memo。
+- server registry 对 poison 锁的公共入口 fail-closed/可恢复；压缩摘要 Retry 不再混入上次尝试的输出；多余 Usage 事件记为 unreported（EMBEDDING 补充自定义 backend 语义）。
+
+### 修复：压缩与部分结果
+
+- 尾段真实 user 守卫不可满足时拒绝压缩（cut=0），不再静默返回不安全边界；启动边界修复写入 `startup_repair` 事件并把被跳过内容并入下次摘要输入。
+- 工具批次基础设施失败保留已完成真实结果，仅未执行调用标记 not executed，随后停止整轮（Plan journal 错误不降级）。
+
+
 ### 修复：子代理中断不再报告为成功，收集等待可被停止
 
 - 子代理终态由内部 `SubAgentStatus{Succeeded,Failed,Interrupted,TimedOut}` 表达：Interrupted/TimedOut 不再落入“Ok 即成功”，coordinator 与恢复 replan 按准确状态映射工具结果与事件字符串（外部字段与协议不变）。

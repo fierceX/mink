@@ -78,9 +78,9 @@ impl ToolFailureKind {
 /// （见 `ToolExecution.error_code`），避免依赖文本嗅探。
 pub fn classify_failure_kind(content: &str, exit_code: Option<i32>) -> ToolFailureKind {
     let lower = content.to_lowercase();
-    // Timeout must be checked before the generic non-zero exit code branch:
-    // Bash/Python report timeout as exit code 124, but the semantic kind is
-    // Timeout, not ProcessFailed.
+    // Timeout is a structured cause (termination/timed-out text), not a
+    // process exit code: check it before the generic non-zero fallback so a
+    // real program exiting with any code cannot masquerade as a timeout.
     if lower.contains("timed out") || lower.contains("timeout") {
         return ToolFailureKind::Timeout;
     }

@@ -202,7 +202,7 @@ fn execute_in_sandbox_at(
                     } else {
                         format!("{stderr}\n{timed_out_msg}")
                     },
-                    Some(124),
+                    None,
                 ))
             } else {
                 Ok((stdout, stderr, Some(1)))
@@ -211,13 +211,12 @@ fn execute_in_sandbox_at(
         Err(cause) => {
             let (code, cancelled_msg) = match cause {
                 StopCause::Timeout => (
-                    124,
+                    0,
                     format!("[... Python sandbox timed out after {timeout_secs} seconds ...]"),
                 ),
-                StopCause::Cancelled => (
-                    130,
-                    "[... Python sandbox cancelled by user ...]".to_string(),
-                ),
+                StopCause::Cancelled => {
+                    (0, "[... Python sandbox cancelled by user ...]".to_string())
+                }
                 StopCause::Disconnected => (
                     1,
                     "[... Python sandbox execution channel disconnected ...]".to_string(),
@@ -230,7 +229,9 @@ fn execute_in_sandbox_at(
                 } else {
                     format!("{stderr}\n{cancelled_msg}")
                 },
-                Some(code),
+                // Timeout/cancel are structured causes, not process exit
+                // codes; only the disconnected path carries a real code.
+                (code != 0).then_some(code),
             ))
         }
     }

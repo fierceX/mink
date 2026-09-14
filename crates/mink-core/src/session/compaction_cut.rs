@@ -206,14 +206,16 @@ pub(crate) fn find_compaction_cut_point(messages: &[Value], tail_target: usize) 
             users_seen += 1;
         }
     }
-    if cut == 0 {
-        // Not enough history to satisfy the guard; keep the token-based cut.
-        return safe;
+    if users_seen < COMPACTION_MIN_TAIL_USER_MESSAGES {
+        // The tail-user guard is a hard requirement: refusing to compact
+        // (cut=0 => "no safe boundary") is the only honest outcome when
+        // satisfying it would drop every message.
+        return 0;
     }
-    // `cut` 由 safe start 或真实 user 消息得出，必然是安全边界；
-    // 前向对齐循环不可达，以断言钉住该不变式。
+    // `cut` comes from a safe start or a real user message, so it is a safe
+    // boundary; the assertion pins that invariant.
     debug_assert!(
-        cut >= messages.len() || is_safe_context_start(&messages[cut]),
+        is_safe_context_start(&messages[cut]),
         "compaction cut point must land on a safe context start"
     );
     cut

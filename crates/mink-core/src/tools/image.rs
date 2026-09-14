@@ -262,12 +262,19 @@ mod tests {
     }
 
     #[test]
-    fn format_mime_mapping_is_exact() {
-        // "non-empty" cannot catch a swapped mapping; assert the real values.
-        assert_eq!(ImageFormat::Png.mime(), "image/png");
-        assert_eq!(ImageFormat::Jpeg.mime(), "image/jpeg");
-        assert_eq!(ImageFormat::Gif.mime(), "image/gif");
-        assert_eq!(ImageFormat::Webp.mime(), "image/webp");
+    fn format_mime_mapping_is_exact_and_all_is_complete() {
+        // Iterate ALL so a new variant cannot silently skip the mapping test.
+        let expected = [
+            (ImageFormat::Png, "image/png"),
+            (ImageFormat::Jpeg, "image/jpeg"),
+            (ImageFormat::Gif, "image/gif"),
+            (ImageFormat::Webp, "image/webp"),
+        ];
+        assert_eq!(ImageFormat::ALL.len(), expected.len());
+        for (format, mime) in expected {
+            assert!(ImageFormat::ALL.contains(&format));
+            assert_eq!(format.mime(), mime);
+        }
     }
 }
 

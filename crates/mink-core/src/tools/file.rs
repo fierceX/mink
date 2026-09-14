@@ -240,9 +240,31 @@ pub fn write(path: &str, content: &str, max_bytes: usize) -> Result<String> {
     if let Some(dir) = Path::new(path).parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, content)?;
-    let sz = std::fs::metadata(path)?.len();
-    Ok(format!("OK: wrote {sz} bytes to {path}"))
+    // Same atomic semantics as Edit: stage + fsync + rename, so a failed
+    // write can never leave a truncated file behind.
+    let existing = existing_target(Path::new(path))?;
+    let (mut file, temporary) = stage_temp_file(
+        Path::new(path),
+        "mink-write",
+        matches!(existing, ExistingTarget::Present(_)),
+    )?;
+    let result = (|| -> Result<()> {
+        use std::io::Write as _;
+        if let ExistingTarget::Present(permissions) = &existing {
+            file.set_permissions(permissions.clone())?;
+        }
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+        result?;
+    }
+    // Report from the written buffer, not a follow-up metadata call: a
+    // successful write must never be reported as a failure.
+    Ok(format!("OK: wrote {} bytes to {path}", content.len()))
 }
 
 /// Generate a unified diff using the `similar` crate (pure Rust, no subprocess).
@@ -1281,6 +1303,9 @@ fn execute_hashline_edit(
         match result {
             Ok(text) => {
                 committed.push(item.display_path.clone());
+                // A committed file already changed on disk even when a later
+                // section fails: invalidate memos before continuing.
+                ctx.bump_mutation();
                 store.set_named_clipboard(item.clipboard_after.named().clone());
                 rendered.push(text);
             }
@@ -1511,6 +1536,15 @@ fn utf8_bounded_line(line: &str, max_bytes: usize) -> (&str, bool) {
 }
 
 fn display_relative_path(cwd: &Path, path: &Path) -> String {
+    // Canonicalized session cwd may differ lexically (e.g. /tmp symlink):
+    // try both so canonical paths still display relative to the workspace.
+    if let Ok(canonical_cwd) = std::fs::canonicalize(cwd)
+        && let Ok(relative) = path.strip_prefix(&canonical_cwd)
+    {
+        return relative
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+    }
     path.strip_prefix(cwd)
         .unwrap_or(path)
         .to_string_lossy()

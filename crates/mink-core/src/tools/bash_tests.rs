@@ -154,7 +154,10 @@ fn timeout_kills_long_command() {
 fn timeout_reports_exit_124() {
     let (result, code) = execute("sleep 5", Some(1), 600).unwrap();
     assert!(result.contains("timed out"));
-    assert_eq!(code, Some(124));
+    assert_eq!(
+        code, None,
+        "timeout is a structured cause, not an exit code"
+    );
 }
 
 #[test]
@@ -170,7 +173,10 @@ fn interrupt_kills_long_command() {
     let interrupt = AtomicBool::new(true);
     let (result, code) =
         execute_with_interrupt("sleep 10; echo done", Some(30), 600, Some(&interrupt)).unwrap();
-    assert_eq!(code, Some(130));
+    assert_eq!(
+        code, None,
+        "interrupt is a structured cause, not an exit code"
+    );
     assert!(result.contains("interrupted"));
     assert!(!result.contains("done"));
 }
@@ -207,4 +213,46 @@ fn bash_timeout_honors_configured_ceiling() {
     // A ceiling below the 5s default floor is rejected instead of panicking.
     let err = execute_with_interrupt_in_dir("true", None, 30, 4, None, None).unwrap_err();
     assert!(err.to_string().contains("at least 5"), "{err}");
+}
+
+#[test]
+fn timeout_and_interrupt_never_emit_a_pseudo_exit_code() {
+    let (result, code) = execute("sleep 5", Some(1), 600).unwrap();
+    assert!(result.contains("timed out"));
+    assert_eq!(code, None);
+    assert!(
+        !result.contains("Exit code:") && !result.contains("Exit code 124"),
+        "timeout must not masquerade as a process exit: {result}"
+    );
+
+    let interrupt = AtomicBool::new(true);
+    let (result, code) =
+        execute_with_interrupt("sleep 10", Some(30), 600, Some(&interrupt)).unwrap();
+    assert!(result.contains("interrupted"));
+    assert_eq!(code, None);
+    assert!(
+        !result.contains("Exit code:") && !result.contains("Exit code 130"),
+        "interrupt must not masquerade as a process exit: {result}"
+    );
+}
+
+#[test]
+fn termination_reason_is_structured_for_timeout_and_interrupt() {
+    use crate::tools::process::ProcessTermination;
+
+    let (_, code, termination) = execute_with_termination("sleep 5", Some(1), 600, None).unwrap();
+    assert_eq!(code, None);
+    assert!(
+        matches!(termination, ProcessTermination::TimedOut),
+        "{termination:?}"
+    );
+
+    let interrupt = AtomicBool::new(true);
+    let (_, code, termination) =
+        execute_with_termination("sleep 10", Some(30), 600, Some(&interrupt)).unwrap();
+    assert_eq!(code, None);
+    assert!(
+        matches!(termination, ProcessTermination::Interrupted),
+        "{termination:?}"
+    );
 }

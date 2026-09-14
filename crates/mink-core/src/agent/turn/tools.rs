@@ -81,25 +81,28 @@ impl super::TurnExecutor {
         } else {
             self.tools.execute_all(calls_to_execute.clone()).await
         };
-        let mut results = match executed {
-            Ok(results) => results,
-            Err(error) => {
-                let synthetic: Vec<crate::tools::runner::ToolExecution> = calls_to_execute
-                    .into_iter()
-                    .map(|call| {
-                        crate::tools::runner::failed_tool_result(
-                            call.id,
-                            call.name,
-                            call.fields,
-                            format!("tool execution failed: {error:#}"),
-                        )
-                    })
-                    .collect();
-                self.ctx.store.add_tool_results(&synthetic).await?;
-                return Err(error);
+        // A fatal infrastructure error keeps every real result produced so
+        // far; only calls that never ran are recorded as explicitly not
+        // executed (tool_call/result protocol stays complete). The error is
+        // re-raised after persistence so the turn still stops.
+        let (mut executed_results, fatal) = match executed {
+            Ok(results) => (results, None),
+            Err(crate::tools::runner::FatalBatchError { error, completed }) => {
+                (completed, Some(error))
             }
         };
-        guarded_results.append(&mut results);
+        let executed_count = executed_results.len();
+        if let Some(error) = &fatal {
+            for call in calls_to_execute.iter().skip(executed_count) {
+                executed_results.push(crate::tools::runner::failed_tool_result(
+                    call.id.clone(),
+                    call.name.clone(),
+                    call.fields.clone(),
+                    format!("not executed: {error:#}"),
+                ));
+            }
+        }
+        guarded_results.append(&mut executed_results);
         let results = guarded_results;
 
         // Plan hand-off happens in place on the executed results: the tool
@@ -183,6 +186,9 @@ impl super::TurnExecutor {
                     presentation: r.presentation.as_ref(),
                     artifacts: &r.artifacts,
                 });
+        }
+        if let Some(error) = fatal {
+            return Err(error);
         }
         Ok(())
     }

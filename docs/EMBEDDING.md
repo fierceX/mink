@@ -137,6 +137,14 @@ let runtime = AgentRuntime::start(
 ).await?;
 ```
 
+### 自定义 backend 的 Retry / Usage 语义
+
+- `Event::Retry` 会重置当前请求的累积文本/工具调用（agent 与压缩摘要一致）；
+  backend 不得依赖“重试前部分输出会保留”。
+- 每个请求只应发送一次 `Event::Usage`；首个 Usage 记为已上报，之后的
+  Usage 事件只记一条 Unreported 诊断（不会静默丢弃，也不会覆盖首条记录）。
+- `Event::UsageUnavailable` 记为 unreported（reason=`provider_usage_missing`）。
+
 非 OpenAI-compatible 协议可实现 `mink::runtime::LlmBackend` 注入：
 
 ```rust

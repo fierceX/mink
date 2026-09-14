@@ -10,7 +10,7 @@ fn entry_times() -> (SystemTime, SystemTime) {
 fn repeat_full_read_hits() {
     let mut memo = ReadMemo::new();
     let (now, _) = entry_times();
-    memo.record(Path::new("a.md"), 100, now, false, None, None, 0, 0);
+    memo.record(Path::new("a.md"), 100, now, false, None, None, 0, 0, None);
     assert!(memo.hit(Path::new("a.md"), 100, now, false, 0, 0, None, None));
 }
 
@@ -18,7 +18,17 @@ fn repeat_full_read_hits() {
 fn sub_range_hits_full_and_range_entries() {
     let mut memo = ReadMemo::new();
     let (now, _) = entry_times();
-    memo.record(Path::new("a.md"), 100, now, false, Some(1), Some(200), 0, 0);
+    memo.record(
+        Path::new("a.md"),
+        100,
+        now,
+        false,
+        Some(1),
+        Some(200),
+        0,
+        0,
+        None,
+    );
     assert!(memo.hit(
         Path::new("a.md"),
         100,
@@ -42,7 +52,17 @@ fn sub_range_hits_full_and_range_entries() {
     // A range entry must NOT satisfy a full request.
     assert!(!memo.hit(Path::new("a.md"), 100, now, false, 0, 0, None, None));
     // An entry running to EOF covers "start..EOF".
-    memo.record(Path::new("a.md"), 100, now, false, Some(10), None, 0, 0);
+    memo.record(
+        Path::new("a.md"),
+        100,
+        now,
+        false,
+        Some(10),
+        None,
+        0,
+        0,
+        None,
+    );
     assert!(memo.hit(Path::new("a.md"), 100, now, false, 0, 0, Some(10), None));
     assert!(!memo.hit(Path::new("a.md"), 100, now, false, 0, 0, Some(1), None));
 }
@@ -51,7 +71,17 @@ fn sub_range_hits_full_and_range_entries() {
 fn mtime_change_invalidates() {
     let mut memo = ReadMemo::new();
     let (now, earlier) = entry_times();
-    memo.record(Path::new("a.md"), 100, earlier, false, None, None, 0, 0);
+    memo.record(
+        Path::new("a.md"),
+        100,
+        earlier,
+        false,
+        None,
+        None,
+        0,
+        0,
+        None,
+    );
     assert!(!memo.hit(Path::new("a.md"), 100, now, false, 0, 0, None, None));
 }
 
@@ -59,7 +89,7 @@ fn mtime_change_invalidates() {
 fn epoch_change_invalidates() {
     let mut memo = ReadMemo::new();
     let (now, _) = entry_times();
-    memo.record(Path::new("a.md"), 100, now, false, None, None, 0, 0);
+    memo.record(Path::new("a.md"), 100, now, false, None, None, 0, 0, None);
     assert!(!memo.hit(Path::new("a.md"), 100, now, false, 1, 0, None, None));
 }
 
@@ -67,7 +97,7 @@ fn epoch_change_invalidates() {
 fn mutation_epoch_change_invalidates() {
     let mut memo = ReadMemo::new();
     let (now, _) = entry_times();
-    memo.record(Path::new("a.md"), 100, now, false, None, None, 0, 0);
+    memo.record(Path::new("a.md"), 100, now, false, None, None, 0, 0, None);
     assert!(!memo.hit(Path::new("a.md"), 100, now, false, 0, 1, None, None));
 }
 
@@ -77,7 +107,7 @@ fn lru_eviction_bounds_memory() {
     let (now, _) = entry_times();
     for i in 0..MEMO_MAX_ENTRIES + 10 {
         let path = Path::new("/tmp/memo-lru").join(format!("f{i}.md"));
-        memo.record(&path, 10, now, false, None, None, 0, 0);
+        memo.record(&path, 10, now, false, None, None, 0, 0, None);
     }
     assert!(memo.total <= MEMO_MAX_ENTRIES);
     // The oldest entry was evicted.
@@ -100,7 +130,76 @@ fn lru_eviction_bounds_memory() {
 fn same_range_replacement_keeps_single_entry() {
     let mut memo = ReadMemo::new();
     let (now, _) = entry_times();
-    memo.record(Path::new("a.md"), 100, now, false, Some(1), Some(50), 0, 0);
-    memo.record(Path::new("a.md"), 100, now, false, Some(1), Some(50), 0, 0);
+    memo.record(
+        Path::new("a.md"),
+        100,
+        now,
+        false,
+        Some(1),
+        Some(50),
+        0,
+        0,
+        None,
+    );
+    memo.record(
+        Path::new("a.md"),
+        100,
+        now,
+        false,
+        Some(1),
+        Some(50),
+        0,
+        0,
+        None,
+    );
     assert_eq!(memo.total, 1);
+}
+
+#[test]
+fn hit_rejects_same_len_same_mtime_content_rewrite() {
+    let dir = std::env::temp_dir().join(format!("mink-memo-hash-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a.txt");
+    std::fs::write(&path, "AAAA").unwrap();
+    let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+    let mut memo = ReadMemo::new();
+    memo.record(
+        &path,
+        4,
+        mtime,
+        false,
+        None,
+        None,
+        0,
+        0,
+        Some(content_hash(b"AAAA")),
+    );
+    assert!(memo.hit(&path, 4, mtime, false, 0, 0, None, None));
+
+    // Same length, same mtime, different bytes: metadata guards pass, the
+    // content hash must reject the stale memo.
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_all(b"BBBB").unwrap();
+        file.flush().unwrap();
+        file.set_modified(mtime).unwrap();
+    }
+    assert!(!memo.hit(&path, 4, mtime, false, 0, 0, None, None));
+
+    memo.record(
+        &path,
+        4,
+        mtime,
+        false,
+        None,
+        None,
+        0,
+        0,
+        Some(content_hash(b"BBBB")),
+    );
+    assert!(memo.hit(&path, 4, mtime, false, 0, 0, None, None));
+    let _ = std::fs::remove_dir_all(&dir);
 }

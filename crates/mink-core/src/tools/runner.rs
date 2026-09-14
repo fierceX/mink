@@ -266,6 +266,33 @@ impl ToolExecOutput {
     }
 }
 
+/// Infrastructure failure while executing a tool batch.
+///
+/// `completed` carries every real `ToolExecution` produced before the fatal
+/// error, so callers can persist them instead of replacing side effects with
+/// a synthetic failure.
+pub(crate) struct FatalBatchError {
+    pub error: anyhow::Error,
+    pub completed: Vec<ToolExecution>,
+}
+
+impl std::fmt::Debug for FatalBatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FatalBatchError")
+            .field("error", &self.error)
+            .field("completed", &self.completed.len())
+            .finish()
+    }
+}
+
+impl std::fmt::Display for FatalBatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.error)
+    }
+}
+
+impl std::error::Error for FatalBatchError {}
+
 impl ToolRunner {
     pub fn new(ctx: Arc<ToolContext>) -> Self {
         Self {
@@ -305,7 +332,10 @@ impl ToolRunner {
         self.storm.lock().unwrap_or_else(|e| e.into_inner()).reset();
     }
 
-    pub async fn execute_all(&self, calls: Vec<ToolCallEvent>) -> Result<Vec<ToolExecution>> {
+    pub(crate) async fn execute_all(
+        &self,
+        calls: Vec<ToolCallEvent>,
+    ) -> std::result::Result<Vec<ToolExecution>, FatalBatchError> {
         let mut results = Vec::new();
         let mut read_batch = Vec::new();
         // One budget per execute_all: sequential tools flush the read batch
@@ -337,20 +367,43 @@ impl ToolRunner {
                 tool.definition.execution == crate::runtime::ToolExecutionMode::Sequential
             });
             if custom_sequential || requires_sequential_execution(metadata) {
-                results.extend(
-                    self.execute_read_batch(std::mem::take(&mut read_batch), &mut image_budget)
-                        .await?,
-                );
-                results.push(self.execute_prepared_call(call).await?);
+                match self
+                    .execute_read_batch(std::mem::take(&mut read_batch), &mut image_budget)
+                    .await
+                {
+                    Ok(mut batch) => results.append(&mut batch),
+                    Err(FatalBatchError { error, completed }) => {
+                        results.extend(completed);
+                        return Err(FatalBatchError {
+                            error,
+                            completed: results,
+                        });
+                    }
+                }
+                match self.execute_prepared_call(call).await {
+                    Ok(result) => results.push(result),
+                    Err(error) => {
+                        return Err(FatalBatchError {
+                            error,
+                            completed: results,
+                        });
+                    }
+                }
             } else {
                 read_batch.push(call);
             }
         }
 
-        results.extend(
-            self.execute_read_batch(read_batch, &mut image_budget)
-                .await?,
-        );
+        match self.execute_read_batch(read_batch, &mut image_budget).await {
+            Ok(mut batch) => results.append(&mut batch),
+            Err(FatalBatchError { error, completed }) => {
+                results.extend(completed);
+                return Err(FatalBatchError {
+                    error,
+                    completed: results,
+                });
+            }
+        }
         Ok(results)
     }
 
@@ -375,7 +428,7 @@ impl ToolRunner {
         &self,
         calls: Vec<ToolCallEvent>,
         budget: &mut ImageBatchBudget,
-    ) -> Result<Vec<ToolExecution>> {
+    ) -> std::result::Result<Vec<ToolExecution>, FatalBatchError> {
         if calls.is_empty() {
             return Ok(Vec::new());
         }
@@ -480,9 +533,41 @@ impl ToolRunner {
                 }
             }
         }
-        let mut text_results = Vec::with_capacity(text_handles.len());
+        let mut text_results: Vec<ToolExecution> = Vec::with_capacity(text_handles.len());
+        // Preserve already-produced results when a later call fails: map the
+        // ordered slots onto the finished prefix instead of dropping them.
+        let ordered_prefix =
+            |slots: Vec<PreparedSlot>, text_results: Vec<ToolExecution>| -> Vec<ToolExecution> {
+                let mut completed = Vec::new();
+                let mut texts = text_results.into_iter();
+                for slot in slots {
+                    match slot {
+                        PreparedSlot::Immediate(result) => completed.push(result),
+                        PreparedSlot::Text(_) => match texts.next() {
+                            Some(result) => completed.push(result),
+                            None => break,
+                        },
+                        PreparedSlot::Image { .. } | PreparedSlot::ClassifyError { .. } => break,
+                    }
+                }
+                completed
+            };
         for handle in text_handles {
-            text_results.push(handle.await??);
+            match handle.await {
+                Ok(Ok(result)) => text_results.push(result),
+                Ok(Err(error)) => {
+                    return Err(FatalBatchError {
+                        error,
+                        completed: ordered_prefix(slots, text_results),
+                    });
+                }
+                Err(join_error) => {
+                    return Err(FatalBatchError {
+                        error: anyhow::anyhow!("tool task join failed: {join_error}"),
+                        completed: ordered_prefix(slots, text_results),
+                    });
+                }
+            }
         }
 
         // Image family runs strictly in call order: prepare one image at a
@@ -851,7 +936,21 @@ impl ToolPolicyGate<'_> {
         call: &ToolCallEvent,
         metadata: Option<ToolMetadata>,
     ) -> Option<ToolExecution> {
-        let metadata = metadata?;
+        let Some(metadata) = metadata else {
+            // Unknown/disabled names are surface rejections too: they must
+            // not bypass the gate and reach dispatch as an "unknown tool"
+            // failure with no surface/storm accounting.
+            return Some(blocked_tool_result(
+                call.id.clone(),
+                call.name.clone(),
+                call.fields.clone(),
+                format!(
+                    "Tool '{}' is unavailable in the resolved model tool surface.",
+                    call.name
+                ),
+                ToolBlocker::ToolSurface,
+            ));
+        };
         if !self.surface.has(&call.name) {
             let reason = self
                 .surface
@@ -1476,13 +1575,21 @@ fn format_tool_result_with_artifact(
             artifacts: Vec::new(),
         };
     }
-    let truncated = format_tool_result(output, max);
+    // The marker is part of the unified size protection: reserve its bytes
+    // before truncating the body so content never exceeds `max`.
+    let body_and_suffix = |suffix: String| {
+        if suffix.len() + 1 >= max {
+            return format_tool_result(output, max);
+        }
+        let body = format_tool_result(output, max - suffix.len());
+        format!("{body}{suffix}")
+    };
     match ctx
         .artifacts
         .write_text(tool_name, "full tool output", output)
     {
         Ok(record) => FormattedToolOutput {
-            content: format!("{truncated}\n\n[Full output: artifact://{}]", record.id),
+            content: body_and_suffix(format!("\n\n[Full output: artifact://{}]", record.id)),
             artifacts: vec![ArtifactDisplay {
                 id: record.id,
                 tool: record.tool,
@@ -1490,8 +1597,12 @@ fn format_tool_result_with_artifact(
                 description: record.description,
             }],
         },
-        Err(_) => FormattedToolOutput {
-            content: truncated,
+        Err(error) => FormattedToolOutput {
+            // A failed spill must be visible to the model/UI: silent
+            // truncation hides that the full output is not retrievable.
+            content: body_and_suffix(format!(
+                "\n\n[Output truncated; artifact storage failed: {error}]"
+            )),
             artifacts: Vec::new(),
         },
     }
@@ -1543,7 +1654,12 @@ fn utf8_prefix_by_bytes(s: &str, max_bytes: usize) -> &str {
 }
 
 static RE_ANSI_ESCAPE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-    regex::Regex::new("\x1b\\[[0-9;]*[a-zA-Z]").expect("valid ANSI regex")
+    // CSI (including private parameter bytes like `\x1b[?25l`), OSC strings
+    // terminated by BEL or ST, and single-character escapes.
+    regex::Regex::new(
+        "\\x1b\\[[0-9;?]*[ -/]*[@-~]|\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)|\\x1b[@-Z\\\\-_]",
+    )
+    .expect("valid ANSI regex")
 });
 
 fn filter_bash_noise(s: &str) -> String {

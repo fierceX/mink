@@ -38,6 +38,8 @@ struct MemoEntry {
     end_line: Option<usize>,
     epoch: u64,
     mutation_epoch: u64,
+    /// Hash of the file bytes at record time; None when unreadable.
+    content_hash: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -64,6 +66,7 @@ impl ReadMemo {
         end_line: Option<usize>,
         epoch: u64,
         mutation_epoch: u64,
+        content_hash: Option<u64>,
     ) {
         let path = canonical_snapshot_path(path);
         let entry = MemoEntry {
@@ -74,6 +77,7 @@ impl ReadMemo {
             end_line,
             epoch,
             mutation_epoch,
+            content_hash,
         };
         let list = self.entries.entry(path.clone()).or_default();
         let before = list.len();
@@ -106,14 +110,33 @@ impl ReadMemo {
         let Some(list) = self.entries.get(&path) else {
             return false;
         };
-        list.iter().any(|entry| {
+        let base_matches = |entry: &MemoEntry| {
             entry.len == len
                 && entry.mtime == mtime
                 && entry.raw == raw
                 && entry.epoch == epoch
                 && entry.mutation_epoch == mutation_epoch
                 && covers(entry, start_line, end_line)
-        })
+        };
+        if !list.iter().any(base_matches) {
+            return false;
+        }
+        // Metadata may be unchanged while the content is not (same-second,
+        // same-length rewrite): confirm with a content hash. Entries recorded
+        // without a readable hash stay metadata-only (legacy behavior);
+        // recorded hashes must match exactly, otherwise it is a miss.
+        if list
+            .iter()
+            .any(|entry| base_matches(entry) && entry.content_hash.is_none())
+        {
+            return true;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            return false;
+        };
+        let current = content_hash(&bytes);
+        list.iter()
+            .any(|entry| base_matches(entry) && entry.content_hash == Some(current))
     }
 
     fn touch(&mut self, path: &PathBuf) {
@@ -152,3 +175,11 @@ fn covers(entry: &MemoEntry, start_line: Option<usize>, end_line: Option<usize>)
 #[cfg(test)]
 #[path = "read_memo_tests.rs"]
 mod tests;
+
+/// Stable content hash used by memo hit confirmation.
+pub(crate) fn content_hash(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}

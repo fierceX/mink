@@ -1,5 +1,5 @@
 use super::{AgentEvent, AgentEventKind, EventDispatcher, EventSink};
-use crate::protocol::{Event, StopEvent, TextEvent};
+
 use std::sync::Arc;
 
 #[test]
@@ -245,14 +245,6 @@ fn emitter_drops_progress_over_budget_but_keeps_reliable_events() {
     assert!(matches!(stop.kind, AgentEventKind::Stop { .. }));
     // The notice and stop are reliable: no third event, no dropped progress.
     assert!(rx.try_recv().is_err());
-    let _ = (
-        Event::Text(TextEvent {
-            content: String::new(),
-        }),
-        StopEvent {
-            reason: String::new(),
-        },
-    );
 }
 
 #[tokio::test]

@@ -1146,3 +1146,77 @@ async fn bash_runtime_interrupt_is_interrupted() {
         result.content
     );
 }
+
+#[tokio::test]
+async fn unknown_tool_is_rejected_by_the_surface_gate() {
+    let shared = crate::regression::test_context_for_agent("runner-unknown-tool")
+        .await
+        .unwrap();
+    let ctx = Arc::new(crate::context::ToolContext::from(shared.as_ref()));
+    let runner = ToolRunner::new(ctx);
+
+    let results = runner
+        .execute_all(vec![test_call("NoSuchTool")])
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].status,
+        ToolStatus::Blocked(crate::tools::metadata::ToolBlocker::ToolSurface)
+    );
+    assert!(
+        results[0]
+            .content
+            .contains("unavailable in the resolved model tool surface"),
+        "{}",
+        results[0].content
+    );
+}
+
+#[tokio::test]
+async fn artifact_marker_respects_budget_and_spill_failure_is_visible() {
+    let shared = crate::regression::test_context_for_agent("runner-artifact-marker")
+        .await
+        .unwrap();
+    let mut tool_ctx = crate::context::ToolContext::from(shared.as_ref());
+    let dir = std::env::temp_dir().join(format!("mink-artifact-marker-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    tool_ctx.artifacts = Arc::new(crate::session::artifacts::ArtifactManager::new(
+        dir.join("artifacts"),
+    ));
+    let output = "line\n".repeat(4000);
+
+    let spilled = format_tool_result_with_artifact("Bash", &output, 256, &tool_ctx);
+    assert!(
+        spilled.content.len() <= 256,
+        "len={}",
+        spilled.content.len()
+    );
+    assert!(spilled.content.contains("artifact://"));
+    assert_eq!(spilled.artifacts.len(), 1);
+
+    // A file at the artifact root makes every spill fail; the truncation must
+    // say so instead of silently dropping the marker.
+    let blocked_root = dir.join("blocked-root");
+    std::fs::write(&blocked_root, "not a directory").unwrap();
+    tool_ctx.artifacts = Arc::new(crate::session::artifacts::ArtifactManager::new(
+        blocked_root,
+    ));
+    let failed = format_tool_result_with_artifact("Bash", &output, 256, &tool_ctx);
+    assert!(failed.content.len() <= 256, "len={}", failed.content.len());
+    assert!(failed.artifacts.is_empty());
+    assert!(
+        failed.content.contains("artifact storage failed"),
+        "{}",
+        failed.content
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn bash_noise_filter_strips_private_csi_and_osc_sequences() {
+    let noisy = "a\x1b[?25lb\x1b]0;window title\x07c\x1b[2Kd";
+    assert_eq!(filter_bash_noise(noisy), "abcd");
+}

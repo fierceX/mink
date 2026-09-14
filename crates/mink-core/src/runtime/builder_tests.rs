@@ -3555,3 +3555,110 @@ async fn high_frequency_retry_events_do_not_starve_deadline_checks() {
     let _ = tokio::fs::remove_dir_all(home).await;
     let _ = tokio::fs::remove_dir_all(cwd).await;
 }
+
+/// Custom tool that panics inside its spawned task: this is the deterministic
+/// infrastructure failure for the partial-results contract.
+struct PanicTool;
+
+#[async_trait::async_trait]
+impl AgentTool for PanicTool {
+    fn definition(&self) -> ToolDefinition {
+        let mut definition = ToolDefinition::new(
+            "PanicTool",
+            "Always panics (test fixture)",
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        );
+        definition.execution = ToolExecutionMode::ParallelReadOnly;
+        definition
+    }
+
+    async fn execute(
+        &self,
+        _input: serde_json::Value,
+        _ctx: ToolExecutionContext,
+    ) -> Result<ToolOutput, ToolError> {
+        panic!("panic tool fixture");
+    }
+}
+
+#[tokio::test]
+async fn partial_tool_results_survive_join_failure() {
+    let home = unique_temp_dir("partial-fatal-home");
+    let cwd = unique_temp_dir("partial-fatal-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    tokio::fs::write(cwd.join("fixture.txt"), "alpha\nbeta\n")
+        .await
+        .unwrap();
+    use crate::protocol::{Event, StopEvent, TextEvent};
+    use serde_json::json;
+    let mock = crate::llm::mock::MockLlmBackend::new(
+        "flash",
+        vec![
+            vec![
+                Ok(Event::ToolCall(tool_call_event(
+                    "Read",
+                    "call_read",
+                    json!({"path":"fixture.txt"}),
+                ))),
+                Ok(Event::ToolCall(tool_call_event(
+                    "PanicTool",
+                    "call_panic",
+                    json!({}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_use".into(),
+                })),
+            ],
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content: "should not be reached".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+        ],
+    );
+    let mut config = runtime_config_with_mock(&home, &cwd, mock);
+    config.custom_tools.push(Arc::new(PanicTool));
+    let runtime = build_runtime(config).await.unwrap();
+
+    let outcome = runtime.run_turn("read then panic").await.unwrap();
+    assert_eq!(
+        outcome.status,
+        crate::agent::orchestrator::TurnStatus::Failed,
+        "a panicking custom tool must fail the turn: {outcome:?}"
+    );
+    assert!(
+        outcome
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("join failed")),
+        "fatal cause must surface: {outcome:?}"
+    );
+
+    let conversation = tokio::fs::read_to_string(&outcome.session.conversation_path)
+        .await
+        .unwrap();
+    assert!(conversation.contains("call_read"), "{conversation}");
+    assert!(
+        conversation.contains("alpha"),
+        "successful Read result must survive the later failure: {conversation}"
+    );
+    assert!(
+        !conversation.contains("tool execution failed"),
+        "no synthetic failure may replace the successful Read: {conversation}"
+    );
+    assert!(
+        conversation.contains("not executed"),
+        "the panicked call must be marked as not executed: {conversation}"
+    );
+
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}

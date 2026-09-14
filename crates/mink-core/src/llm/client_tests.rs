@@ -569,3 +569,72 @@ async fn sse_cancelled_interruption_notice_never_waits_for_capacity() {
         started.elapsed()
     );
 }
+
+struct DoubleUsageBackend;
+
+#[async_trait::async_trait]
+impl LlmBackend for DoubleUsageBackend {
+    fn name(&self) -> &str {
+        "double-usage"
+    }
+
+    async fn stream(
+        &self,
+        _request: crate::llm::client::LlmRequest,
+    ) -> anyhow::Result<crate::llm::client::LlmResponseStream> {
+        let usage = |input: i64, output: i64| crate::protocol::UsageEvent {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        };
+        Ok(crate::llm::client::LlmResponseStream {
+            events: Box::pin(futures::stream::iter(vec![
+                Ok(Event::Usage(usage(1, 1))),
+                Ok(Event::Usage(usage(2, 2))),
+                Ok(Event::Stop(crate::protocol::StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ])),
+            attempt_count: 1,
+        })
+    }
+}
+
+#[tokio::test]
+async fn extra_usage_event_is_recorded_as_unreported() -> anyhow::Result<()> {
+    let ctx = test_context("double-usage", "https://example.invalid/v1").await?;
+    let mut stream = stream_backend(
+        &(Arc::new(DoubleUsageBackend) as Arc<dyn LlmBackend>),
+        &ctx,
+        "custom-model",
+        None,
+        &[json!({"role":"user","content":"ping"})],
+        &[],
+        "system",
+    )
+    .await?;
+    while let Some(event) = stream.next().await {
+        let _ = event?;
+    }
+
+    let records = ctx.usage.all_records()?;
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(
+        records[0].status,
+        crate::session::usage::UsageStatus::Reported
+    );
+    assert_eq!(
+        records[1].status,
+        crate::session::usage::UsageStatus::Unreported
+    );
+    assert!(
+        records[1]
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("provider_sent_extra_usage_event")),
+        "{:?}",
+        records[1].reason
+    );
+    Ok(())
+}

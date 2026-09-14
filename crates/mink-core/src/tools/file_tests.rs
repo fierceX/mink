@@ -128,3 +128,78 @@ fn atomic_write_preserves_existing_permissions() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn write_uses_atomic_staging_and_reports_written_bytes() {
+    let dir = std::env::temp_dir().join(format!("mink-write-atomic-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("nested/a.txt");
+    let content = "hello\nworld\n";
+
+    let message = write(path.to_str().unwrap(), content, usize::MAX).unwrap();
+
+    assert_eq!(
+        message,
+        format!("OK: wrote {} bytes to {}", content.len(), path.display())
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    // No staging leftovers next to the target.
+    let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains("mink-write"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "staging files must be cleaned: {leftovers:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hashline_partial_commit_bumps_mutation_for_committed_files() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::Ordering;
+
+    let shared =
+        crate::regression::test_context_for_agent_with_config("hashline-partial-mutation", |_| {})
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+    let tool_ctx = crate::context::ToolContext::from(shared.as_ref());
+    let cwd = shared.cwd.clone();
+
+    let readonly = cwd.join("readonly");
+    std::fs::create_dir_all(&readonly)?;
+    std::fs::write(cwd.join("a.txt"), "old\n")?;
+    std::fs::write(readonly.join("b.txt"), "old\n")?;
+    std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555))?;
+
+    let (tag_a, tag_b) = {
+        let mut store = tool_ctx.snapshots.lock().unwrap();
+        (
+            store.record(&cwd.join("a.txt"), "old\n", [1]).tag,
+            store.record(&readonly.join("b.txt"), "old\n", [1]).tag,
+        )
+    };
+    let before = tool_ctx.memo_mutation.load(Ordering::SeqCst);
+    let input =
+        format!("[a.txt#{tag_a}]\nPUT 1.=1:\n+new\n[readonly/b.txt#{tag_b}]\nPUT 1.=1:\n+newer");
+
+    let error = super::execute_hashline_edit(&serde_json::json!({"input": input}), &tool_ctx)
+        .expect_err("the read-only second file must fail the batch");
+    let message = format!("{error:#}");
+    assert!(message.contains("committed [a.txt]"), "{message}");
+    let after = tool_ctx.memo_mutation.load(Ordering::SeqCst);
+    assert!(
+        after > before,
+        "a committed file must invalidate memos even when a later section fails"
+    );
+    assert_eq!(std::fs::read_to_string(cwd.join("a.txt"))?, "new\n");
+    assert_eq!(std::fs::read_to_string(readonly.join("b.txt"))?, "old\n");
+
+    std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}

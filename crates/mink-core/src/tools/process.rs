@@ -265,12 +265,14 @@ pub(crate) fn wait_child_with_output(
                 if interrupt.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst)) {
                     tree_cleanup = terminate_child_process_tree(child);
                     interrupted = true;
-                    break Some(130);
+                    // No pseudo exit code: the child never reported one, and
+                    // "Exit code: 130" would misreport a completed process.
+                    break None;
                 }
                 if start.elapsed() >= timeout {
                     tree_cleanup = terminate_child_process_tree(child);
                     timed_out = true;
-                    break Some(124);
+                    break None;
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
