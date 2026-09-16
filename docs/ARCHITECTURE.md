@@ -82,7 +82,7 @@ TurnExecutor (agent/turn.rs)
 │ tools/snapshot.rs     │ Hashline 版本历史、seen-lines、tag、淘汰与路径迁移
 │ tools/search.rs       │ Glob / Grep
 │ tools/vfs.rs          │ Read / Glob / Grep 的同步只读 VFS hook、请求/结果协议和格式化
-│ tools/bash.rs         │ Bash 执行、超时、ANSI 过滤、安全检查、误用拦截
+│ tools/bash.rs         │ Bash 执行、超时、ANSI 过滤、安全检查、误用提示
 │ tools/python.rs       │ 宿主 Python 执行
 │ tools/sandbox_python.rs│ WASI CPython 沙箱执行（python-sandbox feature）
 │ tools/plan.rs         │ PlanDraft / PlanConfirm / PlanClear 类型化命令
@@ -295,7 +295,7 @@ Server 生命周期：Ctrl+C → axum serve 停止 → idle reaper abort → `re
 | `tools/snapshot.rs` | Hashline 完整文本版本、seen-lines、xxHash tag、淘汰和路径恢复 |
 | `tools/search.rs` | `GlobTool`、`GrepTool` |
 | `tools/vfs.rs` | `ReadOnlyFileSystem`、`VfsScope`、结构化请求/结果、虚拟路径规范化、请求校验和结果格式化 |
-| `tools/bash.rs` | `BashTool`、危险命令检查、误用拦截 |
+| `tools/bash.rs` | `BashTool`、危险命令检查、误用提示 |
 | `tools/python.rs` | `PythonTool` |
 | `tools/plan.rs` | `PlanDraftTool`、`PlanConfirmTool`、`PlanClearTool` |
 | `tools/todo.rs` | `TodoReadTool`、`TodoWriteTool`、`TodoAdvanceTool` 与追加式事件格式化 |

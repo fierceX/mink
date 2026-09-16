@@ -145,8 +145,10 @@ cargo build --release
 | 参数 | 类型 | 说明 |
 |---|---|---|
 | `path` | string | 文件路径或资源 URL |
+| `limit` `offset` `range` `path_range` `path_selector` `selector` | integer/string | 兼容字段：接受但忽略 |
 
 - `path` 支持 selector：`file:10-20`、`file:10+5`、`file:raw`、`file:raw:10-20`。
+- 兼容字段（外部 agent 框架的读参习惯）只解析不实现：调用成功并按 `path` 语义读取；真正未知的字段仍 fail closed。
 - `hashline` 模式下，本地非 raw 输出包含基于完整文件内容的 snapshot header 和行号：
 
 ```text
@@ -258,11 +260,11 @@ cargo build --release
 | `timeout` | integer | 单条命令超时秒数，可选 |
 
 - 命令在当前会话 `cwd` 下通过 `bash -lc` 执行。
-- 空命令和危险命令会被安全策略拒绝。
-- 用于读文件、搜索内容或发现路径的 Bash 命令会被拦截，提示改用 `Read`、`Grep` 或 `Glob`。
+- 空命令和危险命令会被安全策略拒绝；`rm -rf` 类删除按目标判定：目标先经受限 POSIX 词法解析（转义/引号）与 symlink 感知的真实路径解析（`realpath(strict=False)` 语义），`/`、`/*` 与临时目录之外的真实目标仍被拒绝（`/tmp`、`/var/folders` 等临时目录放行）；命令替换/变量/字符类/花括号/重定向/未闭合引号等不可静态确定的目标保守拦截。
+- 用于读文件、搜索内容或发现路径的 Bash 命令照常执行，并在结果尾部附一行软提示（`Hint: prefer <Provider> for <purpose>.`）引导后续调用改用 `Read`、`Grep` 或 `Glob`；误用检测不再拒绝调用。
 - 当 `Write` 或 `Edit` 同时位于模型工具 surface 时，系统提示词要求文件创建、完整覆盖和锚定修改优先使用专用 provider，不使用 Bash 重定向、heredoc、sed 或 awk 代替。
 - 恢复首步守卫生效后，首个 Bash 调用还要单独满足 `FocusedVerificationExec`。这只是
-  恢复首步资格，不改变普通 Bash 的误用拦截；
+  恢复首步资格，不改变普通 Bash 的误用提示；
 - 显式 `timeout` 为 `1..=tool_timeout_max` 时按原值执行；超过 `tool_timeout_max` 直接报错（fail closed），`0` 回退到全局 `tool_timeout`；未设置 `tool_timeout` 时默认值稳定夹在 5 到 `tool_timeout_max` 秒之间。`tool_timeout_max` 默认 600 秒，可在 `[tools]` 中配置，最低 5 秒。
 - Ctrl+C / interrupt 会尝试中断子进程，返回 exit code 130 语义；只有运行库中断路径会标注 `command interrupted`，命令自行 `exit 130` 属于普通非零退出。
 - 失败分类优先采用进程监督事实（超时 → `Timeout`，中断 → `Interrupted`，信号终止/非零退出 → `ProcessFailed`）；输出文本中的 `timeout` 等词不会改变分类。
@@ -278,8 +280,10 @@ cargo build --release
 | `script` | string | 内联 Python 代码 |
 | `script_file` | string | Python 文件路径 |
 | `timeout` | integer | 超时秒数，可选 |
+| `command` `code` | string | 兼容字段：接受但忽略 |
 
 - `script` 和 `script_file` 必须二选一，不能同时提供。
+- 兼容字段（外部框架的 `command`/`code` 习惯）只解析不实现：脚本体仍来自 `script`/`script_file`；真正未知的字段仍 fail closed。
 - 在当前会话 `cwd` 下使用 `python3 -B -W ignore -c` 执行。
 - 显式 `timeout` 为 `1..=tool_timeout_max` 时按原值执行；超过 `tool_timeout_max` 直接报错（fail closed），`0` 回退到全局 `tool_timeout`；未设置 `tool_timeout` 时默认值稳定夹在 5 到 `tool_timeout_max` 秒之间。`tool_timeout_max` 默认 600 秒，可在 `[tools]` 中配置，最低 5 秒。
 - Ctrl+C / interrupt 会杀掉脚本并返回 interrupted 提示。
@@ -291,6 +295,7 @@ cargo build --release
 
 仅配置的目录有读写权限，无子进程、无网络、无 C 扩展，完整 CPython 标准库可用。
 默认不进入工具 surface；在 `enabled_tools` 中显式列出 `PythonSandbox` 后启用。
+兼容字段与 `Python` 相同（`command`/`code` 接受即忽略）。
 
 ### python.wasm 说明
 
@@ -366,8 +371,10 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 | `path` | string | 文件、目录或 registered resource URL，可选 |
 | `glob` | string | 本地/VFS 文件过滤，可选 |
 | `context` | integer | 匹配前后上下文行数，可选 |
+| `head_limit` `output_mode` `-i` | integer/string/boolean | 兼容字段：接受但忽略 |
 
 - 本地后端基于 ripgrep 的 `ignore::WalkBuilder`、`OverrideBuilder`、`grep-regex`、`grep-searcher` 和 `grep-printer`，语义和输出对齐 `rg -n/-C -g`，不依赖外部 `rg` 二进制；注入 VFS 后由后端搜索虚拟内容。
+- 兼容字段（外部框架习惯）只解析不实现：结果与只传 `pattern`/`path`/`glob`/`context` 时一致，`head_limit` 不改变 `max_search_results` 上限；真正未知的字段仍 fail closed。
 - registered resource URL 由 `ResourceRouter` 解析后直接搜索返回文本，例如 `session://current/history`；resource path 不接受 selector 或 glob。
 - 优先用于定位编辑目标。
 - `path` 为空或相对路径时基于当前会话 `cwd` 解析；`glob` 过滤使用 `rg -g` override glob 语义。

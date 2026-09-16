@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-09-14
+> 更新日期：2026-09-16
 
 ## 项目概览
 
@@ -117,7 +117,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - 响应注入的是轨迹事实帧（`[trajectory]`/`[detector]`），禁止祈使句与"进入恢复模式"命令；去重哈希只覆盖证据事实文本，同一证据批不重复注入；响应事件携带证据文本（可回溯 conversation.jsonl）。
 - 回滚只作用于循环窗口内被编辑路径，目标为最后一次 Read/Write 完整内容基线（编辑后内容不得作为回滚目标）；Replace 的 Read 同样记录基线；写回经 `publish_state_with_permissions`（权限先设置到临时文件再发布；权限读取/设置失败不得发布，也不得记录成功回滚）且仅当磁盘与基线不一致；写回后 bump memo mutation；以 `signal_rollback` 落事件。
 - 恢复守卫拦截必须生成真实信号喂回信念；连续拦截达 `guard_max_blocks` 必须绕过守卫并强制注入，禁止无限拦截；B < abort 进入用户接管（`signal_handover` 事件落盘后 Failed），禁止静默丢弃证据；策略重启子代理初始化失败必须降级（`signal_replan_error` 后返回 None），不得升级为整轮 Err。
-- Recovery 首步资格来自 resolved semantic capabilities；Bash 的 `FocusedVerificationExec` classifier 与普通 Bash 安全/误用策略相互独立。
+- Recovery 首步资格来自 resolved semantic capabilities；Bash 的 `FocusedVerificationExec` classifier 与普通 Bash 安全/误用提示相互独立。
 
 ### 工具面与执行
 
@@ -140,7 +140,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 
 ### Read / Edit 协议
 
-- `Read` 模型可见参数只含 `path`（行范围用 `path:N`/`N-M`/`N+K`/`:raw` 选择器）；全工具 schema 字段必须与 serde 接受字段一致且 `additionalProperties:false`（catalog 一致性测试强制）。
+- `Read` 的可行为参数只含 `path`（行范围用 `path:N`/`N-M`/`N+K`/`:raw` 选择器），`limit`/`offset`/`range`/`path_range`/`path_selector`/`selector` 为兼容字段；`Grep` 的 `head_limit`/`output_mode`/`-i`、`Python`/`PythonSandbox` 的 `command`/`code` 同属兼容字段（接受即忽略，未知字段仍 fail closed）；全工具 schema 字段必须与 serde 接受字段一致且 `additionalProperties:false`（catalog 一致性测试强制）。
 - 行选择器 `N+K` 必须饱和；offset 超总行数报错而非回读幻影行号；`split_content_lines("")` 返回空集（空文件 0 行），Read/Write/Edit 与 hashline 解析共用该语义。
 - `Read` 本地非 raw 输出记录 snapshot；raw 或 immutable resource 不生成可编辑 snapshot；Read memo 命中需 len/mtime/epoch/mutation_epoch 一致且范围覆盖；压缩提交成功后 bump epoch，Write/Edit 成功后 bump mutation；子代理 memo 独立，仅本地文件。
 - Hashline stale 恢复仅当所有锚点唯一映射且共享一致偏移；Replace 多候选必须拒绝；Edit no-change 幂等成功仅当位置精确且最终状态可验证一致（`hashline::already_applied`），任何歧义退回 soft no-op → 3 次硬错误的 fail-closed 路径。

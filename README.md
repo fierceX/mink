@@ -140,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
 
 - **进程级沙箱** — Linux nsjail / bubblewrap（完整文件系统隔离）、macOS sandbox-exec（写入隔离）
 - **CPython WASI 沙箱** — `PythonSandbox` 工具在 wasmtime + CPython WASI 中执行，WASI 级进程隔离，无网络、无 C 扩展
-- **危险命令过滤** — Bash 误用拦截与安全约束，可选审批策略
+- **危险命令过滤** — Bash 危险命令拦截与误用软提示，可选审批策略
 
 ### 🗃️ 持久化与状态
 

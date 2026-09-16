@@ -366,8 +366,10 @@ tool-call 列表中。每个候选调用都通过 `build_tool_call_event()` 转�
 这些格式是“容器协议”兼容层，不代表旧参数重新成为模型协议。回收层只把内容规整成
 `{name, arguments}`，之后仍由当前 `tools.json` schema、`ToolExec` 参数反序列化和工具实现校验。
 例如 XML/Bracket/R1 中可以恢复 `Read {"path":"src/lib.rs:40-80"}` 或
-`Edit {"path":"src/lib.rs","patch":"@src/lib.rs#TAG\nreplace 40:\n+..."}`。`Read` 已收窄为单参数
-契约（`path` + 路径选择器），`offset`/`limit` 与旧参数名在模型与执行层均被拒绝；`Edit old_string/new_string` 会被拒绝。
+`Edit {"path":"src/lib.rs","patch":"@src/lib.rs#TAG\nreplace 40:\n+..."}`。`Read` 的行范围仍写在
+`path` 选择器里；外部框架习惯的读参（`limit`/`offset`/`selector` 等）以及 `Grep`/`Python` 的
+同类字段只被接受并忽略，真正未知的字段仍会在模型与执行层被拒绝；`Edit old_string/new_string`
+会被拒绝。
 
 ### 步骤 3：Surface Gate 与 StormBreaker（重复抑制）
 

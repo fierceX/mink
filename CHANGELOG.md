@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### 变更：工具参数兼容、Bash 误用软提示与 safety 判定调整
+
+- `Read` 接受 6 个兼容字段（`limit`/`offset`/`range`/`path_range`/`path_selector`/`selector`）并忽略：外部 agent 框架习惯的读参不再报 `unknown field`，调用按 `path` selector 语义成功执行；真正未知的字段仍 fail closed；工具 schema 与 runtime 接受字段的双向一致断言同步更新。
+- `Grep` 接受 `head_limit`/`output_mode`/`-i`，`Python` 与 `PythonSandbox` 接受 `command`/`code` 兼容字段并忽略：同类 `unknown field` 失败不再发生（外部框架习惯参数），运行行为与不传这些字段时一致；未知字段仍 fail closed。
+- Bash 的 file-misuse 检测（读文件/搜内容/找路径）从“拒绝执行”改为“执行 + 结果尾部一行 `Hint: prefer <Provider> for <purpose>.`”：命令不再因误用检测失败，也不再产生 ToolFailed 硬信号（信念/恢复决策不再被误用检测扰动）；`FocusedVerificationExec` 恢复首步资格与 safety 策略不变。
+- safety：`rm -rf` 判定链改为「受限 POSIX 词法解析（转义/引号）→ symlink 感知的真实路径解析（`realpath(strict=False)` 语义）→ 临时目录白名单」：`/tmp/../etc`、`/tmp/\../etc`、引号内空格等穿越写法均按真实目标拦截，`/tmp/link→/etc` 式符号链接逃逸被拦，合法的 `/tmp/a/../b`、`"/tmp/it's/x"` 等写法不受影响；命令替换/变量/字符类/花括号/重定向/未闭合引号等不可静态确定的目标保守拦截。
+
 ## v0.6.3 (2026-09-14)
 
 ### 新增：事件流进度预算与嵌入诊断接口
