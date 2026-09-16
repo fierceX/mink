@@ -24,7 +24,7 @@ Rust 发布包为 `mink-core`，库 crate 名为 `mink`。发布包只包含可�
 mink = { package = "mink-core", version = "0.6.4", default-features = false, features = ["runtime"] }
 ```
 
-公开入口为 `mink::prelude`、`mink::runtime`、`mink::sdk_protocol` 和 `mink::ui`；启用 `prefab` feature 时 `mink::runtime::prefab` 提供 `ensure_session()`。
+公开入口为 `mink::prelude`、`mink::runtime`、`mink::sdk_protocol` 和 `mink::ui`。
 
 ### 最小示例
 
@@ -114,7 +114,6 @@ observer 通过固定容量队列与核心 turn 隔离；溢出或 observer 失�
 | 多模态 | `with_image_input(ImageInputCapability)` / `with_vision_models(Vec<String>)` / `with_image_limits(ImageLimitsOverrides)` |
 | 能力 | `with_mission_content()` / `with_selected_skills()` / `with_runtime_skill_content()` / `with_skill_discovery_policy()` / `with_resource_handler()` / `with_read_only_file_system()` / `with_resource_session_id()` |
 | 后端 | `with_llm_backend()` / `with_sandbox()` / `with_sandbox_python()` |
-| Prefab | `with_prefab(true)` / `with_prefab_named("flash")` / `with_prefab_path(path)` / `with_prefab_spec("name-or-path")`；需要启用 `prefab` feature |
 
 ### 自定义 LLM backend
 
@@ -204,26 +203,6 @@ let runtime = AgentRuntime::start(
 `artifact://`、`skill://`、`rule://`、`session://` 不进入 VFS。
 完整 redb 示例见
 [`crates/mink-core/examples/redb_vfs.rs`](../crates/mink-core/examples/redb_vfs.rs)。
-
-### Prefab 会话播种
-
-启用 `prefab` feature 后，可以在 `AgentOptions` 上调用 `with_prefab(true)` 使用内置默认模板，或用 `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()` 指定模板。Mink 会先正常初始化 session，然后由 Prefab 模块检查/重组 session：若 `events.jsonl` 中没有 Prefab `prefix_snapshot` 事件，则写入模板会话并补写标准前缀事件。
-
-```toml
-[dependencies]
-mink = { package = "mink-core", version = "0.6.4", default-features = false, features = ["runtime", "prefab"] }
-```
-
-```rust
-use mink::prelude::{AgentOptions, AgentRuntime};
-
-let options = AgentOptions::new(home, cwd)
-    .with_prefab_spec("flash")? // 或 .with_prefab_path("./my-template")? / .with_prefab_named("pro")?
-    .with_api_key(std::env::var("DEEPSEEK_API_KEY")?);
-let runtime = AgentRuntime::start(options).await?;
-```
-
-`with_prefab(true)` 使用内置默认模板；`with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()` 可指定模板。已有 prefab session 恢复时不会重复重组；对已有普通 session 使用 prefab 只补写标准 `prefix_snapshot` 事件，不修改 conversation。
 
 ### 沙箱
 

@@ -13,7 +13,6 @@
 - `mink::runtime` / `mink::prelude`：Rust 嵌入式入口，提供唯一 shutdown owner `AgentRuntime`、可克隆 `AgentRuntimeHandle`、异步 `EventSink`、流式事件和 turn outcome。
 - `mink::sdk_protocol`：Agent JSONL 协议类型和 SDK 适配。
 - `mink::runtime::session`：只读 session 发现、读取与统一 usage 汇总。
-- `mink::runtime::prefab`（启用 `prefab` feature）：`ensure_session()` / `PrefabSeed` 会话重组。
 - `src/agent`、`src/tools`、`src/session`、`src/llm`：Mink 的主循环、工具、持久化和 LLM 流式客户端核心。
 
 ## 上下文与会话历史
@@ -126,38 +125,14 @@ implementation. See [`examples/redb_vfs.rs`](examples/redb_vfs.rs) for a
 complete redb adapter; redb is an example-only dependency and is not linked
 into `mink-core`.
 
-## Prefab session restructuring
+## Host extension points
 
-Prefab is implemented as an optional integration layer in the independent
-`mink-prefab` crate (`mink-integration` feature), wired through Mink's neutral
-extension points `PrefixSource` / `PostInitHook` — `mink-core` itself has no
-`mink-prefab` dependency. The host restructures the session after normal
-initialization: the hook writes the selected template conversation/events for
-a fresh session and records the special prefix as a standard
-`prefix_snapshot` event; the prefix source then serves that system prompt /
-tool schemas instead of the compiled prompt.
-
-```rust
-use mink::prelude::{AgentOptions, AgentRuntime};
-
-let options = AgentOptions::new(home, cwd)
-    .with_prefix_source(std::sync::Arc::new(mink_prefab::adapter::PrefabPrefixSource))
-    .with_post_init_hook(std::sync::Arc::new(
-        mink_prefab::adapter::PrefabRestructureHook::new(
-            mink_prefab::adapter::resolve_template("flash")?,
-        ),
-    ))
-    .with_api_key("sk-...");
-let runtime = AgentRuntime::start(options).await?;
-```
-
-The CLI wires both automatically behind `--prefab[=TEMPLATE]` via
-`mink_prefab::adapter::install_template`.
-
-Seeding/restructuring refuses to touch an existing conversation; resuming a
-prefab session does not re-run the restructure. A prefab-enabled runtime
-rebuilds its prefix from the standard `prefix_snapshot` event in
-`events.jsonl`; a normal runtime ignores it.
+`mink-core` exposes neutral extension points and carries no host-specific
+dependency: implement `mink::runtime::PrefixSource` to serve a session's
+immutable prefix (for example rebuilt from a `prefix_snapshot` event in
+`events.jsonl`), and `mink::runtime::PostInitHook` to run host logic after
+normal session initialization. Wire them through
+`AgentOptions::with_prefix_source()` / `with_post_init_hook()`.
 
 ## Custom LLM backend
 
@@ -219,7 +194,6 @@ themselves.
 
 ```bash
 cargo check -p mink-core --no-default-features --features runtime
-cargo check -p mink-core --no-default-features --features "runtime prefab"
 ```
 
 ## 沙箱说明

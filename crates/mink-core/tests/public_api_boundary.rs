@@ -32,8 +32,6 @@ fn workspace_consumers_only_use_supported_mink_modules() {
     let roots = [
         workspace.join("crates/mink-cli/src"),
         workspace.join("crates/mink-server/src"),
-        workspace.join("crates/mink-router/src"),
-        workspace.join("crates/mink-prefab/src"),
         core.join("examples"),
     ];
     let mut files = Vec::new();

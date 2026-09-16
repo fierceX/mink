@@ -45,9 +45,6 @@ cargo build --release        # 或 make build
 
 # 使用自定义系统提示词
 ./target/release/mink --mission ./my-task.mission.md -i
-
-# 使用 prefab 重组会话（默认模板，也可 --prefab=flash 或 --prefab=路径）
-./target/release/mink --prefab "review this repo"
 ```
 
 ### Python SDK
@@ -148,7 +145,6 @@ async fn main() -> anyhow::Result<()> {
 - **非破坏式压缩** — 只更新 `context-state.json` 投影边界，不重写 `conversation.jsonl`；压缩统一使用 LLM 摘要
 - **Plan & Todo 状态** — Plan 使用 append-only transition 与压缩后 checkpoint；Todo 使用稳定 ID、revision 和原子批量提交
 - **Artifact 超长输出** — 工具结果超限自动落盘至 `artifacts/`，序号可恢复且禁止覆盖；`Read artifact://<id>` 读取
-- **Prefab 会话重组** — 可选 `prefab` feature 在 session 初始化后重组 session，并从 `events.jsonl` 的标准 `prefix_snapshot` 事件重建完整 system prompt + tools schema；CLI 使用 `--prefab[=TEMPLATE]`，Rust 使用 `with_prefab(true)` / `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()`（临时功能，后续 DeepSeek 更新模型后可能撤销）
 - **Token 用量** — LLM 请求级 `usage.jsonl` journal，覆盖主 Agent、自动压缩和子代理
 
 ### 🔌 集成与扩展
@@ -168,8 +164,6 @@ async fn main() -> anyhow::Result<()> {
 |------|------|
 | [crates/mink-core](crates/mink-core/README.md) | Rust 发布包 `mink-core`，库 crate 名 `mink`，包含可嵌入 runtime、工具核心、session、sandbox 和 SDK 协议 |
 | [crates/mink-cli](crates/mink-cli/README.md) | workspace 内部二进制包，生成 `mink` 终端二进制和 `mink-core` SDK 精简二进制，持有 REPL/TUI 实现 |
-| [crates/mink-prefab](crates/mink-prefab/README.md) | 独立 prefab seeder：模板加载、校验、Mink 兼容 session/event/prefix 写入 |
-| [crates/mink-router](crates/mink-router/README.md) | 独立 Flash 路由：pi-deepseek-route 策略的 Rust 移植，LlmBackend 装饰器 |
 | [mink_agent](mink_agent/README.md) | Python SDK，wheel 内置无 TUI 的 `mink-core` 二进制 |
 | [crates/mink-server](crates/mink-server/README.md) | Web 工作区服务器：REST + SSE + 嵌入前端，`build.rs` 自动构建并嵌入 web 产物 |
 

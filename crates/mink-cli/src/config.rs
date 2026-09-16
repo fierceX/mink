@@ -237,11 +237,6 @@ pub struct CliConfig {
     pub mission_file: Option<PathBuf>,
     /// 内联 mission 内容（通过 SDK 协议传入，不写临时文件）
     pub mission_content: Option<String>,
-    /// Prefab template to seed/restructure with; `Some("default")` uses the
-    /// bundled generic template, `Some(path)` loads a template directory.
-    pub prefab: Option<String>,
-    /// Router mode; `Some("flash")` enables the Flash routing backend.
-    pub router: Option<String>,
     /// Explicit image-input capability: `Some(cap)` overrides the backend
     /// declaration; `None` defers to it (v7 §3.1).
     pub image_input: Option<mink::runtime::ImageInputCapability>,
@@ -329,8 +324,6 @@ impl Default for CliConfig {
             sandbox_python: SandboxPythonConfig::default(),
             mission_file: None,
             mission_content: None,
-            prefab: None,
-            router: None,
             image_input: None,
             vision_models: None,
             image_limits: None,
@@ -363,34 +356,6 @@ pub fn parse_args(args: Vec<String>) -> Result<CliConfig> {
             "--mission" => {
                 cfg.mission_file = Some(require_value(&args, i)?.into());
                 i += 2;
-            }
-            "--prefab" => {
-                cfg.prefab = Some("default".to_string());
-                i += 1;
-            }
-            arg if arg.starts_with("--prefab=") => {
-                let value = arg.strip_prefix("--prefab=").unwrap_or_default().trim();
-                if value.is_empty() {
-                    bail!("missing value for --prefab");
-                }
-                cfg.prefab = Some(value.to_string());
-                i += 1;
-            }
-            "--router" => {
-                cfg.router = Some("flash".to_string());
-                i += 1;
-            }
-            arg if arg.starts_with("--router=") => {
-                let value = arg.strip_prefix("--router=").unwrap_or_default().trim();
-                if value.is_empty() {
-                    bail!("missing value for --router");
-                }
-                if value.eq_ignore_ascii_case("off") {
-                    cfg.router = None;
-                } else {
-                    cfg.router = Some(value.to_string());
-                }
-                i += 1;
             }
             "--api-key" => {
                 cfg.api_key = require_value(&args, i)?;

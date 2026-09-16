@@ -618,16 +618,6 @@ session 恢复和重放仍可按需读取全部原始消息；`session://current
 - 本地图片投影失败发生在请求进入 backend 之前，不产生记录（不伪装成已发出请求）。
 - 压缩（compaction）使用同一 guard：`compaction_interrupted`/`request_failed` 各记一条；流中断由 `MeteredStream` Drop 兜底，保证每个请求最多一条记录。
 
-### Prefab 会话播种
-
-`prefab` feature 的定位是 session 初始化后的重组：在 `AgentRuntime` 完成正常 session 构建后，Prefab 模块检查目标 session 目录，必要时把模板轨迹写入 conversation/events，并通过标准 `prefix_snapshot` 事件记录特殊 system prompt/tools，使首次 LLM 请求已经带有“读 AGENTS.md → 加载完整使用说明 → Ready”的完整历史。运行时不会在重组后回调 `mink-prefab`，agent loop 不感知重组过程。
-
-- `prefab::ensure_session()` 只重组需要重组的 session；`seed_session()` 仍用于直接播种场景。
-- CLI `--prefab[=TEMPLATE]` / Rust `with_prefab(true)` / `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()` 会在 session 初始化后由 Prefab 模块生成 `conversation.jsonl` 和 `events.jsonl`（仅当 conversation 为空），使 REPL/TUI 恢复时能直接重放预置轨迹。
-- 启用 prefab 的 runtime 在 `PrefixManager::ensure()` 中优先读取 `events.jsonl` 的 Prefab `prefix_snapshot` 事件；该事件不存在时回退编译期 prompt builder。
-- 普通 runtime 忽略 Prefab `prefix_snapshot`；`prefab_mode` 只随启用 prefab 的 runtime 传给子代理。
-- 对已有普通 session 启用 prefab 不创建新 session，也不改写 conversation；只补写标准 `prefix_snapshot` 事件，让后续请求使用 prefab system prompt。
-
 ---
 
 ## 主题九：SubAgent（子代理）
@@ -955,8 +945,6 @@ pub enum Event {
 | compact 提交后按 active_start 裁剪 store 缓存 | `compaction.rs` | 冷历史继续常驻内存 |
 | 压缩不删除 conversation 历史 | `compaction.rs` | session 无法完整恢复或重放 |
 | artifact 序号恢复且正文独占创建 | `artifacts.rs` | fork/恢复后覆盖历史 artifact |
-| Prefab prefix 只在 prefab runtime 生效 | `agent/prefix.rs` | 普通 runtime 误读 Prefab `prefix_snapshot` 会破坏默认提示词 |
-| Prefab 重组不覆盖已有 session | `crates/mink-prefab/src/seed.rs` | 覆盖已有历史会丢失对话 |
 | 图片能力在 session 初始化冻结；恢复/切换按能力指纹兼容门控 | `capabilities/model_capabilities.rs`、`runtime/context_build.rs`、`agent/orchestrator.rs` | 升级或改配置后旧视觉会话被拒绝启动 |
 | conversation 只存 `image://` 引用，请求时才物化；每个引用只完整发送一次 | `llm/image_projection.rs`、`session/store.rs` | 重复 base64 放大请求体或缓存缺失时谎报"已附加" |
 | 图片对象内容寻址、独占创建、读回 digest 校验；子代理不继承父缓存 | `session/image_cache.rs`、`agent/sub_executor.rs` | 覆盖/篡改对象或 fork 后引用损坏 |

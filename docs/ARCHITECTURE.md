@@ -28,7 +28,6 @@ Mink 是一个 Rust 实现的轻量 AI coding agent，默认面向 DeepSeek / Op
 - registered resource 与 capability snapshot 分离：资源读取走 `ResourceRouter`，prompt/skill/rule/context 能力视图走 `CapabilitySnapshot`
 - `Edit` 在 runtime 启动时解析为互斥的 Hashline 或 Replace schema、提示词和 executor
 - 上下文预算是硬约束，通过摘要压缩和 immutable prefix 尽量保留 prefix cache 命中
-- Prefab 会话重组：可选 `prefab` feature 在 session 初始化后检查/重组模板会话，并从 `events.jsonl` 的标准 `prefix_snapshot` 事件重建完整 system prompt/tools
 
 ---
 
@@ -54,7 +53,6 @@ crates/mink-cli/src/cli.rs          ← mink / mink-core 共用 CLI adapter
   │
   │  CLI 参数解析 -> 配置合并 -> sandbox re-exec
   │  根据模式启动 one-shot / REPL / TUI / stream-json / Agent JSONL
-  │  可选 --prefab[=TEMPLATE] / with_prefab(true|named|path|spec) → prefab 重组 session
   │  调用 mink::runtime 构造 AgentRuntime
   ▼
 OrchActor (agent/orchestrator.rs)
@@ -214,7 +212,6 @@ ToolSignalProcessor、decision cooldown 和 StormBreaker 窗口重置。`MINK_SI
 | `crates/mink-cli/src/cli.rs` | **Mink / mink-core 共用 CLI adapter**，参数解析、配置合并、sandbox re-exec、模式分发；调用 `mink::runtime`，但 REPL/TUI 实现归属 CLI crate |
 | `crates/mink-cli/src/main.rs` | `mink` binary thin wrapper → `mink_cli::cli::main_entry()` |
 | `crates/mink-cli/src/bin/mink-core.rs` | `mink-core` binary thin wrapper → `mink_cli::cli::main_entry()` |
-| `crates/mink-prefab/` | workspace 独立 prefab seeder：模板加载、校验、`session.json`/`conversation.jsonl`/`events.jsonl`/`prefab-*.json` 写入 |
 | `crates/mink-cli/src/config.rs` | CLI `Config`、参数解析、`.minkrc`/`--config` 合并、环境变量默认值、sandbox 配置 |
 | `context.rs` | `AgentSharedContext` 和工具层 `ToolContext` |
 | `assets.rs` | 编译期嵌入的 `tools.json` 和 skill 索引 |
@@ -250,12 +247,11 @@ Server 生命周期：Ctrl+C → axum serve 停止 → idle reaper abort → `re
 
 | 文件 | 职责 |
 |------|------|
-| `runtime/mod.rs` | `mink::runtime` 公共 API 导出，供 `mink::prelude` facade 复用；`prefab` feature 下导出 `runtime::prefab` |
+| `runtime/mod.rs` | `mink::runtime` 公共 API 导出，供 `mink::prelude` facade 复用 |
 | `runtime/builder.rs` | crate-private `build_runtime()` — 从 `AgentOptions` 的内部 resolved 配置构造 runtime |
 | `runtime/config.rs` | 私有 resolved 配置 / `SessionPolicy` / `SessionInfo` |
 | `runtime/handle.rs` | `AgentRuntime`（唯一 shutdown owner）/ 可克隆 `AgentRuntimeHandle` — `start()`, `handle()`, `run_turn()`, `stream_turn()`, `compact()`, `set_model()`, `interrupt_current_turn()`, `shutdown()` |
-| `runtime/options.rs` | `AgentOptions` ergonomic builder，包括 LLM backend、只读 VFS、resource session scope 注入和 `with_prefab()` / `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()`（`prefab` feature） |
-| `runtime/prefab.rs` | `prefab` feature 适配层：`ensure_session()` / `resolve_template()`，复用 `mink-prefab` |
+| `runtime/options.rs` | `AgentOptions` ergonomic builder，包括 LLM backend、只读 VFS 和 resource session scope 注入 |
 | `runtime/events.rs` | turn-scoped `AgentEvent` envelope / `EventSink` / 异步 dispatcher / `EventDisplay` adapter |
 | `runtime/tools.rs` | 稳定异步 `AgentTool` 自定义工具 API：`ToolDefinition` / `ToolExecutionContext` / `ToolOutput` / `ToolError` |
 | `runtime/sdk_adapter.rs` | SDK option 映射、status/exit code 映射、`SdkFinal` 组装 |
@@ -266,7 +262,7 @@ Server 生命周期：Ctrl+C → axum serve 停止 → idle reaper abort → `re
 |------|------|
 | `agent/orchestrator.rs` | 命令循环、模型切换、手动 compact、turn 后处理 |
 | `agent/turn.rs` | 单轮执行主流程和 tool_use 内循环 |
-| `agent/prefix.rs` | `PrefixManager`，构建/复用 immutable prefix；prefab 模式下从 session `events.jsonl` 的 `prefix_snapshot` 事件重建 |
+| `agent/prefix.rs` | `PrefixManager`，构建/复用 immutable prefix |
 | `agent/compactor.rs` | `TurnCompactor`，封装同轮压缩防护 |
 | `agent/tool_signals.rs` | 工具信号采集和 belief 更新 |
 | `agent/sub_coordinator.rs` | SubAgent 批次的唯一 pending 所有者：启动、可中断收集、cancel/Drop 清理；结果按输入序回填 |
@@ -485,7 +481,7 @@ REPL/TUI 在 `mink-cli` 内把同一事件流投影为终端输出或 `TuiSignal
 
 
 Session 目录保存 conversation、events、metadata、summary、stats 和 artifacts，并按实际功能
-生成 compaction、plan、todo、usage 和 prefab 状态文件。session 根目录由 `home`、`cwd`、`session_id`
+生成 compaction、plan、todo 和 usage 状态文件。session 根目录由 `home`、`cwd`、`session_id`
 和以下四种 layout 共同决定：
 
 | Layout | `home` 含义 | session 目录 |
@@ -527,16 +523,6 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 `isolated` 中 `home` 自身就是 session 目录，`session_id` 仍写入 `session.json` 并用于事件、SDK final 和恢复引用。
 `session.json` 保存用户可读的 alias、title、cwd 和时间戳。`--session NAME` 会按 alias、完整 id、id 前缀和 title解析已有 session，匹配不到时创建新的时间戳 session 并把 NAME 规范化为安全 alias。列表和解析路径对损坏的 `session.json` 采用 legacy fallback，不让单个坏 metadata 阻断恢复。`--continue` 会选择当前 layout 下最近修改的 session。
 
-### Prefab 会话播种
-
-`prefab` feature 在 `AgentRuntime` 完成正常 session 初始化后重组目标 session：检查 `events.jsonl` 是否已有 Prefab 特殊 `prefix_snapshot` 事件，没有则写入模板会话，并通过标准 `prefix_snapshot` 事件记录特殊 system prompt/tools。CLI 通过 `--prefab[=TEMPLATE]` 触发，Rust 通过 `AgentOptions::with_prefab(true)` 或 `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()` 指定模板触发；子代理继承父 runtime 的 `prefab_mode`。
-
-- 全新 session：若 conversation 为空，写入模板会话（默认占位符），随后正常启动 agent loop。
-- 已有 prefab session：直接恢复，不重复重组，不覆盖 `conversation.jsonl` 或已有 `prefix_snapshot`。
-- 已有普通 session + prefab：复用该 session，仅当缺少 Prefab `prefix_snapshot` 时补写标准前缀事件；conversation 保持不变。
-- Prefix 重建：启用 prefab 的 runtime 在 `PrefixManager::ensure()` 中优先读取 `events.jsonl` 的 Prefab `prefix_snapshot` 事件（system prompt + tools schema），否则回退到编译期 prompt builder。
-- 普通 runtime 忽略 Prefab `prefix_snapshot`；只有 `prefab` feature 编译进来且通过 CLI/Rust API 启用 Prefab 时该事件才生效。
-
 ---
 
 ## 决策与拒绝的替代方案
@@ -575,8 +561,6 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 - Agent JSONL、Python SDK 和 Rust runtime 暴露并映射同一组上下文压缩参数；runtime 在创建 session 前统一校验有限窗口的 reserve、tail、摘要输出和主请求输入预算关系。
 - `max_context_tokens=0` 禁用 auto/preflight 压缩和请求预算上限，但保留手动压缩；真实 context overflow 最多触发一次 LLM 压缩和一次重试。
 - 子代理始终使用父 session 下的 isolated home；fork 在 runtime 初始化前克隆完整 session 状态并重置身份与遥测文件。
-- Prefab 模式使用标准 `prefix_snapshot` 事件记录特殊 system prompt/tools，不创建额外 `prefab-*.json` 文件；普通 runtime 忽略该事件中的 Prefab 前缀。
-- Prefab 重组只写全新 conversation；已有 conversation 的 session 不重新写入模板，缺少 Prefab `prefix_snapshot` 时只补写标准前缀事件，不得修改 conversation。
 - `ImmutablePrefix` 变更必须通过 prefix manager / invalidate 路径。
 - `ConversationStore` append 时保持活跃后缀缓存一致；显式完整历史读取是一次性读盘操作，缓存继续保持为活跃后缀。
 - `ToolRunner::format_tool_result()` 是工具输出进入 LLM/UI 前的最大字节保护。

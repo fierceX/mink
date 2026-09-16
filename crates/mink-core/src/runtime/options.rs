@@ -356,7 +356,7 @@ impl AgentOptions {
 
     /// The currently configured vision model list (built-in defaults unless
     /// replaced via `with_vision_models`). Used by CLI layers that construct
-    /// their own backend (e.g. `--router`) so user configuration is honored.
+    /// their own backend so user configuration is honored.
     pub fn vision_models(&self) -> &[String] {
         &self.config.vision_models
     }

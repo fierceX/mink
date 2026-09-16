@@ -360,9 +360,8 @@ impl AgentSharedContext {
     }
 
     /// Build the compiled-in Mink system prompt for the current context
-    /// without logging a `prefix_snapshot` event. Prefab uses this to render
-    /// `{{FULL_SYSTEM_PROMPT}}` and as a fallback when a template does not
-    /// provide its own system prompt.
+    /// without logging a `prefix_snapshot` event. Hosts that serve their own
+    /// prefix through `PrefixSource` still use this as the compiled fallback.
     pub(crate) fn build_system_prompt(&self) -> anyhow::Result<String> {
         let system_prompt = crate::prompt::Builder {
             cwd: self.cwd.clone(),

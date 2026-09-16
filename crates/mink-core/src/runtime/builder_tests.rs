@@ -2993,7 +2993,7 @@ struct RewritingHook;
 impl crate::runtime::PostInitHook for RewritingHook {
     fn run(&self, ctx: &crate::runtime::PostInitContext<'_>) -> anyhow::Result<()> {
         // Simulate a host that rewrites session files before the first turn
-        // (prefab-style restructuring): append a user line to the
+        // (session-restructuring hook): append a user line to the
         // conversation and record a prefix_snapshot event.
         let mut conversation =
             std::fs::read_to_string(&ctx.session_paths().conversation).unwrap_or_default();

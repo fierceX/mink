@@ -2063,8 +2063,6 @@ dependencies = [
  "crossterm",
  "ignore",
  "mink-core",
- "mink-prefab",
- "mink-router",
  "ratatui",
  "rustyline",
  "serde",
@@ -2107,34 +2105,6 @@ dependencies = [
  "wasmtime-wasi",
  "windows-sys 0.61.2",
  "xxhash-rust",
-]
-
-[[package]]
-name = "mink-prefab"
-version = "0.6.4"
-dependencies = [
- "anyhow",
- "async-trait",
- "futures",
- "mink-core",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "time",
- "tokio",
-]
-
-[[package]]
-name = "mink-router"
-version = "0.6.4"
-dependencies = [
- "anyhow",
- "async-trait",
- "mink-core",
- "mink-prefab",
- "regex",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
