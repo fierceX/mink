@@ -51,13 +51,38 @@ fn catalog_joins_every_schema_and_executor() {
 #[test]
 fn schemas_declare_exactly_the_runtime_accepted_fields() {
     const CONTRACT: &[(&str, &[&str])] = &[
-        ("Read", &["path"]),
+        (
+            "Read",
+            &[
+                "path",
+                "limit",
+                "offset",
+                "range",
+                "path_range",
+                "path_selector",
+                "selector",
+            ],
+        ),
         ("Glob", &["pattern", "path"]),
-        ("Grep", &["pattern", "path", "glob", "context"]),
+        (
+            "Grep",
+            &[
+                "pattern",
+                "path",
+                "glob",
+                "context",
+                "head_limit",
+                "output_mode",
+                "-i",
+            ],
+        ),
         ("Write", &["path", "content"]),
         ("Edit", &["input"]),
         ("Bash", &["command", "timeout"]),
-        ("Python", &["script", "script_file", "timeout"]),
+        (
+            "Python",
+            &["script", "script_file", "timeout", "command", "code"],
+        ),
         ("TodoRead", &["include_completed"]),
         ("TodoWrite", &["base_revision", "add", "update", "remove"]),
         (
@@ -68,7 +93,10 @@ fn schemas_declare_exactly_the_runtime_accepted_fields() {
         ("PlanConfirm", &[]),
         ("PlanClear", &[]),
         ("SubAgent", &["prompt", "description", "fork"]),
-        ("PythonSandbox", &["script", "script_file", "timeout"]),
+        (
+            "PythonSandbox",
+            &["script", "script_file", "timeout", "command", "code"],
+        ),
     ];
     let catalog = ToolCatalog::builtin().unwrap();
     let mut covered = BTreeSet::new();

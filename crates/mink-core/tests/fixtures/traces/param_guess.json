@@ -1,6 +1,6 @@
 {
   "name": "param-guess",
-  "source": "生产轨迹分析：Read 传入 path_selector 报 unknown field；全库参数名瞎猜 178 次（path_selector/path2/selector/selectors/path_selectors/path_sel/pathSelector/path_range）",
+  "source": "生产轨迹分析：Read 传入外部框架习惯字段（path_selector/limit/offset）；旧契约逐个报 unknown field，新契约接受并忽略（行范围仍写在 path 选择器里），非兼容的瞎猜名（path_sel 等）继续 fail closed",
   "setup": {
     "files": {
       "commonsense_report.md": "{{REPORT_FILE}}"
@@ -8,6 +8,12 @@
     "config": {}
   },
   "steps": [
+    {
+      "tool": "Read",
+      "input": {
+        "path": "commonsense_report.md:160-186"
+      }
+    },
     {
       "tool": "Read",
       "input": {
@@ -26,25 +32,30 @@
     {
       "tool": "Read",
       "input": {
-        "path": "commonsense_report.md:160-186"
+        "path": "commonsense_report.md",
+        "path_sel": ":160-186"
       }
     }
   ],
   "asserts": [
     {
       "after_step": 0,
-      "success": false,
-      "contains": "unknown field `path_selector`"
+      "success": true,
+      "contains": "160:"
     },
     {
       "after_step": 1,
-      "success": false,
-      "contains": "unknown field"
+      "success": true,
+      "contains": "1:line 1"
     },
     {
       "after_step": 2,
-      "success": true,
-      "contains": "160:"
+      "success": true
+    },
+    {
+      "after_step": 3,
+      "success": false,
+      "contains": "unknown field"
     }
   ]
 }

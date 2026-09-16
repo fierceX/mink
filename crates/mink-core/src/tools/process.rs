@@ -22,11 +22,20 @@ pub(crate) struct PythonScriptArgs {
     pub script_file: Option<String>,
     #[serde(default)]
     pub timeout: Option<u64>,
+    // 兼容字段：其他框架用 command/code 传脚本体。只接受并忽略；
+    // 真正未知的字段仍 fail closed。
+    #[serde(default)]
+    pub command: Option<serde_json::Value>,
+    #[serde(default)]
+    pub code: Option<serde_json::Value>,
 }
 
 impl PythonScriptArgs {
     pub(crate) fn parse(input: &serde_json::Value) -> anyhow::Result<Self> {
-        serde_json::from_value(input.clone()).map_err(Into::into)
+        let args: Self = serde_json::from_value(input.clone())?;
+        // 兼容字段不携带行为：显式引用避免 lint 隐藏该事实。
+        let _ = (&args.command, &args.code);
+        Ok(args)
     }
 
     /// Resolve the script body from the mutually exclusive arguments.

@@ -902,13 +902,45 @@ async fn read_rejects_unknown_fields_with_expected_message() -> anyhow::Result<(
         .execute_all(vec![tool_call(
             "Read",
             "read_unknown",
-            json!({"path": "a.md", "selector": "1-2"}),
+            json!({"path": "a.md", "bogus_field": "1-2"}),
         )])
         .await?;
     assert!(!result[0].succeeded());
     assert!(
         result[0].content.contains("unknown field") && result[0].content.contains("path"),
         "{}",
+        result[0].content
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_compat_fields_are_accepted_and_ignored() -> anyhow::Result<()> {
+    // 兼容字段（外部 agent 框架的读参习惯）只接受不实现：调用成功，
+    // 读取结果与只传 `path` 时一致；真正未知的字段仍 fail closed
+    // （由 read_rejects_unknown_fields_with_expected_message 钉住）。
+    let h = harness_with_config("read-compat-fields", false, 300, |_| {}, None).await?;
+    tokio::fs::write(h.cwd.join("compat.txt"), "one\ntwo\n").await?;
+    let runner = ToolRunner::new(Arc::new(ToolContext::from(h.ctx.as_ref())));
+    let result = runner
+        .execute_all(vec![tool_call(
+            "Read",
+            "read_compat",
+            json!({
+                "path": "compat.txt",
+                "limit": 2,
+                "offset": 0,
+                "range": "1-2",
+                "path_range": "1-2",
+                "path_selector": "1-2",
+                "selector": "1-2"
+            }),
+        )])
+        .await?;
+    assert!(result[0].succeeded(), "{}", result[0].content);
+    assert!(
+        result[0].content.contains("1:one") && result[0].content.contains("2:two"),
+        "compat fields must not change the read result: {}",
         result[0].content
     );
     Ok(())

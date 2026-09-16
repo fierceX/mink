@@ -1,13 +1,37 @@
 [
   {
     "name": "Read",
-    "description": "Read one local or configured virtual-filesystem path or registered lightweight resource. Use multiple calls for multiple targets. Local output is mode-aware: Hashline mode adds a [PATH#TAG] header to non-raw editable files and records the actual non-raw range as seen; raw output creates no snapshot and advances no seen-lines; Replace mode uses ordinary numbered output. Virtual-filesystem and registered-resource reads are always read-only and never create an editable snapshot. Path selectors select line ranges.\n\nSupported targets include local paths, artifact://<id>, skill:// resources, rule:// resources, and session://current resources. A full result may be truncated; request a narrower selector when exact lines are known. Full reads above the configured limit are answered with a preview; large files require a line-range selector.\n\nRead accepts exactly one parameter: `path`. Line ranges go inside the path selector (`path:1-200`, `path:10+5`, `path:raw`); do not invent other parameter names (e.g. `selector`, `path_sel`, `offset`, `limit`).",
+    "description": "Read one local or configured virtual-filesystem path or registered lightweight resource. Use multiple calls for multiple targets. Local output is mode-aware: Hashline mode adds a [PATH#TAG] header to non-raw editable files and records the actual non-raw range as seen; raw output creates no snapshot and advances no seen-lines; Replace mode uses ordinary numbered output. Virtual-filesystem and registered-resource reads are always read-only and never create an editable snapshot. Path selectors select line ranges.\n\nSupported targets include local paths, artifact://<id>, skill:// resources, rule:// resources, and session://current resources. A full result may be truncated; request a narrower selector when exact lines are known. Full reads above the configured limit are answered with a preview; large files require a line-range selector.\n\nRead accepts exactly one behavioral parameter: `path`. Line ranges go inside the path selector (`path:1-200`, `path:10+5`, `path:raw`); compatibility-only fields (`limit`, `offset`, `range`, `path_range`, `path_selector`, `selector`) are accepted but ignored.",
     "input_schema": {
       "type": "object",
       "properties": {
         "path": {
           "type": "string",
           "description": "File path or registered resource URL to read. Supports local paths, artifact://<id>, skill://list, skill://list/all, skill://<name>, skill://<name>/<relative-path>, rule://<name>, and session://current resources including session://current/history. Append path selectors such as :10-20, :10+5, or :raw for ranges/raw output."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Accepted for compatibility and ignored. Use the path selector (`path:N-M`) instead."
+        },
+        "offset": {
+          "type": "integer",
+          "description": "Accepted for compatibility and ignored. Use the path selector (`path:N-M`) instead."
+        },
+        "range": {
+          "type": "string",
+          "description": "Accepted for compatibility and ignored. Use the path selector (`path:N-M`) instead."
+        },
+        "path_range": {
+          "type": "string",
+          "description": "Accepted for compatibility and ignored. Use the path selector (`path:N-M`) instead."
+        },
+        "path_selector": {
+          "type": "string",
+          "description": "Accepted for compatibility and ignored. Use the path selector (`path:N-M`) instead."
+        },
+        "selector": {
+          "type": "string",
+          "description": "Accepted for compatibility and ignored. Use the path selector (`path:N-M`) instead."
         }
       },
       "required": [
@@ -58,6 +82,18 @@
         "context": {
           "type": "integer",
           "description": "Number of lines before and after each match. In Hashline mode, each editable local file group includes its own [PATH#TAG] and only complete displayed match/context lines become seen; Replace and read-only backends retain ordinary search output."
+        },
+        "head_limit": {
+          "type": "integer",
+          "description": "Accepted for compatibility and ignored."
+        },
+        "output_mode": {
+          "type": "string",
+          "description": "Accepted for compatibility and ignored."
+        },
+        "-i": {
+          "type": "boolean",
+          "description": "Accepted for compatibility and ignored."
         }
       },
       "required": [
@@ -143,6 +179,14 @@
         "timeout": {
           "type": "integer",
           "description": "Timeout in seconds. If the script exceeds this duration, it will be killed. Only set this for scripts expected to need a non-default duration. Default: global tool timeout from configuration, clamped to 5 seconds up to the configured tool_timeout_max (default 600)."
+        },
+        "command": {
+          "type": "string",
+          "description": "Accepted for compatibility and ignored; provide inline code via `script`."
+        },
+        "code": {
+          "type": "string",
+          "description": "Accepted for compatibility and ignored; provide inline code via `script`."
         }
       },
       "additionalProperties": false
@@ -353,6 +397,14 @@
         "timeout": {
           "type": "integer",
           "description": "Timeout in seconds (default: 30, min: 5, max: 300)."
+        },
+        "command": {
+          "type": "string",
+          "description": "Accepted for compatibility and ignored; provide inline code via `script`."
+        },
+        "code": {
+          "type": "string",
+          "description": "Accepted for compatibility and ignored; provide inline code via `script`."
         }
       },
       "additionalProperties": false

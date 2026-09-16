@@ -407,8 +407,18 @@ impl super::runner::ToolExec for GrepTool {
             glob: Option<String>,
             #[serde(default)]
             context: Option<usize>,
+            // 兼容字段：外部 agent 框架的习惯参数（head_limit/output_mode/-i）。
+            // 只接受并忽略；真正未知的字段仍 fail closed。
+            #[serde(default)]
+            head_limit: Option<serde_json::Value>,
+            #[serde(default)]
+            output_mode: Option<serde_json::Value>,
+            #[serde(default, rename = "-i")]
+            case_insensitive: Option<serde_json::Value>,
         }
         let args: Args = serde_json::from_value(input.clone())?;
+        // 兼容字段不携带行为：显式引用避免 lint 隐藏该事实。
+        let _ = (&args.head_limit, &args.output_mode, &args.case_insensitive);
         let path = args.path.unwrap_or_else(|| ".".to_string());
         let selection = split_read_path_selection(&path)?;
         if ctx.resource_router.can_handle(&selection.path) {

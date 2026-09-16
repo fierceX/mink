@@ -1,6 +1,89 @@
 use super::*;
 
 #[tokio::test]
+async fn bash_misuse_is_a_tail_hint_not_a_rejection() -> anyhow::Result<()> {
+    // misuse 检测从拦截改为软提示：命令照常执行，提示出现在结果尾部，
+    // 结果状态为成功（不再产生 ToolFailed 硬信号）。
+    let h = harness_with_config("bash-misuse-hint", false, 300, |_| {}, None).await?;
+    let runner = ToolRunner::new(Arc::new(ToolContext::from(h.ctx.as_ref())));
+    let result = runner
+        .execute_all(vec![tool_call(
+            "Bash",
+            "misuse_ls",
+            json!({"command": "ls"}),
+        )])
+        .await?;
+    assert!(result[0].succeeded(), "{}", result[0].content);
+    assert!(
+        result[0]
+            .content
+            .trim_end()
+            .ends_with("Hint: prefer Glob for file discovery."),
+        "{}",
+        result[0].content
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn grep_compat_fields_are_accepted_and_ignored() -> anyhow::Result<()> {
+    // 兼容字段（head_limit/output_mode/-i）只接受不实现：搜索结果不变。
+    let h = harness_with_config("grep-compat-fields", false, 300, |_| {}, None).await?;
+    tokio::fs::write(h.cwd.join("grep.txt"), "needle\nother\n").await?;
+    let runner = ToolRunner::new(Arc::new(ToolContext::from(h.ctx.as_ref())));
+    let result = runner
+        .execute_all(vec![tool_call(
+            "Grep",
+            "grep_compat",
+            json!({
+                "pattern": "needle",
+                "path": ".",
+                "head_limit": 5,
+                "output_mode": "content",
+                "-i": true
+            }),
+        )])
+        .await?;
+    assert!(result[0].succeeded(), "{}", result[0].content);
+    assert!(
+        result[0].content.contains("needle"),
+        "{}",
+        result[0].content
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn python_compat_fields_are_accepted_and_ignored() -> anyhow::Result<()> {
+    // 兼容字段（command/code）只接受不实现：脚本体仍来自 `script`。
+    let h = harness_with_config("python-compat-fields", false, 300, |_| {}, None).await?;
+    let runner = ToolRunner::new(Arc::new(ToolContext::from(h.ctx.as_ref())));
+    let result = runner
+        .execute_all(vec![tool_call(
+            "Python",
+            "python_compat",
+            json!({
+                "script": "print('compat-ok')",
+                "command": "echo should-not-run",
+                "code": "print('should-not-run')"
+            }),
+        )])
+        .await?;
+    assert!(result[0].succeeded(), "{}", result[0].content);
+    assert!(
+        result[0].content.contains("compat-ok"),
+        "{}",
+        result[0].content
+    );
+    assert!(
+        !result[0].content.contains("should-not-run"),
+        "compat fields must not execute: {}",
+        result[0].content
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn safety_blocked_bash_emits_typed_signal_event() -> anyhow::Result<()> {
     let llm = Arc::new(MockLlmBackend::new(
         "flash",

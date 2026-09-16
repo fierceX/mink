@@ -182,12 +182,11 @@ impl super::runner::ToolExec for BashTool {
             timeout: Option<u64>,
         }
         let args: Args = serde_json::from_value(input.clone())?;
-        if let Some(guidance) =
-            bash_misuse_guidance(&args.command, &ctx.tool_surface, &ctx.tool_capabilities)
-        {
-            bail!("Error: {}", guidance.content);
-        }
-        Self::execute_with_context(&args.command, args.timeout, ctx)
+        // misuse 检测是引导而非门禁：命令照常执行，提示附在结果尾部，
+        // 模型可在后续调用改用专用 provider，而不丢失当前这一轮。
+        let hint = bash_misuse_guidance(&args.command, &ctx.tool_surface, &ctx.tool_capabilities)
+            .map(|guidance| guidance.content);
+        Self::execute_with_context(&args.command, args.timeout, ctx, hint)
     }
 }
 
@@ -215,9 +214,7 @@ fn bash_misuse_guidance(
         _ => return None,
     };
     let guidance = crate::tools::runtime_guidance::RenderedRuntimeGuidance {
-        content: format!(
-            "Bash command looks like {purpose}. Use {primary}, the active specialized provider, instead."
-        ),
+        content: format!("Hint: prefer {primary} for {purpose}."),
         referenced_tools: [primary.clone()].into_iter().collect(),
     };
     guidance.validate(surface).ok()?;
@@ -276,6 +273,7 @@ impl BashTool {
         command: &str,
         timeout: Option<u64>,
         ctx: &crate::context::ToolContext,
+        hint: Option<String>,
     ) -> anyhow::Result<super::runner::ToolOutcome> {
         execute_with_interrupt_in_dir(
             command,
@@ -285,19 +283,26 @@ impl BashTool {
             Some(ctx.interrupt.as_ref()),
             Some(&ctx.cwd),
         )
-        .map(|(s, code, termination)| super::runner::ToolOutcome {
-            content: s,
-            conversation_content: String::new(),
-            is_bash: true,
-            exit_code: code,
-            success: code == Some(0),
-            no_mutation: false,
-            memo_candidate: None,
-            diagnostics: Vec::new(),
-            plan_command: None,
-            state_metadata: None,
-            presentation: None,
-            termination: Some(termination),
+        .map(|(s, code, termination)| {
+            // 提示走结果尾部：统一截断保护保留尾部预算，不改变状态与退出码。
+            let content = match hint {
+                Some(hint) if !hint.is_empty() => format!("{s}\n{hint}"),
+                _ => s,
+            };
+            super::runner::ToolOutcome {
+                content,
+                conversation_content: String::new(),
+                is_bash: true,
+                exit_code: code,
+                success: code == Some(0),
+                no_mutation: false,
+                memo_candidate: None,
+                diagnostics: Vec::new(),
+                plan_command: None,
+                state_metadata: None,
+                presentation: None,
+                termination: Some(termination),
+            }
         })
     }
 }

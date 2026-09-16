@@ -420,8 +420,32 @@ impl super::runner::ToolExec for ReadTool {
         #[serde(deny_unknown_fields)]
         struct Args {
             path: String,
+            // 兼容字段：外部 agent 框架常用这些读参名（limit/offset/range/
+            // selector 等）。它们只被接受并忽略——行范围必须写在 `path`
+            // 选择器里；真正未知的字段仍然 fail closed。
+            #[serde(default)]
+            limit: Option<serde_json::Value>,
+            #[serde(default)]
+            offset: Option<serde_json::Value>,
+            #[serde(default)]
+            range: Option<serde_json::Value>,
+            #[serde(default)]
+            path_range: Option<serde_json::Value>,
+            #[serde(default)]
+            path_selector: Option<serde_json::Value>,
+            #[serde(default)]
+            selector: Option<serde_json::Value>,
         }
         let args: Args = serde_json::from_value(input.clone())?;
+        // 兼容字段不携带行为：解析成功即丢弃，显式引用避免 lint 隐藏该事实。
+        let _ = (
+            &args.limit,
+            &args.offset,
+            &args.range,
+            &args.path_range,
+            &args.path_selector,
+            &args.selector,
+        );
         let selection = split_read_path_selection(&args.path)?;
         let filesystem_backend = if ctx.read_only_fs.is_some() {
             FilesystemBackend::ReadOnlyVfs
