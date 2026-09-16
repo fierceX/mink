@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.6.4 (2026-09-16)
 
 ### 变更：工具参数兼容、Bash 误用软提示与 safety 判定调整
 
@@ -8,6 +8,11 @@
 - `Grep` 接受 `head_limit`/`output_mode`/`-i`，`Python` 与 `PythonSandbox` 接受 `command`/`code` 兼容字段并忽略：同类 `unknown field` 失败不再发生（外部框架习惯参数），运行行为与不传这些字段时一致；未知字段仍 fail closed。
 - Bash 的 file-misuse 检测（读文件/搜内容/找路径）从“拒绝执行”改为“执行 + 结果尾部一行 `Hint: prefer <Provider> for <purpose>.`”：命令不再因误用检测失败，也不再产生 ToolFailed 硬信号（信念/恢复决策不再被误用检测扰动）；`FocusedVerificationExec` 恢复首步资格与 safety 策略不变。
 - safety：`rm -rf` 判定链改为「受限 POSIX 词法解析（转义/引号）→ symlink 感知的真实路径解析（`realpath(strict=False)` 语义）→ 临时目录白名单」：`/tmp/../etc`、`/tmp/\../etc`、引号内空格等穿越写法均按真实目标拦截，`/tmp/link→/etc` 式符号链接逃逸被拦，合法的 `/tmp/a/../b`、`"/tmp/it's/x"` 等写法不受影响；命令替换/变量/字符类/花括号/重定向/未闭合引号等不可静态确定的目标保守拦截。
+
+### 兼容性说明
+
+- 公共 API、CLI 参数、`--print`/`--agent-jsonl` 协议与 `events.jsonl` 事件形状不变。
+- 行为变化汇总：Bash 误用检测不再拒绝调用（改为结果尾部一行提示）；`rm -rf` 判定按真实目标（含 symlink）执行，临时目录清理不再被拦；`Read`/`Grep`/`Python` 接受外部框架习惯参数并忽略。
 
 ## v0.6.3 (2026-09-14)
 

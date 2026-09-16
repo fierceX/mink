@@ -73,7 +73,7 @@ session.close()
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.6.3", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.6.4", default-features = false, features = ["runtime"] }
 ```
 
 ```rust
