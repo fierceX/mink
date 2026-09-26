@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.6.5 (2026-09-26)
+
+### 新增：LLM 有界自愈（格式反馈窗口 + 请求重试）
+
+- 请求级自动重试从内置 backend 内部循环迁到 runtime attempt 循环：一个 round 只构建一次固定请求投影（含图片物化），每次 `stream()` 对应一次物理请求，默认最多 `request_max_retries+1=4` 次实际调用；退避 1s/2s/4s…上限 10s，`Retry-After`（秒数或 HTTP-date）作为最早重试时间且不被退避上限截短；取消、持久化闩锁与可选总期限在每次 attempt 前和退避中生效，最终以 `request_retry_exhausted` / `request_timeout` 如实失败。
+- 模型输出格式错误可自行纠正：每个用户 turn 拥有滑动的格式错误窗口（默认窗口 10、最多 3 次），每个完成判定的 round 只记一个槽；坏参数工具调用返回 `ArgumentInvalid` 失败结果供模型重发（不再自动执行词法修复），缺名/缺 ID/重复 ID 的候选批整批丢弃并反馈一次内部诊断，length/max_tokens 候选整体废弃，空正文/未知 stop 不再静默成功；超限以 `format_recovery_exhausted` 结束（不回滚已执行工具）。
+- 上游错误类型化（`LlmUpstreamError`：可重试 / 响应协议损坏 / 永久故障，带可选 HTTP status、provider code 与受限诊断）；502/429/首事件与 idle 超时可恢复，401/403/模型不存在/未知 provider 错误不再重试。
+- 每个物理请求独立结算 usage（成功 reported、失败/取消 unreported，恰一笔）；只有最终接受的请求可校准 provider prompt usage 压力；压缩摘要请求接入同一重试预算，用途纠正只追加到临时请求尾部。
+- 配置：Rust `AgentOptions::with_llm_recovery` / `Config.llm_recovery`，JSONL `options.recovery`，CLI/server `.minkrc [recovery]`，Python `SandboxConfig` 四个字段；session 创建前统一校验（W 1..=1024、K<W、retries≤16、timeout>0；未知字段拒绝）。
+
+### 修复：格式反馈闭环与候选保真
+
+- 反馈送达与 round 收尾：诊断、工具结果、todo 提醒与 `[trajectory]` 证据统一在唯一 round 尾部先结算窗口、再执行分支决策、最后重载已提交历史，三者都出现在下一次请求；窗口耗尽只结束 turn，不回滚同批已执行的工具结果；轮次用尽仍返回 `MaxTurnsExceeded`。
+- 在途请求期限：`request_timeout_secs` 同时约束建流、流消费与退避等待（主请求与压缩摘要共用），到点停止等待/消费并返回 `request_timeout`，已收到的 usage 照常结算。
+- 工具参数解码入口统一：`Write`/`Glob`/`Grep`/`SubAgent` 等全部模型可见内置工具改走共享解码 helper，字段/类型错误一律 `Failed(ArgumentInvalid)` + `ModelFormat` 并计入格式窗口（`parse_error` 失败结果文案统一为 `invalid tool arguments: ...`）。
+- 正文候选保真（scavenge）：wrapper 标签即候选标记（闭合/未闭合、内层 JSON 合法/非法、工具名正常/缺失都产出可用候选或降级候选，不再落回普通文本成功）；DSML invoke 头部/块/参数头一律 checked 解析（缺失 `>` 分隔符不得固定偏移跳过，禁止越界 panic），声明为 JSON 的参数失败不回退为字符串、残缺参数不当作完整调用；OpenAI 形态 `function.arguments` 区分字段缺失与类型错误（后者保留原始 payload）；裸 JSON 示例仍不误判。
+- SSE 流式参数类型错误粘性：非字符串 `arguments` 不再忽略，空片段与后续合法片段都不在流内“纠错”，一律产出降级候选交下一 round 重发；`tool_calls` 与 legacy `function_call` 同一处理。
+- 压缩摘要 attempt 生命周期：补齐与主请求一致的首事件（覆盖建立+首事件等待）与 idle 计时，超时按可重试故障进入既有预算且不提交投影；建立失败的 attempt 在退避/重试前先取消自身子 token（父 token 不受影响）。
+
+### 兼容性说明
+
+- 默认请求重试次数 2 → 3（总请求数上限 3 → 4）；默认不新增总请求期限。
+- 协议兼容输出（合法调用配 `stop`、旧式 `function_call`）不计格式错误。
+- 坏参数工具调用一律返回可见失败结果（`ArgumentInvalid`）而不是被词法修复或静默跳过；正文中已识别的不可解析调用进入格式反馈而非静默丢弃；`Retry` 控制通知不再延长 idle 超时；压缩请求同样受首事件/idle 与总期限约束。
+- 文档：`AGENTS.md` 新增「LLM 有界恢复」契约；`docs/ARCHITECTURE.md`、`docs/DESIGN.md`、`docs/USAGE.md`、`docs/EMBEDDING.md`、`docs/PROTOCOL.md`、`docs/server.md`、`docs/tools.md`、`docs/设计哲学-信号系统.md` 同步。
+
 ## v0.6.4 (2026-09-16)
 
 ### 变更：工具参数兼容、Bash 误用软提示与 safety 判定调整
