@@ -436,7 +436,7 @@ impl super::runner::ToolExec for ReadTool {
             #[serde(default)]
             selector: Option<serde_json::Value>,
         }
-        let args: Args = serde_json::from_value(input.clone())?;
+        let args: Args = crate::tools::args::decode_args(input)?;
         // 兼容字段不携带行为：解析成功即丢弃，显式引用避免 lint 隐藏该事实。
         let _ = (
             &args.limit,
@@ -678,7 +678,7 @@ impl super::runner::ToolExec for WriteTool {
             path: String,
             content: String,
         }
-        let args: Args = serde_json::from_value(input.clone())?;
+        let args: Args = crate::tools::args::decode_args(input)?;
         let path = resolve_tool_path(&ctx.cwd, &args.path)?;
         let result = write(
             &path.display().to_string(),
@@ -916,11 +916,10 @@ fn execute_hashline_edit(
     struct Args {
         input: String,
     }
-    let args: Args = serde_json::from_value(input.clone()).map_err(|error| {
-        anyhow!(
-            "Error: Hashline Edit accepts only {{\"input\": \"[PATH#TAG]...\"}}; legacy path/patch and old_string/new_string inputs are unsupported: {error}"
-        )
-    })?;
+    let args: Args = crate::tools::args::decode_args_context(
+        input,
+        "Hashline Edit accepts only {\"input\": \"[PATH#TAG]...\"}; legacy path/patch and old_string/new_string inputs are unsupported",
+    )?;
     let patch = crate::tools::hashline::parse(&args.input)?;
     let mut store = ctx
         .snapshots
@@ -1585,9 +1584,10 @@ fn execute_replace_edit(
         path: String,
         edits: Vec<crate::tools::replace::ReplaceEntry>,
     }
-    let args: Args = serde_json::from_value(input.clone()).map_err(|error| {
-        anyhow!("Error: Replace Edit requires path and edits with old_text/new_text/all; legacy patch inputs are unsupported: {error}")
-    })?;
+    let args: Args = crate::tools::args::decode_args_context(
+        input,
+        "Replace Edit requires path and edits with old_text/new_text/all; legacy patch inputs are unsupported",
+    )?;
     ensure!(
         !args.edits.is_empty(),
         "Error: edits must contain at least one entry"

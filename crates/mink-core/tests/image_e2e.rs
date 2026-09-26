@@ -55,6 +55,7 @@ impl CapturingVisionBackend {
                     })
                     .unwrap_or_default(),
                 parse_error: None,
+                raw_arguments_digest: None,
             }))
         }
         fn text(content: &str) -> Result<LlmEvent> {

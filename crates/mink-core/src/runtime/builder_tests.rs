@@ -785,6 +785,7 @@ fn tool_call_event(
         input_json: input,
         fields,
         parse_error: None,
+        raw_arguments_digest: None,
     }
 }
 
@@ -1403,10 +1404,12 @@ async fn dropping_a_stream_cancels_then_releases_the_turn_gate() {
     let home = unique_temp_dir("mock-drop-stream-home");
     let cwd = unique_temp_dir("mock-drop-stream-cwd");
     tokio::fs::create_dir_all(&cwd).await.unwrap();
-    let (config, _entered) = runtime_config_with_blocking_mock(&home, &cwd);
+    let (config, _entered, block) = runtime_config_with_blocking_mock(&home, &cwd);
     let runtime = build_runtime(config).await.unwrap();
 
     drop(runtime.stream_turn("blocking").unwrap());
+    // Release the backend so the replacement turn can complete promptly.
+    block.store(false, std::sync::atomic::Ordering::SeqCst);
     let replacement = tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
         loop {
             match runtime.stream_turn("replacement") {
@@ -1554,12 +1557,13 @@ async fn consecutive_turn_outcomes_keep_their_own_text() {
 
 // ── Interrupt test with blocking mock LLM ──────────────────────
 
-/// A mock LLM whose stream never yields, used to test interrupt.
-/// A mock LLM whose first `stream()` call returns a never-yielding
-/// stream (for testing interrupt), and subsequent calls return a normal
-/// Text+Stop (for testing recovery).
+/// A mock LLM used to test interrupt: while `block` is set, every `stream()`
+/// call returns a never-yielding stream; once released, calls return a normal
+/// Text+Stop. The explicit release flag replaces the old call-count ordering,
+/// which depended on whether an already-interrupted turn still opened its
+/// first request.
 struct InterruptTestMockLlmBackend {
-    calls: std::sync::Mutex<u32>,
+    block: Arc<std::sync::atomic::AtomicBool>,
     /// Signalled when the turn actually reaches the LLM stream call.
     entered: Arc<tokio::sync::Notify>,
 }
@@ -1607,34 +1611,35 @@ impl crate::llm::client::LlmBackend for InterruptTestMockLlmBackend {
         _request: crate::runtime::LlmRequest,
     ) -> anyhow::Result<crate::runtime::LlmResponseStream> {
         self.entered.notify_one();
-        let mut c = self.calls.lock().unwrap();
-        *c += 1;
-        if *c == 1 {
-            Ok(crate::runtime::LlmResponseStream {
+        if self.block.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(crate::runtime::LlmResponseStream {
                 events: Box::pin(futures::stream::pending()),
                 attempt_count: 1,
-            })
-        } else {
-            use crate::protocol::{Event, StopEvent, TextEvent};
-            Ok(crate::runtime::LlmResponseStream {
-                events: Box::pin(futures::stream::iter(vec![
-                    Ok(Event::Text(TextEvent {
-                        content: "recovered".into(),
-                    })),
-                    Ok(Event::Stop(StopEvent {
-                        reason: "end_turn".into(),
-                    })),
-                ])),
-                attempt_count: 1,
-            })
+            });
         }
+        use crate::protocol::{Event, StopEvent, TextEvent};
+        Ok(crate::runtime::LlmResponseStream {
+            events: Box::pin(futures::stream::iter(vec![
+                Ok(Event::Text(TextEvent {
+                    content: "recovered".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ])),
+            attempt_count: 1,
+        })
     }
 }
 
 fn runtime_config_with_blocking_mock(
     home: &std::path::Path,
     cwd: &std::path::Path,
-) -> (AgentRuntimeConfig, Arc<tokio::sync::Notify>) {
+) -> (
+    AgentRuntimeConfig,
+    Arc<tokio::sync::Notify>,
+    Arc<std::sync::atomic::AtomicBool>,
+) {
     let cfg = Config {
         model: "flash".into(),
         api_key: "test-key".into(),
@@ -1645,11 +1650,12 @@ fn runtime_config_with_blocking_mock(
     };
     let mut rt_config = AgentRuntimeConfig::from_config(cfg, home.to_path_buf(), cwd.to_path_buf());
     let entered = Arc::new(tokio::sync::Notify::new());
+    let block = Arc::new(std::sync::atomic::AtomicBool::new(true));
     rt_config.llm_backend = Some(Arc::new(InterruptTestMockLlmBackend {
-        calls: std::sync::Mutex::new(0),
+        block: block.clone(),
         entered: entered.clone(),
     }));
-    (rt_config, entered)
+    (rt_config, entered, block)
 }
 
 #[tokio::test]
@@ -1658,7 +1664,7 @@ async fn interrupt_mid_turn_returns_interrupted_and_next_turn_works() {
     let cwd = unique_temp_dir("mock-int-cwd");
     tokio::fs::create_dir_all(&cwd).await.unwrap();
 
-    let (config, entered) = runtime_config_with_blocking_mock(&home, &cwd);
+    let (config, entered, block) = runtime_config_with_blocking_mock(&home, &cwd);
     let runtime = build_runtime(config).await.unwrap();
 
     let runtime_handle = runtime.handle();
@@ -1680,6 +1686,8 @@ async fn interrupt_mid_turn_returns_interrupted_and_next_turn_works() {
         crate::agent::orchestrator::TurnStatus::Interrupted
     );
 
+    // Release the backend so the next turn can complete promptly.
+    block.store(false, std::sync::atomic::Ordering::SeqCst);
     // Next turn must still run successfully.
     let outcome2 = runtime.run_turn("recovery turn").await.unwrap();
     assert_eq!(outcome2.status, crate::agent::orchestrator::TurnStatus::Ok);
@@ -1895,6 +1903,9 @@ async fn first_event_deadline_survives_stream_establishment() {
         Arc::new(SlowEstablishBackend),
         |cfg| {
             cfg.llm_first_event_timeout_secs = 1;
+            // Single attempt: this test pins the per-attempt deadline, not the
+            // retry budget (covered by dedicated recovery tests).
+            cfg.llm_recovery.request_max_retries = 0;
         },
     ))
     .await
@@ -2245,7 +2256,7 @@ async fn explicit_stream_cancel_releases_the_turn_gate_after_outcome() {
     let home = unique_temp_dir("mock-cancel-stream-home");
     let cwd = unique_temp_dir("mock-cancel-stream-cwd");
     tokio::fs::create_dir_all(&cwd).await.unwrap();
-    let (config, _entered) = runtime_config_with_blocking_mock(&home, &cwd);
+    let (config, _entered, block) = runtime_config_with_blocking_mock(&home, &cwd);
     let runtime = build_runtime(config).await.unwrap();
 
     let stream = runtime.stream_turn("blocking").unwrap();
@@ -2255,6 +2266,8 @@ async fn explicit_stream_cancel_releases_the_turn_gate_after_outcome() {
         cancelled.status,
         crate::agent::orchestrator::TurnStatus::Interrupted
     );
+    // Release the backend so the recovery turn can complete promptly.
+    block.store(false, std::sync::atomic::Ordering::SeqCst);
     let recovered = runtime.run_turn("recovery").await.unwrap();
     assert_eq!(
         recovered.status,
@@ -2288,6 +2301,7 @@ fn mock_llm_tool_use() -> crate::llm::mock::MockLlmBackend {
                     input_json: json!({"command": "echo hello"}),
                     fields,
                     parse_error: None,
+                    raw_arguments_digest: None,
                 })),
                 Ok(Event::Stop(StopEvent {
                     reason: "tool_use".into(),
@@ -2466,6 +2480,7 @@ fn mock_llm_single_tool(name: &str) -> crate::llm::mock::MockLlmBackend {
                     input_json: serde_json::json!({}),
                     fields: Default::default(),
                     parse_error: None,
+                    raw_arguments_digest: None,
                 })),
                 Ok(Event::Stop(StopEvent {
                     reason: "tool_use".into(),
@@ -2497,6 +2512,7 @@ fn mock_llm_custom_tool_use() -> crate::llm::mock::MockLlmBackend {
                     input_json: serde_json::json!({"text": "hello"}),
                     fields,
                     parse_error: None,
+                    raw_arguments_digest: None,
                 })),
                 Ok(Event::Stop(StopEvent {
                     reason: "tool_use".into(),
@@ -2680,6 +2696,7 @@ async fn custom_tool_timeout_is_local_and_next_turn_still_runs() {
                             input_json: serde_json::json!({}),
                             fields: Default::default(),
                             parse_error: None,
+                            raw_arguments_digest: None,
                         },
                     )),
                     Ok(crate::protocol::Event::Stop(crate::protocol::StopEvent {
@@ -3328,6 +3345,9 @@ async fn retry_does_not_bypass_first_event_deadline() {
         Arc::new(RetryThenPendingBackend { retries: 1 }),
         |cfg| {
             cfg.llm_first_event_timeout_secs = 1;
+            // Single attempt: this test pins the per-attempt deadline, not the
+            // retry budget (covered by dedicated recovery tests).
+            cfg.llm_recovery.request_max_retries = 0;
             cfg.llm_idle_timeout_secs = 30;
         },
     ))
@@ -3369,6 +3389,9 @@ async fn repeated_retry_events_do_not_extend_first_event_deadline() {
         Arc::new(RetryThenPendingBackend { retries: 3 }),
         |cfg| {
             cfg.llm_first_event_timeout_secs = 1;
+            // Single attempt: this test pins the per-attempt deadline, not the
+            // retry budget (covered by dedicated recovery tests).
+            cfg.llm_recovery.request_max_retries = 0;
             cfg.llm_idle_timeout_secs = 30;
         },
     ))
@@ -3526,6 +3549,9 @@ async fn high_frequency_retry_events_do_not_starve_deadline_checks() {
         Arc::new(HighFrequencyRetryBackend),
         |cfg| {
             cfg.llm_first_event_timeout_secs = 1;
+            // Single attempt: this test pins the per-attempt deadline, not the
+            // retry budget (covered by dedicated recovery tests).
+            cfg.llm_recovery.request_max_retries = 0;
             cfg.llm_idle_timeout_secs = 30;
         },
     ))
@@ -3658,6 +3684,83 @@ async fn partial_tool_results_survive_join_failure() {
         "the panicked call must be marked as not executed: {conversation}"
     );
 
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+/// Loopback: two 502s then a 200 through the real OpenAI-compatible
+/// backend must issue exactly three physical requests; the runtime attempt
+/// loop — not the backend — owns retries.
+#[tokio::test]
+#[ignore = "requires local loopback sockets"]
+async fn builtin_http_retry_uses_exactly_three_requests() {
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = Arc::new(AtomicUsize::new(0));
+    let seen_server = seen.clone();
+    let sse_body = "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}\n\ndata: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}]}\n\ndata: [DONE]\n\n";
+    let ok_response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        sse_body.len(),
+        sse_body
+    );
+    let responses = vec![
+        "HTTP/1.1 502 Bad Gateway\r\ncontent-length: 11\r\nconnection: close\r\n\r\nbad gateway"
+            .to_string(),
+        "HTTP/1.1 502 Bad Gateway\r\ncontent-length: 11\r\nconnection: close\r\n\r\nbad gateway"
+            .to_string(),
+        ok_response,
+    ];
+    let server = tokio::spawn(async move {
+        for response in responses {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.write_all(response.as_bytes()).await;
+            seen_server.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    });
+
+    let home = unique_temp_dir("http-retry-home");
+    let cwd = unique_temp_dir("http-retry-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let cfg = Config {
+        model: "flash".into(),
+        api_key: "test-key".into(),
+        base_url: format!("http://{addr}"),
+        max_context_tokens: 1_000_000,
+        log_events: true,
+        ..Config::default()
+    };
+    let runtime = build_runtime(AgentRuntimeConfig::from_config(
+        cfg,
+        home.clone(),
+        cwd.clone(),
+    ))
+    .await
+    .unwrap();
+
+    let outcome = runtime.run_turn("retry twice").await.unwrap();
+    assert_eq!(
+        outcome.status,
+        crate::agent::orchestrator::TurnStatus::Ok,
+        "{:?}",
+        outcome.error
+    );
+    assert_eq!(outcome.text, "recovered");
+    assert_eq!(
+        seen.load(AtomicOrdering::SeqCst),
+        3,
+        "two retryable failures plus the accepted attempt = three requests"
+    );
+
+    server.abort();
     runtime.shutdown().await.unwrap();
     let _ = tokio::fs::remove_dir_all(home).await;
     let _ = tokio::fs::remove_dir_all(cwd).await;

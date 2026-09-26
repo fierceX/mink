@@ -46,8 +46,15 @@ fn stop_event_reason_field() {
 fn error_event_message_field() {
     let e = ErrorEvent {
         message: "rate limit".into(),
+        provider_code: Some("rate_limit_exceeded".into()),
+        status: Some(429),
     };
     assert_eq!(e.message, "rate limit");
+    assert_eq!(e.provider_code.as_deref(), Some("rate_limit_exceeded"));
+    assert_eq!(e.status, Some(429));
+    let plain = ErrorEvent::new("plain");
+    assert_eq!(plain.message, "plain");
+    assert!(plain.provider_code.is_none() && plain.status.is_none());
 }
 
 #[test]
@@ -59,6 +66,7 @@ fn tool_call_event_roundtrip_fields() {
         input_json: input.clone(),
         fields: [("path".to_string(), "/tmp/file.txt".to_string())].into(),
         parse_error: None,
+        raw_arguments_digest: None,
     };
     assert_eq!(e.name, "Read");
     assert_eq!(e.id, "call_1");

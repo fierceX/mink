@@ -9,113 +9,93 @@ use tokio::net::TcpListener;
 
 #[tokio::test]
 #[ignore = "requires local loopback sockets"]
-async fn send_with_retry_retries_429_and_preserves_authorization() -> anyhow::Result<()> {
+async fn send_once_classifies_429_and_keeps_structured_retry_after() -> anyhow::Result<()> {
     let responses = vec![
         http_response(429, &[("retry-after", "0")], "rate limited"),
         http_response(200, &[], "ok"),
     ];
     let (api_url, seen, _server) = start_http_server(responses).await?;
-    let ctx = test_context("client-retry", &api_url).await?;
     let client = AsyncLlClient::new("secret-key", &api_url)?;
 
-    let (resp, _) = client
-        .send_with_retry(
-            ctx.display.as_ref(),
+    let error = client
+        .send_once(
             br#"{"ping":true}"#.to_vec(),
-            &ctx.cancel,
+            &crate::cancel::CancellationToken::new(),
         )
         .await
-        .map_err(|failure| failure.error)?;
-    assert_eq!(resp.status().as_u16(), 200);
-    assert_eq!(seen.load(Ordering::SeqCst), 2);
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires local loopback sockets"]
-async fn send_with_retry_does_not_retry_non_retryable_400() -> anyhow::Result<()> {
-    let responses = vec![http_response(400, &[], "bad request")];
-    let (api_url, seen, _server) = start_http_server(responses).await?;
-    let ctx = test_context("client-400", &api_url).await?;
-    let client = AsyncLlClient::new("secret-key", &api_url)?;
-
-    let err = client
-        .send_with_retry(
-            ctx.display.as_ref(),
-            br#"{"ping":true}"#.to_vec(),
-            &ctx.cancel,
-        )
-        .await
-        .unwrap_err()
-        .error
-        .to_string();
-    assert!(err.contains("HTTP 400"), "{err}");
+        .expect_err("429 must surface as a typed failure");
+    assert_eq!(error.kind(), UpstreamFailureKind::Recoverable);
+    assert_eq!(error.status(), Some(429));
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(0)));
+    // One call = exactly one physical request; retries belong to the runtime
+    // attempt loop, never to the backend.
     assert_eq!(seen.load(Ordering::SeqCst), 1);
     Ok(())
 }
 
 #[tokio::test]
 #[ignore = "requires local loopback sockets"]
-async fn retry_after_is_capped() -> anyhow::Result<()> {
-    let responses = vec![
-        http_response(429, &[("retry-after", "10000")], "rate limited"),
-        http_response(429, &[("retry-after", "10000")], "rate limited"),
-        http_response(429, &[("retry-after", "10000")], "rate limited"),
-    ];
+async fn send_once_marks_400_as_permanent() -> anyhow::Result<()> {
+    let responses = vec![http_response(400, &[], "bad request")];
     let (api_url, seen, _server) = start_http_server(responses).await?;
-    let ctx = test_context("client-retry-cap", &api_url).await?;
     let client = AsyncLlClient::new("secret-key", &api_url)?;
 
-    let start = std::time::Instant::now();
-    let err = client
-        .send_with_retry(
-            ctx.display.as_ref(),
+    let error = client
+        .send_once(
             br#"{"ping":true}"#.to_vec(),
-            &ctx.cancel,
+            &crate::cancel::CancellationToken::new(),
         )
         .await
-        .unwrap_err()
-        .error
-        .to_string();
-    // Uncapped, retry-after 10000 would park each attempt for hours;
-    // capped at 10s the failure arrives after ~2 sleeps + the 20s budget.
-    assert!(err.contains("HTTP 429"), "{err}");
-    assert!(start.elapsed() < std::time::Duration::from_secs(30));
-    assert_eq!(seen.load(Ordering::SeqCst), 3);
+        .expect_err("400 must surface as a typed failure");
+    assert_eq!(error.kind(), UpstreamFailureKind::Permanent);
+    assert_eq!(error.status(), Some(400));
+    assert!(error.to_string().contains("HTTP 400"), "{error}");
+    assert_eq!(seen.load(Ordering::SeqCst), 1);
     Ok(())
 }
 
 #[tokio::test]
 #[ignore = "requires local loopback sockets"]
-async fn send_is_cancellable() -> anyhow::Result<()> {
+async fn send_once_reports_retry_after_without_waiting() -> anyhow::Result<()> {
+    let responses = vec![http_response(
+        429,
+        &[("retry-after", "10000")],
+        "rate limited",
+    )];
+    let (api_url, seen, _server) = start_http_server(responses).await?;
+    let client = AsyncLlClient::new("secret-key", &api_url)?;
+
+    let start = std::time::Instant::now();
+    let error = client
+        .send_once(
+            br#"{"ping":true}"#.to_vec(),
+            &crate::cancel::CancellationToken::new(),
+        )
+        .await
+        .expect_err("429 must surface as a typed failure");
+    // A valid Retry-After is surfaced verbatim (a floor for the runtime wait),
+    // never awaited inside the backend and never truncated to the backoff cap.
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(10_000)));
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    assert_eq!(seen.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local loopback sockets"]
+async fn send_once_observes_cancel() -> anyhow::Result<()> {
     let responses = vec![http_response(200, &[], "ok")];
     let (api_url, _seen, _server) = start_http_server(responses).await?;
-    let ctx = test_context("client-cancel", &api_url).await?;
     let client = AsyncLlClient::new("secret-key", &api_url)?;
 
     let cancel = CancellationToken::new();
     cancel.cancel();
-    let ctx_clone = ctx.clone();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        // Bypass ctx.cancel (not cancelled) to exercise the parameter wiring.
-        let result = client
-            .send_with_retry(
-                ctx_clone.display.as_ref(),
-                br#"{"ping":true}"#.to_vec(),
-                &cancel,
-            )
-            .await;
-        let _ = tx.send(result);
-    });
-    let result = tokio::time::timeout(std::time::Duration::from_secs(2), rx).await?;
-    match result {
-        Ok(Err(failure)) => {
-            assert_eq!(failure.error.to_string(), "request cancelled");
-        }
-        Ok(Ok(_)) => panic!("send unexpectedly succeeded"),
-        Err(e) => panic!("task join failed: {e}"),
-    }
+    let error = client
+        .send_once(br#"{"ping":true}"#.to_vec(), &cancel)
+        .await
+        .expect_err("a cancelled request must not be sent");
+    assert_eq!(error.kind(), UpstreamFailureKind::Recoverable);
+    assert_eq!(error.message(), "request cancelled");
     Ok(())
 }
 #[tokio::test]

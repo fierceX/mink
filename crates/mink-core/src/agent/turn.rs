@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+mod format_recovery;
 mod recovery;
 mod stream;
 mod tools;
@@ -23,6 +24,25 @@ struct StreamOutput {
     calls: Vec<ToolCallEvent>,
     stop: String,
     usage: Option<UsageEvent>,
+    /// The round must terminate as a format failure with no accepted
+    /// candidate (protocol-damaged attempts already exhausted the window).
+    format_abort: Option<String>,
+    /// A discarded attempt in this round was response-protocol damaged.
+    had_format_error: bool,
+}
+
+impl StreamOutput {
+    fn format_abort(detail: String) -> Self {
+        Self {
+            text: String::new(),
+            thinking: String::new(),
+            calls: Vec::new(),
+            stop: String::new(),
+            usage: None,
+            format_abort: Some(detail),
+            had_format_error: true,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -75,6 +95,8 @@ struct TurnLocalState {
     successful_work_calls_since_todo_advance: u32,
     final_text: String,
     final_thinking: String,
+    /// 当前用户输入内的 round 序号（1-based），用于恢复诊断记录。
+    round: u32,
     /// 本输入内 scavenge 批次序号：回收调用的 id 必须跨轮唯一，
     /// 否则 conversation.jsonl 中会出现重复 tool_use_id 干扰配对修复。
     scavenge_seq: u32,
@@ -172,6 +194,12 @@ impl TurnExecutor {
     /// Number of tool calls that produced at least one tool_error signal.
     pub fn tool_error_count(&self) -> u32 {
         self.signal_processor.tool_error_count()
+    }
+
+    /// Model-output format failures observed in this turn (bad tool argument
+    /// decoding); counted separately from execution failures.
+    pub fn format_error_count(&self) -> u32 {
+        self.signal_processor.format_error_count()
     }
 
     pub fn text(&self) -> &str {
@@ -289,8 +317,18 @@ impl TurnExecutor {
             Err(error) => return Err(error),
         };
         messages = self.ctx.compaction.active_messages().await?;
+
+        // Every user turn owns a fresh format window; compaction never clears
+        // it and a sub-agent executor owns its own. State stays in memory.
+        let recovery_policy = self.ctx.config.llm_recovery;
+        let mut format_window = format_recovery::FormatRecoveryWindow::new(
+            recovery_policy.format_window_size,
+            recovery_policy.format_max_errors,
+        );
+
         while turn < max_turns {
             turn += 1;
+            self.local.round = turn as u32;
 
             let (mut request_messages, current_context_tokens) = match self
                 .prepare_request(&mut messages, &mut system_prompt, &mut tools_json)
@@ -307,10 +345,11 @@ impl TurnExecutor {
                 Err(error) => return Err(error),
             };
 
-            // Phase 1: LLM 流式响应
+            // Phase 1: LLM 流式响应（同 round 内可含多次 attempt 重试）
             let stream_output = loop {
                 match self
                     .stream_llm_response(
+                        &format_window,
                         &request_messages,
                         &system_prompt,
                         &tools_json,
@@ -356,9 +395,19 @@ impl TurnExecutor {
                 mut calls,
                 mut stop,
                 usage,
+                format_abort,
+                had_format_error: stream_format_error,
             } = stream_output;
-            self.local.final_text.push_str(&text);
-            self.local.final_thinking.push_str(&thinking);
+            let mut had_format_error = stream_format_error;
+
+            if let Some(detail) = format_abort {
+                // Response damage exhausted the format window: the single
+                // round-end commit happens here and the turn fails with the
+                // stable reason prefix.
+                let _ = format_window.commit(true);
+                self.ctx.display.render_error(&detail);
+                return Ok((TurnDecision::Failed(detail), effects));
+            }
 
             if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
                 self.ctx.display.render_stop("interrupted");
@@ -375,35 +424,231 @@ impl TurnExecutor {
                 stop = "tool_use".into();
             }
 
-            // Phase 2: 持久化 assistant 消息 + 用量
-            self.persist_assistant(&text, &thinking, &calls, &usage)
-                .await?;
+            // 结束判定顺序（不能只看 finish_reason）：拒绝 → 截断 →
+            // 调用身份 → 可配对调用 → 无调用完成/不可确认。
+            let kind = if stop == "interrupted" {
+                RoundKind::Interrupted
+            } else if is_terminal_stop(&stop) {
+                RoundKind::Terminal
+            } else if is_truncated_stop(&stop) {
+                RoundKind::Truncated
+            } else if let Some(reason) = validate_tool_call_identity(&calls) {
+                RoundKind::IdentityInvalid(reason)
+            } else if !calls.is_empty() {
+                RoundKind::ConsumeCalls
+            } else if matches!(stop.as_str(), "end_turn" | "stop" | "done") && !text.is_empty() {
+                RoundKind::Complete
+            } else {
+                RoundKind::Unconfirmed
+            };
 
-            // Phase 3: 工具执行
-            if !calls.is_empty() {
-                self.execute_tools_inner(calls, belief.as_deref_mut(), &mut effects)
-                    .await?;
-            }
+            // Round body: persist/execute and compute this round's window
+            // outcome. No branch continues on its own — the single round tail
+            // below settles the window, runs the branch decisions and only then
+            // refreshes the history.
+            let window_error = match &kind {
+                RoundKind::Interrupted => {
+                    self.ctx.display.render_stop("interrupted");
+                    return Ok((TurnDecision::Interrupted, effects));
+                }
+                RoundKind::Terminal => {
+                    // Terminal stop: explicit provider error/refusal — the candidate
+                    // calls never execute and the content is never re-prompted
+                    // as a "format error".
+                    self.persist_assistant(&text, &thinking, &[], &usage)
+                        .await?;
+                    self.record_agent_calibration(&usage);
+                    self.local.final_text.push_str(&text);
+                    self.local.final_thinking.push_str(&thinking);
+                    self.ctx.display.render_stop(&stop);
+                    return Ok((TurnDecision::Failed(format!("stop: {stop}")), effects));
+                }
+                RoundKind::Truncated => {
+                    // Truncated candidate: discarded as a whole
+                    // (text and every call, however complete it looks). Only
+                    // the provider bill remains.
+                    self.record_discarded_usage(&usage).await;
+                    let diagnostic = format!(
+                        "<output-truncated>The previous response hit the output limit (stop: {}) and was discarded without executing anything. Continue with one smaller, focused step.</output-truncated>",
+                        truncate_str(&stop, 80)
+                    );
+                    self.ctx.store.add_runtime_user(&diagnostic).await?;
+                    true
+                }
+                RoundKind::IdentityInvalid(reason) => {
+                    // Identity-invalid batch: cannot be paired
+                    // reliably. Drop every call; never write an illegal tool
+                    // call or invent results for it.
+                    self.persist_assistant(&text, &thinking, &[], &usage)
+                        .await?;
+                    self.record_agent_calibration(&usage);
+                    self.local.final_text.push_str(&text);
+                    self.local.final_thinking.push_str(&thinking);
+                    let diagnostic = format!(
+                        "<tool-call-format-error>The previous response could not be executed: {reason}. No tool was run. Resend the intended tool call(s) with an explicit tool name and one unique id per call.</tool-call-format-error>"
+                    );
+                    self.ctx.store.add_runtime_user(&diagnostic).await?;
+                    true
+                }
+                RoundKind::Unconfirmed => {
+                    // Unconfirmed response: empty/thinking-only body, tool_calls without
+                    // calls, or empty/unknown reason — never a silent empty
+                    // success, never a text-bearing "success" either.
+                    self.persist_assistant(&text, &thinking, &[], &usage)
+                        .await?;
+                    self.record_agent_calibration(&usage);
+                    self.local.final_text.push_str(&text);
+                    self.local.final_thinking.push_str(&thinking);
+                    let diagnostic = format!(
+                        "<incomplete-response>The previous assistant response could not be confirmed as complete (stop reason: {:?}, no tool calls). State the next step explicitly or resend the intended tool call(s).</incomplete-response>",
+                        truncate_str(&stop, 80)
+                    );
+                    self.ctx.store.add_runtime_user(&diagnostic).await?;
+                    true
+                }
+                RoundKind::Complete => {
+                    self.persist_assistant(&text, &thinking, &[], &usage)
+                        .await?;
+                    self.record_agent_calibration(&usage);
+                    self.local.final_text.push_str(&text);
+                    self.local.final_thinking.push_str(&thinking);
+                    had_format_error
+                }
+                RoundKind::ConsumeCalls => {
+                    self.persist_assistant(&text, &thinking, &calls, &usage)
+                        .await?;
+                    self.record_agent_calibration(&usage);
+                    self.local.final_text.push_str(&text);
+                    self.local.final_thinking.push_str(&thinking);
+                    // Formal ToolCall display/events are deferred to the
+                    // accepted response: discarded candidates never
+                    // surface as executed calls.
+                    self.announce_tool_calls(&calls);
+                    // Real tool results are persisted before the single
+                    // round-end window commit: an exhausted format budget
+                    // must not roll back legal side effects.
+                    had_format_error |= self
+                        .execute_tools_inner(calls, belief.as_deref_mut(), &mut effects)
+                        .await?;
+                    if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
+                        self.ctx.display.render_stop("interrupted");
+                        return Ok((TurnDecision::Interrupted, effects));
+                    }
+                    had_format_error
+                }
+            };
 
-            // 用户中断：跳过决策/证据注入/回滚，也不再发起下一次 LLM 请求。
-            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
-                self.ctx.display.render_stop("interrupted");
-                return Ok((TurnDecision::Interrupted, effects));
+            // Single round tail: one window slot, then the branch
+            // decisions (which may append a todo reminder or `[trajectory]`
+            // evidence), then a history refresh AFTER every append so the next
+            // request sees diagnostics, tool results and injected state alike.
+            if format_window.commit(window_error) {
+                return Ok((
+                    TurnDecision::Failed(self.format_exhausted_reason()),
+                    effects,
+                ));
             }
-
-            // Phase 4: 决策 — 继续或结束
-            if let Some(decision) = self
-                .decide_next(&stop, belief.as_deref_mut(), turn >= max_turns)
-                .await?
-            {
-                return Ok((decision, effects));
+            match &kind {
+                RoundKind::ConsumeCalls => {
+                    let signal_enabled = self.ctx.config.signal_policy.enabled();
+                    if let Some(decision) = self
+                        .decide_signal_recovery(signal_enabled, belief.as_deref_mut())
+                        .await?
+                    {
+                        return Ok((decision, effects));
+                    }
+                }
+                RoundKind::Complete => {
+                    if let Some(decision) = self
+                        .decide_next(&stop, belief.as_deref_mut(), turn >= max_turns)
+                        .await?
+                    {
+                        return Ok((decision, effects));
+                    }
+                }
+                _ => {}
             }
-            // tool_use 路径：重新加载 messages 继续循环
             messages = self.ctx.compaction.active_messages().await?;
         }
 
         Ok((TurnDecision::MaxTurnsExceeded, effects))
     }
+
+    /// Stable terminal reason for an exhausted format window.
+    fn format_exhausted_reason(&self) -> String {
+        let policy = self.ctx.config.llm_recovery;
+        format!(
+            "format_recovery_exhausted: more than {} format error(s) within the last {} round(s)",
+            policy.format_max_errors, policy.format_window_size
+        )
+    }
+
+    /// Update the provider prompt-usage calibration baseline for a finally
+    /// accepted response. Session stats are recorded by `persist_assistant`;
+    /// calibration must not be fed by discarded candidates.
+    fn record_agent_calibration(&self, usage: &Option<UsageEvent>) {
+        if let Some(usage) = usage {
+            self.ctx.compaction.record_agent_usage(usage);
+        }
+    }
+
+    /// Bill a discarded candidate: the provider bill still stands, but it must
+    /// not calibrate later requests or dilute the format window.
+    async fn record_discarded_usage(&self, usage: &Option<UsageEvent>) {
+        if let Some(usage) = usage {
+            self.ctx.stats.record_usage(usage).await;
+        }
+    }
+}
+
+/// End-decision shape for one accepted candidate.
+enum RoundKind {
+    Interrupted,
+    Terminal,
+    Truncated,
+    IdentityInvalid(String),
+    ConsumeCalls,
+    Complete,
+    Unconfirmed,
+}
+
+/// Explicit provider refusal/error stop reasons: report plainly, never induce a
+/// resend as a format error.
+fn is_terminal_stop(stop: &str) -> bool {
+    matches!(stop, "content_filter" | "error")
+}
+
+fn is_truncated_stop(stop: &str) -> bool {
+    matches!(stop, "length" | "max_tokens")
+}
+
+/// The whole candidate tool batch is unusable when calls cannot be paired
+/// reliably: missing name, missing id, or duplicate ids.
+fn validate_tool_call_identity(calls: &[ToolCallEvent]) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    for call in calls {
+        if call.name.is_empty() {
+            let id = if call.id.is_empty() {
+                "(no id)"
+            } else {
+                &call.id
+            };
+            let detail = match &call.parse_error {
+                Some(error) => format!(" (the payload is unparsable: {error})"),
+                None => String::new(),
+            };
+            return Some(format!(
+                "a candidate tool call ({id}) is missing a tool name{detail}"
+            ));
+        }
+        if call.id.is_empty() {
+            return Some(format!("tool call '{}' is missing a call id", call.name));
+        }
+        if !seen.insert(call.id.as_str()) {
+            return Some(format!("tool call id '{}' appears more than once", call.id));
+        }
+    }
+    None
 }
 
 fn is_context_overflow_message(message: &str) -> bool {
@@ -424,7 +669,7 @@ fn is_context_overflow_message(message: &str) -> bool {
     .any(|pattern| message.contains(pattern))
 }
 
-fn positive_duration(seconds: i32) -> Option<Duration> {
+pub(crate) fn positive_duration(seconds: i32) -> Option<Duration> {
     (seconds > 0).then(|| Duration::from_secs(seconds as u64))
 }
 
@@ -449,6 +694,7 @@ fn blocked_by_signal_recovery(
         presentation: None,
         artifacts: Vec::new(),
         signals: Vec::new(),
+        failure_source: None,
         plan_command: None,
         needs_finalization: false,
         state_metadata: None,

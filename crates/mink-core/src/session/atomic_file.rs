@@ -154,7 +154,7 @@ fn write_and_replace_with(
     file.flush()
         .map_err(|error| PublishError::NotPublished(error.into()))?;
     // Apply the final permissions BEFORE the file sync so the mode is part
-    // of the same durability barrier as the content (audit R4).
+    // of the same durability barrier as the content.
     if let Some(permissions) = permissions {
         #[cfg(test)]
         if INJECT_PERMISSION_FAILURE.with(|flag| flag.replace(false)) {

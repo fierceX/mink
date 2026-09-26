@@ -217,10 +217,12 @@ async fn orchestrator_flash_command_resets_forced_model_display() -> anyhow::Res
 
 #[tokio::test]
 async fn orchestrator_renders_failed_turn_decision() -> anyhow::Result<()> {
+    // An explicit content refusal is a terminal Failed decision (never a
+    // silent success, never a format-feedback loop).
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         vec![vec![Ok(Event::Stop(StopEvent {
-            reason: "max_tokens".into(),
+            reason: "content_filter".into(),
         }))]],
     ));
     let h = harness_with_backend("orch-failed-turn", llm.clone()).await?;
@@ -231,7 +233,7 @@ async fn orchestrator_renders_failed_turn_decision() -> anyhow::Result<()> {
             .lock()
             .unwrap()
             .iter()
-            .any(|msg| msg == "error:stop: max_tokens"),
+            .any(|msg| msg == "error:stop: content_filter"),
         "{:?}",
         h.display.info.lock().unwrap()
     );
@@ -786,9 +788,14 @@ impl LlmBackend for PlanTurnBackend {
                 })),
             ]
         } else {
-            vec![Ok(Event::Stop(StopEvent {
-                reason: "end_turn".into(),
-            }))]
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content: "plan transition complete".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ]
         };
         Ok(LlmResponseStream {
             events: Box::pin(futures::stream::iter(events)),

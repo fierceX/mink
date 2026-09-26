@@ -1,6 +1,7 @@
 use crate::context::AgentSharedContext;
+use crate::llm::recovery::{self, LlmUpstreamError, UpstreamFailureKind};
 use crate::protocol::Event;
-use crate::session::usage::{UsageCapture, UsageKind};
+use crate::session::usage::{UsageCapture, UsageGuard, UsageKind};
 use crate::sse::openai::OpenAIParser;
 use anyhow::Result;
 use futures::StreamExt;
@@ -9,11 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-const MAX_RETRIES: u32 = 2;
-const RETRY_DELAY: Duration = Duration::from_secs(1);
-const RETRY_MAX_TIME: Duration = Duration::from_secs(20);
-
-const MAX_STREAM_ERRORS: u32 = 5;
+/// Bound on the provider error body kept for diagnostics.
+const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub struct LlmModelTarget<'a> {
@@ -57,7 +55,18 @@ impl std::fmt::Display for LlmRequestFailure {
 
 impl std::error::Error for LlmRequestFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.error.source()
+        // Expose the wrapped error itself so `root_cause()`/`chain()` from a
+        // caller can still reach the structured upstream root (for example an
+        // `LlmUpstreamError` returned by the built-in backend).
+        Some(self.error.as_ref())
+    }
+}
+
+impl LlmRequestFailure {
+    /// Structured upstream classification carried by this failure, when the
+    /// wrapped error (or its chain) provides one.
+    pub fn upstream_kind(&self) -> Option<UpstreamFailureKind> {
+        recovery::find_upstream_failure(&self.error).map(|error| error.kind())
     }
 }
 
@@ -78,6 +87,12 @@ pub struct LlmCacheProjection {
     pub messages: Vec<serde_json::Value>,
 }
 
+/// One logical LLM request as built by the runtime.
+///
+/// Retries of one logical request reuse the *same* projection (including
+/// materialized images); only the per-attempt cancel token changes. Cloning
+/// this value is how each attempt gets its own request object.
+#[derive(Clone)]
 pub struct LlmRequest {
     pub purpose: LlmPurpose,
     pub model: String,
@@ -355,19 +370,19 @@ impl LlmBackend for OpenAiCompatibleBackend {
             ));
         }
 
-        let (resp, attempt_count) = client
-            .send_with_retry(request.display.as_ref(), body, &request.cancel)
+        // One `stream()` call is exactly one physical request: request-level
+        // retries are owned by the runtime attempt loop, so retry counts can
+        // never multiply.
+        let resp = client
+            .send_once(body, &request.cancel)
             .await
-            .map_err(|failure| LlmRequestFailure {
-                attempt_count: failure.attempt_count,
-                error: failure.error,
-            })?;
+            .map_err(anyhow::Error::new)?;
         let (tx, rx) = mpsc::channel(SSE_QUEUE_CAPACITY);
         let cancel = request.cancel.linked_child_token();
         AsyncLlClient::spawn_stream_task(resp, cancel.clone(), tx);
         Ok(LlmResponseStream {
             events: Box::pin(SseEventStream { rx, cancel }),
-            attempt_count,
+            attempt_count: 1,
         })
     }
 }
@@ -392,11 +407,6 @@ pub(crate) enum SseSendStatus {
     Delivered,
     /// Cancelled: the caller must stop without waiting for capacity.
     Stopped,
-}
-
-pub(crate) struct SendFailure {
-    pub(crate) error: anyhow::Error,
-    pub(crate) attempt_count: u32,
 }
 
 fn build_http_client() -> reqwest::Result<reqwest::Client> {
@@ -429,7 +439,6 @@ impl AsyncLlClient {
         tokio::spawn(async move {
             let mut byte_stream = resp.bytes_stream();
             let mut buf: Vec<u8> = Vec::new();
-            let mut decode_errors = 0u32;
             let mut clean_end = false;
             let mut parser = OpenAIParser::new();
             let mut pending: Vec<Event> = Vec::new();
@@ -464,30 +473,25 @@ impl AsyncLlClient {
                                             clean_end = true;
                                             break 'outer;
                                         }
+                                        Ok(false) => {}
+                                        // Frame-level damage: the whole attempt is
+                                        // untrustworthy. Frames are never silently
+                                        // skipped anymore; the runtime discards
+                                        // the candidate and retries the request.
                                         Err(e) => {
-                                            if is_fatal_parser_error(&e) {
-                                                let _ = AsyncLlClient::send_one(&tx, Err(e), &cancel).await;
-                                                clean_end = true;
-                                                break 'outer;
-                                            }
-                                            decode_errors += 1;
-                                            if decode_errors > MAX_STREAM_ERRORS {
-                                                let _ = AsyncLlClient::send_one(&tx, Err(e), &cancel).await;
-                                                clean_end = true;
-                                                break 'outer;
-                                            }
+                                            let failure = protocol_damage(e);
+                                            let _ = AsyncLlClient::send_one(&tx, Err(anyhow::Error::new(failure)), &cancel).await;
+                                            clean_end = true;
+                                            break 'outer;
                                         }
-                                        _ => {}
                                     }
                                 }
                             }
                             Some(Err(e)) => {
-                                decode_errors += 1;
-                                if decode_errors > MAX_STREAM_ERRORS {
-                                    let _ = AsyncLlClient::send_one(&tx, Err(anyhow::anyhow!("stream: {e}")), &cancel).await;
-                                    clean_end = true;
-                                    break 'outer;
-                                }
+                                let failure = transport_failure(e);
+                                let _ = AsyncLlClient::send_one(&tx, Err(anyhow::Error::new(failure)), &cancel).await;
+                                clean_end = true;
+                                break 'outer;
                             }
                             None => {
                                 // 传输 EOF：缓冲可能残留未换行的最后一行
@@ -506,21 +510,11 @@ impl AsyncLlClient {
                                             clean_end = true;
                                             break 'outer;
                                         }
-                                        match parsed {
-                                            Ok(true) => clean_end = true,
-                                            Ok(false) => {}
-                                            Err(e) => {
-                                                if is_fatal_parser_error(&e) {
-                                                    let _ = AsyncLlClient::send_one(&tx, Err(e), &cancel).await;
-                                                    clean_end = true;
-                                                } else {
-                                                    decode_errors += 1;
-                                                    if decode_errors > MAX_STREAM_ERRORS {
-                                                        let _ = AsyncLlClient::send_one(&tx, Err(e), &cancel).await;
-                                                        clean_end = true;
-                                                    }
-                                                }
-                                            }
+                                        if let Err(e) = parsed {
+                                            let failure = protocol_damage(e);
+                                            let _ = AsyncLlClient::send_one(&tx, Err(anyhow::Error::new(failure)), &cancel).await;
+                                            clean_end = true;
+                                            break 'outer;
                                         }
                                     }
                                 }
@@ -537,7 +531,11 @@ impl AsyncLlClient {
                     Ok(())
                 })
             {
-                let _ = AsyncLlClient::send_one(&tx, Err(e), &cancel).await;
+                // An EOF without a terminal frame is response damage, not a
+                // permanent request failure: the runtime may retry it.
+                let failure = protocol_damage(e);
+                let _ =
+                    AsyncLlClient::send_one(&tx, Err(anyhow::Error::new(failure)), &cancel).await;
             }
             parser
                 .flush(&mut |e| {
@@ -585,102 +583,76 @@ impl AsyncLlClient {
         })));
     }
 
-    async fn send_with_retry(
+    /// Establish exactly one physical request.
+    ///
+    /// Transient/provider/permanent classification is carried by the returned
+    /// [`LlmUpstreamError`]; the runtime attempt loop owns retries, backoff and
+    /// `Retry-After` waits.
+    async fn send_once(
         &self,
-        display: &dyn crate::ui::Display,
         body: Vec<u8>,
         cancel: &crate::cancel::CancellationToken,
-    ) -> std::result::Result<(reqwest::Response, u32), SendFailure> {
-        let start = std::time::Instant::now();
-        let mut attempt: u32 = 0;
-
-        loop {
-            let attempt_count = attempt.saturating_add(1);
-            let req = self
-                .client
-                .post(&self.api_url)
-                .body(body.clone())
-                .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {}", self.api_key));
-            match tokio::select! {
-                result = req.send() => result,
-                _ = cancel.cancelled() => {
-                    return Err(SendFailure {
-                        error: anyhow::anyhow!("request cancelled"),
-                        attempt_count,
-                    })
-                }
-            } {
-                Ok(resp) => {
-                    let code = resp.status().as_u16();
-                    if code < 400 {
-                        return Ok((resp, attempt_count));
-                    }
-                    if !is_retryable(code) || !can_retry(attempt, start) {
-                        let body_text = resp.text().await.unwrap_or_default();
-                        let err = anyhow::anyhow!("HTTP {}: {}", code, body_text.trim());
-                        display.render_error(&err.to_string());
-                        return Err(SendFailure {
-                            error: err,
-                            attempt_count,
-                        });
-                    }
-                    if code == 429 {
-                        let retry_after = resp
-                            .headers()
-                            .get("retry-after")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|v| v.parse::<u64>().ok())
-                            .unwrap_or(2)
-                            .min(10);
-                        tokio::select! {
-                            _ = tokio::time::sleep(Duration::from_secs(retry_after)) => {}
-                            _ = cancel.cancelled() => {
-                                return Err(SendFailure {
-                                    error: anyhow::anyhow!("request cancelled"),
-                                    attempt_count,
-                                })
-                            }
-                        }
-                    } else {
-                        tokio::select! {
-                            _ = tokio::time::sleep(RETRY_DELAY * 2u32.pow(attempt)) => {}
-                            _ = cancel.cancelled() => {
-                                return Err(SendFailure {
-                                    error: anyhow::anyhow!("request cancelled"),
-                                    attempt_count,
-                                })
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    if !can_retry(attempt, start) {
-                        let err = anyhow::anyhow!("{}", e);
-                        display.render_error(&err.to_string());
-                        return Err(SendFailure {
-                            error: err,
-                            attempt_count,
-                        });
-                    }
-                    tokio::select! {
-                        _ = tokio::time::sleep(RETRY_DELAY) => {}
-                        _ = cancel.cancelled() => {
-                            return Err(SendFailure {
-                                error: anyhow::anyhow!("request cancelled"),
-                                attempt_count,
-                            })
-                        }
-                    }
-                }
-            }
-            attempt += 1;
-            display.render_info(&format!("Retrying ({}/{})...", attempt, MAX_RETRIES));
+    ) -> std::result::Result<reqwest::Response, LlmUpstreamError> {
+        if cancel.is_cancelled() {
+            return Err(LlmUpstreamError::recoverable("request cancelled"));
         }
+        let req = self
+            .client
+            .post(&self.api_url)
+            .body(body)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", self.api_key));
+        let resp = tokio::select! {
+            result = req.send() => match result {
+                Ok(resp) => resp,
+                Err(error) => return Err(transport_failure(error)),
+            },
+            _ = cancel.cancelled() => {
+                return Err(LlmUpstreamError::recoverable("request cancelled"));
+            }
+        };
+        let status = resp.status().as_u16();
+        if status < 400 {
+            return Ok(resp);
+        }
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(recovery::parse_retry_after);
+        let body_text = read_error_body(resp, cancel).await;
+        Err(recovery::http_failure(status, &body_text, retry_after))
     }
 }
 
-pub(crate) async fn stream_backend(
+/// One round's fixed request projection.
+///
+/// Built once per round: every attempt clones the template with a fresh cancel
+/// token, so images/attachments are materialized exactly once and the
+/// immutable prefix never changes across retries.
+pub(crate) struct PreparedLlmRequest {
+    request: LlmRequest,
+    local_tokens: usize,
+    cache_projection: Option<LlmCacheProjection>,
+    source_fingerprint: String,
+    source_system_prompt: String,
+    source_tools: Vec<serde_json::Value>,
+    is_agent_request: bool,
+    backend_name: String,
+    model_name: String,
+}
+
+impl PreparedLlmRequest {
+    pub(crate) fn request_for(&self, cancel: LlmCancelToken) -> LlmRequest {
+        let mut request = self.request.clone();
+        request.cancel = cancel;
+        request
+    }
+}
+
+/// Build one round's fixed projection (image materialization included).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn prepare_llm_request(
     backend: &Arc<dyn LlmBackend>,
     ctx: &AgentSharedContext,
     model_name: &str,
@@ -688,7 +660,7 @@ pub(crate) async fn stream_backend(
     messages_json: &[serde_json::Value],
     tools_json: &[serde_json::Value],
     system_prompt: &str,
-) -> Result<LlmEventStream> {
+) -> Result<PreparedLlmRequest> {
     let purpose = if ctx.is_sub_agent {
         LlmPurpose::SubAgent {
             session_id: ctx.config.session_id.clone(),
@@ -704,7 +676,7 @@ pub(crate) async fn stream_backend(
     )?;
     // Core Agent request projection (v7 §9.2): resolve `tool_attachment`
     // blocks into data-URL image parts against the home image cache.
-    // Compaction bypasses stream_backend: it may retain Agent tool schemas for
+    // Compaction bypasses this path: it may retain Agent tool schemas for
     // cache alignment, but persisted attachments are degraded to deterministic
     // text markers instead of materializing or resending image pixels.
     // Runs on the blocking pool: reads + base64 of multi-MB images must not
@@ -732,14 +704,6 @@ pub(crate) async fn stream_backend(
         Ok::<_, anyhow::Error>(messages)
     })
     .await??;
-    let mut usage_guard = crate::session::usage::UsageGuard::new(ctx.usage.capture(
-        ctx.usage_scope(if ctx.is_sub_agent {
-            UsageKind::SubAgent
-        } else {
-            UsageKind::Agent
-        }),
-        model_name.to_string(),
-    ));
     let request = LlmRequest {
         purpose,
         model: model_name.to_string(),
@@ -754,56 +718,158 @@ pub(crate) async fn stream_backend(
         verbose: ctx.verbose(),
         display: ctx.display.clone(),
     };
-    let cache_projection = backend.cache_projection(&request, request.messages.len());
-    let source_fingerprint =
-        crate::session::compaction::prefix_fingerprint(&request.system_prompt, &request.tools);
-    let source_system_prompt = request.system_prompt.clone();
-    let source_tools = request.tools.clone();
-    let backend_name = backend.name().to_string();
-    let response = match backend.stream(request).await {
+    Ok(PreparedLlmRequest {
+        cache_projection: backend.cache_projection(&request, request.messages.len()),
+        source_fingerprint: crate::session::compaction::prefix_fingerprint(
+            &request.system_prompt,
+            &request.tools,
+        ),
+        source_system_prompt: request.system_prompt.clone(),
+        source_tools: request.tools.clone(),
+        backend_name: backend.name().to_string(),
+        model_name: model_name.to_string(),
+        local_tokens,
+        is_agent_request,
+        request,
+    })
+}
+
+/// Open one attempt of a prepared logical request.
+///
+/// Each attempt settles its own usage capture (reported on success, unreported
+/// on failure) and records the successful agent request for cache alignment.
+pub(crate) async fn open_llm_stream(
+    backend: &Arc<dyn LlmBackend>,
+    ctx: &AgentSharedContext,
+    prepared: &PreparedLlmRequest,
+    cancel: LlmCancelToken,
+) -> Result<LlmResponseStream> {
+    let request = prepared.request_for(cancel);
+    let capture = ctx.usage.capture(
+        ctx.usage_scope(if ctx.is_sub_agent {
+            UsageKind::SubAgent
+        } else {
+            UsageKind::Agent
+        }),
+        prepared.model_name.clone(),
+    );
+    let response = match guarded_open_stream(backend, request, capture).await {
+        Ok(response) => response,
+        Err(error) => return Err(error),
+    };
+    if prepared.is_agent_request {
+        ctx.compaction.record_agent_request(
+            &prepared.model_name,
+            &prepared.source_fingerprint,
+            prepared.local_tokens,
+            prepared.backend_name.clone(),
+            prepared.source_system_prompt.clone(),
+            prepared.source_tools.clone(),
+            prepared.cache_projection.clone(),
+        );
+    }
+    Ok(response)
+}
+
+/// Open one backend request with exactly-once usage settlement: the capture is
+/// reported by the returned metered stream on success and recorded as
+/// unreported on failure.
+pub(crate) async fn guarded_open_stream(
+    backend: &Arc<dyn LlmBackend>,
+    request: LlmRequest,
+    capture: UsageCapture,
+) -> Result<LlmResponseStream> {
+    let mut usage_guard = UsageGuard::new(capture);
+    match backend.stream(request).await {
         Ok(response) => {
-            if is_agent_request {
-                ctx.compaction.record_agent_request(
-                    model_name,
-                    &source_fingerprint,
-                    local_tokens,
-                    backend_name,
-                    source_system_prompt,
-                    source_tools,
-                    cache_projection,
-                );
-            }
-            response
+            let capture = usage_guard
+                .take()
+                .expect("usage guard transferred exactly once");
+            Ok(LlmResponseStream {
+                events: Box::pin(MeteredStream::new(
+                    response.events,
+                    capture,
+                    response.attempt_count,
+                )),
+                attempt_count: response.attempt_count,
+            })
         }
         Err(error) => {
             let attempt_count = request_failure_attempt_count(&error);
             usage_guard.record_unreported(attempt_count, format!("request_failed: {error}"));
-            return Err(error);
+            Err(error)
         }
-    };
-    let capture = usage_guard
-        .take()
-        .expect("usage guard transferred exactly once");
-    Ok(Box::pin(MeteredStream::new(
-        response.events,
-        capture,
-        response.attempt_count,
-    )))
+    }
 }
 
-fn is_fatal_parser_error(e: &anyhow::Error) -> bool {
-    let msg = e.to_string();
-    msg.contains("parse tool call")
-        || msg.contains("parse tool input")
-        || msg.contains("tool input must be object")
+/// One-shot open used by unit tests and simple embedders; production agent
+/// turns use `prepare_llm_request` + `open_llm_stream` so retries keep the
+/// same fixed projection.
+#[cfg(test)]
+pub(crate) async fn stream_backend(
+    backend: &Arc<dyn LlmBackend>,
+    ctx: &AgentSharedContext,
+    model_name: &str,
+    model_alias: Option<&str>,
+    messages_json: &[serde_json::Value],
+    tools_json: &[serde_json::Value],
+    system_prompt: &str,
+) -> Result<LlmEventStream> {
+    let prepared = prepare_llm_request(
+        backend,
+        ctx,
+        model_name,
+        model_alias,
+        messages_json,
+        tools_json,
+        system_prompt,
+    )
+    .await?;
+    let stream = open_llm_stream(backend, ctx, &prepared, ctx.cancel.clone()).await?;
+    Ok(stream.events)
 }
 
-fn is_retryable(code: u16) -> bool {
-    matches!(code, 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504)
+/// Attempt-level response stream damage: the candidate is untrustworthy and
+/// the runtime may retry the identical request while counting one format error.
+fn protocol_damage(error: impl std::fmt::Display) -> LlmUpstreamError {
+    LlmUpstreamError::protocol_damaged(format!("response stream damaged: {error}"))
 }
 
-fn can_retry(attempt: u32, start: std::time::Instant) -> bool {
-    attempt < MAX_RETRIES && start.elapsed() <= RETRY_MAX_TIME
+/// Transport failure classification for one physical request.
+fn transport_failure(error: reqwest::Error) -> LlmUpstreamError {
+    let kind = recovery::classify_transport_error(&error);
+    LlmUpstreamError::new(kind, format!("request failed: {error}"))
+        .with_source(anyhow::Error::new(error))
+}
+
+/// Read a bounded, cancellable provider error body.
+async fn read_error_body(
+    resp: reqwest::Response,
+    cancel: &crate::cancel::CancellationToken,
+) -> String {
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    loop {
+        let chunk = tokio::select! {
+            chunk = stream.next() => chunk,
+            _ = cancel.cancelled() => break,
+        };
+        let Some(chunk) = chunk else { break };
+        match chunk {
+            Ok(chunk) => {
+                if bytes.len() >= MAX_ERROR_BODY_BYTES {
+                    break;
+                }
+                let take = (MAX_ERROR_BODY_BYTES - bytes.len()).min(chunk.len());
+                bytes.extend_from_slice(&chunk[..take]);
+                if take < chunk.len() {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 pub struct SseEventStream {

@@ -135,6 +135,18 @@ pub enum ToolBlocker {
     StormBreaker,
 }
 
+/// Internal provenance marker for a failed tool call produced by model output
+/// formatting rather than real execution.
+///
+/// The signal layer routes these results back to the model as format feedback
+/// (no belief/evidence effect); persistence still records an ordinary failed
+/// tool result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolFailureSource {
+    /// Model-produced arguments failed decoding before any side effect.
+    ModelFormat,
+}
+
 /// Authoritative execution state. Display text is never used to recover it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "state", content = "reason", rename_all = "snake_case")]

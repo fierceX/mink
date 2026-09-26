@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use super::bash;
 use super::file;
 use super::metadata::{
-    ApprovalTier, ToolBlocker, ToolFailureKind, ToolMetadata, ToolResultKind, ToolStatus,
+    ApprovalTier, ToolBlocker, ToolFailureKind, ToolFailureSource, ToolMetadata, ToolResultKind,
+    ToolStatus,
 };
 use super::plan::{PlanClearTool, PlanCommand, PlanConfirmTool, PlanDraftTool};
 use super::python;
@@ -120,7 +121,7 @@ pub fn tool_registry() -> &'static [Box<dyn ToolExec>] {
 /// ToolRunner dispatches tool calls to their implementations.
 pub struct ToolRunner {
     ctx: Arc<ToolContext>,
-    storm: Mutex<StormBreaker>,
+    storm: Arc<Mutex<StormBreaker>>,
     tools: &'static [Box<dyn ToolExec>],
 }
 
@@ -140,6 +141,9 @@ pub struct ToolExecution {
     pub presentation: Option<ToolPresentation>,
     pub artifacts: Vec<ArtifactDisplay>,
     pub signals: Vec<crate::guard::collector::Signal>,
+    /// Internal provenance of a failure produced by model output formatting.
+    /// Never used to recover authoritative execution state.
+    pub failure_source: Option<ToolFailureSource>,
     pub(crate) plan_command: Option<PlanCommand>,
     pub(crate) needs_finalization: bool,
     pub(crate) state_metadata: Option<serde_json::Value>,
@@ -188,6 +192,7 @@ impl ToolExecution {
             presentation: None,
             artifacts: Vec::new(),
             signals: Vec::new(),
+            failure_source: None,
             plan_command: None,
             needs_finalization: false,
             state_metadata: None,
@@ -236,6 +241,7 @@ struct ToolExecOutput {
     state_metadata: Option<serde_json::Value>,
     result_kind: ToolResultKind,
     presentation: Option<ToolPresentation>,
+    failure_source: Option<ToolFailureSource>,
 }
 
 impl ToolExecOutput {
@@ -262,6 +268,7 @@ impl ToolExecOutput {
             state_metadata: None,
             result_kind,
             presentation: None,
+            failure_source: None,
         }
     }
 }
@@ -297,7 +304,7 @@ impl ToolRunner {
     pub fn new(ctx: Arc<ToolContext>) -> Self {
         Self {
             ctx,
-            storm: Mutex::new(StormBreaker::new(6, 3)),
+            storm: Arc::new(Mutex::new(StormBreaker::new(6, 3))),
             tools: tool_registry(),
         }
     }
@@ -514,21 +521,29 @@ impl ToolRunner {
                 if let Some(tool) = self.find_custom_tool(&call.name).cloned() {
                     let ctx = self.ctx.clone();
                     let call = call.clone();
+                    let storm = self.storm.clone();
                     text_handles.push(tokio::spawn(async move {
-                        execute_custom(&ctx, &call, tool).await
+                        let result = execute_custom(&ctx, &call, tool).await?;
+                        mark_format_confirmed(&storm, &call.name, &call.storm_identity(), &result);
+                        Ok::<_, anyhow::Error>(result)
                     }));
                 } else {
                     let ctx = self.ctx.clone();
                     let tool_name = call.name.clone();
                     let call = call.clone();
+                    let name = call.name.clone();
+                    let identity = call.storm_identity();
+                    let storm = self.storm.clone();
                     text_handles.push(tokio::spawn(async move {
-                        tokio::task::spawn_blocking(move || {
+                        let result = tokio::task::spawn_blocking(move || {
                             let tool = tool_registry()
                                 .iter()
                                 .find(|t| t.metadata().name == tool_name);
                             Self::execute_one_sync(&ctx, &call, tool.map(|t| t.as_ref()))
                         })
-                        .await?
+                        .await??;
+                        mark_format_confirmed(&storm, &name, &identity, &result);
+                        Ok::<_, anyhow::Error>(result)
                     }));
                 }
             }
@@ -743,6 +758,7 @@ impl ToolRunner {
             presentation: None,
             artifacts: Vec::new(),
             signals: Vec::new(),
+            failure_source: None,
             plan_command: None,
             needs_finalization: false,
             state_metadata: None,
@@ -755,33 +771,32 @@ impl ToolRunner {
             PreparedCall::Immediate(result) => Ok(result),
             PreparedCall::Execute(call) => {
                 if let Some(tool) = self.find_custom_tool(&call.name).cloned() {
-                    return execute_custom(&self.ctx, &call, tool).await;
+                    let result = execute_custom(&self.ctx, &call, tool).await?;
+                    mark_format_confirmed(&self.storm, &call.name, &call.storm_identity(), &result);
+                    return Ok(result);
                 }
                 let ctx = self.ctx.clone();
                 let tool_name = call.name.clone();
-                tokio::task::spawn_blocking(move || {
+                let name = call.name.clone();
+                let identity = call.storm_identity();
+                let storm = self.storm.clone();
+                let result = tokio::task::spawn_blocking(move || {
                     let tool = tool_registry()
                         .iter()
                         .find(|t| t.metadata().name == tool_name);
                     Self::execute_one_sync(&ctx, &call, tool.map(|t| t.as_ref()))
                 })
-                .await?
+                .await??;
+                mark_format_confirmed(&storm, &name, &identity, &result);
+                Ok(result)
             }
         }
     }
 
     fn prepare_call(&self, call: ToolCallEvent) -> PreparedCall {
-        // Model-generated tool arguments that could not be parsed become an
-        // ordinary failed tool result instead of failing the turn: the model
-        // sees the error and can retry (dsh-style degradation).
-        if let Some(error) = call.parse_error.clone() {
-            return PreparedCall::Immediate(failed_tool_result(
-                call.id,
-                call.name,
-                call.fields,
-                format!("Error: tool input JSON invalid: {error}"),
-            ));
-        }
+        // Surface membership and storm accounting run first for every call
+        // (including known model-format ones), so a crafted bad call cannot
+        // bypass them; only then is the known-format failure reported.
         let tool_metadata = self.metadata_for(&call.name);
         let policy = ToolPolicyGate {
             surface: &self.ctx.tool_surface,
@@ -789,6 +804,17 @@ impl ToolRunner {
         };
         if let Some(blocked) = policy.evaluate(&call, tool_metadata) {
             return PreparedCall::Immediate(blocked);
+        }
+
+        // Model-generated arguments that could not be parsed become an
+        // ordinary failed tool result (ModelFormat provenance) instead of
+        // failing the turn: the model sees the decode diagnostic and can
+        // resend corrected arguments. Repaired payloads are never executed.
+        if let Some(error) = call.parse_error.clone() {
+            return PreparedCall::Immediate(model_format_failed_result(
+                call,
+                format!("invalid tool arguments: {error}"),
+            ));
         }
 
         PreparedCall::Execute(call)
@@ -831,7 +857,9 @@ impl ToolRunner {
             .find(|t| t.metadata().name == call.name)
             .map(|t| t.as_ref());
         let call_for_task = call.clone();
-        match tokio::task::spawn_blocking(move || {
+        let name = call.name.clone();
+        let identity = call.storm_identity();
+        let result = match tokio::task::spawn_blocking(move || {
             Self::execute_one_sync(&ctx, &call_for_task, tool_fn)
         })
         .await
@@ -846,7 +874,25 @@ impl ToolRunner {
                 call.fields.clone(),
                 format!("text fallback task failed: {error}"),
             ),
+        };
+        mark_format_confirmed(&self.storm, &name, &identity, &result);
+        result
+    }
+
+    /// Whether a candidate call was already confirmed as a pure model-format
+    /// decode failure (used to let the recovery guard keep waiting for a real
+    /// call instead of rewriting a known format problem).
+    pub(crate) fn is_format_confirmed(&self, call: &ToolCallEvent) -> bool {
+        if call.parse_error.is_some() {
+            return true;
         }
+        let Some(metadata) = self.metadata_for(&call.name) else {
+            return false;
+        };
+        self.storm
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_format_confirmed(&call.name, &call.storm_identity(), metadata.mutating)
     }
 }
 
@@ -911,16 +957,26 @@ async fn execute_custom(
                 state_metadata: None,
                 result_kind: definition.result_kind,
                 presentation: None,
+                failure_source: None,
             }
         }
         Err(error) => {
             let detail = error.to_string();
-            ToolExecOutput::failed(
+            let argument = error.is_argument();
+            let mut failed = ToolExecOutput::failed(
                 format!("Error: tool execution failed: {detail}"),
-                failed_status(&detail, None, None),
+                if argument {
+                    ToolStatus::Failed(ToolFailureKind::ArgumentInvalid)
+                } else {
+                    failed_status(&detail, None, None)
+                },
                 definition.result_kind,
                 Some(started.elapsed().as_millis()),
-            )
+            );
+            if argument {
+                failed.failure_source = Some(ToolFailureSource::ModelFormat);
+            }
+            failed
         }
     };
     let formatted = format_dispatched_result(ctx, call, raw);
@@ -972,20 +1028,34 @@ impl ToolPolicyGate<'_> {
         if metadata.storm_exempt {
             return None;
         }
-        let args_json = serde_json::to_string(&call.input_json).unwrap_or_default();
-        let decision = {
+        // The storm identity uses the original raw-argument digest when the
+        // payload did not parse, so distinct bad calls never collapse into
+        // one identity through their `{}` placeholder.
+        let identity = call.storm_identity();
+        let (decision, format_confirmed) = {
             let mut storm = self.storm.lock().unwrap_or_else(|e| e.into_inner());
-            storm.check(&call.name, &args_json, metadata.mutating)
+            let decision = storm.check(&call.name, &identity, metadata.mutating);
+            let confirmed = storm.is_format_confirmed(&call.name, &identity, metadata.mutating);
+            (decision, confirmed)
         };
         match decision {
             StormDecision::Allow => None,
-            StormDecision::Suppress(reason) => Some(blocked_tool_result(
-                call.id.clone(),
-                call.name.clone(),
-                call.fields.clone(),
-                reason,
-                ToolBlocker::StormBreaker,
-            )),
+            StormDecision::Suppress(reason) => {
+                let mut blocked = blocked_tool_result(
+                    call.id.clone(),
+                    call.name.clone(),
+                    call.fields.clone(),
+                    reason,
+                    ToolBlocker::StormBreaker,
+                );
+                // A repeated known-bad-arguments call keeps its format
+                // provenance: suppression must not turn it into a hard
+                // execution failure.
+                if call.parse_error.is_some() || format_confirmed {
+                    blocked.failure_source = Some(ToolFailureSource::ModelFormat);
+                }
+                Some(blocked)
+            }
         }
     }
 }
@@ -1052,19 +1122,35 @@ fn dispatch_tool(
                     state_metadata: outcome.state_metadata,
                     result_kind: metadata.result_kind,
                     presentation: outcome.presentation,
+                    failure_source: None,
                 }
             }
             Err(e) => {
                 let detail = e.to_string();
+                // Argument decoding failures are model-format provenance: the
+                // shared decode helper or an explicit `ToolError::argument`
+                // guarantees no side effect happened before the error.
+                let argument_error = crate::tools::args::is_argument_error(&e)
+                    || e.downcast_ref::<crate::runtime::ToolError>()
+                        .is_some_and(crate::runtime::ToolError::is_argument);
+                let status = if argument_error {
+                    ToolStatus::Failed(ToolFailureKind::ArgumentInvalid)
+                } else {
+                    failed_status(&detail, None, None)
+                };
                 // A failed execute must never mark the call as spawning a
                 // sub-agent: the coordinator would launch a child with raw
                 // fields even though the executor rejected the input.
-                ToolExecOutput::failed(
+                let mut failed = ToolExecOutput::failed(
                     format!("Error: tool execution failed: {detail}"),
-                    failed_status(&detail, None, None),
+                    status,
                     metadata.result_kind,
                     None,
-                )
+                );
+                if argument_error {
+                    failed.failure_source = Some(ToolFailureSource::ModelFormat);
+                }
+                failed
             }
         }
     } else {
@@ -1097,6 +1183,7 @@ fn format_dispatched_result(
         state_metadata,
         result_kind,
         presentation,
+        failure_source,
     } = raw;
     let success = status.is_success();
     if !success && exit_code.is_none() {
@@ -1227,6 +1314,7 @@ fn format_dispatched_result(
         presentation,
         artifacts: formatted.artifacts,
         signals,
+        failure_source,
 
         plan_command,
         needs_finalization,
@@ -1369,6 +1457,7 @@ pub(crate) fn blocked_tool_result(
         presentation: None,
         artifacts: Vec::new(),
         signals: Vec::new(),
+        failure_source: None,
         plan_command: None,
         needs_finalization: false,
         state_metadata: None,
@@ -1386,6 +1475,30 @@ pub(crate) fn failed_tool_result(
     result.status =
         ToolStatus::Failed(crate::tools::metadata::classify_failure_kind(&reason, None));
     result
+}
+
+/// Failed tool call produced by model-output formatting (bad arguments).
+/// The signal layer routes these as format feedback, not execution failures.
+pub(crate) fn model_format_failed_result(call: ToolCallEvent, reason: String) -> ToolExecution {
+    let mut result = failed_tool_result(call.id, call.name, call.fields, reason);
+    result.status = ToolStatus::Failed(ToolFailureKind::ArgumentInvalid);
+    result.failure_source = Some(ToolFailureSource::ModelFormat);
+    result
+}
+
+/// Flag the matching bounded storm entry after a call was confirmed as a pure
+/// model-format decode failure. No second cache is introduced.
+fn mark_format_confirmed(
+    storm: &Mutex<StormBreaker>,
+    name: &str,
+    identity: &str,
+    result: &ToolExecution,
+) {
+    if result.failure_source != Some(ToolFailureSource::ModelFormat) {
+        return;
+    }
+    let mut storm = storm.lock().unwrap_or_else(|error| error.into_inner());
+    storm.mark_format(name, identity);
 }
 
 /// Explicit "this call was never dispatched" result, used when a latched
@@ -1424,7 +1537,7 @@ impl ToolExec for SubAgentTool {
             description: Option<String>,
             fork: Option<bool>,
         }
-        let args: Args = serde_json::from_value(input.clone())?;
+        let args: Args = crate::tools::args::decode_args(input)?;
         if args.prompt.trim().is_empty() {
             bail!("Error: sub-agent prompt is required");
         }

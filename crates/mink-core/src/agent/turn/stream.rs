@@ -1,4 +1,32 @@
 use super::*;
+use crate::llm::recovery::{
+    self, LlmUpstreamError, RequestRetryState, RequestTerminal, UpstreamFailureKind,
+    find_upstream_failure, terminal_error,
+};
+
+/// Classified failure of one attempt (one physical request + its stream).
+enum AttemptFailure {
+    /// Turn-level cancellation/interruption.
+    Interrupted,
+    /// Fatal, non-retryable failure (permanent upstream error, context
+    /// overflow, persistence fault, ...).
+    Fatal(anyhow::Error),
+    /// The optional total request deadline elapsed while this attempt was in
+    /// flight (establish or consume). The logical request is over.
+    Timeout,
+    /// Retryable failure: the candidate is discarded and the identical fixed
+    /// projection is requested again.
+    Retry(RetryFailure),
+}
+
+struct RetryFailure {
+    /// Response-protocol damage: also counts as one format error for the
+    /// round once the attempt is discarded.
+    protocol_damaged: bool,
+    retry_after: Option<Duration>,
+    message: String,
+    category: &'static str,
+}
 
 impl super::TurnExecutor {
     pub(super) async fn ensure_prefix(&self) -> Result<(String, Vec<serde_json::Value>)> {
@@ -69,15 +97,170 @@ impl super::TurnExecutor {
     }
 
     /// Phase 1: 发送 LLM 请求并流式读取响应，返回 `StreamOutput`。
-    /// 网络/协议错误通过 `bail!` 传播，由调用方转为 `TurnDecision::Failed`。
+    ///
+    /// 一个 round 的请求投影（含图片物化结果）在此构建一次；每次真正重开
+    /// backend 请求重建 attempt 计时器、子取消 token 和 usage 结算，失败候选
+    /// 被废弃。工具参数格式与结束原因由 round 层处理，这里不做工具 schema
+    /// 校验、不调用工具、不把参数错当成流失败。
     pub(super) async fn stream_llm_response(
         &mut self,
+        window: &super::format_recovery::FormatRecoveryWindow,
         messages: &[serde_json::Value],
         system_prompt: &str,
         tools_json: &[serde_json::Value],
         current_context_tokens: usize,
     ) -> anyhow::Result<StreamOutput> {
-        // 首事件期限自进入函数起算一次绝对 deadline，覆盖“请求建立＋首事件”；
+        let policy = self.ctx.config.llm_recovery;
+        let prepared = crate::llm::client::prepare_llm_request(
+            &self.ctx.llm_backend,
+            &self.ctx,
+            &self.model_name,
+            self.model_alias.as_deref(),
+            messages,
+            tools_json,
+            system_prompt,
+        )
+        .await?;
+        let mut retry = RequestRetryState::new(&policy);
+        // The same deadline covers request establishment, stream consumption
+        // and every backoff wait — a retry never extends it.
+        let request_deadline = retry.deadline();
+        let mut had_format_error = false;
+        let mut last_failure = String::new();
+        let mut attempt: u32 = 0;
+        loop {
+            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
+                self.ctx.log_event(crate::events::EventLog::Stop {
+                    reason: "interrupted".into(),
+                });
+                return Err(anyhow::Error::new(TurnInterrupted));
+            }
+            // A latched session must not open new requests.
+            self.ctx.persistence_fault.check()?;
+            if retry.deadline_expired() {
+                self.log_recovery(
+                    attempt + 1,
+                    "timeout",
+                    &retry,
+                    window,
+                    Some("request_timeout"),
+                );
+                return Err(terminal_error(RequestTerminal::Timeout, last_failure));
+            }
+
+            let attempt_cancel = self.ctx.cancel.linked_child_token();
+            let outcome = self
+                .consume_attempt(
+                    &prepared,
+                    &attempt_cancel,
+                    current_context_tokens,
+                    request_deadline,
+                )
+                .await;
+            // Close the attempt's background stream task without touching the
+            // parent runtime token, then decide.
+            attempt_cancel.cancel();
+
+            match outcome {
+                Ok(mut output) => {
+                    output.had_format_error = had_format_error;
+                    return Ok(output);
+                }
+                Err(AttemptFailure::Interrupted) => {
+                    self.ctx.log_event(crate::events::EventLog::Stop {
+                        reason: "interrupted".into(),
+                    });
+                    return Err(anyhow::Error::new(TurnInterrupted));
+                }
+                Err(AttemptFailure::Fatal(error)) => return Err(error),
+                Err(AttemptFailure::Timeout) => {
+                    let detail = if last_failure.is_empty() {
+                        "request deadline exceeded while the request was in flight".to_string()
+                    } else {
+                        last_failure.clone()
+                    };
+                    self.log_recovery(
+                        attempt + 1,
+                        "timeout",
+                        &retry,
+                        window,
+                        Some("request_timeout"),
+                    );
+                    return Err(terminal_error(RequestTerminal::Timeout, detail));
+                }
+                Err(AttemptFailure::Retry(failure)) => {
+                    last_failure = failure.message;
+                    if failure.protocol_damaged {
+                        had_format_error = true;
+                        // Side-effect-free pre-check: the round may not start
+                        // another feedback round. Do not insert the slot here;
+                        // the round-end commit owns that.
+                        if window.would_exceed(true) {
+                            return Ok(StreamOutput::format_abort(format!(
+                                "format_recovery_exhausted: response stream damaged and the format window is exhausted: {last_failure}"
+                            )));
+                        }
+                    }
+                    // Cancellation always wins over a pending retry.
+                    if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
+                        return Err(anyhow::Error::new(TurnInterrupted));
+                    }
+                    if !retry.can_retry() {
+                        self.log_recovery(
+                            attempt + 1,
+                            failure.category,
+                            &retry,
+                            window,
+                            Some("request_retry_exhausted"),
+                        );
+                        return Err(terminal_error(
+                            RequestTerminal::RetryExhausted,
+                            last_failure,
+                        ));
+                    }
+                    let wait = match retry.retry_wait(
+                        attempt,
+                        failure.retry_after,
+                        recovery::jitter_fraction(),
+                    ) {
+                        Ok(wait) => wait,
+                        Err(_) => {
+                            self.log_recovery(
+                                attempt + 1,
+                                failure.category,
+                                &retry,
+                                window,
+                                Some("request_timeout"),
+                            );
+                            return Err(terminal_error(RequestTerminal::Timeout, last_failure));
+                        }
+                    };
+                    // Exactly one Retry control notification per runtime-managed
+                    // retry: the last candidate is discarded and a new request
+                    // follows.
+                    self.log_recovery(attempt + 1, failure.category, &retry, window, None);
+                    self.ctx.log_event(crate::events::EventLog::Retry);
+                    self.ctx.display.render_retry();
+                    retry.note_retry();
+                    attempt += 1;
+                    if !self.wait_retry_delay(wait).await {
+                        return Err(anyhow::Error::new(TurnInterrupted));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Consume one attempt (one physical request) with its own timers and
+    /// candidate buffers. `deadline` is the optional total request deadline.
+    async fn consume_attempt(
+        &self,
+        prepared: &crate::llm::client::PreparedLlmRequest,
+        attempt_cancel: &crate::cancel::CancellationToken,
+        current_context_tokens: usize,
+        deadline: Option<Instant>,
+    ) -> std::result::Result<StreamOutput, AttemptFailure> {
+        // 首事件期限自本 attempt 起算一次绝对 deadline，覆盖“请求建立＋首事件”；
         // 建流返回不会重新获得完整预算，`Retry` 事件也不延长它。
         let stream_started = Instant::now();
         let first_event_timeout = positive_duration(self.ctx.config.llm_first_event_timeout_secs);
@@ -86,14 +269,11 @@ impl super::TurnExecutor {
         let mut last_heartbeat_at = stream_started;
 
         // 建流 future 只创建一次并 pin：tick 分支不得重建它，否则会重复发请求。
-        let mut establish = std::pin::pin!(crate::llm::client::stream_backend(
+        let mut establish = std::pin::pin!(crate::llm::client::open_llm_stream(
             &self.ctx.llm_backend,
             &self.ctx,
-            &self.model_name,
-            self.model_alias.as_deref(),
-            messages,
-            tools_json,
-            system_prompt,
+            prepared,
+            attempt_cancel.clone(),
         ));
         let mut stream = loop {
             tokio::select! {
@@ -102,40 +282,32 @@ impl super::TurnExecutor {
                 // 已经确定的成功结果。
                 result = &mut establish => {
                     break match result {
-                        Ok(stream) => stream,
-                        Err(error) if error.downcast_ref::<TurnInterrupted>().is_some() => {
-                            return Err(error);
-                        }
-                        Err(error) if is_context_overflow_message(&error.to_string()) => {
-                            return Err(anyhow::Error::new(ContextOverflowError {
-                                message: error.to_string(),
-                            }));
-                        }
-                        Err(error) => return Err(error),
+                        Ok(response) => response.events,
+                        Err(error) => return Err(establish_failure(error)),
                     };
                 }
                 // shutdown / 外层取消：与流消费阶段一致映射为中断。
                 _ = self.ctx.cancel.cancelled() => {
-                    self.ctx.log_event(crate::events::EventLog::Stop {
-                        reason: "interrupted".into(),
-                    });
-                    return Err(anyhow::Error::new(TurnInterrupted));
+                    return Err(AttemptFailure::Interrupted);
+                }
+                // 可选总期限覆盖建流：到点必须停止等待，不建流也不重试。
+                _ = recovery::wait_until(deadline) => {
+                    return Err(AttemptFailure::Timeout);
                 }
                 // tick 仅负责 interrupt 轮询、首事件 deadline 与等待心跳。
                 _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
                     if self.ctx.interrupt.load(Ordering::SeqCst) {
-                        self.ctx.log_event(crate::events::EventLog::Stop {
-                            reason: "interrupted".into(),
-                        });
-                        return Err(anyhow::Error::new(TurnInterrupted));
+                        return Err(AttemptFailure::Interrupted);
                     }
-                    self.check_llm_wait_timeout(
+                    if let Err(error) = self.check_llm_wait_timeout(
                         false,
                         stream_started,
                         stream_started,
                         first_event_timeout,
                         idle_timeout,
-                    )?;
+                    ) {
+                        return Err(attempt_error_failure(error));
+                    }
                     self.maybe_render_llm_wait_heartbeat(
                         false,
                         stream_started,
@@ -155,7 +327,7 @@ impl super::TurnExecutor {
         let mut saw_stop = false;
         let mut saw_any_event = false;
         let mut saw_visible_output = false;
-        // idle 只在流消费阶段计量；首事件 deadline 继续使用请求起点。
+        // idle 只在流消费阶段计量；首事件 deadline 继续使用本 attempt 起点。
         let mut last_event_at = Instant::now();
 
         loop {
@@ -167,17 +339,24 @@ impl super::TurnExecutor {
                 saw_stop = true;
                 break;
             }
+            // 可选总期限在消费循环的确定路径上检查：事件比 25ms tick 更快时
+            // 也不能超期继续消费。
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(AttemptFailure::Timeout);
+            }
             // Deadline enforcement lives on the deterministic loop path: a
             // stream of events arriving faster than the 25ms tick must not
             // starve the first-event/idle checks (each iteration recreates
             // the select's sleep timer).
-            self.check_llm_wait_timeout(
+            if let Err(error) = self.check_llm_wait_timeout(
                 saw_any_event,
                 stream_started,
                 last_event_at,
                 first_event_timeout,
                 idle_timeout,
-            )?;
+            ) {
+                return Err(attempt_error_failure(error));
+            }
 
             let result = tokio::select! {
                 result = stream.next() => result,
@@ -195,15 +374,23 @@ impl super::TurnExecutor {
             let Some(result) = result else {
                 break;
             };
-            let evt = result?;
+            let evt = match result {
+                Ok(evt) => evt,
+                Err(error) => return Err(attempt_error_failure(error)),
+            };
             // Retry is a control notification, not a valid first provider
             // event: it must not satisfy (or restart) the first-event
             // deadline, which stays absolute until real output arrives.
+            // A backend-internal retry notification neither grants a new
+            // request budget nor resets the attempt timer.
+            // Retry is a control notification, not progress: it must not
+            // refresh the idle clock, otherwise a backend that only pings
+            // Retry can hang the turn beyond every configured timeout (F5).
             let is_retry = matches!(&evt, Event::Retry(_));
             if !is_retry {
                 saw_any_event = true;
+                last_event_at = Instant::now();
             }
-            last_event_at = Instant::now();
 
             match evt {
                 Event::Thinking(t) => {
@@ -226,21 +413,6 @@ impl super::TurnExecutor {
                 }
                 Event::ToolCall(call) => {
                     saw_visible_output = true;
-                    self.ctx.log_event(crate::events::EventLog::ToolCall {
-                        version: None,
-                        name: call.name.clone(),
-                        id: call.id.clone(),
-                        input: call.input_json.clone(),
-                    });
-                    let summary = build_tool_call_summary(&call.name, &call.fields);
-                    self.ctx
-                        .display
-                        .render_tool_call(&crate::ui::ToolCallDisplay {
-                            tool_use_id: &call.id,
-                            tool_name: &call.name,
-                            summary: &summary,
-                            input: Some(&call.input_json),
-                        });
                     calls.push(call);
                 }
                 Event::Usage(u) => {
@@ -271,11 +443,31 @@ impl super::TurnExecutor {
                         message: e.message.clone(),
                     });
                     if !saw_visible_output && is_context_overflow_message(&e.message) {
-                        return Err(anyhow::Error::new(ContextOverflowError {
-                            message: e.message,
-                        }));
+                        return Err(AttemptFailure::Fatal(anyhow::Error::new(
+                            ContextOverflowError { message: e.message },
+                        )));
                     }
-                    anyhow::bail!("{}", e.message);
+                    // A provider error envelope inside a `200` stream is
+                    // classified by its structured code/status: known
+                    // transient envelopes retry, everything unknown fails
+                    // closed with the diagnostic preserved.
+                    let kind =
+                        recovery::classify_provider_error(e.provider_code.as_deref(), e.status);
+                    let message = match e.provider_code {
+                        Some(code) => format!("provider error ({code}): {}", e.message),
+                        None => e.message,
+                    };
+                    return Err(match kind {
+                        UpstreamFailureKind::Recoverable => AttemptFailure::Retry(RetryFailure {
+                            protocol_damaged: false,
+                            retry_after: None,
+                            message,
+                            category: "provider_recoverable",
+                        }),
+                        _ => AttemptFailure::Fatal(anyhow::Error::new(LlmUpstreamError::new(
+                            kind, message,
+                        ))),
+                    });
                 }
                 Event::Retry(_) => {
                     self.ctx.log_event(crate::events::EventLog::Retry);
@@ -292,10 +484,14 @@ impl super::TurnExecutor {
 
         drop(stream);
         if !saw_stop {
-            anyhow::bail!("stream ended without stop event");
-        }
-        if let Some(usage) = usage.as_ref() {
-            self.ctx.compaction.record_agent_usage(usage);
+            // 未正常终止的 EOF：当前 attempt 不可信，废弃候选并按格式错误
+            // 记账（由调用方完成预判/提交）。
+            return Err(AttemptFailure::Retry(RetryFailure {
+                protocol_damaged: true,
+                retry_after: None,
+                message: "response stream ended without a terminal stop event".into(),
+                category: "protocol_damaged",
+            }));
         }
         Ok(StreamOutput {
             text,
@@ -303,6 +499,8 @@ impl super::TurnExecutor {
             calls,
             stop,
             usage,
+            format_abort: None,
+            had_format_error: false,
         })
     }
 
@@ -332,7 +530,7 @@ impl super::TurnExecutor {
                     elapsed_ms: Some(now.duration_since(stream_started).as_millis() as u64),
                     idle_ms: None,
                 });
-                anyhow::bail!(message);
+                return Err(anyhow::Error::new(LlmUpstreamError::recoverable(message)));
             }
             return Ok(());
         }
@@ -353,7 +551,7 @@ impl super::TurnExecutor {
                 elapsed_ms: None,
                 idle_ms: Some(now.duration_since(last_event_at).as_millis() as u64),
             });
-            anyhow::bail!(message);
+            return Err(anyhow::Error::new(LlmUpstreamError::recoverable(message)));
         }
         Ok(())
     }
@@ -385,5 +583,79 @@ impl super::TurnExecutor {
         self.ctx
             .display
             .render_info(&crate::ui::llm_wait_heartbeat_message(elapsed, idle));
+    }
+
+    /// Cancellable backoff wait; `false` means the turn was interrupted or
+    /// cancelled while waiting.
+    async fn wait_retry_delay(&self, wait: Duration) -> bool {
+        let sleep = tokio::time::sleep(wait);
+        tokio::pin!(sleep);
+        loop {
+            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
+                return false;
+            }
+            tokio::select! {
+                _ = &mut sleep => return true,
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+        }
+    }
+
+    /// Minimal bounded-recovery diagnostic record.
+    fn log_recovery(
+        &self,
+        attempt: u32,
+        category: &str,
+        retry: &RequestRetryState,
+        window: &super::format_recovery::FormatRecoveryWindow,
+        terminal: Option<&str>,
+    ) {
+        self.ctx.log_event(crate::events::EventLog::LlmRecovery {
+            round: Some(self.local.round),
+            attempt,
+            category: category.to_string(),
+            retries: retry.used_retries(),
+            window_errors: window.error_count(),
+            terminal: terminal.map(str::to_string),
+        });
+    }
+}
+
+fn establish_failure(error: anyhow::Error) -> AttemptFailure {
+    if error.downcast_ref::<TurnInterrupted>().is_some() {
+        return AttemptFailure::Interrupted;
+    }
+    if is_context_overflow_message(&format!("{error:#}")) {
+        return AttemptFailure::Fatal(anyhow::Error::new(ContextOverflowError {
+            message: format!("{error:#}"),
+        }));
+    }
+    attempt_error_failure(error)
+}
+
+/// Classify an attempt error. Untyped errors keep their pre-existing
+/// fail-closed behavior (a custom backend must return the typed error to
+/// request retries).
+fn attempt_error_failure(error: anyhow::Error) -> AttemptFailure {
+    if error.downcast_ref::<TurnInterrupted>().is_some() {
+        return AttemptFailure::Interrupted;
+    }
+    let Some(upstream) = find_upstream_failure(&error) else {
+        return AttemptFailure::Fatal(error);
+    };
+    match upstream.kind() {
+        UpstreamFailureKind::Recoverable => AttemptFailure::Retry(RetryFailure {
+            protocol_damaged: false,
+            retry_after: upstream.retry_after(),
+            category: "recoverable",
+            message: format!("{error:#}"),
+        }),
+        UpstreamFailureKind::ProtocolDamaged => AttemptFailure::Retry(RetryFailure {
+            protocol_damaged: true,
+            retry_after: None,
+            category: "protocol_damaged",
+            message: format!("{error:#}"),
+        }),
+        UpstreamFailureKind::Permanent => AttemptFailure::Fatal(error),
     }
 }

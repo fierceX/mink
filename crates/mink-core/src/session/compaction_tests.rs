@@ -117,6 +117,7 @@ async fn add_tool_history(ctx: &crate::context::AgentSharedContext) -> anyhow::R
                 input_json: json!({"command":"cargo test"}),
                 fields: Default::default(),
                 parse_error: None,
+                raw_arguments_digest: None,
             }],
         )
         .await?;
@@ -144,6 +145,7 @@ async fn add_follow_up_turn(ctx: &crate::context::AgentSharedContext) -> anyhow:
                 input_json: json!({"command":"cargo test --lib"}),
                 fields: Default::default(),
                 parse_error: None,
+                raw_arguments_digest: None,
             }],
         )
         .await?;
@@ -624,6 +626,363 @@ async fn partial_alignment_rolls_back_before_incomplete_tool_exchange() -> anyho
     Ok(())
 }
 
+#[derive(Default)]
+struct TransientSummaryBackend {
+    calls: Mutex<u32>,
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for TransientSummaryBackend {
+    fn name(&self) -> &str {
+        "transient-summary"
+    }
+
+    async fn stream(&self, _request: LlmRequest) -> Result<crate::llm::client::LlmResponseStream> {
+        let mut calls = self.calls.lock().unwrap();
+        *calls += 1;
+        if *calls == 1 {
+            return Err(anyhow::Error::new(
+                crate::llm::recovery::LlmUpstreamError::recoverable("HTTP 502: transient")
+                    .with_status(502),
+            ));
+        }
+        Ok(crate::llm::client::LlmResponseStream {
+            events: Box::pin(futures::stream::iter(vec![
+                Ok(Event::Usage(crate::protocol::UsageEvent {
+                    input_tokens: 21,
+                    output_tokens: 8,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })),
+                Ok(Event::Text(TextEvent {
+                    content: "Task focus: retried\nLatest request: compact\nProgress: recovered\nErrors: (none)\nDecisions: (none)\nTool evidence: none\nReflections: none".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ])),
+            attempt_count: 1,
+        })
+    }
+}
+
+/// A transient summary failure is retried inside the same compaction
+/// operation and commits exactly once；usage 每个物理 attempt 各结算一笔。
+#[tokio::test]
+async fn transient_summary_failure_retries_and_commits_once() -> anyhow::Result<()> {
+    let backend = Arc::new(TransientSummaryBackend::default());
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "summary-retry-502",
+        |config| {
+            config.max_context_tokens = 64_000;
+            config.context_reserve_tokens = 8_000;
+            config.context_compact_tail_tokens = 1;
+        },
+        backend.clone(),
+    )
+    .await?;
+    add_tool_history(&ctx).await?;
+    add_follow_up_turn(&ctx).await?;
+    let before = ctx.compaction.active_messages().await?;
+
+    let (compacted, _reason) = compact(&ctx, "manual", 0).await?;
+    assert!(compacted);
+    assert_eq!(*backend.calls.lock().unwrap(), 2, "one retry after the 502");
+    let after = ctx.compaction.active_messages().await?;
+    assert!(
+        after.len() < before.len(),
+        "the accepted summary advances the projection"
+    );
+    assert!(ctx.compaction.read_summary().await.is_some());
+    let records = ctx.usage.all_records()?;
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert!(
+        records
+            .iter()
+            .any(|record| record.status == crate::session::usage::UsageStatus::Unreported)
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record.status == crate::session::usage::UsageStatus::Reported)
+    );
+    Ok(())
+}
+
+/// The optional total request deadline also bounds a summary
+/// request that is already in flight, not only the gaps between attempts.
+struct SlowSummaryBackend {
+    delay: std::time::Duration,
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for SlowSummaryBackend {
+    fn name(&self) -> &str {
+        "slow-summary"
+    }
+
+    async fn stream(&self, _request: LlmRequest) -> Result<crate::llm::client::LlmResponseStream> {
+        tokio::time::sleep(self.delay).await;
+        Ok(crate::llm::client::LlmResponseStream {
+            events: Box::pin(futures::stream::iter(vec![
+                Ok(Event::Text(TextEvent {
+                    content: "Task focus: too late\nLatest request: compact\nProgress: late\nErrors: (none)\nDecisions: (none)\nTool evidence: none\nReflections: none".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ])),
+            attempt_count: 1,
+        })
+    }
+}
+
+#[tokio::test]
+async fn summary_deadline_bounds_an_in_flight_request() -> anyhow::Result<()> {
+    let backend = Arc::new(SlowSummaryBackend {
+        delay: std::time::Duration::from_millis(1500),
+    });
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "summary-deadline-in-flight",
+        |config| {
+            config.max_context_tokens = 64_000;
+            config.context_reserve_tokens = 8_000;
+            config.context_compact_tail_tokens = 1;
+            config.llm_recovery.request_timeout_secs = Some(1);
+        },
+        backend.clone(),
+    )
+    .await?;
+    add_tool_history(&ctx).await?;
+    add_follow_up_turn(&ctx).await?;
+    let before = ctx.compaction.active_messages().await?;
+
+    let started = std::time::Instant::now();
+    let error = compact(&ctx, "manual", 0)
+        .await
+        .expect_err("the deadline must fail the summary request")
+        .to_string();
+    let elapsed = started.elapsed();
+
+    assert!(error.contains("request_timeout"), "{error}");
+    assert!(
+        elapsed < std::time::Duration::from_millis(1400),
+        "the 1s deadline must cut the in-flight summary short: {elapsed:?}"
+    );
+    let after = ctx.compaction.active_messages().await?;
+    assert_eq!(
+        after.len(),
+        before.len(),
+        "nothing is committed on a deadline"
+    );
+    assert!(ctx.compaction.read_summary().await.is_none());
+    Ok(())
+}
+
+/// One summary Text, then a stream that never yields again (audit F6 idle).
+struct StallingSummaryBackend;
+
+#[async_trait::async_trait]
+impl LlmBackend for StallingSummaryBackend {
+    fn name(&self) -> &str {
+        "stalling-summary"
+    }
+
+    async fn stream(&self, _request: LlmRequest) -> Result<crate::llm::client::LlmResponseStream> {
+        let head = futures::stream::once(async {
+            Ok(Event::Text(TextEvent {
+                content: "Task focus: partial".into(),
+            }))
+        });
+        let tail = futures::stream::pending();
+        Ok(crate::llm::client::LlmResponseStream {
+            events: Box::pin(futures::StreamExt::chain(head, tail)),
+            attempt_count: 1,
+        })
+    }
+}
+
+/// Regression: the first attempt records its cancel token and fails recoverably;
+/// the retry records whether that token was already cancelled.
+#[derive(Default)]
+struct CancelTrackingSummaryBackend {
+    calls: std::sync::atomic::AtomicUsize,
+    first_token: Mutex<Option<crate::cancel::CancellationToken>>,
+    first_cancelled_at_retry: Mutex<Option<bool>>,
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for CancelTrackingSummaryBackend {
+    fn name(&self) -> &str {
+        "cancel-tracking-summary"
+    }
+
+    async fn stream(&self, request: LlmRequest) -> Result<crate::llm::client::LlmResponseStream> {
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call == 0 {
+            *self.first_token.lock().unwrap() = Some(request.cancel.clone());
+            return Err(anyhow::Error::new(
+                crate::llm::recovery::LlmUpstreamError::recoverable("HTTP 502: transient"),
+            ));
+        }
+        let cancelled = self
+            .first_token
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|token| token.is_cancelled())
+            .unwrap_or(false);
+        *self.first_cancelled_at_retry.lock().unwrap() = Some(cancelled);
+        Ok(crate::llm::client::LlmResponseStream {
+            events: Box::pin(futures::stream::iter(vec![
+                Ok(Event::Text(TextEvent {
+                    content: "Task focus: retried\nLatest request: compact\nProgress: recovered\nErrors: (none)\nDecisions: (none)\nTool evidence: none\nReflections: none".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ])),
+            attempt_count: 1,
+        })
+    }
+}
+
+fn summary_test_config(config: &mut Config) {
+    config.max_context_tokens = 64_000;
+    config.context_reserve_tokens = 8_000;
+    config.context_compact_tail_tokens = 1;
+    config.llm_recovery.request_max_retries = 0;
+    config.llm_recovery.request_timeout_secs = None;
+}
+
+/// Regression: the compaction attempt honours the first-event timeout while the
+/// request is still being established.
+#[tokio::test]
+async fn summary_first_event_timeout_is_enforced() -> anyhow::Result<()> {
+    let backend: Arc<dyn LlmBackend> = Arc::new(SlowSummaryBackend {
+        delay: std::time::Duration::from_millis(1500),
+    });
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "summary-first-event-timeout",
+        |config| {
+            summary_test_config(config);
+            config.llm_first_event_timeout_secs = 1;
+        },
+        backend,
+    )
+    .await?;
+    add_tool_history(&ctx).await?;
+    add_follow_up_turn(&ctx).await?;
+    let before = ctx.compaction.active_messages().await?;
+
+    let started = std::time::Instant::now();
+    let error = compact(&ctx, "manual", 0)
+        .await
+        .expect_err("the first-event timeout must fail the summary")
+        .to_string();
+    let elapsed = started.elapsed();
+
+    assert!(error.contains("first event"), "{error}");
+    assert!(
+        elapsed < std::time::Duration::from_millis(1400),
+        "the 1s first-event budget must cut the establish wait short: {elapsed:?}"
+    );
+    assert_eq!(ctx.compaction.active_messages().await?.len(), before.len());
+    assert!(ctx.compaction.read_summary().await.is_none());
+    Ok(())
+}
+
+/// Regression: an established request that never yields a first event also hits
+/// the same budget.
+#[tokio::test]
+async fn summary_pending_stream_first_event_timeout_is_enforced() -> anyhow::Result<()> {
+    let backend: Arc<dyn LlmBackend> = Arc::new(PendingSummaryBackend);
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "summary-pending-first-event",
+        |config| {
+            summary_test_config(config);
+            config.llm_first_event_timeout_secs = 1;
+        },
+        backend,
+    )
+    .await?;
+    add_tool_history(&ctx).await?;
+    add_follow_up_turn(&ctx).await?;
+
+    let error = compact(&ctx, "manual", 0)
+        .await
+        .expect_err("a pending stream must hit the first-event timeout")
+        .to_string();
+    assert!(error.contains("first event"), "{error}");
+    assert!(ctx.compaction.read_summary().await.is_none());
+    Ok(())
+}
+
+/// Regression: a summary that stalls after its first event hits the idle budget.
+#[tokio::test]
+async fn summary_idle_timeout_is_enforced() -> anyhow::Result<()> {
+    let backend: Arc<dyn LlmBackend> = Arc::new(StallingSummaryBackend);
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "summary-idle-timeout",
+        |config| {
+            summary_test_config(config);
+            config.llm_first_event_timeout_secs = 60;
+            config.llm_idle_timeout_secs = 1;
+        },
+        backend,
+    )
+    .await?;
+    add_tool_history(&ctx).await?;
+    add_follow_up_turn(&ctx).await?;
+
+    let started = std::time::Instant::now();
+    let error = compact(&ctx, "manual", 0)
+        .await
+        .expect_err("the idle timeout must fail the summary")
+        .to_string();
+    let elapsed = started.elapsed();
+
+    assert!(error.contains("idle timeout"), "{error}");
+    assert!(
+        elapsed < std::time::Duration::from_millis(1800),
+        "the 1s idle budget must end the stalled summary: {elapsed:?}"
+    );
+    assert!(ctx.compaction.read_summary().await.is_none());
+    Ok(())
+}
+
+/// Regression: a failed establish closes its attempt token before the backoff and
+/// before the next request starts; the parent token stays alive.
+#[tokio::test]
+async fn failed_compaction_attempt_is_cancelled_before_retry() -> anyhow::Result<()> {
+    let backend = Arc::new(CancelTrackingSummaryBackend::default());
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "summary-cancel-before-retry",
+        |config| {
+            summary_test_config(config);
+            config.llm_recovery.request_max_retries = 1;
+            config.llm_first_event_timeout_secs = 60;
+            config.llm_idle_timeout_secs = 60;
+        },
+        backend.clone(),
+    )
+    .await?;
+    add_tool_history(&ctx).await?;
+    add_follow_up_turn(&ctx).await?;
+
+    let (compacted, _reason) = compact(&ctx, "manual", 0).await?;
+
+    assert!(compacted, "the retry must still succeed");
+    assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        *backend.first_cancelled_at_retry.lock().unwrap(),
+        Some(true),
+        "the failed attempt token must be cancelled before the retry starts"
+    );
+    assert!(ctx.compaction.read_summary().await.is_some());
+    Ok(())
+}
+
 #[tokio::test]
 async fn summary_tool_call_fails_explicitly_without_advancing_context() -> anyhow::Result<()> {
     let backend = Arc::new(MockLlmBackend::new(
@@ -635,6 +994,7 @@ async fn summary_tool_call_fails_explicitly_without_advancing_context() -> anyho
                 input_json: json!({"path":"src/lib.rs"}),
                 fields: Default::default(),
                 parse_error: None,
+                raw_arguments_digest: None,
             })),
             Ok(Event::Stop(StopEvent {
                 reason: "tool_use".into(),
@@ -647,6 +1007,9 @@ async fn summary_tool_call_fails_explicitly_without_advancing_context() -> anyho
             config.max_context_tokens = 64_000;
             config.context_reserve_tokens = 8_000;
             config.context_compact_tail_tokens = 1;
+            // One attempt: the retry budget for unusable summaries is
+            // exercised by the dedicated recovery tests.
+            config.llm_recovery.request_max_retries = 0;
         },
         backend,
     )
@@ -1436,7 +1799,7 @@ async fn memo_epoch_is_shared_and_bumped_by_compaction() -> anyhow::Result<()> {
 
 #[test]
 fn cut_refuses_when_tail_user_guard_cannot_be_satisfied_without_dropping_all() {
-    // Audit R1 scenario A: candidate/safe boundary after the last real user
+    // Scenario A: candidate/safe boundary after the last real user
     // would leave zero real users in the tail; the cut must refuse.
     let messages = vec![
         json!({"role":"user","content":"first constraint"}),
@@ -1452,7 +1815,7 @@ fn cut_refuses_when_tail_user_guard_cannot_be_satisfied_without_dropping_all() {
 
 #[test]
 fn cut_refuses_when_only_one_real_user_precedes_candidate() {
-    // Audit R1 scenario B: safe boundary (assistant) has one real user after
+    // Scenario B: safe boundary (assistant) has one real user after
     // it and only one before; satisfying two tail users would reach index 0.
     let messages = vec![
         json!({"role":"user","content":"head constraint"}),

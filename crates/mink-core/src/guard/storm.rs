@@ -10,6 +10,10 @@ struct StormEntry {
     name: String,
     args: String,
     mutating: bool,
+    /// Earlier identical call was confirmed as a pure model-format decode
+    /// failure: suppression must preserve that provenance instead of
+    /// turning it into a hard execution failure.
+    format_confirmed: bool,
 }
 
 pub struct StormBreaker {
@@ -52,6 +56,7 @@ impl StormBreaker {
             name: name.to_string(),
             args: args.to_string(),
             mutating,
+            format_confirmed: false,
         });
         while self.window.len() > self.max_window {
             self.window.pop_front();
@@ -70,6 +75,28 @@ impl StormBreaker {
         } else {
             StormDecision::Allow
         }
+    }
+
+    /// Record that the identical call was confirmed as a pure model-format
+    /// decode failure. Matching entries in the existing bounded window are
+    /// flagged; no second cache is introduced.
+    pub fn mark_format(&mut self, name: &str, args: &str) {
+        for entry in self.window.iter_mut() {
+            if entry.name == name && entry.args == args {
+                entry.format_confirmed = true;
+            }
+        }
+    }
+
+    /// Whether a previously observed identical call was confirmed as a pure
+    /// model-format decode failure.
+    pub fn is_format_confirmed(&self, name: &str, args: &str, mutating: bool) -> bool {
+        self.window.iter().any(|entry| {
+            entry.name == name
+                && entry.args == args
+                && entry.mutating == mutating
+                && entry.format_confirmed
+        })
     }
 }
 

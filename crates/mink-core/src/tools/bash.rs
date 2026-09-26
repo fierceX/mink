@@ -181,7 +181,7 @@ impl super::runner::ToolExec for BashTool {
             #[serde(default)]
             timeout: Option<u64>,
         }
-        let args: Args = serde_json::from_value(input.clone())?;
+        let args: Args = crate::tools::args::decode_args(input)?;
         // misuse 检测是引导而非门禁：命令照常执行，提示附在结果尾部，
         // 模型可在后续调用改用专用 provider，而不丢失当前这一轮。
         let hint = bash_misuse_guidance(&args.command, &ctx.tool_surface, &ctx.tool_capabilities)

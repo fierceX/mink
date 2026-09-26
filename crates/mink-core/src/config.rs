@@ -140,6 +140,55 @@ impl ModelResolver {
     }
 }
 
+/// Bounded LLM recovery policy.
+///
+/// The format window bounds how many self-correction rounds a turn may spend
+/// on model-output format errors; the request retry budget bounds repeated
+/// physical attempts of one logical request. Both are plain configuration —
+/// there is deliberately no pluggable strategy layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LlmRecoveryPolicy {
+    /// Sliding window of completed rounds used to bound format errors.
+    pub format_window_size: usize,
+    /// Format errors tolerated inside the window before the turn ends.
+    pub format_max_errors: usize,
+    /// Retry calls allowed beyond the first attempt of one logical request.
+    pub request_max_retries: u32,
+    /// Optional total deadline for one logical request (all attempts and
+    /// waits). `None` keeps the pre-existing per-attempt timeouts only.
+    pub request_timeout_secs: Option<u64>,
+}
+
+impl Default for LlmRecoveryPolicy {
+    fn default() -> Self {
+        Self {
+            format_window_size: 10,
+            format_max_errors: 3,
+            request_max_retries: 3,
+            request_timeout_secs: None,
+        }
+    }
+}
+
+impl LlmRecoveryPolicy {
+    pub fn validate(&self) -> Result<()> {
+        if !(1..=1024).contains(&self.format_window_size) {
+            bail!("format_window_size must be between 1 and 1024");
+        }
+        if self.format_max_errors >= self.format_window_size {
+            bail!("format_max_errors must be less than format_window_size");
+        }
+        if self.request_max_retries > 16 {
+            bail!("request_max_retries must be at most 16");
+        }
+        if self.request_timeout_secs == Some(0) {
+            bail!("request_timeout_secs must be greater than 0 when set");
+        }
+        Ok(())
+    }
+}
+
 /// CPython WASI 沙箱工具的运行时配置（从 .minkrc 的 `[sandbox_python]` 加载）。
 #[derive(Debug, Clone)]
 pub struct SandboxPythonConfig {
@@ -306,6 +355,8 @@ pub struct ResolvedConfig {
     /// Per-tool approval overrides keyed by tool name.
     pub tool_approval: BTreeMap<String, ToolApprovalPolicy>,
     pub signal_policy: SignalPolicy,
+    /// Bounded format-error window and request-retry budget.
+    pub llm_recovery: LlmRecoveryPolicy,
     pub(crate) signal: SignalConfig,
     /// Explicit image-input capability override. Priority: explicit config
     /// over backend declaration, then Unsupported (v7 §3.1). `None` defers
@@ -378,6 +429,7 @@ impl Default for ResolvedConfig {
             tool_approval_mode: ToolApprovalMode::Yolo,
             tool_approval: BTreeMap::new(),
             signal_policy: SignalPolicy::Full,
+            llm_recovery: LlmRecoveryPolicy::default(),
             signal: SignalConfig::default(),
             image_input: None,
             image_limits: None,
@@ -413,6 +465,7 @@ pub fn validate_runtime_config(cfg: &ResolvedConfig) -> Result<()> {
     if cfg.tool_timeout_max_secs < 5 {
         bail!("tool_timeout_max_secs must be at least 5 seconds");
     }
+    cfg.llm_recovery.validate()?;
     Ok(())
 }
 
@@ -652,6 +705,77 @@ mod validation_tests {
         );
         cfg.tool_timeout_max_secs = 5;
         assert!(validate_runtime_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn llm_recovery_policy_bounds_are_validated() {
+        let validate = |policy: LlmRecoveryPolicy| {
+            let cfg = ResolvedConfig {
+                llm_recovery: policy,
+                ..ResolvedConfig::default()
+            };
+            validate_runtime_config(&cfg)
+        };
+        assert!(validate(LlmRecoveryPolicy::default()).is_ok());
+        assert!(
+            validate(LlmRecoveryPolicy {
+                format_window_size: 0,
+                ..LlmRecoveryPolicy::default()
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("format_window_size")
+        );
+        assert!(
+            validate(LlmRecoveryPolicy {
+                format_window_size: 1025,
+                format_max_errors: 3,
+                ..LlmRecoveryPolicy::default()
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("format_window_size")
+        );
+        // K must be strictly less than W; K = 0 is valid (no format budget).
+        assert!(
+            validate(LlmRecoveryPolicy {
+                format_window_size: 4,
+                format_max_errors: 4,
+                ..LlmRecoveryPolicy::default()
+            })
+            .is_err()
+        );
+        assert!(
+            validate(LlmRecoveryPolicy {
+                format_window_size: 1,
+                format_max_errors: 0,
+                ..LlmRecoveryPolicy::default()
+            })
+            .is_ok()
+        );
+        assert!(
+            validate(LlmRecoveryPolicy {
+                request_max_retries: 17,
+                ..LlmRecoveryPolicy::default()
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("request_max_retries")
+        );
+        assert!(
+            validate(LlmRecoveryPolicy {
+                request_timeout_secs: Some(0),
+                ..LlmRecoveryPolicy::default()
+            })
+            .is_err()
+        );
+        assert!(
+            validate(LlmRecoveryPolicy {
+                request_timeout_secs: Some(30),
+                ..LlmRecoveryPolicy::default()
+            })
+            .is_ok()
+        );
     }
 
     #[test]

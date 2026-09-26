@@ -243,30 +243,66 @@ async fn signal_recovery_guard_allows_first_read() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn stop_error_reasons_return_failed_and_unknown_reasons_stop() -> anyhow::Result<()> {
+    // Truncation is a discarded candidate: the round is answered with a bounded
+    // diagnostic and the next round completes normally.
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
-        vec![vec![Ok(Event::Stop(StopEvent {
-            reason: "max_tokens".into(),
-        }))]],
+        vec![
+            vec![Ok(Event::Stop(StopEvent {
+                reason: "max_tokens".into(),
+            }))],
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content: "short final".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "stop".into(),
+                })),
+            ],
+        ],
     ));
     let h = harness_with_backend("stop-reasons", llm.clone()).await?;
 
     let mut executor = TurnExecutor::new(h.ctx.clone());
     let (decision, effects) = executor.execute("too long", None).await?;
-    assert_eq!(decision, TurnDecision::Failed("stop: max_tokens".into()));
+    assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());
+    let lines = h.ctx.store.lines().await?;
+    assert!(
+        lines.iter().any(|line| {
+            line["role"] == "user"
+                && line["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("<output-truncated>"))
+        }),
+        "a truncated candidate must feed back a bounded diagnostic: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| {
+            line["role"] == "assistant"
+                && line["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("<output-truncated>"))
+        }),
+        "the truncated text must be discarded, not persisted: {lines:?}"
+    );
 
+    // An explicit content refusal is terminal: never re-prompted as a format
+    // error and never a silent success.
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         vec![vec![Ok(Event::Stop(StopEvent {
             reason: "content_filter".into(),
         }))]],
     ));
-    let h = harness_with_backend("unknown-stop", llm.clone()).await?;
+    let h = harness_with_backend("content-filter-stop", llm.clone()).await?;
 
     let mut executor = TurnExecutor::new(h.ctx.clone());
-    let (decision, effects) = executor.execute("unknown", None).await?;
-    assert_eq!(decision, TurnDecision::Stop);
+    let (decision, effects) = executor.execute("filtered", None).await?;
+    assert_eq!(
+        decision,
+        TurnDecision::Failed("stop: content_filter".into())
+    );
     assert!(effects.is_empty());
     Ok(())
 }
@@ -339,14 +375,14 @@ async fn soft_only_editloop_does_not_inject_above_warn_zone() -> anyhow::Result<
     // 不注入任何消息（记录但不干预），避免打断正常的写->编译->修流程。
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
-        vec![
-            vec![Ok(Event::Stop(StopEvent {
-                reason: "tool_calls".into(),
-            }))],
-            vec![Ok(Event::Stop(StopEvent {
+        vec![vec![
+            Ok(Event::Text(TextEvent {
+                content: "done".into(),
+            })),
+            Ok(Event::Stop(StopEvent {
                 reason: "end_turn".into(),
-            }))],
-        ],
+            })),
+        ]],
     ));
     let h = harness_with_backend("soft-only-no-inject", llm.clone()).await?;
 

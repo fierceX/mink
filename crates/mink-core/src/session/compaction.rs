@@ -1,7 +1,5 @@
 use crate::config::ResolvedConfig as Config;
-use crate::llm::client::{
-    LlmBackend, LlmCacheProjection, LlmModelTarget, LlmPurpose, LlmRequest, MeteredStream,
-};
+use crate::llm::client::{LlmBackend, LlmCacheProjection, LlmModelTarget, LlmPurpose, LlmRequest};
 use crate::protocol::{ErrorEvent, Event, StopEvent, TextEvent, UsageEvent};
 use crate::session::compaction_input;
 use crate::session::event_log::EventLogWriter;
@@ -10,7 +8,6 @@ use crate::session::store::ConversationStore;
 use crate::session::usage::{UsageJournal, UsageKind};
 use crate::ui::Display;
 use anyhow::{Result, bail};
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -616,6 +613,8 @@ impl CompactionEngine {
         target: LlmModelTarget<'_>,
         request_cancel: crate::cancel::CancellationToken,
     ) -> Result<(String, SummaryInputMeta)> {
+        use crate::llm::recovery::{self, RequestRetryState, RequestTerminal, UpstreamFailureKind};
+
         let input = self.build_summary_input(
             active,
             cut,
@@ -646,100 +645,320 @@ impl CompactionEngine {
             }
         }
 
-        let mut usage_guard = crate::session::usage::UsageGuard::new(
-            self.usage.capture(
+        // The summary request uses the same request-retry budget and backoff
+        // as the main agent, but keeps its own consumption loop: a completed
+        // yet unusable summary (empty output, tool call, invalid stop reason)
+        // is retried with a purpose correction appended to this temporary
+        // request only — never written to the parent conversation.
+        let mut retry = RequestRetryState::new(&self.config.llm_recovery);
+        // Same deadline for establishment, consumption and every wait.
+        let request_deadline = retry.deadline();
+        let mut attempt: u32 = 0;
+        let mut correction: Option<String> = None;
+        loop {
+            if request_cancel.is_cancelled() {
+                bail!("compaction interrupted");
+            }
+            self.fault.check()?;
+            if retry.deadline_expired() {
+                bail!(
+                    "{}: compaction summary deadline exceeded",
+                    RequestTerminal::Timeout.message()
+                );
+            }
+            let attempt_cancel = request_cancel.linked_child_token();
+            let mut attempt_messages = messages.clone();
+            if let Some(correction) = &correction {
+                attempt_messages.push(json!({
+                    "role": "user",
+                    "internal": true,
+                    "content": correction,
+                }));
+            }
+            // Cache-aligned summaries deliberately retain the Agent tool
+            // schemas so the provider can reuse the immutable request prefix.
+            // Those tools are alignment-only: compaction never executes them.
+            let request = LlmRequest {
+                purpose: LlmPurpose::Compaction,
+                model: target.model.to_string(),
+                model_alias: target.alias.map(str::to_string),
+                api_url: self.api_url.clone(),
+                api_key: self.api_key.clone(),
+                system_prompt: system_prompt.clone(),
+                messages: attempt_messages,
+                tools: tools.clone(),
+                max_tokens: compaction_max_output_tokens(&self.config),
+                cancel: attempt_cancel.clone(),
+                verbose: self.config.verbose,
+                display: self.display.clone(),
+            };
+            let capture = self.usage.capture(
                 self.usage
                     .scope(UsageKind::Compaction, self.session_id.clone()),
                 target.model.to_string(),
-            ),
-        );
-        // Cache-aligned summaries deliberately retain the Agent tool schemas so
-        // the provider can reuse the immutable request prefix. Those tools are
-        // alignment-only: compaction never executes them, and any emitted tool
-        // call is rejected explicitly while consuming the response below.
-        let request = self.llm_backend.stream(LlmRequest {
-            purpose: LlmPurpose::Compaction,
-            model: target.model.to_string(),
-            model_alias: target.alias.map(str::to_string),
-            api_url: self.api_url.clone(),
-            api_key: self.api_key.clone(),
-            system_prompt,
-            messages,
-            tools,
-            max_tokens: compaction_max_output_tokens(&self.config),
-            cancel: request_cancel.clone(),
-            verbose: self.config.verbose,
-            display: self.display.clone(),
-        });
-        tokio::pin!(request);
-        let response = match tokio::select! {
-            response = &mut request => response,
-            _ = request_cancel.cancelled() => {
-                usage_guard.record_unreported(1, "compaction_interrupted");
-                bail!("compaction interrupted");
-            }
-        } {
-            Ok(response) => response,
-            Err(error) => {
-                let attempts = crate::llm::client::request_failure_attempt_count(&error);
-                usage_guard.record_unreported(attempts, format!("request_failed: {error}"));
-                return Err(error);
-            }
-        };
+            );
+            // First-event and idle deadlines mirror the main request path:
+            // the first-event budget covers establishment plus the wait for
+            // the first event of this attempt, the idle budget covers gaps
+            // between real events. Retry notifications are not progress.
+            let attempt_started = std::time::Instant::now();
+            let first_event_timeout =
+                crate::agent::turn::positive_duration(self.config.llm_first_event_timeout_secs);
+            let idle_timeout =
+                crate::agent::turn::positive_duration(self.config.llm_idle_timeout_secs);
+            let opened = tokio::select! {
+                opened = crate::llm::client::guarded_open_stream(
+                    &self.llm_backend,
+                    request,
+                    capture,
+                ) => opened,
+                _ = request_cancel.cancelled() => bail!("compaction interrupted"),
+                _ = recovery::wait_until(request_deadline) => {
+                    bail!(
+                        "{}: compaction summary deadline exceeded before the request was established",
+                        RequestTerminal::Timeout.message()
+                    )
+                }
+                _ = wait_first_event_deadline(attempt_started, first_event_timeout) => {
+                    let failure = SummaryRetry {
+                        retry_after: None,
+                        message: format!(
+                            "compaction summary first event timeout after {} seconds",
+                            first_event_timeout.map_or(0, |timeout| timeout.as_secs())
+                        ),
+                    };
+                    attempt_cancel.cancel();
+                    self.wait_summary_retry(&mut retry, attempt, &failure, &request_cancel)
+                        .await?;
+                    attempt += 1;
+                    continue;
+                }
+            };
+            let response = match opened {
+                Ok(response) => response,
+                Err(error) => {
+                    // Close this failed attempt before classifying/backing off:
+                    // a custom backend may still hold the attempt token (F7).
+                    attempt_cancel.cancel();
+                    if request_cancel.is_cancelled() {
+                        bail!("compaction interrupted");
+                    }
+                    let failure = classify_summary_failure(&error);
+                    if let Some(failure) = failure {
+                        self.wait_summary_retry(&mut retry, attempt, &failure, &request_cancel)
+                            .await?;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
 
-        let capture = usage_guard
-            .take()
-            .expect("usage guard transferred exactly once");
-        let mut stream = MeteredStream::new(response.events, capture, response.attempt_count);
+            let consumption = self
+                .consume_summary_stream(
+                    response.events,
+                    &request_cancel,
+                    request_deadline,
+                    attempt_started,
+                    first_event_timeout,
+                    idle_timeout,
+                )
+                .await?;
+            attempt_cancel.cancel();
+            match consumption {
+                SummaryConsumption::Complete {
+                    output,
+                    stop_reason,
+                    invalid_tool_call,
+                } => {
+                    let summary = strip_dsml_tags(&output);
+                    let issue = if let Some((name, id)) = invalid_tool_call {
+                        Some(format!(
+                            "compaction attempted invalid tool call {name} ({id})"
+                        ))
+                    } else if !matches!(stop_reason.as_str(), "stop" | "end_turn") {
+                        Some(format!("invalid stop reason {stop_reason:?}"))
+                    } else if summary.trim().is_empty() {
+                        Some("empty response".to_string())
+                    } else {
+                        None
+                    };
+                    match issue {
+                        None => return Ok((summary.trim().to_string(), meta)),
+                        Some(issue) => {
+                            // The correction lives only in this temporary
+                            // summary request tail.
+                            let failure = SummaryRetry {
+                                retry_after: None,
+                                message: issue.clone(),
+                            };
+                            self.wait_summary_retry(&mut retry, attempt, &failure, &request_cancel)
+                                .await?;
+                            attempt += 1;
+                            correction = Some(format!(
+                                "<summary-retry>Your previous response was rejected: {issue}. Output only the seven required summary fields now, starting directly with Task focus:.</summary-retry>"
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                SummaryConsumption::ProviderError(error) => {
+                    let kind = recovery::classify_provider_error(
+                        error.provider_code.as_deref(),
+                        error.status,
+                    );
+                    let message = format!("failed to generate context summary: {}", error.message);
+                    if kind != UpstreamFailureKind::Recoverable {
+                        bail!("{message}");
+                    }
+                    let failure = SummaryRetry {
+                        retry_after: None,
+                        message,
+                    };
+                    self.wait_summary_retry(&mut retry, attempt, &failure, &request_cancel)
+                        .await?;
+                    attempt += 1;
+                    continue;
+                }
+                SummaryConsumption::StreamError(error) => {
+                    let failure = classify_summary_failure(&error);
+                    if let Some(failure) = failure {
+                        self.wait_summary_retry(&mut retry, attempt, &failure, &request_cancel)
+                            .await?;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(error);
+                }
+                SummaryConsumption::Deadline => bail!(
+                    "{}: compaction summary deadline exceeded while streaming",
+                    RequestTerminal::Timeout.message()
+                ),
+                SummaryConsumption::Interrupted => bail!("compaction interrupted"),
+            }
+        }
+    }
+
+    /// Consume one compaction attempt without committing anything. `deadline`
+    /// is the optional total request deadline shared with establishment and
+    /// the retry waits; `attempt_started`/`first_event_timeout`/`idle_timeout`
+    /// are the per-attempt first-event and idle deadlines.
+    async fn consume_summary_stream(
+        &self,
+        mut stream: crate::llm::client::LlmEventStream,
+        request_cancel: &crate::cancel::CancellationToken,
+        deadline: Option<std::time::Instant>,
+        attempt_started: std::time::Instant,
+        first_event_timeout: Option<std::time::Duration>,
+        idle_timeout: Option<std::time::Duration>,
+    ) -> Result<SummaryConsumption> {
         let mut output = String::new();
         let mut stop_reason = String::new();
-        let mut last_error = String::new();
         let mut invalid_tool_call = None;
+        // Retry notifications do not count as the first event, nor do they
+        // refresh the idle clock (mirrors the main request path).
+        let mut saw_any_event = false;
+        let mut last_event_at = std::time::Instant::now();
         loop {
+            if let Some(consumption) = summary_wait_timeout(
+                saw_any_event,
+                attempt_started,
+                last_event_at,
+                first_event_timeout,
+                idle_timeout,
+            ) {
+                return Ok(consumption);
+            }
             let event = tokio::select! {
-                event = stream.next() => event,
-                _ = request_cancel.cancelled() => bail!("compaction interrupted"),
+                event = futures::StreamExt::next(&mut stream) => event,
+                _ = request_cancel.cancelled() => return Ok(SummaryConsumption::Interrupted),
+                _ = crate::llm::recovery::wait_until(deadline) => {
+                    return Ok(SummaryConsumption::Deadline)
+                }
+                // Deterministic wake-up so a pending stream still hits the
+                // deadline checks above (a stream of events arriving faster
+                // than this tick cannot starve them either: the checks run on
+                // the loop path).
+                _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => continue,
             };
             let Some(event) = event else { break };
-            match event? {
-                Event::Text(TextEvent { content }) => output.push_str(&content),
-                Event::Usage(usage) => {
+            match event {
+                Ok(Event::Text(TextEvent { content })) => {
+                    saw_any_event = true;
+                    last_event_at = std::time::Instant::now();
+                    output.push_str(&content);
+                }
+                Ok(Event::Usage(usage)) => {
+                    saw_any_event = true;
+                    last_event_at = std::time::Instant::now();
                     self.log_compact_event(&usage);
                     self.stats.record_compact(&usage).await;
                 }
-                Event::UsageUnavailable => {}
-                Event::Error(ErrorEvent { message }) => last_error = message,
-                Event::Stop(StopEvent { reason }) => stop_reason = reason,
-                Event::ToolCall(call) if invalid_tool_call.is_none() => {
+                Ok(Event::UsageUnavailable) => {}
+                Ok(Event::Error(error)) => return Ok(SummaryConsumption::ProviderError(error)),
+                Ok(Event::Stop(StopEvent { reason })) => {
+                    stop_reason = reason;
+                    break;
+                }
+                Ok(Event::ToolCall(call)) if invalid_tool_call.is_none() => {
+                    saw_any_event = true;
+                    last_event_at = std::time::Instant::now();
                     invalid_tool_call = Some((call.name, call.id));
                 }
-                Event::Retry(_) => {
-                    // The summary stream restarts: partial output from the
-                    // aborted attempt must not leak into the final summary.
+                Ok(Event::Retry(_)) => {
+                    // The backend restarted this logical request: partial
+                    // output from the aborted attempt must not leak. The
+                    // notification is not progress and does not refresh the
+                    // idle clock.
                     output.clear();
                     stop_reason.clear();
-                    last_error.clear();
                     invalid_tool_call = None;
                 }
-                _ => {}
+                Ok(_) => {
+                    saw_any_event = true;
+                    last_event_at = std::time::Instant::now();
+                }
+                Err(error) => return Ok(SummaryConsumption::StreamError(error)),
             }
         }
-        if !last_error.is_empty() {
-            bail!("failed to generate context summary: {last_error}");
-        }
-        if let Some((name, id)) = invalid_tool_call {
+        Ok(SummaryConsumption::Complete {
+            output,
+            stop_reason,
+            invalid_tool_call,
+        })
+    }
+
+    /// Bounded wait before retrying one compaction attempt; fails with the
+    /// stable terminal reason when the budget/deadline is exhausted.
+    async fn wait_summary_retry(
+        &self,
+        retry: &mut crate::llm::recovery::RequestRetryState,
+        attempt: u32,
+        failure: &SummaryRetry,
+        request_cancel: &crate::cancel::CancellationToken,
+    ) -> Result<()> {
+        use crate::llm::recovery::{self, RequestTerminal};
+        if !retry.can_retry() {
             bail!(
-                "failed to generate context summary: compaction attempted invalid tool call {name} ({id})"
+                "{}: {}",
+                RequestTerminal::RetryExhausted.message(),
+                failure.message
             );
         }
-        if !matches!(stop_reason.as_str(), "stop" | "end_turn") {
-            bail!("failed to generate context summary: invalid stop reason {stop_reason:?}");
+        let wait = match retry.retry_wait(attempt, failure.retry_after, recovery::jitter_fraction())
+        {
+            Ok(wait) => wait,
+            Err(_) => bail!(
+                "{}: {}",
+                RequestTerminal::Timeout.message(),
+                failure.message
+            ),
+        };
+        retry.note_retry();
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => Ok(()),
+            _ = request_cancel.cancelled() => bail!("compaction interrupted"),
         }
-        let summary = strip_dsml_tags(&output);
-        if summary.trim().is_empty() {
-            bail!("failed to generate context summary: empty response");
-        }
-        Ok((summary.trim().to_string(), meta))
     }
 
     fn build_summary_input(
@@ -987,6 +1206,93 @@ impl CompactionEngine {
 
 pub(crate) fn prefix_fingerprint(system_prompt: &str, tools: &[Value]) -> String {
     crate::session::prefix::ImmutablePrefix::compute_fingerprint(system_prompt, tools, None)
+}
+
+/// Outcome of consuming one compaction attempt.
+enum SummaryConsumption {
+    Complete {
+        output: String,
+        stop_reason: String,
+        invalid_tool_call: Option<(String, String)>,
+    },
+    ProviderError(ErrorEvent),
+    StreamError(anyhow::Error),
+    /// The optional total request deadline elapsed while the response was in
+    /// flight; the logical compaction request is over.
+    Deadline,
+    Interrupted,
+}
+
+/// One retryable compaction failure: a typed upstream failure or an unusable
+/// completed summary (empty output, tool call, invalid stop reason).
+struct SummaryRetry {
+    retry_after: Option<std::time::Duration>,
+    message: String,
+}
+
+/// Sleep until the attempt's first-event deadline; without a configured
+/// timeout this future never resolves (uniform `select!` shape).
+async fn wait_first_event_deadline(
+    attempt_started: std::time::Instant,
+    first_event_timeout: Option<std::time::Duration>,
+) {
+    match first_event_timeout {
+        Some(timeout) => tokio::time::sleep_until((attempt_started + timeout).into()).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// Per-attempt first-event / idle deadline check shared by the compaction
+/// consumption loop. Returns a retryable stream failure once a deadline is
+/// exceeded so the existing retry budget applies.
+fn summary_wait_timeout(
+    saw_any_event: bool,
+    attempt_started: std::time::Instant,
+    last_event_at: std::time::Instant,
+    first_event_timeout: Option<std::time::Duration>,
+    idle_timeout: Option<std::time::Duration>,
+) -> Option<SummaryConsumption> {
+    let now = std::time::Instant::now();
+    if !saw_any_event {
+        if let Some(timeout) = first_event_timeout
+            && now.duration_since(attempt_started) >= timeout
+        {
+            return Some(SummaryConsumption::StreamError(anyhow::Error::new(
+                crate::llm::recovery::LlmUpstreamError::recoverable(format!(
+                    "compaction summary first event timeout after {} seconds",
+                    timeout.as_secs()
+                )),
+            )));
+        }
+        return None;
+    }
+    if let Some(timeout) = idle_timeout
+        && now.duration_since(last_event_at) >= timeout
+    {
+        return Some(SummaryConsumption::StreamError(anyhow::Error::new(
+            crate::llm::recovery::LlmUpstreamError::recoverable(format!(
+                "compaction summary idle timeout after {} seconds without events",
+                timeout.as_secs()
+            )),
+        )));
+    }
+    None
+}
+
+/// Classify a compaction attempt failure. `None` means permanent/fatal (the
+/// caller returns the original error).
+fn classify_summary_failure(error: &anyhow::Error) -> Option<SummaryRetry> {
+    use crate::llm::recovery::{UpstreamFailureKind, find_upstream_failure};
+    let upstream = find_upstream_failure(error)?;
+    match upstream.kind() {
+        UpstreamFailureKind::Permanent => None,
+        UpstreamFailureKind::Recoverable | UpstreamFailureKind::ProtocolDamaged => {
+            Some(SummaryRetry {
+                retry_after: upstream.retry_after(),
+                message: format!("{error:#}"),
+            })
+        }
+    }
 }
 
 fn provider_projection_extends(

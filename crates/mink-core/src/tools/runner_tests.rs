@@ -15,6 +15,7 @@ async fn successful_display_text_may_start_with_error_prefix() {
         input_json: serde_json::json!({}),
         fields: BTreeMap::new(),
         parse_error: None,
+        raw_arguments_digest: None,
     };
     let result = format_dispatched_result(
         &ctx,
@@ -34,6 +35,7 @@ async fn successful_display_text_may_start_with_error_prefix() {
             state_metadata: None,
             result_kind: ToolResultKind::Search,
             presentation: None,
+            failure_source: None,
         },
     );
     assert_eq!(result.status, ToolStatus::Succeeded);
@@ -380,6 +382,7 @@ fn test_call(name: &str) -> ToolCallEvent {
         input_json: serde_json::json!({}),
         fields: BTreeMap::new(),
         parse_error: None,
+        raw_arguments_digest: None,
     }
 }
 
@@ -483,6 +486,7 @@ fn read_call(id: &str, path: &str) -> ToolCallEvent {
         input_json: serde_json::json!({"path": path}),
         fields: BTreeMap::from([("path".to_string(), path.to_string())]),
         parse_error: None,
+        raw_arguments_digest: None,
     }
 }
 
@@ -637,6 +641,7 @@ async fn batch_budget_survives_sequential_tool_flush() {
         input_json: serde_json::json!({"command": "true"}),
         fields: BTreeMap::from([("command".to_string(), "true".to_string())]),
         parse_error: None,
+        raw_arguments_digest: None,
     };
     let results = runner
         .execute_all(vec![
@@ -878,12 +883,13 @@ async fn parse_error_calls_become_failed_tool_results_without_executing() {
         input_json: serde_json::json!({}),
         fields: BTreeMap::new(),
         parse_error: Some("parse tool input: expected `,` or `}` at line 1 column 153".to_string()),
+        raw_arguments_digest: Some("deadbeef".to_string()),
     };
     let results = runner.execute_all(vec![call]).await.unwrap();
     assert_eq!(results.len(), 1);
     assert!(!results[0].succeeded(), "{}", results[0].content);
     assert!(
-        results[0].content.contains("tool input JSON invalid"),
+        results[0].content.contains("invalid tool arguments"),
         "{}",
         results[0].content
     );
@@ -1006,6 +1012,7 @@ async fn latched_fault_halts_tool_batch_without_side_effects() {
             input_json: serde_json::json!({"command": format!("touch {}", marker.display())}),
             fields: BTreeMap::new(),
             parse_error: None,
+            raw_arguments_digest: None,
         },
         ToolCallEvent {
             name: "Bash".into(),
@@ -1013,6 +1020,7 @@ async fn latched_fault_halts_tool_batch_without_side_effects() {
             input_json: serde_json::json!({"command": format!("touch {}2", marker.display())}),
             fields: BTreeMap::new(),
             parse_error: None,
+            raw_arguments_digest: None,
         },
     ];
     let results = runner.execute_all(calls).await.unwrap();
@@ -1046,6 +1054,7 @@ fn bash_call(id: &str, input: serde_json::Value) -> ToolCallEvent {
         input_json: input,
         fields: BTreeMap::new(),
         parse_error: None,
+        raw_arguments_digest: None,
     }
 }
 
@@ -1219,4 +1228,171 @@ async fn artifact_marker_respects_budget_and_spill_failure_is_visible() {
 fn bash_noise_filter_strips_private_csi_and_osc_sequences() {
     let noisy = "a\x1b[?25lb\x1b]0;window title\x07c\x1b[2Kd";
     assert_eq!(filter_bash_noise(noisy), "abcd");
+}
+
+// ── Model-format provenance ──
+#[tokio::test]
+async fn every_builtin_argument_decode_entry_reports_model_format() {
+    // Every model-visible built-in tool must decode through the
+    // shared helper so a schema/type mismatch is a ModelFormat failure (which
+    // feeds the format window) instead of a hard tool failure or a silent skip.
+    let shared = crate::regression::test_context_for_agent("runner-format-all-tools")
+        .await
+        .unwrap();
+    let ctx = crate::context::ToolContext::from(shared.as_ref());
+    let surface = ctx.tool_surface.clone();
+    let runner = ToolRunner::new(Arc::new(ctx));
+    let cases: Vec<(&str, serde_json::Value)> = vec![
+        ("Read", serde_json::json!({})),
+        ("Write", serde_json::json!({"path": "x"})),
+        ("Edit", serde_json::json!({})),
+        ("Glob", serde_json::json!({})),
+        ("Grep", serde_json::json!({})),
+        ("Bash", serde_json::json!({"command": 123})),
+        ("Python", serde_json::json!({"bogus": 1})),
+        ("SubAgent", serde_json::json!({})),
+        ("TodoRead", serde_json::json!({"bogus": 1})),
+        ("PlanDraft", serde_json::json!({})),
+    ];
+    for (name, input) in cases {
+        if !surface.has(name) {
+            continue;
+        }
+        let mut call = bash_call(&format!("format-{name}"), input);
+        call.name = name.to_string();
+        let results = runner.execute_all(vec![call]).await.unwrap();
+        assert_eq!(results.len(), 1, "{name}");
+        assert_eq!(
+            results[0].status,
+            ToolStatus::Failed(ToolFailureKind::ArgumentInvalid),
+            "{name}: {:?} {}",
+            results[0].status,
+            results[0].content
+        );
+        assert_eq!(
+            results[0].failure_source,
+            Some(crate::tools::metadata::ToolFailureSource::ModelFormat),
+            "{name}: {}",
+            results[0].content
+        );
+        assert!(
+            results[0].content.contains("invalid tool arguments"),
+            "{name}: {}",
+            results[0].content
+        );
+    }
+}
+
+#[tokio::test]
+async fn builtin_argument_decode_failure_is_model_format() {
+    // Wrong type: the serde rules are not relaxed; the failure is marked
+    // as model-format provenance and carries no signal.
+    let result = run_bash(
+        "runner-format-wrong-type",
+        serde_json::json!({"command": 123}),
+        false,
+    )
+    .await;
+    assert_eq!(
+        result.status,
+        ToolStatus::Failed(ToolFailureKind::ArgumentInvalid)
+    );
+    assert_eq!(
+        result.failure_source,
+        Some(crate::tools::metadata::ToolFailureSource::ModelFormat)
+    );
+    assert!(
+        result.content.contains("invalid tool arguments"),
+        "{}",
+        result.content
+    );
+    assert!(result.signals.is_empty());
+}
+
+#[tokio::test]
+async fn unknown_argument_field_is_not_relaxed() {
+    // Unknown field: `deny_unknown_fields` still rejects the call.
+    let result = run_bash(
+        "runner-format-unknown-field",
+        serde_json::json!({"command": "echo hi", "bogus": true}),
+        false,
+    )
+    .await;
+    assert_eq!(
+        result.status,
+        ToolStatus::Failed(ToolFailureKind::ArgumentInvalid)
+    );
+    assert_eq!(
+        result.failure_source,
+        Some(crate::tools::metadata::ToolFailureSource::ModelFormat)
+    );
+    assert!(
+        result.content.contains("unknown field"),
+        "{}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn non_object_arguments_are_model_format() {
+    // Non-object payload: an array never reaches dispatch as a success.
+    let shared = crate::regression::test_context_for_agent("runner-format-non-object")
+        .await
+        .unwrap();
+    let ctx = crate::context::ToolContext::from(shared.as_ref());
+    let runner = ToolRunner::new(Arc::new(ctx));
+    let mut call = bash_call("call_non_object", serde_json::json!({}));
+    call.parse_error = Some("tool input must be object".into());
+    call.raw_arguments_digest = Some("digest-non-object".into());
+    let results = runner.execute_all(vec![call]).await.unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].status,
+        ToolStatus::Failed(ToolFailureKind::ArgumentInvalid)
+    );
+    assert_eq!(
+        results[0].failure_source,
+        Some(crate::tools::metadata::ToolFailureSource::ModelFormat)
+    );
+}
+
+#[tokio::test]
+async fn storm_suppression_preserves_format_provenance_across_batches() {
+    // After the identical bad call was confirmed as a format failure, a
+    // later storm suppression keeps ModelFormat instead of becoming a hard
+    // ToolFailed.
+    let shared = crate::regression::test_context_for_agent("runner-format-storm")
+        .await
+        .unwrap();
+    let ctx = crate::context::ToolContext::from(shared.as_ref());
+    let runner = ToolRunner::new(Arc::new(ctx));
+    let bad_call = |id: &str| bash_call(id, serde_json::json!({"command": 123}));
+
+    // First batch: three identical calls are allowed and each decode fails
+    // (threshold+1 rules: the fourth identical call is suppressed).
+    let first = runner
+        .execute_all(vec![bad_call("c1"), bad_call("c2"), bad_call("c3")])
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 3);
+    for result in &first {
+        assert_eq!(
+            result.failure_source,
+            Some(crate::tools::metadata::ToolFailureSource::ModelFormat),
+            "{}",
+            result.content
+        );
+    }
+
+    let suppressed = runner.execute_all(vec![bad_call("c4")]).await.unwrap();
+    assert!(
+        matches!(suppressed[0].status, ToolStatus::Blocked(_)),
+        "{:?}",
+        suppressed[0].status
+    );
+    assert_eq!(
+        suppressed[0].failure_source,
+        Some(crate::tools::metadata::ToolFailureSource::ModelFormat),
+        "a repeated known-bad call keeps its format provenance"
+    );
 }

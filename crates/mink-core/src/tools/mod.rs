@@ -1,4 +1,5 @@
 pub mod approval;
+pub mod args;
 pub mod bash;
 pub mod catalog;
 pub mod file;

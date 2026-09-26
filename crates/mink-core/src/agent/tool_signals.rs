@@ -7,6 +7,9 @@ use std::sync::Arc;
 pub struct ToolSignalProcessor {
     collector: SignalCollector,
     tool_error_count: u32,
+    /// Model-output format failures, counted separately so they are visible as
+    /// diagnostics without masquerading as execution failures.
+    format_error_count: u32,
     evidence: EvidenceTracker,
 }
 
@@ -29,6 +32,7 @@ impl ToolSignalProcessor {
                 config.edit_loop_weights.clone(),
             ),
             tool_error_count: 0,
+            format_error_count: 0,
             evidence: EvidenceTracker::new(
                 config.seq_window.max(MIN_EVIDENCE_RECORDS),
                 config.evidence_dedup_window,
@@ -38,11 +42,18 @@ impl ToolSignalProcessor {
 
     pub fn reset(&mut self) {
         self.tool_error_count = 0;
+        self.format_error_count = 0;
         self.evidence.reset();
     }
 
     pub fn tool_error_count(&self) -> u32 {
         self.tool_error_count
+    }
+
+    /// Model-output format failures observed in this input (bad tool argument
+    /// decoding). They do not feed belief/evidence or rollback/replan.
+    pub fn format_error_count(&self) -> u32 {
+        self.format_error_count
     }
 
     /// 本输入累计硬失败数（供 DecisionEngine::decide_with_signals）。
@@ -84,6 +95,16 @@ impl ToolSignalProcessor {
         model_label: &str,
         signal_enabled: bool,
     ) {
+        // Model-format failures (model-generated arguments that failed
+        // decoding) are format feedback: count them separately and keep the
+        // failed result visible, but never feed belief/evidence, never trigger
+        // rollback/replan/abort, and never disguise them as tool execution
+        // failures.
+        if result.failure_source == Some(crate::tools::metadata::ToolFailureSource::ModelFormat) {
+            result.signals.clear();
+            self.format_error_count = self.format_error_count.saturating_add(1);
+            return;
+        }
         if !signal_enabled {
             result.signals.clear();
             return;

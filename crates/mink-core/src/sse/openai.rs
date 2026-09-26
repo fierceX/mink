@@ -12,6 +12,10 @@ struct PendingCall {
     id: String,
     name: String,
     arguments: String,
+    /// Set when a provider sent `arguments` with a non-string type (e.g.
+    /// `false`); the raw value is kept for the degraded candidate and its
+    /// storm digest. A later valid string fragment clears it again.
+    arguments_type_error: Option<String>,
 }
 /// Incremental OpenAI SSE parser.
 #[derive(Default)]
@@ -63,13 +67,34 @@ impl OpenAIParser {
         }
 
         let body: Value = serde_json::from_str(payload)?;
-        if let Some(msg) = body
-            .get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(Value::as_str)
-        {
+        if let Some(error) = body.get("error") {
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("provider error envelope");
+            // Structured fields let the runtime classify a `200` envelope by
+            // code/type/status exactly like an HTTP error status. Unknown
+            // envelopes stay permanent instead of guessing from text.
+            let provider_code = error
+                .get("code")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| {
+                    error
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                });
+            let status = error.get("status").and_then(|status| {
+                status
+                    .as_u64()
+                    .and_then(|value| u16::try_from(value).ok())
+                    .or_else(|| status.as_str().and_then(|value| value.parse().ok()))
+            });
             emit(Event::Error(ErrorEvent {
-                message: msg.into(),
+                message: message.into(),
+                provider_code,
+                status,
             }))?;
             return Ok(false);
         }
@@ -173,25 +198,43 @@ impl OpenAIParser {
                 {
                     entry.name = v.into();
                 }
-                if let Some(v) = tc
-                    .get("function")
-                    .and_then(|f| f.get("arguments"))
-                    .and_then(Value::as_str)
-                {
-                    entry.arguments.push_str(v);
+                if let Some(arguments) = tc.get("function").and_then(|f| f.get("arguments")) {
+                    match arguments.as_str() {
+                        Some(v) => {
+                            // Fragments accumulate; whether an earlier
+                            // wrong-typed value was corrected is decided at
+                            // emit time from the *final* payload, never from
+                            // the mere arrival of a (possibly empty) fragment.
+                            entry.arguments.push_str(v);
+                        }
+                        None if !arguments.is_null() => {
+                            entry.arguments_type_error = Some(arguments.to_string());
+                        }
+                        None => {}
+                    }
                 }
             }
         }
         if let Some(function_call) = delta.get("function_call") {
             let entry = self.pending_calls.entry(0).or_default();
             if entry.id.is_empty() {
-                entry.id = "legacy_function_call".to_string();
+                // Legacy compatibility: providers send no id, so generate one
+                // that cannot collide with ids already in the conversation
+                // history (deterministic compatibility never consumes the
+                // format window).
+                entry.id = crate::sse::toolcall::unique_call_id("legacy_function_call");
             }
             if let Some(v) = function_call.get("name").and_then(Value::as_str) {
                 entry.name = v.into();
             }
-            if let Some(v) = function_call.get("arguments").and_then(Value::as_str) {
-                entry.arguments.push_str(v);
+            if let Some(arguments) = function_call.get("arguments") {
+                match arguments.as_str() {
+                    Some(v) => entry.arguments.push_str(v),
+                    None if !arguments.is_null() => {
+                        entry.arguments_type_error = Some(arguments.to_string());
+                    }
+                    None => {}
+                }
             }
         }
 
@@ -259,38 +302,46 @@ impl OpenAIParser {
 
     fn emit_pending(&mut self, emit: &mut dyn FnMut(Event) -> Result<()>) -> Result<()> {
         for call in self.pending_calls.values_mut() {
-            if call.name.is_empty() {
-                continue;
-            }
-            let evt = match build_tool_call_event(&call.name, &call.id, &call.arguments) {
-                Ok(evt) => evt,
-                Err(original) => {
-                    // Repair covers truncation; anything else (e.g. a missing
-                    // comma) degrades instead of failing the whole turn: the
-                    // call is marked with the parse error and the runner
-                    // turns it into a failed tool result the model can see
-                    // and retry.
-                    let repaired = crate::repair::repair_truncated_json(&call.arguments);
-                    let repaired_evt = if repaired.changed && !repaired.fallback {
-                        build_tool_call_event(&call.name, &call.id, &repaired.repaired).ok()
-                    } else {
-                        None
-                    };
-                    match repaired_evt {
-                        Some(evt) => evt,
-                        None => {
-                            let mut degraded = build_tool_call_event(&call.name, &call.id, "{}")?;
-                            degraded.parse_error = Some(format!("{original:#}"));
-                            degraded
-                        }
-                    }
+            // Every candidate is surfaced with its identity: a missing name is
+            // emitted as an invalid candidate (the round layer drops the whole
+            // batch) instead of being silently skipped.
+            let name = std::mem::take(&mut call.name);
+            let id = std::mem::take(&mut call.id);
+            let arguments = std::mem::take(&mut call.arguments);
+            let type_error = call.arguments_type_error.take();
+            let built = build_tool_call_event(&name, &id, &arguments);
+            let event = match (type_error, built) {
+                // A wrong-typed `arguments` is real response damage: keep the
+                // error — later fragments never "correct" it in stream; the
+                // model resends in the next round — and surface the degraded
+                // candidate instead of executing with empty/wrong
+                // arguments.
+                (Some(raw), _) => crate::sse::toolcall::degraded_tool_call(
+                    &name,
+                    &id,
+                    &raw,
+                    "tool arguments must be a JSON string",
+                ),
+                (None, Ok(event)) => event,
+                (None, Err(original)) => {
+                    // Unsafe lexical repairs (closing truncated strings,
+                    // filling nulls) must never be executed directly: an
+                    // unparsable payload is reported to the model, which
+                    // resends corrected arguments. The raw payload digest
+                    // keeps distinct bad calls distinct for storm accounting.
+                    crate::sse::toolcall::degraded_tool_call(
+                        &name,
+                        &id,
+                        &arguments,
+                        &format!("{original:#}"),
+                    )
                 }
             };
-            emit(Event::ToolCall(evt))?;
-            call.id.clear();
-            call.name.clear();
-            call.arguments.clear();
+            emit(Event::ToolCall(event))?;
         }
+        // Consumed candidates are removed so a second terminal pass (finish
+        // reason followed by [DONE]/EOF) cannot re-emit empty placeholders.
+        self.pending_calls.clear();
         Ok(())
     }
 }

@@ -229,6 +229,20 @@ pub enum EventLog {
         elapsed_secs: u64,
         idle_secs: u64,
     },
+    /// Minimal bounded-recovery diagnostic record: round and
+    /// attempt identity, error category, retry/window counters and terminal.
+    /// Diagnostic-grade: may degrade under writer backpressure with the
+    /// existing loss accounting, never a critical state commit.
+    LlmRecovery {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        round: Option<u32>,
+        attempt: u32,
+        category: String,
+        retries: u32,
+        window_errors: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal: Option<String>,
+    },
     Stop {
         reason: String,
     },

@@ -41,7 +41,7 @@ impl ToolExec for PlanDraftTool {
         struct Args {
             content: String,
         }
-        let args: Args = serde_json::from_value(input.clone())?;
+        let args: Args = crate::tools::args::decode_args(input)?;
         let cancelled = args.content.is_empty();
         ctx.plan_store
             .set_draft(&args.content, ctx.tool_config.file_write_max_bytes)?;
@@ -76,7 +76,7 @@ impl ToolExec for PlanConfirmTool {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Args {}
-        let _: Args = serde_json::from_value(input.clone())?;
+        let _: Args = crate::tools::args::decode_args(input)?;
         let content = ctx.plan_store.confirm()?;
         let mut outcome = ToolOutcome::plan(PlanCommand::Confirm, "Plan confirmed and locked in.");
         outcome.presentation = Some(ToolPresentation::Plan(PlanDisplay {
@@ -98,7 +98,7 @@ impl ToolExec for PlanClearTool {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Args {}
-        let _: Args = serde_json::from_value(input.clone())?;
+        let _: Args = crate::tools::args::decode_args(input)?;
         ctx.plan_store.clear()?;
         let mut outcome = ToolOutcome::plan(PlanCommand::Clear, "Plan cleared.");
         outcome.presentation = Some(ToolPresentation::Plan(PlanDisplay {

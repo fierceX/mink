@@ -82,7 +82,7 @@ impl ToolExec for TodoReadTool {
     }
 
     fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutcome> {
-        let args: TodoReadArgs = serde_json::from_value(input.clone())?;
+        let args: TodoReadArgs = crate::tools::args::decode_args(input)?;
         let snapshot = ctx.todo_store.snapshot();
         let mut outcome = ToolOutcome::text(render_snapshot(&snapshot, args.include_completed));
         outcome.state_metadata = Some(todo_state_metadata(snapshot.revision, "snapshot"));
@@ -103,7 +103,7 @@ impl ToolExec for TodoWriteTool {
     }
 
     fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutcome> {
-        let args: TodoWriteArgs = serde_json::from_value(input.clone())?;
+        let args: TodoWriteArgs = crate::tools::args::decode_args(input)?;
         let add = args
             .add
             .into_iter()
@@ -166,7 +166,7 @@ impl ToolExec for TodoAdvanceTool {
     }
 
     fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutcome> {
-        let args: TodoAdvanceArgs = serde_json::from_value(input.clone())?;
+        let args: TodoAdvanceArgs = crate::tools::args::decode_args(input)?;
         let result = ctx.todo_store.advance(
             args.base_revision,
             TodoTransitions {

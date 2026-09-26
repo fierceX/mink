@@ -68,6 +68,7 @@ fn tool_call_event(id: &str) -> ToolCallEvent {
         input_json: json!({"command": "false"}),
         fields: Default::default(),
         parse_error: None,
+        raw_arguments_digest: None,
     }
 }
 

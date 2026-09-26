@@ -24,11 +24,30 @@ impl super::TurnExecutor {
         let mut recovered = false;
         for sc in &scavenged {
             let cid = format!("scavenged_{}_{}", self.local.scavenge_seq, calls.len());
+            // A candidate whose arguments were declared but could not be parsed
+            // (wrapper JSON damage or a `function.arguments` string) is already
+            // known-bad: build the degraded candidate directly with the true
+            // parse error instead of re-parsing a placeholder.
+            if let Some(error) = &sc.parse_error {
+                let degraded =
+                    crate::sse::toolcall::degraded_tool_call(&sc.name, &cid, &sc.arguments, error);
+                let duplicate = calls.iter().any(|c| {
+                    c.name == degraded.name && c.storm_identity() == degraded.storm_identity()
+                });
+                if !duplicate {
+                    self.ctx.log_event(crate::events::EventLog::Scavenge {
+                        note: format!("recovered damaged tool call {}", sc.name),
+                    });
+                    calls.push(degraded);
+                    recovered = true;
+                }
+                continue;
+            }
             match build_tool_call_event(&sc.name, &cid, &sc.arguments) {
                 Ok(call) => {
-                    let duplicate = calls
-                        .iter()
-                        .any(|c| c.name == call.name && c.input_json == call.input_json);
+                    let duplicate = calls.iter().any(|c| {
+                        c.name == call.name && c.storm_identity() == call.storm_identity()
+                    });
                     if !duplicate {
                         self.ctx.log_event(crate::events::EventLog::Scavenge {
                             note: format!("recovered tool call {}", call.name),
@@ -37,10 +56,28 @@ impl super::TurnExecutor {
                         recovered = true;
                     }
                 }
-                Err(e) => {
-                    self.ctx.log_event(crate::events::EventLog::Scavenge {
-                        note: format!("discarded invalid scavenged call {}: {e}", sc.name),
+                Err(error) => {
+                    // A registered tool name with unusable arguments is a model
+                    // format error, not noise: surface the degraded candidate so
+                    // the round reports a ModelFormat tool result and feeds the
+                    // format window. Plain JSON examples never reach this arm
+                    // (scavenge only extracts tool-call shapes).
+                    let degraded = crate::sse::toolcall::degraded_tool_call(
+                        &sc.name,
+                        &cid,
+                        &sc.arguments,
+                        &format!("{error:#}"),
+                    );
+                    let duplicate = calls.iter().any(|c| {
+                        c.name == degraded.name && c.storm_identity() == degraded.storm_identity()
                     });
+                    if !duplicate {
+                        self.ctx.log_event(crate::events::EventLog::Scavenge {
+                            note: format!("recovered unparsable tool call {}", degraded.name),
+                        });
+                        calls.push(degraded);
+                        recovered = true;
+                    }
                 }
             }
         }
@@ -49,6 +86,29 @@ impl super::TurnExecutor {
                 .log_event(crate::events::EventLog::Scavenge { note: note.clone() });
         }
         (calls, recovered)
+    }
+
+    /// Formal announcement of accepted tool calls: display and the
+    /// `tool_call` event are emitted only after the complete response has been
+    /// judged, so a discarded candidate never surfaces as an executed call.
+    pub(super) fn announce_tool_calls(&self, calls: &[ToolCallEvent]) {
+        for call in calls {
+            self.ctx.log_event(crate::events::EventLog::ToolCall {
+                version: None,
+                name: call.name.clone(),
+                id: call.id.clone(),
+                input: call.input_json.clone(),
+            });
+            let summary = build_tool_call_summary(&call.name, &call.fields);
+            self.ctx
+                .display
+                .render_tool_call(&crate::ui::ToolCallDisplay {
+                    tool_use_id: &call.id,
+                    tool_name: &call.name,
+                    summary: &summary,
+                    input: Some(&call.input_json),
+                });
+        }
     }
 
     /// Phase 2: 持久化 assistant 消息 + 用量统计。
@@ -68,12 +128,14 @@ impl super::TurnExecutor {
 
     /// 执行一轮中的所有工具调用（Phase 3）。
     /// 处理 Plan 状态转换、子代理生成与收集、结果定稿、信号采集和持久化。
+    /// 返回本批是否包含模型格式失败（参数解码失败）——同一 round 的多个
+    /// 格式错只计一次。
     pub(super) async fn execute_tools_inner(
         &mut self,
         calls: Vec<ToolCallEvent>,
         mut belief: Option<&mut crate::agent::belief::BeliefTracker>,
         effects: &mut Vec<TurnEffect>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.local.tool_call_count += calls.len() as u32;
         let (calls_to_execute, mut guarded_results) = self.apply_signal_recovery_guard(calls);
         let executed = if calls_to_execute.is_empty() {
@@ -190,7 +252,25 @@ impl super::TurnExecutor {
         if let Some(error) = fatal {
             return Err(error);
         }
-        Ok(())
+        // Model-output format failures in this batch (bad argument decoding)
+        // count once for the round; real execution failures follow their own
+        // signal path.
+        let had_format_error = processed_results.iter().any(|result| {
+            result.failure_source == Some(crate::tools::metadata::ToolFailureSource::ModelFormat)
+        });
+        if had_format_error {
+            // Separate diagnostic counter: format provenance never feeds the
+            // tool-failure signal path.
+            self.ctx.log_event(crate::events::EventLog::LlmRecovery {
+                round: Some(self.local.round),
+                attempt: 0,
+                category: "tool_format".into(),
+                retries: 0,
+                window_errors: self.format_error_count() as usize,
+                terminal: None,
+            });
+        }
+        Ok(had_format_error)
     }
 
     fn observe_todo_progress(&mut self, results: &[crate::tools::runner::ToolExecution]) {

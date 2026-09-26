@@ -11,7 +11,19 @@ impl super::TurnExecutor {
             return (calls, Vec::new());
         }
 
-        let mut iter = calls.into_iter();
+        // Calls already confirmed as pure model-format decode failures (or
+        // carrying an explicit parse error) are dispatched so the runner
+        // reports the format failure directly. They do not consume the guard:
+        // it keeps waiting for the next valid call instead of rewriting a
+        // known format problem into a blocked execution.
+        let (known_format, rest): (Vec<_>, Vec<_>) = calls
+            .into_iter()
+            .partition(|call| self.tools.is_format_confirmed(call));
+        if rest.is_empty() {
+            return (known_format, Vec::new());
+        }
+
+        let mut iter = rest.into_iter();
         let first = iter
             .next()
             .expect("signal recovery guard already checked calls is non-empty");
@@ -43,7 +55,7 @@ impl super::TurnExecutor {
                     .chain(iter)
                     .map(|call| blocked_by_signal_recovery(call, guidance.content.clone()))
                     .collect();
-                return (Vec::new(), blocked);
+                return (known_format, blocked);
             }
             // 连续拦截达到 guard_max_blocks：绕过守卫放行调用，并强制下一次
             // 决策注入证据。事件 action 与实际行为保持一致（bypassed 而非 blocked）。
@@ -57,14 +69,14 @@ impl super::TurnExecutor {
                     reason: guidance.content.clone(),
                     guard_blocks: self.local.guard_blocks,
                 });
-            let mut allowed = Vec::new();
+            let mut allowed = known_format;
             allowed.push(first);
             allowed.extend(iter);
             return (allowed, Vec::new());
         }
 
         self.local.signal_recovery_guard = false;
-        let mut allowed = Vec::new();
+        let mut allowed = known_format;
         allowed.push(first);
         allowed.extend(iter);
         (allowed, Vec::new())

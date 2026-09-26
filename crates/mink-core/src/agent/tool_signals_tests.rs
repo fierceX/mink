@@ -28,6 +28,7 @@ fn tool_result(content: &str) -> ToolExecution {
             matched_pattern: None,
             message: "old".into(),
         }],
+        failure_source: None,
         plan_command: None,
         needs_finalization: false,
         state_metadata: None,

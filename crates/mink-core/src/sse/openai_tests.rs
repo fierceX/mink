@@ -229,6 +229,33 @@ fn legacy_function_call_becomes_tool_call() {
 }
 
 #[test]
+fn legacy_function_call_ids_are_unique_across_responses() {
+    // The generated compatibility id must not collide with ids already
+    // present in the conversation history (two responses never share it).
+    let lines = [
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"function_call\":{\"name\":\"Read\",\"arguments\":\"{}\"}},\"finish_reason\":\"function_call\"}]}",
+        "data: [DONE]",
+    ];
+    let mut first = OpenAIParser::new();
+    let first_events = collect_lines(&mut first, &lines);
+    let mut second = OpenAIParser::new();
+    let second_events = collect_lines(&mut second, &lines);
+    let id = |events: &[Event]| {
+        events
+            .iter()
+            .find_map(|e| match e {
+                Event::ToolCall(c) => Some(c.id.clone()),
+                _ => None,
+            })
+            .expect("legacy call surfaced")
+    };
+    let first_id = id(&first_events);
+    let second_id = id(&second_events);
+    assert!(first_id.starts_with("legacy_function_call_"), "{first_id}");
+    assert_ne!(first_id, second_id);
+}
+
+#[test]
 fn empty_tool_call_arguments_default_to_empty_object() {
     let mut p = OpenAIParser::new();
     let lines = [
@@ -270,16 +297,184 @@ fn eof_without_finish_reason_is_error() {
 }
 
 #[test]
-fn truncated_tool_call_arguments_are_repaired_before_emit() {
+fn truncated_tool_call_arguments_are_not_auto_repaired() {
+    // A truncated payload is surfaced with its parse error and raw-argument
+    // digest; it is never lexically repaired and executed.
     let mut p = OpenAIParser::new();
     let lines = [
         "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/f.txt\\\"\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}",
         "data: [DONE]",
     ];
     let events = collect_lines(&mut p, &lines);
-    assert!(events.iter().any(
-        |e| matches!(e, Event::ToolCall(c) if c.name == "Read" && c.fields["path"] == "/tmp/f.txt")
-    ));
+    let call = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ToolCall(c) => Some(c),
+            _ => None,
+        })
+        .expect("the truncated candidate is still surfaced");
+    assert_eq!(call.name, "Read");
+    assert!(call.parse_error.is_some(), "{call:?}");
+    assert!(call.raw_arguments_digest.is_some(), "{call:?}");
+    assert!(call.fields.is_empty(), "{call:?}");
+}
+
+#[test]
+fn non_string_tool_arguments_are_surfaced_as_damaged() {
+    // `arguments` with the wrong type must not be ignored (which
+    // would execute the tool with empty arguments); it becomes a degraded
+    // candidate with a parse error and a raw-argument digest.
+    let mut p = OpenAIParser::new();
+    let lines = [
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"TodoRead\",\"arguments\":false}}]},\"finish_reason\":\"tool_calls\"}]}",
+        "data: [DONE]",
+    ];
+    let events = collect_lines(&mut p, &lines);
+    let call = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ToolCall(c) => Some(c),
+            _ => None,
+        })
+        .expect("the candidate is surfaced");
+    assert_eq!(call.name, "TodoRead");
+    let error = call.parse_error.as_deref().unwrap_or_default();
+    assert!(error.contains("must be a JSON string"), "{error}");
+    assert!(call.raw_arguments_digest.is_some(), "{call:?}");
+    assert!(call.fields.is_empty(), "{call:?}");
+}
+
+#[test]
+fn valid_arguments_after_a_type_error_fragment_win() {
+    // Superseded by audit F3 (type errors are sticky): kept as the inverted
+    // regression so the previous "legal fragment wins" contract cannot come
+    // back by accident.
+    let mut p = OpenAIParser::new();
+    let lines = [
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":false}}]}}]}",
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\\\"/x\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}",
+        "data: [DONE]",
+    ];
+    let events = collect_lines(&mut p, &lines);
+    let call = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ToolCall(c) => Some(c),
+            _ => None,
+        })
+        .expect("the candidate is surfaced");
+    assert!(
+        call.parse_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("must be a JSON string"),
+        "{call:?}"
+    );
+    assert!(call.fields.is_empty(), "{call:?}");
+}
+
+#[test]
+fn empty_arguments_fragment_does_not_clear_a_type_error() {
+    // An empty string fragment is not a correction; the type
+    // error must survive and produce a degraded candidate.
+    let mut p = OpenAIParser::new();
+    let lines = [
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"TodoRead\",\"arguments\":false}}]}}]}",
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\"}}]},\"finish_reason\":\"tool_calls\"}]}",
+        "data: [DONE]",
+    ];
+    let events = collect_lines(&mut p, &lines);
+    let call = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ToolCall(c) => Some(c),
+            _ => None,
+        })
+        .expect("the candidate is surfaced");
+    let error = call.parse_error.as_deref().unwrap_or_default();
+    assert!(error.contains("must be a JSON string"), "{error}");
+    assert!(call.raw_arguments_digest.is_some(), "{call:?}");
+}
+
+#[test]
+fn valid_arguments_fragment_does_not_clear_a_type_error() {
+    // Once the arguments type is damaged, the error is sticky — a
+    // later valid fragment does not "correct" it in stream; the model resends
+    // in the next round.
+    let mut p = OpenAIParser::new();
+    let lines = [
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":true}}]}}]}",
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\\\"/x\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}",
+        "data: [DONE]",
+    ];
+    let events = collect_lines(&mut p, &lines);
+    let call = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ToolCall(c) => Some(c),
+            _ => None,
+        })
+        .expect("the candidate is surfaced");
+    assert!(
+        call.parse_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("must be a JSON string"),
+        "{call:?}"
+    );
+    assert!(call.fields.is_empty(), "{call:?}");
+}
+
+#[test]
+fn earlier_valid_arguments_do_not_hide_a_late_type_error() {
+    // A valid `{}` first, then a boolean — the late type error
+    // must survive.
+    let mut p = OpenAIParser::new();
+    let lines = [
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"TodoRead\",\"arguments\":\"{}\"}}]}}]}",
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":false}}]},\"finish_reason\":\"tool_calls\"}]}",
+        "data: [DONE]",
+    ];
+    let events = collect_lines(&mut p, &lines);
+    let call = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ToolCall(c) => Some(c),
+            _ => None,
+        })
+        .expect("the candidate is surfaced");
+    assert!(
+        call.parse_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("must be a JSON string"),
+        "{call:?}"
+    );
+}
+
+#[test]
+fn legacy_function_call_late_type_error_is_sticky() {
+    let mut p = OpenAIParser::new();
+    let lines = [
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"function_call\":{\"name\":\"TodoRead\",\"arguments\":\"{}\"}},\"finish_reason\":null}]}",
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"function_call\":{\"arguments\":false}},\"finish_reason\":\"function_call\"}]}",
+        "data: [DONE]",
+    ];
+    let events = collect_lines(&mut p, &lines);
+    let call = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ToolCall(c) => Some(c),
+            _ => None,
+        })
+        .expect("the candidate is surfaced");
+    assert!(
+        call.parse_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("must be a JSON string"),
+        "{call:?}"
+    );
 }
 
 #[test]

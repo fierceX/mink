@@ -360,7 +360,7 @@ impl super::runner::ToolExec for GlobTool {
             #[serde(default)]
             path: Option<String>,
         }
-        let args: Args = serde_json::from_value(input.clone())?;
+        let args: Args = crate::tools::args::decode_args(input)?;
         if let Some(vfs) = &ctx.read_only_fs {
             let request = crate::tools::vfs::VfsGlobRequest {
                 pattern: args.pattern,
@@ -416,7 +416,7 @@ impl super::runner::ToolExec for GrepTool {
             #[serde(default, rename = "-i")]
             case_insensitive: Option<serde_json::Value>,
         }
-        let args: Args = serde_json::from_value(input.clone())?;
+        let args: Args = crate::tools::args::decode_args(input)?;
         // 兼容字段不携带行为：显式引用避免 lint 隐藏该事实。
         let _ = (&args.head_limit, &args.output_mode, &args.case_insensitive);
         let path = args.path.unwrap_or_else(|| ".".to_string());

@@ -39,6 +39,12 @@ fn options_convert_to_runtime_config_without_losing_config_fields() {
         .with_mission_content("mission")
         .with_enabled_tools(vec!["Read".to_string(), "Bash".to_string()])
         .with_tool_approval_mode(ToolApprovalMode::Write)
+        .with_llm_recovery(crate::config::LlmRecoveryPolicy {
+            format_window_size: 5,
+            format_max_errors: 2,
+            request_max_retries: 1,
+            request_timeout_secs: Some(30),
+        })
         .with_first_prompt("hello")
         .into_runtime_config();
 
@@ -97,8 +103,30 @@ fn options_convert_to_runtime_config_without_losing_config_fields() {
         Some(vec!["Read".to_string(), "Bash".to_string()])
     );
     assert_eq!(cfg.tool_approval_mode, ToolApprovalMode::Write);
+    assert_eq!(
+        cfg.llm_recovery,
+        crate::config::LlmRecoveryPolicy {
+            format_window_size: 5,
+            format_max_errors: 2,
+            request_max_retries: 1,
+            request_timeout_secs: Some(30),
+        }
+    );
     // per-tool approval 的 options 便捷方法已删除（零外部调用），
     // 嵌入方经 Config/CLI [tools.approval] 配置。
+}
+
+#[test]
+fn options_llm_recovery_defaults_are_the_single_runtime_defaults() {
+    // An untouched AgentOptions carries the shared Rust defaults (the
+    // other entry points override only the fields they set).
+    let runtime_config = AgentOptions::new("/tmp/mink-home", "/tmp/project").into_runtime_config();
+    let policy = runtime_config.config.llm_recovery;
+    assert_eq!(policy, crate::config::LlmRecoveryPolicy::default());
+    assert_eq!(policy.format_window_size, 10);
+    assert_eq!(policy.format_max_errors, 3);
+    assert_eq!(policy.request_max_retries, 3);
+    assert_eq!(policy.request_timeout_secs, None);
 }
 
 #[test]

@@ -256,6 +256,12 @@ impl AgentOptions {
         self
     }
 
+    /// Bounded LLM recovery policy (format window + request retries).
+    pub fn with_llm_recovery(mut self, policy: crate::config::LlmRecoveryPolicy) -> Self {
+        self.config.llm_recovery = policy;
+        self
+    }
+
     pub fn with_interactive(mut self, interactive: bool) -> Self {
         self.config.interactive = interactive;
         self

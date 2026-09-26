@@ -98,9 +98,14 @@ async fn safety_blocked_bash_emits_typed_signal_event() -> anyhow::Result<()> {
                     reason: "tool_use".into(),
                 })),
             ],
-            vec![Ok(Event::Stop(StopEvent {
-                reason: "end_turn".into(),
-            }))],
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content: "safety done".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
         ],
     ));
     let h = harness_with_backend("safety-signal", llm.clone()).await?;

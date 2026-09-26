@@ -97,6 +97,8 @@ async fn turn_error_event_returns_error_and_logs_event() -> anyhow::Result<()> {
         "flash",
         vec![vec![Ok(Event::Error(ErrorEvent {
             message: "model error".into(),
+            provider_code: None,
+            status: None,
         }))]],
     ));
     let h = harness_with_backend("turn-error-event", llm.clone()).await?;
@@ -246,7 +248,16 @@ async fn turn_stream_without_stop_event_fails_without_assistant_message() -> any
             content: "partial".into(),
         }))]],
     ));
-    let h = harness_with_backend("turn-missing-stop", llm.clone()).await?;
+    // Single attempt: the abandoned-stream retry budget is exercised by the
+    // dedicated recovery tests; here we pin the terminal classification.
+    let h = harness_with_config(
+        "turn-missing-stop",
+        false,
+        300,
+        |cfg| cfg.llm_recovery.request_max_retries = 0,
+        Some(llm.clone()),
+    )
+    .await?;
 
     let mut executor = TurnExecutor::new(h.ctx.clone());
     let err = executor
@@ -255,7 +266,11 @@ async fn turn_stream_without_stop_event_fails_without_assistant_message() -> any
         .unwrap_err()
         .to_string();
 
-    assert!(err.contains("stream ended without stop event"), "{err}");
+    assert!(
+        err.contains("request_retry_exhausted")
+            && err.contains("ended without a terminal stop event"),
+        "{err}"
+    );
     let lines = h.ctx.store.lines().await?;
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["role"], "user");
@@ -272,6 +287,9 @@ async fn turn_llm_first_event_timeout_fails_with_clear_error() -> anyhow::Result
             cfg.llm_first_event_timeout_secs = 1;
             cfg.llm_idle_timeout_secs = 10;
             cfg.llm_wait_heartbeat_secs = 0;
+            // Single attempt: this test pins the timeout classification, not
+            // the retry budget (covered by dedicated recovery tests).
+            cfg.llm_recovery.request_max_retries = 0;
         },
         Some(Arc::new(PendingLlmBackend)),
     )
@@ -303,6 +321,9 @@ async fn turn_llm_idle_timeout_fails_after_partial_stream() -> anyhow::Result<()
             cfg.llm_first_event_timeout_secs = 10;
             cfg.llm_idle_timeout_secs = 1;
             cfg.llm_wait_heartbeat_secs = 0;
+            // Single attempt: this test pins the timeout classification, not
+            // the retry budget (covered by dedicated recovery tests).
+            cfg.llm_recovery.request_max_retries = 0;
         },
         Some(Arc::new(IdleAfterTextLlmBackend)),
     )
@@ -420,17 +441,30 @@ async fn disabled_tool_call_persists_error_result_instead_of_being_dropped() -> 
 }
 
 #[tokio::test]
-async fn invalid_scavenged_tool_call_is_logged_and_ignored() -> anyhow::Result<()> {
+async fn invalid_scavenged_tool_call_is_surfaced_as_format_feedback() -> anyhow::Result<()> {
+    // A recognized body tool call with unusable arguments is model
+    // format feedback, not noise: the degraded candidate is reported as a
+    // failed tool result and the next round sees the diagnostic.
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
-        vec![vec![
-            Ok(Event::Text(TextEvent {
-                content: r#"<tool_call>{"name":"Read","arguments":[]}</tool_call>"#.into(),
-            })),
-            Ok(Event::Stop(StopEvent {
-                reason: "end_turn".into(),
-            })),
-        ]],
+        vec![
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content: r#"<tool_call>{"name":"Read","arguments":[]}</tool_call>"#.into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content: "recovered".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+        ],
     ));
     let h = harness_with_backend("invalid-scavenge", llm.clone()).await?;
 
@@ -439,12 +473,21 @@ async fn invalid_scavenged_tool_call_is_logged_and_ignored() -> anyhow::Result<(
 
     assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());
-    assert_eq!(executor.tool_call_count(), 0);
+    assert_eq!(
+        executor.tool_call_count(),
+        1,
+        "the degraded candidate is reported, not silently dropped"
+    );
     h.ctx.flush_event_log().await?;
     let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
     assert!(
-        events.contains("discarded invalid scavenged call Read"),
+        events.contains("recovered unparsable tool call Read"),
         "{events}"
+    );
+    let conversation = tokio::fs::read_to_string(&h.ctx.store.path()).await?;
+    assert!(
+        conversation.contains("invalid tool arguments"),
+        "{conversation}"
     );
     Ok(())
 }
@@ -470,9 +513,14 @@ async fn duplicate_scavenged_tool_call_is_deduplicated_against_official_call() -
                     reason: "tool_calls".into(),
                 })),
             ],
-            vec![Ok(Event::Stop(StopEvent {
-                reason: "end_turn".into(),
-            }))],
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content: "dedupe done".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
         ],
     ));
     let h = harness_with_backend("duplicate-scavenge", llm.clone()).await?;

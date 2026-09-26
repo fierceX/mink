@@ -20,8 +20,8 @@ pub use crate::capabilities::{
     SkillLoadContext, SkillProvider, SourceLevel, SourceMeta,
 };
 pub use crate::config::{
-    EditMode, ModelResolver, OutputFormat, ResolvedModel, SandboxConfig, SandboxPythonConfig,
-    SignalPolicy, ToolApprovalMode, ToolApprovalPolicy,
+    EditMode, LlmRecoveryPolicy, ModelResolver, OutputFormat, ResolvedModel, SandboxConfig,
+    SandboxPythonConfig, SignalPolicy, ToolApprovalMode, ToolApprovalPolicy,
 };
 pub use crate::config::{ResolvedConfig, vision_model_defaults};
 pub use crate::llm::client::{
@@ -30,6 +30,7 @@ pub use crate::llm::client::{
     LlmTextEvent, LlmThinkingEvent, LlmToolCallEvent, LlmUsageEvent, OpenAiCompatibleBackend,
     OpenAiCompatibleOptions, TokenParamKind,
 };
+pub use crate::llm::recovery::{LlmUpstreamError, UpstreamFailureKind};
 pub use crate::resources::ResourceHandler;
 pub use crate::runtime::extensions::{PostInitContext, PostInitHook, PrefixSource};
 /// 同目录临时文件 + rename 的原子替换（session 状态文件共用实现）。

@@ -32,7 +32,7 @@ pub(crate) struct PythonScriptArgs {
 
 impl PythonScriptArgs {
     pub(crate) fn parse(input: &serde_json::Value) -> anyhow::Result<Self> {
-        let args: Self = serde_json::from_value(input.clone())?;
+        let args: Self = crate::tools::args::decode_args(input)?;
         // 兼容字段不携带行为：显式引用避免 lint 隐藏该事实。
         let _ = (&args.command, &args.code);
         Ok(args)

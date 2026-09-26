@@ -116,3 +116,29 @@ fn reset_clears_window() {
     let d = sb.check("Read", "a", false);
     assert!(matches!(d, StormDecision::Allow));
 }
+
+#[test]
+fn format_confirmation_matches_only_the_identical_payload() {
+    let mut sb = StormBreaker::new(6, 3);
+    sb.check("Bash", "raw:aaaa", false);
+    sb.mark_format("Bash", "raw:aaaa");
+    assert!(sb.is_format_confirmed("Bash", "raw:aaaa", false));
+    // A different bad payload keeps its own identity in the same window.
+    assert!(!sb.is_format_confirmed("Bash", "raw:bbbb", false));
+    assert!(!sb.is_format_confirmed("Read", "raw:aaaa", false));
+    // Different mutating class does not cross-match.
+    sb.check("Bash", "raw:aaaa", true);
+    assert!(!sb.is_format_confirmed("Bash", "raw:aaaa", true));
+}
+
+#[test]
+fn format_flag_survives_until_the_entry_leaves_the_window() {
+    let mut sb = StormBreaker::new(2, 3);
+    sb.check("Bash", "raw:aaaa", false);
+    sb.mark_format("Bash", "raw:aaaa");
+    // Evict the only entry with unrelated calls.
+    sb.check("Read", "a", false);
+    sb.check("Read", "b", false);
+    sb.check("Read", "c", false);
+    assert!(!sb.is_format_confirmed("Bash", "raw:aaaa", false));
+}

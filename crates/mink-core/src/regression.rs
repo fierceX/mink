@@ -290,6 +290,30 @@ pub(crate) async fn test_context_for_agent_with_config_and_backend(
     )
 }
 
+/// Tool-use ids of persisted tool results, in append order.
+pub(crate) async fn tool_result_ids(
+    store: &crate::session::store::ConversationStore,
+) -> anyhow::Result<Vec<String>> {
+    let lines = store.lines().await?;
+    let mut ids = Vec::new();
+    for line in &lines {
+        if line.get("role").and_then(serde_json::Value::as_str) != Some("user") {
+            continue;
+        }
+        let Some(blocks) = line.get("content").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        for block in blocks {
+            if block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
+                && let Some(id) = block.get("tool_use_id").and_then(serde_json::Value::as_str)
+            {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    Ok(ids)
+}
+
 async fn harness_with(
     name: &str,
     is_sub_agent: bool,
@@ -433,6 +457,7 @@ fn tool_call(name: &str, id: &str, input: serde_json::Value) -> ToolCallEvent {
         input_json: input,
         fields,
         parse_error: None,
+        raw_arguments_digest: None,
     }
 }
 
@@ -487,6 +512,7 @@ fn internal_result(name: &str) -> ToolExecution {
         presentation: None,
         artifacts: Vec::new(),
         signals: Vec::new(),
+        failure_source: None,
         plan_command: None,
         needs_finalization: false,
         state_metadata: None,

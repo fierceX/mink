@@ -104,12 +104,29 @@ impl ToolOutput {
 #[derive(Debug, Clone)]
 pub struct ToolError {
     message: String,
+    /// Set by [`ToolError::argument`]: pure argument decoding failure with no
+    /// side effect. The runtime reports it as model-format feedback.
+    argument: bool,
 }
 impl ToolError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            argument: false,
         }
+    }
+
+    /// Construct a pure argument-decoding failure. Callers must guarantee the
+    /// error is returned before any side effect occurs.
+    pub fn argument(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            argument: true,
+        }
+    }
+
+    pub(crate) fn is_argument(&self) -> bool {
+        self.argument
     }
 }
 impl std::fmt::Display for ToolError {
