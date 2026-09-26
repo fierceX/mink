@@ -39,6 +39,7 @@ pub struct SdkOptions {
     pub session: SdkSessionOptions,
     pub output: SdkOutputOptions,
     pub signal: SdkSignalOptions,
+    pub recovery: SdkRecoveryOptions,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -103,6 +104,17 @@ pub struct SdkOutputOptions {
 #[serde(default, deny_unknown_fields)]
 pub struct SdkSignalOptions {
     pub policy: Option<crate::config::SignalPolicy>,
+}
+
+/// `options.recovery`: bounded format-error window and request retries. Every
+/// field is optional so partial overrides keep the Rust-side defaults.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SdkRecoveryOptions {
+    pub format_window_size: Option<usize>,
+    pub format_max_errors: Option<usize>,
+    pub request_max_retries: Option<u32>,
+    pub request_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -264,6 +276,36 @@ pub fn validate_sdk_request(req: &SdkRequest) -> Result<(), String> {
         return Err(
             "invalid SDK request: context_compact_max_output_tokens must be greater than 0"
                 .to_string(),
+        );
+    }
+    let recovery = &opts.recovery;
+    if let Some(size) = recovery.format_window_size
+        && !(1..=1024).contains(&size)
+    {
+        return Err(
+            "invalid SDK request: recovery.format_window_size must be between 1 and 1024"
+                .to_string(),
+        );
+    }
+    let format_window_size = recovery.format_window_size.unwrap_or(10);
+    if let Some(max_errors) = recovery.format_max_errors
+        && max_errors >= format_window_size
+    {
+        return Err(
+            "invalid SDK request: recovery.format_max_errors must be less than format_window_size"
+                .to_string(),
+        );
+    }
+    if let Some(retries) = recovery.request_max_retries
+        && retries > 16
+    {
+        return Err(
+            "invalid SDK request: recovery.request_max_retries must be at most 16".to_string(),
+        );
+    }
+    if recovery.request_timeout_secs == Some(0) {
+        return Err(
+            "invalid SDK request: recovery.request_timeout_secs must be greater than 0".to_string(),
         );
     }
     if let Some(tool_timeout) = tools.tool_timeout

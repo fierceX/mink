@@ -483,6 +483,7 @@ fn assemble_runtime_options(
             approval: cfg.tool_approval.clone(),
         })
         .with_signal_policy(cfg.signal_policy)
+        .with_llm_recovery(cfg.llm_recovery)
         .with_session(session)
         .with_output_format(cfg.output_format)
         .with_verbose(cfg.verbose)

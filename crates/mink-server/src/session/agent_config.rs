@@ -34,6 +34,8 @@ pub(crate) struct MinkConfigFile {
     #[serde(default)]
     pub signal: SignalPolicyFile,
     #[serde(default)]
+    pub recovery: RecoveryConfigFile,
+    #[serde(default)]
     pub sandbox: SandboxConfigFile,
     #[serde(default)]
     pub sandbox_python: SandboxPythonConfigFile,
@@ -131,6 +133,27 @@ pub(crate) struct SandboxPythonConfigFile {
     pub package_dirs: Option<Vec<String>>,
 }
 
+/// `[recovery]`: bounded format-error window and request retries (all fields
+/// optional; unset fields keep the single Rust-side defaults).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RecoveryConfigFile {
+    pub format_window_size: Option<usize>,
+    pub format_max_errors: Option<usize>,
+    pub request_max_retries: Option<u32>,
+    pub request_timeout_secs: Option<u64>,
+}
+
+/// Merge two recovery sections per field (higher layer wins).
+fn merge_recovery(base: RecoveryConfigFile, over: RecoveryConfigFile) -> RecoveryConfigFile {
+    RecoveryConfigFile {
+        format_window_size: over.format_window_size.or(base.format_window_size),
+        format_max_errors: over.format_max_errors.or(base.format_max_errors),
+        request_max_retries: over.request_max_retries.or(base.request_max_retries),
+        request_timeout_secs: over.request_timeout_secs.or(base.request_timeout_secs),
+    }
+}
+
 /// Resolved agent configuration layer (one file layer or the merged result).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AgentConfig {
@@ -169,6 +192,7 @@ pub(crate) struct AgentConfig {
     pub edit_fuzzy_threshold: Option<f64>,
     pub edit_enforce_seen_lines: Option<bool>,
     pub signal_policy: Option<SignalPolicy>,
+    pub recovery: RecoveryConfigFile,
     pub sandbox: SandboxConfigFile,
     pub sandbox_python: SandboxPythonConfigFile,
 }
@@ -273,6 +297,7 @@ pub(crate) fn merge(base: AgentConfig, over: AgentConfig) -> AgentConfig {
         edit_fuzzy_threshold: pick(base.edit_fuzzy_threshold, over.edit_fuzzy_threshold),
         edit_enforce_seen_lines: pick(base.edit_enforce_seen_lines, over.edit_enforce_seen_lines),
         signal_policy: pick(base.signal_policy, over.signal_policy),
+        recovery: merge_recovery(base.recovery, over.recovery),
         sandbox: merge_sandbox(base.sandbox, over.sandbox),
         sandbox_python: merge_sandbox_python(base.sandbox_python, over.sandbox_python),
     }
@@ -415,6 +440,7 @@ fn from_file(file: &MinkConfigFile) -> AgentConfig {
     cfg.edit_fuzzy_threshold = tools.edit.fuzzy_threshold;
     cfg.edit_enforce_seen_lines = tools.edit.enforce_seen_lines;
     cfg.signal_policy = file.signal.policy;
+    cfg.recovery = file.recovery.clone();
     cfg.sandbox = file.sandbox.clone();
     cfg.sandbox_python = file.sandbox_python.clone();
     cfg
@@ -568,6 +594,30 @@ pub(crate) fn apply_to(mut options: AgentOptions, cfg: &AgentConfig) -> AgentOpt
 
     if let Some(policy) = cfg.signal_policy {
         options = options.with_signal_policy(policy);
+    }
+    {
+        let file = &cfg.recovery;
+        let mut policy = mink::runtime::LlmRecoveryPolicy::default();
+        let mut any = false;
+        if let Some(v) = file.format_window_size {
+            policy.format_window_size = v;
+            any = true;
+        }
+        if let Some(v) = file.format_max_errors {
+            policy.format_max_errors = v;
+            any = true;
+        }
+        if let Some(v) = file.request_max_retries {
+            policy.request_max_retries = v;
+            any = true;
+        }
+        if let Some(v) = file.request_timeout_secs {
+            policy.request_timeout_secs = Some(v);
+            any = true;
+        }
+        if any {
+            options = options.with_llm_recovery(policy);
+        }
     }
     if let Some(enabled) = cfg.log_events {
         options = options.with_log_events(enabled);
@@ -848,5 +898,27 @@ timeout = 60
         assert_eq!(parse_size_bytes("1g").unwrap(), 1_000_000_000);
         assert_eq!(parse_size_bytes("4096").unwrap(), 4096);
         assert!(parse_size_bytes("").is_err());
+    }
+
+    #[test]
+    fn recovery_section_parses_and_merges_per_field() {
+        // A01: the server reads the same `[recovery]` section as the CLI and
+        // merges it per field (higher layer wins, absent fields keep defaults).
+        let user = parse_layer(
+            "[recovery]\nformat_window_size = 5\nrequest_max_retries = 0\n",
+            "user",
+        );
+        let project = parse_layer("[recovery]\nformat_max_errors = 2\n", "project");
+        assert_eq!(user.recovery.format_window_size, Some(5));
+        assert_eq!(user.recovery.request_max_retries, Some(0));
+        let merged = merge(user, project);
+        assert_eq!(merged.recovery.format_window_size, Some(5));
+        assert_eq!(merged.recovery.format_max_errors, Some(2));
+        assert_eq!(merged.recovery.request_max_retries, Some(0));
+        assert_eq!(merged.recovery.request_timeout_secs, None);
+
+        // A02: unknown fields inside the section fail closed at parse time.
+        let error = toml::from_str::<MinkConfigFile>("[recovery]\nbogus = 1\n").unwrap_err();
+        assert!(error.to_string().contains("bogus"));
     }
 }

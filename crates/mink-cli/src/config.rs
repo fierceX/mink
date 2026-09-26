@@ -53,6 +53,8 @@ pub struct MinkConfigFile {
     #[serde(default)]
     pub signal: SignalPolicyFile,
     #[serde(default)]
+    pub recovery: RecoveryConfigFile,
+    #[serde(default)]
     pub sandbox: SandboxConfigFile,
     #[serde(default)]
     pub sandbox_python: SandboxPythonConfigFile,
@@ -104,6 +106,17 @@ pub struct GenerationConfigFile {
     pub llm_wait_heartbeat: Option<i32>,
     pub log_events: Option<bool>,
     pub output_format: Option<String>,
+}
+
+/// `[recovery]` TOML section: bounded format-error window and request retries
+/// (all fields optional; unset fields keep the single Rust-side defaults).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RecoveryConfigFile {
+    pub format_window_size: Option<usize>,
+    pub format_max_errors: Option<usize>,
+    pub request_max_retries: Option<u32>,
+    pub request_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -255,6 +268,8 @@ pub struct CliConfig {
     /// Per-tool approval overrides keyed by tool name.
     pub tool_approval: BTreeMap<String, ToolApprovalPolicy>,
     pub signal_policy: SignalPolicy,
+    /// Bounded LLM recovery policy ([recovery] / SDK options.recovery).
+    pub llm_recovery: mink::runtime::LlmRecoveryPolicy,
 }
 
 /// Fields explicitly provided by CLI flags. Only these inputs outrank the
@@ -332,6 +347,7 @@ impl Default for CliConfig {
             tool_approval_mode: ToolApprovalMode::Yolo,
             tool_approval: BTreeMap::new(),
             signal_policy: SignalPolicy::Full,
+            llm_recovery: mink::runtime::LlmRecoveryPolicy::default(),
         }
     }
 }
@@ -752,6 +768,18 @@ fn apply_config_sources(
     let cli = cfg.cli_overrides.clone();
 
     for toml_cfg in [user_cfg, project_cfg, cli_cfg].into_iter().flatten() {
+        if let Some(value) = toml_cfg.recovery.format_window_size {
+            cfg.llm_recovery.format_window_size = value;
+        }
+        if let Some(value) = toml_cfg.recovery.format_max_errors {
+            cfg.llm_recovery.format_max_errors = value;
+        }
+        if let Some(value) = toml_cfg.recovery.request_max_retries {
+            cfg.llm_recovery.request_max_retries = value;
+        }
+        if let Some(value) = toml_cfg.recovery.request_timeout_secs {
+            cfg.llm_recovery.request_timeout_secs = Some(value);
+        }
         if !cli.model
             && let Some(model) = &toml_cfg.provider.model
         {
@@ -1224,5 +1252,18 @@ pub(crate) fn apply_sdk_request_options(
             mink::runtime::SignalPolicy::Restart => SignalPolicy::Restart,
             mink::runtime::SignalPolicy::Full => SignalPolicy::Full,
         };
+    }
+    let recovery = &options.recovery;
+    if let Some(value) = recovery.format_window_size {
+        cfg.llm_recovery.format_window_size = value;
+    }
+    if let Some(value) = recovery.format_max_errors {
+        cfg.llm_recovery.format_max_errors = value;
+    }
+    if let Some(value) = recovery.request_max_retries {
+        cfg.llm_recovery.request_max_retries = value;
+    }
+    if let Some(value) = recovery.request_timeout_secs {
+        cfg.llm_recovery.request_timeout_secs = Some(value);
     }
 }

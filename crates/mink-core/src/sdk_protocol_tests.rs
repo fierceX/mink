@@ -267,3 +267,64 @@ fn sdk_request_rejects_flat_legacy_options() {
         .unwrap_err();
     assert!(error.contains("unknown field `max_context`"), "{error}");
 }
+
+#[test]
+fn sdk_recovery_options_are_parsed_validated_and_defaulted() {
+    // JSONL `options.recovery` is an optional group; absent fields keep
+    // the single Rust-side defaults and unknown fields are rejected.
+    let plain = parse_agent_jsonl_request(r#"{"prompt":"hi"}"#).unwrap();
+    assert!(plain.options.recovery.format_window_size.is_none());
+    assert!(plain.options.recovery.request_max_retries.is_none());
+
+    let req = parse_agent_jsonl_request(
+        r#"{"prompt":"hi","options":{"recovery":{"format_window_size":5,"format_max_errors":2,"request_max_retries":1,"request_timeout_secs":30}}}"#,
+    )
+    .unwrap();
+    validate_sdk_request(&req).unwrap();
+    assert_eq!(req.options.recovery.format_window_size, Some(5));
+    assert_eq!(req.options.recovery.format_max_errors, Some(2));
+    assert_eq!(req.options.recovery.request_max_retries, Some(1));
+    assert_eq!(req.options.recovery.request_timeout_secs, Some(30));
+
+    let error = parse_agent_jsonl_request(r#"{"prompt":"hi","options":{"recovery":{"bogus":1}}}"#)
+        .unwrap_err();
+    assert!(error.contains("unknown field `bogus`"), "{error}");
+}
+
+#[test]
+fn sdk_recovery_options_fail_closed_on_invalid_values() {
+    // Invalid W/K/retries/timeout are rejected before session creation.
+    let cases = [
+        (
+            r#"{"prompt":"hi","options":{"recovery":{"format_window_size":0}}}"#,
+            "format_window_size",
+        ),
+        (
+            r#"{"prompt":"hi","options":{"recovery":{"format_window_size":1025}}}"#,
+            "format_window_size",
+        ),
+        (
+            r#"{"prompt":"hi","options":{"recovery":{"format_window_size":4,"format_max_errors":4}}}"#,
+            "format_max_errors",
+        ),
+        (
+            r#"{"prompt":"hi","options":{"recovery":{"request_max_retries":17}}}"#,
+            "request_max_retries",
+        ),
+        (
+            r#"{"prompt":"hi","options":{"recovery":{"request_timeout_secs":0}}}"#,
+            "request_timeout_secs",
+        ),
+    ];
+    for (body, expected) in cases {
+        let req = parse_agent_jsonl_request(body).unwrap();
+        let error = validate_sdk_request(&req).unwrap_err();
+        assert!(error.contains(expected), "{body}: {error}");
+    }
+    // K=0 with an explicit window is valid (no format budget).
+    let req = parse_agent_jsonl_request(
+        r#"{"prompt":"hi","options":{"recovery":{"format_window_size":1,"format_max_errors":0}}}"#,
+    )
+    .unwrap();
+    validate_sdk_request(&req).unwrap();
+}

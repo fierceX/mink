@@ -286,6 +286,13 @@ class SandboxConfig:
     # Signal system
     signal_policy: Optional[str] = None
 
+    # Bounded LLM recovery: format-error window and request retries.
+    # None keeps the Rust-side defaults (window 10, max errors 3, retries 3).
+    format_window_size: Optional[int] = None
+    format_max_errors: Optional[int] = None
+    request_max_retries: Optional[int] = None
+    request_timeout_secs: Optional[int] = None
+
     # Working directory
     cwd: Optional[str] = None
 
@@ -871,6 +878,17 @@ class AgentSession:
         }
         if self._config.signal_policy is not None:
             options["signal"] = {"policy": self._config.signal_policy}
+        recovery: dict[str, Any] = {}
+        if self._config.format_window_size is not None:
+            recovery["format_window_size"] = self._config.format_window_size
+        if self._config.format_max_errors is not None:
+            recovery["format_max_errors"] = self._config.format_max_errors
+        if self._config.request_max_retries is not None:
+            recovery["request_max_retries"] = self._config.request_max_retries
+        if self._config.request_timeout_secs is not None:
+            recovery["request_timeout_secs"] = self._config.request_timeout_secs
+        if recovery:
+            options["recovery"] = recovery
         if extra_options:
             options = _deep_merge(options, extra_options)
         signal = options.get("signal")
@@ -963,6 +981,21 @@ class AgentSession:
                     "inline skill exposure must be 'model_discoverable', "
                     "'model_addressable', or 'host_only'"
                 )
+        self._validate_recovery_config(cfg)
+
+    @staticmethod
+    def _validate_recovery_config(cfg: "SandboxConfig") -> None:
+        """Validate the bounded LLM recovery overrides (None = Rust default)."""
+        if cfg.format_window_size is not None and not 1 <= cfg.format_window_size <= 1024:
+            raise ValueError("format_window_size must be between 1 and 1024")
+        if cfg.format_max_errors is not None:
+            window = cfg.format_window_size if cfg.format_window_size is not None else 10
+            if not 0 <= cfg.format_max_errors < window:
+                raise ValueError("format_max_errors must be less than format_window_size")
+        if cfg.request_max_retries is not None and not 0 <= cfg.request_max_retries <= 16:
+            raise ValueError("request_max_retries must be at most 16")
+        if cfg.request_timeout_secs is not None and cfg.request_timeout_secs <= 0:
+            raise ValueError("request_timeout_secs must be greater than 0")
 
     @staticmethod
     def _validate_skill_name(name: Any, label: str) -> None:
@@ -1047,6 +1080,19 @@ class AgentSession:
             },
         }
         sections = {"generation": generation, "tools": tools}
+
+        # Bounded LLM recovery overrides for .minkrc [recovery].
+        recovery: dict[str, Any] = {}
+        if cfg.format_window_size is not None:
+            recovery["format_window_size"] = cfg.format_window_size
+        if cfg.format_max_errors is not None:
+            recovery["format_max_errors"] = cfg.format_max_errors
+        if cfg.request_max_retries is not None:
+            recovery["request_max_retries"] = cfg.request_max_retries
+        if cfg.request_timeout_secs is not None:
+            recovery["request_timeout_secs"] = cfg.request_timeout_secs
+        if recovery:
+            sections["recovery"] = recovery
 
         # PythonSandbox configuration; activation is controlled by enabled_tools.
         sp = {}

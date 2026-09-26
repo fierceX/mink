@@ -332,6 +332,51 @@ fn config_llm_timeout_via_toml() {
 }
 
 #[test]
+fn config_recovery_via_toml() {
+    // A01/A02: `[recovery]` forwards the four fields into the shared Config;
+    // unset fields keep the Rust-side defaults.
+    let mut cfg = parse_args(vec![
+        "--config".into(),
+        "[recovery]\nformat_window_size = 5\nformat_max_errors = 2\nrequest_max_retries = 1\nrequest_timeout_secs = 30"
+            .into(),
+    ])
+    .unwrap();
+    let defaults = CliConfig::default();
+    let cli = cfg.cli_config.take();
+    apply_config_sources(&mut cfg, &defaults, None, None, cli.as_ref());
+    cfg.cli_config = cli;
+    assert_eq!(cfg.llm_recovery.format_window_size, 5);
+    assert_eq!(cfg.llm_recovery.format_max_errors, 2);
+    assert_eq!(cfg.llm_recovery.request_max_retries, 1);
+    assert_eq!(cfg.llm_recovery.request_timeout_secs, Some(30));
+
+    let mut cfg = parse_args(vec!["prompt".into()]).unwrap();
+    let defaults = CliConfig::default();
+    let cli = cfg.cli_config.take();
+    apply_config_sources(&mut cfg, &defaults, None, None, cli.as_ref());
+    cfg.cli_config = cli;
+    assert_eq!(
+        cfg.llm_recovery,
+        mink::runtime::LlmRecoveryPolicy::default()
+    );
+}
+
+#[test]
+fn sdk_request_recovery_options_are_applied() {
+    let request: mink::sdk_protocol::SdkRequest = serde_json::from_str(
+        r#"{"prompt":"hi","options":{"recovery":{"format_window_size":4,"request_max_retries":0}}}"#,
+    )
+    .unwrap();
+    mink::sdk_protocol::validate_sdk_request(&request).unwrap();
+    let mut cfg = CliConfig::default();
+    apply_sdk_request_options(&mut cfg, &request);
+    assert_eq!(cfg.llm_recovery.format_window_size, 4);
+    assert_eq!(cfg.llm_recovery.request_max_retries, 0);
+    assert_eq!(cfg.llm_recovery.format_max_errors, 3);
+    assert_eq!(cfg.llm_recovery.request_timeout_secs, None);
+}
+
+#[test]
 fn parse_config_file_overrides_model() {
     let toml_str = r#"
 [provider]
