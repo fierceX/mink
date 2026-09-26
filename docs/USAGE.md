@@ -255,6 +255,13 @@ enforce_seen_lines = false
 [signal]
 policy = "full" # off / evidence / state_ops / restart / full
 
+[recovery]
+# 有界 LLM 自愈（缺省字段保留内置默认值）
+format_window_size = 10   # 每个用户 turn 的格式错误滑动窗口 W（1..=1024）
+format_max_errors = 3     # 窗口内允许多少次格式错误 K（0 <= K < W）
+request_max_retries = 3   # 单个逻辑请求在其后的重试调用数（0..=16，默认共 4 次请求）
+request_timeout_secs = 30 # 可选：单个逻辑请求的总期限（含全部尝试与等待，> 0）
+
 [sandbox_python]
 wasm_path = "/path/to/python.wasm"
 read_dirs = ["./data"]
@@ -263,6 +270,16 @@ read_dirs = ["./data"]
 旧的顶层扁平字段不再接受；解析器会报告 unknown field。算法阈值、先验、衰减、证据长度、冷却和恢复限制是内部策略，不属于配置协议。
 `llm_first_event_timeout` 覆盖「请求建立（含等待响应头）＋首事件」的**总预算**：建流返回不会重置计时，`Retry` 不延长；Ctrl+C 在建立阶段同样生效，中断映射为 Interrupted。
 `--agent-jsonl` 模式不会读取 `.minkrc`，但仍应用命令行 `--config`。
+
+#### LLM 有界恢复（`[recovery]`）
+
+一次 `run_turn()` 内的自愈限制全部来自这一组配置（Rust `Config.llm_recovery`、JSONL `options.recovery`、Python `SandboxConfig` 同名参数）：
+
+- 模型输出格式错误采用滑动的 round 窗口：`format_window_size`（默认 10）与 `format_max_errors`（默认 3）。每个完成判定的 round 只占一个槽；坏参数工具调用返回 `ArgumentInvalid` 失败结果让模型重发，缺名/缺 ID/重复 ID 的候选批整体丢弃并反馈一次内部诊断，`length`/`max_tokens` 候选整体废弃，空正文/未知 stop 不再静默成功；错误数超过 K 以 `format_recovery_exhausted` 结束，已执行工具不回滚。
+- 请求暂时故障（408/409/425/429/500/502/503/504、连接重置、首事件/idle 超时、响应协议损坏）自动重试：`request_max_retries`（默认 3）表示首次之外允许的重试调用数，退避 1s/2s/4s…上限 10s，`Retry-After`（秒数或 HTTP-date）作为最早重试时间；401/403、模型不存在、未知 provider 错误不重试。
+- `request_timeout_secs`（默认不设）限定一个逻辑请求的总期限，包含全部重试与等待，重试不会延长它。
+- 参数错反馈与请求重试是两条独立分支：参数错不会原样重发同一请求，502 也不会靠给模型追加提示恢复。
+- 取消、持久化闩锁与 `max_turns` 优先：取消立即结束等待中的重试；格式恢复消耗正常 round/max_turns，超限时返回 `format_recovery_exhausted`，未超限但轮次用尽仍是 `MaxTurnsExceeded`。
 
 #### 信号系统（分层响应模型）
 
@@ -641,7 +658,7 @@ context_compact_tail_tokens = 256000
 每次工具执行前自动运行三段修复，无需人工干预：
 
 - **Scavenge**：从 `reasoning_content` 和文本回复中回收遗漏的工具调用（支持 DSML/XML/
-  Bracket/裸 JSON/OpenAI/R1 等容器格式）
+  Bracket/裸 JSON/OpenAI/R1 等容器格式）；DSML 参数头损坏时反馈格式错误，在恢复窗口允许时继续，不执行损坏调用。
 - **Truncation**：修复截断的 JSON 参数（闭合引号、补全括号、去尾逗号）
 - **StormBreaker**：滑动窗口检测 `(工具名, 参数)` 重复，同一对出现 3 次时抑制调用；
   mutating 工具执行时清空只读条目，允许 edit→re-read 正常模式

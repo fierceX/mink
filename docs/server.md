@@ -58,8 +58,8 @@ MINK_SERVER_PORT=9000 ./target/debug/mink-server
 
 - 每个会话启动时按 **项目级 `<cwd>/.minkrc` 覆盖用户级 `~/.minkrc`** 的层级合并，覆盖 CLI 的同一套分组：
   `[provider]`（model/api_key/base_url/model_aliases/openai_*）、`[generation]`、`[context]`、
-  `[tools]` / `[tools.edit]`、`[signal]`、`[sandbox]`、`[sandbox_python]`。
-- 会话运行时选项（provider/generation/context/tools/signal/sandbox）完整应用到 `AgentOptions`，
+  `[tools]` / `[tools.edit]`、`[signal]`、`[recovery]`、`[sandbox]` / `[sandbox_python]`。
+- 会话运行时选项（provider/generation/context/tools/signal/recovery/sandbox）完整应用到 `AgentOptions`，
   与 CLI 的 `assemble_runtime_options` 行为一致。
 - 环境变量 `MODEL` / `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `MINK_SIGNAL_POLICY` /
   `LOG_EVENTS` 在文件层之上覆盖（server 文档化优先级：环境变量 > `mink-server.toml` >

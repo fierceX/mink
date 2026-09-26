@@ -75,6 +75,7 @@ echo '{"version":3,"prompt":"scan this repo"}' | mink-core --agent-jsonl
 | `session` | `session_id`, `session_layout` | session 引用与布局 |
 | `output` | `verbose`, `stream_events` | 输出策略 |
 | `signal` | `policy` | `off` / `evidence` / `state_ops` / `restart` / `full` |
+| `recovery` | `format_window_size`, `format_max_errors`, `request_max_retries`, `request_timeout_secs` | 有界 LLM 恢复；全部可选，缺省保留 Rust 默认（10 / 3 / 3 / 不设），非法值拒绝 |
 
 示例：
 
@@ -98,6 +99,7 @@ echo '{"version":3,"prompt":"scan this repo"}' | mink-core --agent-jsonl
       "edit_enforce_seen_lines": false,
       "enabled_tools": ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
     },
+    "recovery": {"format_window_size": 10, "request_max_retries": 3},
     "output": {"stream_events": false}
   }
 }

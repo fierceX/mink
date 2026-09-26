@@ -19,23 +19,25 @@
 ```text
 ToolCallEvent
   -> resolved ModelToolSurface 执行门禁
-  -> StormBreaker 检查
-  -> repair_tool_input() 非 fallback 输入守卫
-  -> ToolExec::execute()
+  -> StormBreaker 检查（身份：合法 JSON 用序列化参数，不可解析输入用原始参数摘要）
+  -> 已知 parse_error / 已确认 ModelFormat：不执行，直接返回 ArgumentInvalid 失败结果
+  -> ToolExec::execute()（内置工具经共享 decode helper，失败标记 ModelFormat）
   -> format_dispatched_result() 生成 ToolExecution
      -> 普通结果执行大小保护、Bash noise filter、Read-Write summary、Edit conv_content
      -> Plan/SubAgent 结果标记为待定稿
   -> 工具阶段原地完成 PlanCommand 交接；SubAgentCoordinator 完成延迟工作
   -> finalize_deferred_results() 对延迟结果执行大小保护
   -> SignalCollector 只观察最终 ToolExecution.status；Command 正文只用于诊断 regex
+     （ModelFormat 不产生信号，只单独计数）
 ```
 
 OpenAI SSE parser 在生成 `ToolCallEvent` 前合并碎片化 arguments，并要求输入是 JSON object。
-首次解析失败时调用 `repair_truncated_json()`；只有修复结果能够重新解析且
-`fallback=false` 才继续，无法可靠修复的输入直接返回解析错误。Scavenge 回收的候选调用也
-通过同一个 `build_tool_call_event()` 结构化校验。Runner 接收结构化 `input_json`，每个工具
-通过 serde 从 `input_json` 反序列化参数；参数不匹配时返回 `Error:` 前缀的结构化错误，
-不 panic。
+参数不可解析时不再执行词法修复：候选带 parse error 与原始参数摘要交给模型重发（失败结果
+`Failed(ArgumentInvalid)`，来源 `ToolFormat(ModelFormat)`），既不会静默跳过，也不会把占位 `{}`
+当成功调用执行；缺名/缺 ID/重复 ID 的候选整批丢弃并反馈一次内部诊断。Scavenge 回收的候选调用也
+通过同一个 `build_tool_call_event()` 结构化校验；DSML 参数头必须完整包含 `>`，缺失时生成降级候选和错误反馈，不执行部分参数。Runner 接收结构化 `input_json`，内置工具
+经共享 decode helper 从 `input_json` 反序列化参数（`deny_unknown_fields` 不变）；参数不匹配时
+返回 `Error: tool execution failed: invalid tool arguments: ...` 失败结果，不 panic、不放宽 schema。
 
 工具结果有两个内容通道：
 

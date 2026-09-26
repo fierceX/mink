@@ -60,15 +60,17 @@ OrchActor (agent/orchestrator.rs)
   │  维护 BeliefTracker 和当前强制模型
   ▼
 TurnExecutor (agent/turn.rs)
-  │  单轮执行器：压缩 -> LLM stream -> scavenge -> 工具 -> 信号 -> 决策
+  │  单轮执行器：压缩 -> LLM stream（固定投影 + attempt 重试）-> scavenge ->
+  │  格式窗口提交 -> 工具 -> 信号 -> 决策
   │  组合 PrefixManager / TurnCompactor / ToolSignalProcessor /
   │  SubAgentCoordinator（模型与 backend 在构造时一次确定）
   ▼
 ┌─────── LLM 层 ────────┐
-│ llm/client.rs         │ LlmBackend 注入、OpenAI-compatible 流式客户端、重试、usage 采集、模型名解析、请求选项、缓存投影 seam 与校准门控
+│ llm/client.rs         │ LlmBackend 注入、每次 `stream()` 一个物理请求的 OpenAI-compatible 客户端、usage 采集、模型名解析、请求选项、缓存投影 seam 与校准门控
+│ llm/recovery.rs       │ 类型化上游错误（可重试/协议损坏/永久）、请求重试计数与 deadline、纯退避/Retry-After 计算、稳定终态码
 │ llm/transport.rs      │ OpenAI chat/completions 请求构造、tool_choice 和 extra_body 合并
-│ sse/openai.rs         │ SSE 增量解析、usage、stop、tool call 合并
-│ sse/toolcall.rs       │ tool_call 字段归一化
+│ sse/openai.rs         │ SSE 增量解析、usage、stop、tool call 合并；坏参数/坏身份候选不执行、不静默跳帧
+│ sse/toolcall.rs       │ tool_call 字段归一化、兼容调用唯一 ID、原始参数摘要（storm 身份）
 └───────────────────────┘
          │
 ┌─────── 工具层 ────────┐
@@ -150,19 +152,26 @@ OrchActor.handle_user_input()
        ├── ensure_prefix()
        │
        └── while turn < max_turns:
-           ├── auto compact + preflight compact
-           ├── LLM stream -> Event （MeteredStream 采集 usage → usage.jsonl）
-           ├── scavenge thinking/text 中遗漏的工具调用
-           ├── store.add_assistant()
-           ├── ToolRunner::execute_all()
-           ├── 工具阶段原地完成 Plan 交接（PlanCommand → effect / append-only transition）
-           ├── SubAgentCoordinator 启动/收集子代理
-           ├── ToolRunner 统一定稿并保护延迟结果大小
-           ├── ToolSignalProcessor 基于最终结果更新 belief
-           ├── store.add_tool_results()
-           ├── 发射 AgentEventKind::ToolResult
-           ├── Plan 压缩请求交给 TurnCompactor
-           └── 循环结束 → OrchActor::finish_usage() 汇总 billing_turn_id → TurnOutcome
+          ├── auto compact + preflight compact
+          ├── 固定本 round 请求投影（含图片物化，只构建一次）
+          ├── attempt 循环：建流 → 消费流 → 故障分类（共享同一可选总期限）
+          │    ├── 可重试（502/429/连接重置/首事件与 idle 超时）：废弃候选，退避后重试（恰发一次 Retry）
+          │    ├── 协议损坏：废弃候选，计本 round 一个格式错，预判窗口后重试
+          │    ├── 永久/取消/耗尽：request_retry_exhausted / request_timeout / Interrupted
+          │    └── 每次 attempt 独立结算 usage（MeteredStream → usage.jsonl）
+          ├── scavenge thinking/text 中遗漏的工具调用（已识别但参数不可解析或 DSML 参数头不完整的调用作为降级候选呈现）
+          ├── §6.3 结束判定：拒绝/截断/调用身份/可配对调用/完成/不可确认
+          ├── store.add_assistant()（仅接受后的候选；ToolCall 展示与事件同点后移）
+          ├── ToolRunner::execute_all()（模型格式失败标 ModelFormat，不执行坏参数调用）
+          ├── 工具阶段原地完成 Plan 交接（PlanCommand → effect / append-only transition）
+          ├── SubAgentCoordinator 启动/收集子代理
+          ├── ToolRunner 统一定稿并保护延迟结果大小
+          ├── ToolSignalProcessor 基于最终结果更新 belief（ModelFormat 仅单独计数）
+          ├── store.add_tool_results()
+          ├── 发射 AgentEventKind::ToolResult
+          ├── 唯一的 round 结束点：格式窗口提交 true/false；超限→format_recovery_exhausted
+          ├── Plan 压缩请求交给 TurnCompactor
+          └── 循环结束 → OrchActor::finish_usage() 汇总 billing_turn_id → TurnOutcome
 ```
 
 ### 工具结果进入 LLM 与 UI

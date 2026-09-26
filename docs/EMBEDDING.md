@@ -21,7 +21,7 @@ Rust 发布包为 `mink-core`，库 crate 名为 `mink`。发布包只包含可�
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.6.4", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.6.5", default-features = false, features = ["runtime"] }
 ```
 
 公开入口为 `mink::prelude`、`mink::runtime`、`mink::sdk_protocol` 和 `mink::ui`。
@@ -110,6 +110,7 @@ observer 通过固定容量队列与核心 turn 隔离；溢出或 observer 失�
 | Tools | `with_tool_options()`；`enabled_tools=None` 用默认集合，空列表禁用全部 |
 | Session | `with_session()` / `with_session_layout()`（或布局快捷方法） |
 | Signal | `with_signal_policy(SignalPolicy)` |
+| Recovery | `with_llm_recovery(LlmRecoveryPolicy { format_window_size, format_max_errors, request_max_retries, request_timeout_secs })` |
 | OpenAI | `with_openai_reasoning_effort()` / `with_openai_tool_choice()` / `with_openai_extra_body()` / `with_openai_token_param()` / `with_openai_include_usage()` |
 | 多模态 | `with_image_input(ImageInputCapability)` / `with_vision_models(Vec<String>)` / `with_image_limits(ImageLimitsOverrides)` |
 | 能力 | `with_mission_content()` / `with_selected_skills()` / `with_runtime_skill_content()` / `with_skill_discovery_policy()` / `with_resource_handler()` / `with_read_only_file_system()` / `with_resource_session_id()` |
@@ -138,8 +139,9 @@ let runtime = AgentRuntime::start(
 
 ### 自定义 backend 的 Retry / Usage 语义
 
-- `Event::Retry` 会重置当前请求的累积文本/工具调用（agent 与压缩摘要一致）；
-  backend 不得依赖“重试前部分输出会保留”。
+- runtime 拥有对外层 `stream()` 调用的重试责任：内置 backend 一次调用 = 一次物理请求；自定义 backend 若希望复用 runtime 重试，返回 `LlmUpstreamError`（`UpstreamFailureKind::Recoverable`/`ProtocolDamaged`，可选 HTTP status、provider code、`Retry-After` 与受限诊断），可选包在 `LlmRequestFailure{attempt_count, error}` 中（该结构曝光 source 链，运行时能穿透取出结构化根因）。未类型化错误保持既有的失败行为（不重试）。
+- 每次 attempt 重新调用 `stream()`；重试次数由 `LlmRecoveryPolicy.request_max_retries` 限制，退避 1s/2s/4s…上限 10s，`Retry-After` 作为最早重试时间。backend 内部自带的多次请求不受限，也请如实上报聚合 `attempt_count`（外层不乘算，也不拆不可观察的明细）。
+- `Event::Retry` 是 backend 内部的“本次候选作废”通知：会重置当前尝试累积的文本/工具调用（agent 与压缩摘要一致），但不获得新的重试额度、不重置 attempt 计时；runtime 自己发起的重试会另行发一次 Retry 控制事件。
 - 每个请求只应发送一次 `Event::Usage`；首个 Usage 记为已上报，之后的
   Usage 事件只记一条 Unreported 诊断（不会静默丢弃，也不会覆盖首条记录）。
 - `Event::UsageUnavailable` 记为 unreported（reason=`provider_usage_missing`）。

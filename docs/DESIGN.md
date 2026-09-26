@@ -965,7 +965,7 @@ Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。`mink-core` 发布�
 实现；终端二进制和 UI 实现由 workspace 中的 `mink-cli` 包持有。服务端依赖时推荐只启用嵌入式 runtime：
 
 ```toml
-mink = { package = "mink-core", version = "0.6.4", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.6.5", default-features = false, features = ["runtime"] }
 ```
 
 `mink::runtime` / `mink::prelude` 解决这些问题：**同一套 OrchActor / TurnExecutor / ToolRunner 核心，但无进程边界**。
@@ -1028,3 +1028,25 @@ Rust crate mink ───┘
   降级为确定性文本引用，`Read image://` 可重新注入；
 - 图片准入配额（数量/字节/维度/像素）在工具层与物化层双重校验，批次从 0 计数且
   批次间重置；`[provider.image]` 限额只作用于已支持会话。
+
+## 主题十七：LLM 有界自愈
+
+设计目标是“有限故障下继续推进”，不是通用恢复框架：只增加两个小型状态对象（turn 内格式窗口、logical request 内的重试计数/退避状态），复用现有 `LlmBackend`、`TurnExecutor`、工具失败结果、`Retry` 事件与 usage 记录。
+
+### 四种处置
+
+- 接受：完整响应或确定性兼容（合法调用配 `stop`、旧式 `function_call`、已支持的 `data:` 拼写/缺 DONE 但有 finish_reason）。
+- 反馈并继续：工具参数/调用格式错误与不可用输出——失败工具结果或一次受限内部诊断，下一 round 纠正；模型可见的错误包括 `invalid tool arguments`（serde 规则未放宽）、`<tool-call-format-error>`（整批身份不可配对）、`<output-truncated>`（length 候选整体废弃）、`<incomplete-response>`（空正文/未知 stop）。
+- 重试当前请求：502/429/连接重置/首事件与 idle 超时（不占格式窗口）与 SSE 损坏/异常 EOF（占一个格式错）；固定投影重试、恰发一次 Retry、可取消退避、`Retry-After` 为最早重试时间。
+- 结束：永久拒绝、恢复耗尽、取消、本地不可恢复故障；稳定错误前缀 `format_recovery_exhausted` / `request_retry_exhausted` / `request_timeout`，绝不空成功。
+
+### 关键取舍
+
+- 所有可继续的 round 共用同一个尾部：先结算窗口一次，再执行分支决策（todo 提醒、`[trajectory]` 证据注入），最后重载已提交历史——刷新必须在本轮所有追加之后；反馈诊断、工具结果与注入状态必须出现在下一次请求中。
+- scavenge 的候选解析必须区分“无候选”与“明确候选解析失败”：先识别包装标签再解析内部（闭合/未闭合 × JSON 合法/非法 × 名字正常/缺失 全部归入降级候选），DSML invoke 同样（头部/块/参数截断均降级且切片安全；参数头完整匹配含 `>` 的分隔符后才读取值，声明为 JSON 的参数解码失败不得回退为字符串）；`function.arguments` 字段缺失（默认空对象）与类型错误（保留原始 payload 与 parse error）必须区分；普通 JSON 示例仍不误判。
+- SSE 流式 `arguments` 类型错误是粘性的（不在流内纠正，模型下一 round 重发）；首事件/idle 期限只由真实进度推进，Retry 不延长 idle；失败 attempt 在重试前先取消自身子 token。
+- 格式窗口按 round 计（不是按工具、不是按 attempt）：一个 round 内多个坏参数调用、多次损坏流只占一个 `true`；预判（`would_exceed`）不改变窗口，提交只在唯一 round 结束点发生，且在所有真实工具结果持久化之后。
+- 参数错与请求重试严格分离：参数错不能归入“原样重试同请求”，502 不能靠给模型追加提示恢复；已知格式调用不消耗恢复守卫，也不触发 belief/回滚/重启。所有模型可见内置工具的模型参数解码经共享 helper（不完整迁移会造成真实失败信号与格式额度的错配）。
+- 不确定的词法修复不再执行：截断 JSON 只带 parse error 与原始参数摘要交给模型重发；正文中已识别的工具调用同样如此（降级候选进入纠错分支），普通 JSON 示例仍不会被当成格式错误。
+- 可选总期限是整次逻辑请求的上限：建流、流消费与退避等待共用同一个 deadline；到点时停止等待/消费并保留已收到的 usage，重试不会延长它（主请求与压缩摘要请求共用该语义）。
+- 内置 backend 一次调用 = 一次物理请求，重试责任收敛到 runtime attempt 循环，避免嵌套重试相乘；自定义 backend 内部的多次物理请求只按既有聚合 `attempt_count` 记录（不拆明细、不外层乘算）。
