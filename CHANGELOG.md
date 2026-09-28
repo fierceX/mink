@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### 变更：同一用户输入可重复压缩（取消单轮一次互锁）
+
+- `TurnCompactor` 的 `compacted_this_turn` 布尔互锁改为计数（`compactions_this_turn`）：auto / preflight / overflow 不再按「每个用户输入一次」封顶；每次压缩必须严格降低请求估算（不降即停，避免在同一投影上重复摘要），无安全切点 / 收益不足时仍以 fail-closed 拒绝发送超预算请求。
+- `prepare_request` 改为「压到装得下为止」：估算超硬闸门时反复强制 preflight，每轮重新投影与重估；错误消息现在带上本轮已提交压缩次数、强制尝试次数与最后一次跳过原因（便于嵌入侧区分「预算用尽请续跑」与真故障）。
+- provider context overflow 恢复不再要求「本轮尚未压缩」：只在无可见输出时触发，且每个输入仍最多一次压缩 + 一次重试。
+- 最小收益检查分档：auto 保持「节省 < 10% 跳过」；preflight / overflow 在请求已经超预算时只要真能省（`saved > 0`）就压——否则「需要的削减量小于阈值」会变成无法恢复的必然失败。
+- `compact` 事件 `result` 串追加 `_compactions_this_turn=<n>`（本轮第几次压缩，1-based；`manual` 等输入外调用不带该字段）。
+
+### 已知边界
+
+- 活跃窗口里只剩最近两个真实 user 消息时切点为 0（`no safe boundary`），压缩不会发生；当轮自身产生的工具输出也无法被折叠。这时的超预算仍以 fail-closed 结束该轮，调用方应发下一条输入续跑（下一输入会重置压缩入口且上一轮变成可折叠历史）。放宽该切点规则的方案（允许切进当轮 / 重新锚定当前用户消息）暂缓。
+- 代价：长输入可能产生多次摘要调用与投影 generation 递增（前缀缓存命中率下降，该 turn 的 provider 压力校准退回本地估算）。
+
+### 兼容性说明
+
+- 事件形状不变，仅 `compact.result` 字符串新增字段；公共 API 不变（`agent` 模块为私有）；`--print` / `--agent-jsonl` 协议不变。
+- 行为变化：同一用户输入内可发生多次压缩；错误文案由 `context remains over the request input budget after compaction: ...` 变为 `context remains over the request input budget: ... N compaction(s) committed and M forced attempt(s) in this input (last: ...)`。
+- 文档同步：`AGENTS.md`（不变式 + 日期）、`docs/DESIGN.md`、`docs/ARCHITECTURE.md`、`docs/USAGE.md`。
+
 ## v0.6.5 (2026-09-26)
 
 ### 新增：LLM 有界自愈（格式反馈窗口 + 请求重试）

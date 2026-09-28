@@ -1,30 +1,105 @@
 use super::*;
 use crate::agent::prefix::PrefixManager;
+use crate::llm::client::LlmBackend;
+use crate::llm::mock::MockLlmBackend;
+use crate::protocol::Event;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+fn summary_script() -> Vec<Result<Event>> {
+    vec![
+        Ok(Event::Text(crate::protocol::TextEvent {
+            content: "Task focus: x\nLatest request: y\nProgress: z\nTool evidence: none\nReflections: none"
+                .into(),
+        })),
+        Ok(Event::Stop(crate::protocol::StopEvent {
+            reason: "end_turn".into(),
+        })),
+    ]
+}
+
+/// 同一用户输入不再限制压缩次数：首次压缩之后，请求仍然装不下时必须能再次
+/// 到达压缩引擎（这里第二次真的再次提交），而不是被入口互锁直接短路。
 #[tokio::test]
-async fn maybe_compact_skips_after_already_compacted_this_turn() -> anyhow::Result<()> {
-    let ctx = crate::regression::test_context_for_agent("compactor-already").await?;
+async fn maybe_compact_attempts_again_after_a_successful_compaction() -> anyhow::Result<()> {
+    let backend: Arc<dyn LlmBackend> = Arc::new(MockLlmBackend::new(
+        "summary-model",
+        vec![summary_script(), summary_script(), summary_script()],
+    ));
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "compactor-repeat",
+        |cfg| {
+            // 热尾部保持两次压缩都能找到合法切点。
+            cfg.context_compact_tail_tokens = 5_000;
+        },
+        backend,
+    )
+    .await?;
+    ctx.store
+        .add_user(&format!("first {}", "x".repeat(24_000)))
+        .await?;
+    ctx.store
+        .add_assistant(&"y".repeat(24_000), "", &[])
+        .await?;
+    ctx.store
+        .add_user(&format!("second {}", "z".repeat(6_000)))
+        .await?;
+    ctx.store.add_assistant("ack", "", &[]).await?;
+    ctx.store.add_user("third").await?;
+    ctx.store.add_assistant("ack", "", &[]).await?;
+
     let prefix = PrefixManager::new(ctx.clone());
-    let mut compactor = TurnCompactor::new(ctx, prefix);
-    compactor.compacted_this_turn = true;
-    let mut messages = Vec::new();
+    let mut compactor = TurnCompactor::new(ctx.clone(), prefix);
+    let mut messages = ctx.store.lines().await?;
     let mut system_prompt = String::new();
     let mut tools = Vec::new();
+    let target = LlmModelTarget::new("test-model", None);
 
-    let did_compact = compactor
+    let (first, detail) = compactor
         .maybe_compact(
             "manual",
             &mut messages,
             &mut system_prompt,
             &mut tools,
-            LlmModelTarget::new("test-model", None),
+            target,
         )
         .await?;
+    assert!(first, "the seeded history must compact: {detail}");
+    assert_eq!(compactor.compactions_this_turn(), 1);
 
-    assert!(!did_compact);
+    // 同一输入的下一个 round 继续追加内容：必须还能压。
+    ctx.store
+        .add_assistant(&"w".repeat(24_000), "", &[])
+        .await?;
+    messages = ctx.store.lines().await?;
+    let (second, detail) = compactor
+        .maybe_compact(
+            "preflight",
+            &mut messages,
+            &mut system_prompt,
+            &mut tools,
+            target,
+        )
+        .await?;
+    assert!(
+        second,
+        "a later compaction in the same input must still run: {detail}"
+    );
+    assert_eq!(compactor.compactions_this_turn(), 2);
+    assert_eq!(messages, ctx.compaction.active_messages().await?);
+
+    ctx.flush_event_log().await?;
+    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    assert_eq!(
+        events.matches("\"type\":\"compact\"").count(),
+        2,
+        "{events}"
+    );
+    assert!(
+        events.contains("_compactions_this_turn=2"),
+        "the compact event carries the in-input ordinal: {events}"
+    );
     Ok(())
 }
 
@@ -52,7 +127,7 @@ async fn maybe_compact_success_refreshes_context_and_prefix() -> anyhow::Result<
     let mut system_prompt = String::new();
     let mut tools = Vec::new();
 
-    let did_compact = compactor
+    let (did_compact, detail) = compactor
         .maybe_compact(
             "manual",
             &mut messages,
@@ -62,8 +137,8 @@ async fn maybe_compact_success_refreshes_context_and_prefix() -> anyhow::Result<
         )
         .await?;
 
-    assert!(did_compact);
-    assert!(compactor.compacted_this_turn());
+    assert!(did_compact, "{detail}");
+    assert_eq!(compactor.compactions_this_turn(), 1);
     assert_eq!(messages, ctx.compaction.active_messages().await?);
     assert!(!system_prompt.is_empty());
     assert!(!tools.is_empty());

@@ -331,8 +331,13 @@ async fn preflight_rejects_context_that_cannot_fit_the_request_budget() -> anyho
     let error = executor
         .execute("large context estimate", None)
         .await
-        .expect_err("an impossible request budget must fail before the LLM call");
-    assert!(error.to_string().contains("over the request input budget"));
+        .expect_err("an impossible request budget must fail before the LLM call")
+        .to_string();
+    assert!(error.contains("over the request input budget"), "{error}");
+    // 诊断必须带上本轮压缩尝试的事实（嵌入侧据此区分「预算用尽请续跑」与真故障）。
+    assert!(error.contains("compaction(s) committed"), "{error}");
+    assert!(error.contains("forced attempt(s)"), "{error}");
+    assert!(error.contains("(last: "), "{error}");
     Ok(())
 }
 

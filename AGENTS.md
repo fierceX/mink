@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-09-26
+> 更新日期：2026-09-28
 
 ## 项目概览
 
@@ -70,15 +70,15 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 
 ### 压缩与持久化
 
-- `TurnCompactor`：同一用户输入的内循环最多压缩一次；auto、preflight、manual、overflow 统一经过该守卫并传播失败。
+- `TurnCompactor`：同一用户输入的内循环可重复压缩，不设次数上限；auto 按压力阈值触发，preflight/overflow 在请求超预算时强制折叠直到装得下、压无可压（`no safe boundary` / `savings too small`）或估算不再下降，随后仍按 fail-closed 拒绝发送超预算请求；强制触发只要真能省就压（auto 保留 ≥10% 收益门控）。
 - `ImmutablePrefix`：system prompt/tools 变更必须 invalidate 并重建；每次构建/重建向 events.jsonl 写一条 `prefix_snapshot`（fingerprint/dependency_fingerprint/system_prompt/tools_json），缓存命中不得重复写。
 - `conversation.jsonl` 完整保留且只追加；压缩只推进 `context-state.json` 的活跃投影边界；`ConversationStore` 缓存只保留活跃后缀并随 append 增量更新，模型请求只能经 `active_messages()` 读取活跃投影。
 - `context-state.json` 必须同目录临时文件 + rename 原子替换，成功后更新内存并按新 `active_start` 裁剪缓存；JSONL 续写前修复未换行尾记录、以含换行的单缓冲区追加、append 经内部写锁串行化，读盘只容忍文件末尾半截记录。
 - 状态发布区分**发布前失败**（旧文件不变）与“已发布但目录同步失败”：后者必须重读并比对**完整预期快照**、重做目录同步；无法恢复时闩锁 session（拒绝后续状态变更、以 fatal 结束当前 turn），禁止按旧 revision 重试。闩锁后 turn/压缩入口、同批工具派发与 `publish_state*` 一律拒绝（低层 `atomic_replace` 仅供显式恢复路径）；启动期写入与 telemetry/外观元数据（stats、session title）不在此列。
-- 投影边界必须位于完整历史内、不得拆开 tool call/result 协议；cut point 必须保留最近 ≥2 条真实 user 消息（优先于纯 token 预算）。
+- 投影边界必须位于完整历史内、不得拆开 tool call/result 协议；cut point 必须保留最近 ≥2 条真实 user 消息（优先于纯 token 预算）。推论：活跃窗口只剩最近两个用户轮次时切点为 0，压缩不会发生（`no safe boundary`）——这是已知边界，超预算时以 fail-closed 结束该轮，调用方应以下一条输入续跑。
 - 所有压缩统一调用 LLM 摘要，以唯一 internal user `<compacted-summary>` checkpoint 投影，不修改 immutable system/tools prefix；`context_compact_input_reduction=true` 只精简摘要请求，不改写完整历史或热尾部。
 - auto 压力优先用同模型、同 system/tools 指纹、同 projection generation 的最近 provider prompt usage 校准（基线须为当前投影严格前缀）；preflight 始终保守本地估算，基线只存 runtime 内存；`prompt_usage_calibration_safe=false` 的后端禁用校准；支持 cache projection 的后端必须让摘要复用主请求的实际 system/tools 与历史公共缓存前缀，无法证明边界或超预算时按 reduction 配置降级。
-- 压缩与子代理请求必须使用当前活动真实模型名与别名，并复用 runtime 共享 `LlmBackend`；provider context overflow 只允许在无部分输出且本轮尚未压缩时触发一次压缩与一次重试。
+- 压缩与子代理请求必须使用当前活动真实模型名与别名，并复用 runtime 共享 `LlmBackend`；provider context overflow 只允许在无部分输出时触发一次压缩与一次重试（该次压缩不受"本轮已压缩过"限制）。
 - `max_context_tokens=0` 禁用 auto/preflight 与本地输入预算上限、保留手动压缩；压缩百分比、响应预留、热尾部、摘要输出预算来自显式配置（不推断隐式档位）；有限窗口下 reserve 与摘要输出必须小于窗口、热尾部小于主请求预算。
 - Agent JSONL `SdkOptions`、Python `SandboxConfig`、Rust `AgentOptions` 覆盖同一组压缩参数并映射到唯一 `Config`；runtime 创建 session 前调用 `validate_runtime_config()`。
 

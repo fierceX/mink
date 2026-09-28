@@ -1042,6 +1042,67 @@ fn zero_context_window_keeps_request_budget_unbounded() {
     assert_eq!(request_input_limit(&config), usize::MAX);
 }
 
+#[tokio::test]
+async fn forced_triggers_compact_below_the_savings_ratio() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "forced-low-savings",
+        |cfg| {
+            cfg.max_context_tokens = 1_000_000;
+            cfg.context_compact_pct = 1;
+            cfg.context_compact_tail_tokens = 10_000;
+        },
+        summary_backend(),
+    )
+    .await?;
+    // 可折叠段很小、热尾部很大：saved / total 远低于 10%。
+    ctx.store
+        .add_user(&format!("turn0 {}", "p".repeat(2_000)))
+        .await?;
+    ctx.store.add_assistant("ack", "", &[]).await?;
+    ctx.store
+        .add_user(&format!("turn1 {}", "q".repeat(90_000)))
+        .await?;
+    ctx.store.add_assistant("ack", "", &[]).await?;
+    ctx.store.add_user("turn2").await?;
+    ctx.store.add_assistant("ack", "", &[]).await?;
+
+    let (auto, reason) = compact(&ctx, "auto", 900_000).await?;
+    assert!(!auto, "auto 必须保留 10% 收益门控：{reason}");
+    assert!(reason.contains("savings too small"), "{reason}");
+
+    let (forced, reason) = compact(&ctx, "preflight", 900_000).await?;
+    assert!(
+        forced,
+        "强制触发只要真能省就必须压缩（否则必然失败）：{reason}"
+    );
+    Ok(())
+}
+
+/// 边界（显式契约）：窗口里只剩最近两个真实 user 消息时，切点只能是 0，
+/// 压缩不发生——这是已知边界（B 方案暂不做），调用方应该用下一条输入续跑。
+#[tokio::test]
+async fn window_with_only_two_user_turns_cannot_compact() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "two-user-window-boundary",
+        |cfg| {
+            cfg.max_context_tokens = 1_000_000;
+            // 热尾部大于全部历史：切点只能落在窗口起点。
+            cfg.context_compact_tail_tokens = 1_000_000;
+        },
+        summary_backend(),
+    )
+    .await?;
+    ctx.store.add_user("first request").await?;
+    ctx.store.add_assistant("ack", "", &[]).await?;
+    ctx.store.add_user("second request").await?;
+    ctx.store.add_assistant("ack", "", &[]).await?;
+
+    let (compacted, reason) = compact(&ctx, "preflight", 900_000).await?;
+    assert!(!compacted);
+    assert!(reason.contains("no safe boundary"), "{reason}");
+    Ok(())
+}
+
 #[test]
 fn cut_point_can_compact_completed_tool_exchanges_in_one_user_turn() {
     let messages = vec![

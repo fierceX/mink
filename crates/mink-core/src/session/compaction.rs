@@ -340,7 +340,7 @@ impl CompactionEngine {
         context_tokens: usize,
         target: LlmModelTarget<'_>,
     ) -> Result<(bool, String)> {
-        self.evaluate_and_compact_with_prefix(trigger, context_tokens, target, None, None)
+        self.evaluate_and_compact_with_prefix(trigger, context_tokens, target, None, None, None)
             .await
     }
 
@@ -351,6 +351,9 @@ impl CompactionEngine {
         target: LlmModelTarget<'_>,
         source_fingerprint: Option<&str>,
         current_projection: Option<&LlmCacheProjection>,
+        // Ordinal of this compaction inside the current user input (1-based),
+        // recorded in the `compact` event. `None` for out-of-turn callers.
+        compaction_ordinal: Option<usize>,
     ) -> Result<(bool, String)> {
         // Latched session: refuse before any summary request or state write.
         self.fault.check()?;
@@ -387,7 +390,15 @@ impl CompactionEngine {
         let total_tokens = estimate_messages_tokens(&active);
         let kept_tokens = estimate_messages_tokens(kept);
         let saved_tokens = total_tokens.saturating_sub(kept_tokens);
-        if total_tokens == 0 || (saved_tokens as u128) * 10 < total_tokens as u128 {
+        // 最小收益检查：auto 仍要求 ≥10%，避免小上下文的无意义压缩；
+        // 强制触发（preflight / overflow）在请求已经超预算时只要真能省就压——
+        // 否则「需要的削减量小于 10% 阈值」会变成无法恢复的必然失败。
+        let savings_sufficient = if is_forced_trigger(trigger) {
+            saved_tokens > 0
+        } else {
+            (saved_tokens as u128) * 10 >= total_tokens as u128
+        };
+        if total_tokens == 0 || !savings_sufficient {
             return Ok((false, "savings too small".into()));
         }
 
@@ -418,7 +429,7 @@ impl CompactionEngine {
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Vec::new();
         let result = format!(
-            "compacted_at_trigger={trigger}_kept={}_input_reduction={}_input_mode={}_aligned_messages={}_aligned_estimated_tokens={}_reduced_suffix_messages={}_fallback_reason={}",
+            "compacted_at_trigger={trigger}_kept={}_input_reduction={}_input_mode={}_aligned_messages={}_aligned_estimated_tokens={}_reduced_suffix_messages={}_fallback_reason={}{}",
             kept.len(),
             self.config.context_compact_input_reduction,
             summary_meta.input_mode,
@@ -426,6 +437,9 @@ impl CompactionEngine {
             summary_meta.aligned_estimated_tokens,
             summary_meta.reduced_suffix_messages,
             summary_meta.fallback_reason.as_deref().unwrap_or("none"),
+            compaction_ordinal
+                .map(|ordinal| format!("_compactions_this_turn={ordinal}"))
+                .unwrap_or_default(),
         );
         if self.config.log_events {
             self.write_event(crate::events::EventLog::Compact {

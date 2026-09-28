@@ -227,52 +227,70 @@ impl TurnExecutor {
     }
 }
 
+/// Safety bound for the forced-compaction loop in `prepare_request`: every
+/// iteration must strictly reduce the estimate, so this only guards against a
+/// pathological estimate. Compaction itself has no per-input attempt cap.
+const MAX_FORCED_COMPACTIONS_PER_REQUEST: usize = 8;
+
 impl TurnExecutor {
     /// Execute a full turn: send user input, stream response, execute tools, decide next.
-    /// Phase 0 for one inner iteration: auto compaction, one-shot token
-    /// estimation, preflight compaction, and the hard input-budget check.
+    /// Phase 0 for one inner iteration: auto compaction, forced compaction and
+    /// the hard input-budget check.
+    ///
+    /// Compaction is repeatable inside one user input: a projection that does
+    /// not fit the request budget is compacted again until it fits, no further
+    /// legal cut exists, or a compaction stops reducing it. The final check
+    /// stays fail-closed — an over-budget request is never sent.
     async fn prepare_request(
         &mut self,
         messages: &mut Vec<serde_json::Value>,
         system_prompt: &mut String,
         tools_json: &mut Vec<serde_json::Value>,
     ) -> Result<(Vec<serde_json::Value>, usize)> {
-        // Phase 0: 上下文压缩（auto 触发在 maybe_compact 内部估算一次）
+        // Phase 0: 上下文压缩（auto 按压力阈值触发，可多次）
         self.try_compact("auto", messages, system_prompt, tools_json)
             .await?;
-        let mut request_messages = self.project_request_messages(messages)?;
         let input_limit = crate::session::compaction::request_input_limit(&self.ctx.config);
-        // preflight 只在 auto 未压缩时评估；压缩发生后必须重估。
-        // 估算只做一次并复用（避免同轮对相同输入的全量重复估算）。
-        let estimated_tokens = if !self.compactor.compacted_this_turn() {
-            let estimated = crate::llm::transport::estimate_openai_context_tokens(
+        let mut request_messages = self.project_request_messages(messages)?;
+        let mut estimated_tokens = crate::llm::transport::estimate_openai_context_tokens(
+            &request_messages,
+            tools_json,
+            system_prompt,
+        )?;
+        // 硬闸门：反复强制压缩，直到装得下、压无可压或压缩不再降低估算。
+        let mut forced_attempts = 0usize;
+        let mut last_detail: Option<String> = None;
+        while estimated_tokens > input_limit && forced_attempts < MAX_FORCED_COMPACTIONS_PER_REQUEST
+        {
+            let before = estimated_tokens;
+            let (compacted, detail) = self
+                .try_compact("preflight", messages, system_prompt, tools_json)
+                .await?;
+            last_detail = Some(detail);
+            forced_attempts += 1;
+            if !compacted {
+                break;
+            }
+            request_messages = self.project_request_messages(messages)?;
+            estimated_tokens = crate::llm::transport::estimate_openai_context_tokens(
                 &request_messages,
                 tools_json,
                 system_prompt,
             )?;
-            if estimated > input_limit {
-                self.try_compact("preflight", messages, system_prompt, tools_json)
-                    .await?;
-                request_messages = self.project_request_messages(messages)?;
-                crate::llm::transport::estimate_openai_context_tokens(
-                    &request_messages,
-                    tools_json,
-                    system_prompt,
-                )?
-            } else {
-                estimated
+            if estimated_tokens >= before {
+                // 压缩没有带来净收益：同一投影上继续摘要不会改变结果。
+                break;
             }
-        } else {
-            crate::llm::transport::estimate_openai_context_tokens(
-                &request_messages,
-                tools_json,
-                system_prompt,
-            )?
-        };
+        }
         if estimated_tokens > input_limit {
             anyhow::bail!(
-                "context remains over the request input budget after compaction: \
-                 estimated {estimated_tokens} tokens, limit {input_limit}"
+                "context remains over the request input budget: estimated {estimated_tokens} tokens, \
+                 limit {input_limit}; {} compaction(s) committed and {forced_attempts} forced attempt(s) \
+                 in this input{}",
+                self.compactor.compactions_this_turn(),
+                last_detail
+                    .map(|detail| format!(" (last: {detail})"))
+                    .unwrap_or_default()
             );
         }
         Ok((request_messages, estimated_tokens))
@@ -366,8 +384,7 @@ impl TurnExecutor {
                     }
                     Err(error)
                         if error.downcast_ref::<ContextOverflowError>().is_some()
-                            && !overflow_recovery_attempted
-                            && !self.compactor.compacted_this_turn() =>
+                            && !overflow_recovery_attempted =>
                     {
                         overflow_recovery_attempted = true;
                         if !self
@@ -378,6 +395,7 @@ impl TurnExecutor {
                                 &mut tools_json,
                             )
                             .await?
+                            .0
                         {
                             return Err(error);
                         }

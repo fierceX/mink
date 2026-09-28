@@ -83,7 +83,7 @@ SubAgent 由 `SubAgentCoordinator` 在 turn 内部启动、收集和注入结果
 ```
 
 各个阶段之间有严格的依赖关系：
-- 同一用户输入的压缩互锁由 `TurnCompactor` 内部标记保证（自动/预检/手动/溢出统一入口），与工具阶段的 Plan transition 无关
+- 同一用户输入的压缩可重复执行（不再有次数互锁）：auto / preflight / overflow 共用同一引擎入口，每次压缩必须严格降低请求估算；Plan transition 不强制压缩
 - 步骤 4 依赖步骤 3 收集的 thinking + text 内容
 - 步骤 6 依赖步骤 4 补充后的 calls 列表
 - 步骤 7 根据 stop_reason 决定是否循环
@@ -308,19 +308,23 @@ transcript：用户和 assistant text 保留，thinking 删除，工具参数限
 
 ### 防护措施
 
-**同轮防护**（`TurnCompactor::compacted_this_turn`）：同一用户输入中的自动、Preflight、
-auto、preflight 和 overflow 压缩共用一个守卫，整个 tool_use 循环只压缩一次；Plan transition 不强制压缩。
+**同轮可重复压缩**（`TurnCompactor::compactions_this_turn`）：auto、preflight 和 overflow 共用同一入口，不设次数上限；每次
+提交后重新投影并重估，只要求严格降低请求估算（不降即停，避免在同一投影上重复摘要）；压无可压时仍以 fail-closed
+拒绝发送超预算请求。长任务（尤其嵌入式单输入长任务）因此不再在首次压缩后必然失败。
 
-**最小收益检查**（`CompactionEngine::evaluate_and_compact`）：如果压缩节省的 token 不足当前总量的 10%，跳过压缩。防止小上下文场景下的无意义压缩。
+**最小收益检查**（`CompactionEngine::evaluate_and_compact`）：auto 触发下，如果压缩节省的 token 不足当前总量的 10%，
+跳过压缩，防止小上下文场景下的无意义压缩；强制触发（preflight / overflow）在请求已经超预算时只要真能省（`saved > 0`）就压，
+否则「需要的削减量小于 10% 阈值」会变成无法恢复的必然失败。
 
 **Preflight 预算检查**：按转换后的 OpenAI messages、system prompt 和 tools schema 估算输入。
-超过 `max_context_tokens - effective_max_tokens` 时强制压缩；压缩后仍超预算则不发送请求。
+超过 `max_context_tokens - effective_max_tokens` 时反复强制压缩（每轮重估，直到装得下、没有合法切点或不再下降）；
+仍然超预算则不发送请求。
 
 **摘要预算检查**：摘要请求按最小 system prompt、原始或降噪后的输入和独立输出预算估算；超出
 `max_context_tokens` 时在发送前失败，不依赖 provider 隐式截断。
 
 **Provider overflow 恢复**：如果 provider 在尚未输出文本、thinking 或工具调用前明确返回 context
-overflow，并且本轮尚未压缩，则执行一次相同的 LLM 压缩并重试一次；第二次失败直接返回重试请求的错误，
+overflow，则执行一次相同的 LLM 压缩并重试一次（不要求本轮此前未压缩过）；第二次失败直接返回重试请求的错误，
 不循环恢复。
 
 ---
@@ -938,7 +942,7 @@ pub enum Event {
 | runtime 在 session 创建前校验上下文预算组合 | `config.rs`、`runtime/builder.rs` | 首次请求才因零输入预算或不可压缩热尾部失败 |
 | StormBreaker 窗口每用户输入重置 | `agent/turn.rs` | 跨意图抑制误判 |
 | BeliefTracker 每用户输入衰减、ToolSignalProcessor/DecisionEngine 每用户输入重置 | `agent/orchestrator.rs`、`agent/turn.rs` | 跨意图信号累积误升级 |
-| 同一用户输入最多压缩一次 | `agent/turn.rs`、`agent/compactor.rs` | 多次无用压缩 |
+| 同一用户输入的压缩必须严格降低请求估算（无次数上限，压不动即 fail-closed） | `agent/turn.rs`、`agent/compactor.rs` | 同一投影上重复摘要或死循环；超预算请求被发送 |
 | PrefixManager 校验完整依赖 fingerprint，漂移时重建 ImmutablePrefix | `agent/prefix.rs`、`session/prefix.rs` | 缓存偏移不可检测 |
 | Plan/SubAgent 延迟结果完成并执行大小保护后才能采集信号 | `agent/turn.rs`、`tools/runner.rs` | 信号观察占位结果或未保护正文 |
 | store 只缓存活跃后缀，append 增量更新 | `store.rs` | 长 session 内存持续增长或读盘性能下降 |

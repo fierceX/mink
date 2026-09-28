@@ -548,7 +548,7 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 ## 关键不变式
 
 - 每个用户输入开始时重置 StormBreaker、decision cooldown 和 interrupt；belief 按 `decay_per_input`（默认 0.6）衰减而非硬重置。
-- 同一用户输入的 tool_use 内循环最多压缩一次；PlanConfirm / PlanClear 不强制压缩。
+- 同一用户输入的 tool_use 内循环可重复压缩（每次必须严格降低请求估算，压不动即 fail-closed；不设次数上限）；PlanConfirm / PlanClear 不强制压缩。
 - `conversation.jsonl` 是完整的 append-only 消息历史；压缩只推进 `context-state.json` 中的投影边界。
 - JSONL 续写先处理未换行尾部：完整 JSON 补换行，半截 JSON 截断后再以单缓冲区追加新记录。
 - `context-state.json` 通过同目录临时文件和 rename 原子替换，内存状态只在替换成功后更新。

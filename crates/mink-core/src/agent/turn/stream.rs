@@ -70,17 +70,18 @@ impl super::TurnExecutor {
     }
 
     /// 通过 turn 级统一守卫尝试上下文压缩。成功时更新 messages/system_prompt/tools_json。
-    /// 返回 true 表示进行了压缩。
+    /// 返回 `(是否压缩, 引擎诊断或跳过原因)`。同一输入内可反复调用：请求装不下时
+    /// 必须继续折叠，直到装得下或确实压无可压。
     pub(super) async fn try_compact(
         &mut self,
         trigger: &str,
         messages: &mut Vec<serde_json::Value>,
         system_prompt: &mut String,
         tools_json: &mut Vec<serde_json::Value>,
-    ) -> Result<bool> {
+    ) -> Result<(bool, String)> {
         let model_name = self.model_name.clone();
         let model_alias = self.model_alias.clone();
-        let compacted = self
+        let (compacted, detail) = self
             .compactor
             .maybe_compact(
                 trigger,
@@ -93,7 +94,7 @@ impl super::TurnExecutor {
         if compacted {
             self.reconcile_todo_state(messages).await?;
         }
-        Ok(compacted)
+        Ok((compacted, detail))
     }
 
     /// Phase 1: 发送 LLM 请求并流式读取响应，返回 `StreamOutput`。

@@ -505,7 +505,7 @@ async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()
     Ok(())
 }
 #[tokio::test]
-async fn plan_compaction_obeys_the_existing_single_turn_guard() -> anyhow::Result<()> {
+async fn plan_transition_survives_a_compaction_in_the_same_turn() -> anyhow::Result<()> {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let backend = Arc::new(PlanTurnBackend {
         compaction_requests: requests.clone(),
@@ -513,7 +513,7 @@ async fn plan_compaction_obeys_the_existing_single_turn_guard() -> anyhow::Resul
         calls: std::sync::atomic::AtomicUsize::new(0),
     });
     let h = harness_with_config(
-        "plan-single-compaction",
+        "plan-in-turn-compaction",
         false,
         300,
         |config| {
@@ -540,7 +540,9 @@ async fn plan_compaction_obeys_the_existing_single_turn_guard() -> anyhow::Resul
 
     assert_eq!(decision, TurnDecision::Stop);
     assert!(matches!(effects.as_slice(), ["Plan confirmed."]));
-    assert_eq!(requests.lock().unwrap().len(), 1);
+    // 同一输入内的压缩不再被次数互锁限制：这里只要求确实压过，
+    // 且 Plan 交接在压缩之后仍然完整。
+    assert!(!requests.lock().unwrap().is_empty());
     assert!(h.ctx.plan_path.exists());
     assert!(!h.ctx.plan_draft_path.exists());
     Ok(())

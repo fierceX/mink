@@ -7,7 +7,11 @@ use std::sync::Arc;
 pub struct TurnCompactor {
     ctx: Arc<AgentSharedContext>,
     prefix: PrefixManager,
-    compacted_this_turn: bool,
+    /// Compactions committed for the current user input. There is no per-input
+    /// attempt cap: a request that does not fit must keep folding while a
+    /// legal cut exists, and the caller stops only when compaction can no
+    /// longer reduce the projection.
+    compactions_this_turn: usize,
 }
 
 impl TurnCompactor {
@@ -15,18 +19,21 @@ impl TurnCompactor {
         Self {
             ctx,
             prefix,
-            compacted_this_turn: false,
+            compactions_this_turn: 0,
         }
     }
 
     pub fn reset(&mut self) {
-        self.compacted_this_turn = false;
+        self.compactions_this_turn = 0;
     }
 
-    pub fn compacted_this_turn(&self) -> bool {
-        self.compacted_this_turn
+    pub fn compactions_this_turn(&self) -> usize {
+        self.compactions_this_turn
     }
 
+    /// One compaction attempt. Returns `(compacted, detail)` where `detail` is
+    /// the engine's success summary or its skip reason, so callers can report
+    /// why a request could not be reduced.
     pub async fn maybe_compact(
         &mut self,
         trigger: &str,
@@ -34,10 +41,7 @@ impl TurnCompactor {
         system_prompt: &mut String,
         tools_json: &mut Vec<serde_json::Value>,
         target: LlmModelTarget<'_>,
-    ) -> Result<bool> {
-        if self.compacted_this_turn {
-            return Ok(false);
-        }
+    ) -> Result<(bool, String)> {
         // Same projection as the real request: consumed image references
         // become text citations FIRST, so the compaction estimate counts
         // visual tokens only for the unconsumed batch — otherwise history
@@ -69,7 +73,7 @@ impl TurnCompactor {
             .ctx
             .llm_backend
             .cache_projection(&projection_request, projection_request.messages.len());
-        let (did_compact, _) = self
+        let (did_compact, detail) = self
             .ctx
             .compaction
             .evaluate_and_compact_with_prefix(
@@ -78,15 +82,16 @@ impl TurnCompactor {
                 target,
                 Some(&source_fingerprint),
                 current_projection.as_ref(),
+                Some(self.compactions_this_turn + 1),
             )
             .await?;
         if did_compact {
-            self.compacted_this_turn = true;
+            self.compactions_this_turn += 1;
             (*system_prompt, *tools_json) = self.prefix.ensure().await?;
             *messages = self.ctx.compaction.active_messages().await?;
-            return Ok(true);
+            return Ok((true, detail));
         }
-        Ok(false)
+        Ok((false, detail))
     }
 }
 

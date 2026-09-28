@@ -494,6 +494,198 @@ fn write_call(id: &str, path: &str, content: &str) -> ToolCallEvent {
     .expect("valid Write call")
 }
 
+// ── Repeated compaction inside one user input ──
+
+const COMPACTED_SUMMARY: &str = "Task focus: keep working\nLatest request: continue\nProgress: compacted\nTool evidence: none\nReflections: none";
+
+/// One agent round for the repeated-compaction backend.
+enum CompactionStep {
+    /// A Write round whose payload dominates the round's token estimate.
+    Write(&'static str),
+    /// A provider error envelope with no visible output (overflow path).
+    ProviderError(&'static str),
+    /// A terminal assistant text round.
+    Text(&'static str),
+}
+
+/// Purpose-aware backend: compaction requests are answered inline (and
+/// counted) so a single input can compact repeatedly; agent rounds follow
+/// the script in call order.
+struct RepeatedCompactionBackend {
+    script: Mutex<std::vec::IntoIter<CompactionStep>>,
+    compactions: AtomicUsize,
+    agent_calls: AtomicUsize,
+}
+
+impl RepeatedCompactionBackend {
+    fn new(script: Vec<CompactionStep>) -> Arc<Self> {
+        Arc::new(Self {
+            script: Mutex::new(script.into_iter()),
+            compactions: AtomicUsize::new(0),
+            agent_calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn compactions(&self) -> usize {
+        self.compactions.load(AtomicOrdering::SeqCst)
+    }
+
+    fn agent_calls(&self) -> usize {
+        self.agent_calls.load(AtomicOrdering::SeqCst)
+    }
+}
+
+fn stream_of(events: Vec<Result<Event>>) -> crate::llm::client::LlmResponseStream {
+    crate::llm::client::LlmResponseStream {
+        events: Box::pin(futures::stream::iter(events)),
+        attempt_count: 1,
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for RepeatedCompactionBackend {
+    fn name(&self) -> &str {
+        "repeated-compaction"
+    }
+
+    async fn stream(
+        &self,
+        request: crate::llm::client::LlmRequest,
+    ) -> Result<crate::llm::client::LlmResponseStream> {
+        if matches!(request.purpose, crate::runtime::LlmPurpose::Compaction) {
+            self.compactions.fetch_add(1, AtomicOrdering::SeqCst);
+            return Ok(stream_of(vec![
+                Ok(Event::Text(TextEvent {
+                    content: COMPACTED_SUMMARY.into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ]));
+        }
+        self.agent_calls.fetch_add(1, AtomicOrdering::SeqCst);
+        let step = self.script.lock().unwrap().next();
+        Ok(stream_of(match step {
+            Some(CompactionStep::Write(path)) => vec![
+                Ok(Event::ToolCall(write_call(
+                    &format!("write_{path}"),
+                    path,
+                    &"x".repeat(100_000),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_calls".into(),
+                })),
+            ],
+            Some(CompactionStep::ProviderError(message)) => {
+                vec![Ok(Event::Error(crate::protocol::ErrorEvent {
+                    message: message.into(),
+                    provider_code: None,
+                    status: None,
+                }))]
+            }
+            Some(CompactionStep::Text(text)) => vec![
+                Ok(Event::Text(TextEvent {
+                    content: text.into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "stop".into(),
+                })),
+            ],
+            None => Vec::new(),
+        }))
+    }
+}
+
+/// Window smaller than a few Write rounds: one input crosses the request
+/// budget repeatedly, so the same input must be able to compact again.
+async fn repeated_compaction_context(
+    name: &str,
+    backend: Arc<RepeatedCompactionBackend>,
+) -> anyhow::Result<Arc<crate::context::AgentSharedContext>> {
+    crate::regression::test_context_for_agent_with_config_and_backend(
+        name,
+        |cfg| {
+            cfg.max_context_tokens = 120_000;
+            cfg.context_reserve_tokens = 20_000;
+            cfg.context_compact_pct = 100;
+            cfg.context_compact_tail_tokens = 1_000;
+        },
+        backend,
+    )
+    .await
+}
+
+/// Regression: a long single input used to die on the request budget after its
+/// one allowed compaction. It must keep compacting and finish the work.
+#[tokio::test]
+async fn single_input_compacts_repeatedly_instead_of_failing_the_turn() -> anyhow::Result<()> {
+    let backend = RepeatedCompactionBackend::new(vec![
+        CompactionStep::Write("a.txt"),
+        CompactionStep::Write("b.txt"),
+        CompactionStep::Write("c.txt"),
+        CompactionStep::Write("d.txt"),
+        CompactionStep::Write("e.txt"),
+        CompactionStep::Write("f.txt"),
+        CompactionStep::Write("g.txt"),
+        CompactionStep::Text("done"),
+    ]);
+    let ctx = repeated_compaction_context("turn-repeat-compaction", backend.clone()).await?;
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let (decision, _) = executor.execute("write every file", None).await?;
+
+    assert_eq!(
+        decision,
+        TurnDecision::Stop,
+        "a growing input must not fail while more compactions are possible"
+    );
+    assert_eq!(backend.agent_calls(), 8);
+    assert!(
+        backend.compactions() >= 2,
+        "the same input must be able to compact more than once: {}",
+        backend.compactions()
+    );
+    assert_eq!(
+        crate::regression::tool_result_ids(&ctx.store).await?.len(),
+        7,
+        "every executed round must be preserved"
+    );
+    ctx.flush_event_log().await?;
+    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    assert!(
+        events.matches("\"type\":\"compact\"").count() >= 2,
+        "each compaction must stay visible: {events}"
+    );
+    Ok(())
+}
+
+/// Regression: provider overflow recovery used to be refused whenever the
+/// input had already compacted, turning a recoverable overflow into a failed
+/// turn.
+#[tokio::test]
+async fn provider_overflow_recovers_after_compaction_in_the_same_input() -> anyhow::Result<()> {
+    let backend = RepeatedCompactionBackend::new(vec![
+        CompactionStep::Write("a.txt"),
+        CompactionStep::Write("b.txt"),
+        CompactionStep::Write("c.txt"),
+        CompactionStep::Write("d.txt"),
+        CompactionStep::ProviderError("maximum context length exceeded"),
+        CompactionStep::Text("recovered"),
+    ]);
+    let ctx =
+        repeated_compaction_context("turn-overflow-after-compaction", backend.clone()).await?;
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let (decision, _) = executor.execute("keep going", None).await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert_eq!(backend.agent_calls(), 6);
+    assert!(
+        backend.compactions() >= 2,
+        "overflow recovery must be able to compact after an earlier compaction: {}",
+        backend.compactions()
+    );
+    Ok(())
+}
+
 /// Two 502s then a success — exactly three physical attempts and two
 /// runtime-managed Retry notifications.
 #[tokio::test]
