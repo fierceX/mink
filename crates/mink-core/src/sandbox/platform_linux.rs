@@ -214,6 +214,10 @@ pub fn try_bwrap(
     cmd.push("--unshare-pid".into());
     cmd.push("--unshare-ipc".into());
     cmd.push("--unshare-uts".into());
+    // 沙箱随 bwrap 退出：bwrap 被杀（SIGKILL/SIGTERM/父进程死亡）时，内核向命名空间内
+    // PID1 投递 SIGKILL ⇒ 整个 PID 命名空间被清空。不加这一项时，父侧只杀 bwrap
+    // 杀不到沙箱内的 worker（它会成为孤儿并继续跑）。
+    cmd.push("--die-with-parent".into());
 
     if !config.allow_network {
         cmd.push("--unshare-net".into());

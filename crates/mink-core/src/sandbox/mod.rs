@@ -43,6 +43,16 @@ pub fn reexec_in_sandbox(config: &SandboxConfig, exe: &Path, args: &[String]) {
         std::env::set_var("MINK_SANDBOXED", "1");
     }
 
+    // Linux：父进程（宿主 / agent）死亡时让本进程立即收到 SIGKILL，避免沙箱监工
+    // （bwrap / nsjail）成为孤儿；与 bwrap 的 `--die-with-parent` 配合可整棵树回收
+    // （父死 → 监工死 → 命名空间 PID1 死 → 命名空间内全部进程死）。
+    // 注：prctl 的"父"是创建本进程的线程；embed 场景由常驻运行时线程创建，
+    // 等价于进程级（CLI/TUI 场景则随主线程即进程退出）。
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+    }
+
     let result = try_reexec(config, exe, args);
 
     // If we get here, sandbox exec failed — hard fail instead of silent fallback
