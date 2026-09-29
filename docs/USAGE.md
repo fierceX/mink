@@ -633,6 +633,7 @@ preflight 始终使用保守本地估算。
 - 摘要使用独立输出预算，发送前校验能否装入窗口
 - 软额度与动态预算：热尾部（`context_compact_tail_tokens`）与摘要输出（`context_compact_max_output_tokens`）是**目标而不是地板**——切点会按可用空间收紧热尾部，摘要请求的输出上限按「输入 + 输出 ≤ 窗口」动态下调（低于最小实用输出时转应急）。硬约束只有 `reserve < 窗口`；大软目标 + 小窗口可以初始化，行为由每次请求的实际预算决定
 - 纠错 attempt 追加诊断后重新估算输入并重算 cap，不会发出装不下的摘要请求
+- plan/todo 的派生展示（模型可见 checkpoint）按「输入预算/8」有损截短（头尾保留 + 省略标记）：巨大 plan.md 或超长 todo 正文不再单独撑满窗口；权威 `plan.md`、`todos.json`、revision 与计数不变，`TodoRead` 仍返回完整内容
 - 降噪只作用于摘要请求，不修改完整历史
 - Provider overflow 恢复：无可见输出时最多一次压缩 + 一次重试（不要求本轮此前未压缩过）
 

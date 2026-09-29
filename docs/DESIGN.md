@@ -337,7 +337,9 @@ fail-closed。未超预算的 auto/manual 路径不启用该退化，仍按严�
 而不是发送装不下的请求。配置校验只保留硬约束 `reserve < 窗口`。manual 压缩入口与 turn 共用同一套
 请求形状（真实 system/tools）、候选验收与应急回退；应急摘录只列出仍存在于 artifact 索引中的
 `artifact://` 引用。provider overflow 时按「固定前缀 + 可变额度折半」给出更小目标，且每次收缩都必须让
-请求严格变小（上限 `MAX_OVERFLOW_SHRINK_ATTEMPTS`）。
+请求严格变小（上限 `MAX_OVERFLOW_SHRINK_ATTEMPTS`）。plan/todo 的**模型可见派生展示**同样受额度约束
+（`derived_display_tokens = 输入预算/8`，头尾保留 + 省略标记）：固定前缀之外，动态 checkpoint 也不再是
+无界成本；权威文件、revision 与计数保持真实，`TodoRead` 仍返回完整内容。
 
 **最小收益检查**（`CompactionEngine::evaluate_and_compact`）：auto 触发下，如果压缩节省的 token 不足当前总量的 10%，
 跳过压缩，防止小上下文场景下的无意义压缩；强制触发（preflight / overflow）在请求已经超预算时只要真能省（`saved > 0`）就压，

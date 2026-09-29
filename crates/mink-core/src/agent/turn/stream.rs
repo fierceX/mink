@@ -60,7 +60,13 @@ impl super::TurnExecutor {
         if visible == snapshot.revision {
             return Ok(false);
         }
-        let message = crate::session::todo::sync_message(&snapshot, read_provider);
+        // 模型可见的 todo 投影按额度有损展示（revision/计数保持真实）；与
+        // `predicted_todo_sync` 使用同一额度，保证预演与实际追加一致。
+        let message = crate::session::todo::sync_message_bounded(
+            &snapshot,
+            read_provider,
+            crate::session::compaction::derived_display_tokens(&self.ctx.config),
+        );
         self.ctx
             .store
             .append_runtime_message(message.clone())

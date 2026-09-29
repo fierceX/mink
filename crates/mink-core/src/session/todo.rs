@@ -406,6 +406,79 @@ impl TodoStore {
     }
 }
 
+/// 模型可见的 todo 派生展示：revision 与 pending/in_progress/completed 计数保持真实，
+/// 只有正文/条目数按 token 额度有损截短（权威 todos.json 不变）。
+pub fn render_current_todos_bounded(
+    snapshot: &TodoSnapshot,
+    read_provider: &str,
+    allowance_tokens: usize,
+) -> String {
+    let pending = snapshot
+        .items
+        .iter()
+        .filter(|item| item.status == TodoStatus::Pending)
+        .count();
+    let active = snapshot
+        .items
+        .iter()
+        .filter(|item| item.status == TodoStatus::InProgress)
+        .collect::<Vec<_>>();
+    let completed = snapshot
+        .items
+        .iter()
+        .filter(|item| item.status == TodoStatus::Completed)
+        .count();
+    let mut content = format!(
+        "<current-todos revision=\"{}\" pending=\"{pending}\" in_progress=\"{}\" completed=\"{completed}\">",
+        snapshot.revision,
+        active.len()
+    );
+    if active.is_empty() && pending > 0 {
+        content.push_str(&format!(
+            "\nPending todo items exist, but none are active. Call {read_provider} before selecting the next batch."
+        ));
+    } else if !active.is_empty() {
+        // 额度按 active 条目均分（至少 2 个字符位），超出部分按条目省略并给出真实计数。
+        let per_item_chars = (allowance_tokens.saturating_mul(3) / active.len().max(1)).max(2);
+        content.push_str("\nActive batch:");
+        for (index, item) in active.iter().enumerate() {
+            let body = crate::session::compaction_cut::bounded_derived_text(
+                &escape_prompt_markup(&item.content),
+                per_item_chars / 3,
+            );
+            let entry = format!("\n- {}: {}", item.id, body);
+            if content.len() + entry.len() > allowance_tokens.saturating_mul(3) && index > 0 {
+                content.push_str(&format!(
+                    "\n- …{} more active item(s) omitted (see the persisted todo list)",
+                    active.len() - index
+                ));
+                break;
+            }
+            content.push_str(&entry);
+        }
+    }
+    content.push_str("\n</current-todos>");
+    content
+}
+
+/// 模型可见的 `<todo-sync>` 投影：额度足够时与完整渲染一致（`usize::MAX`），
+/// 空间不足时按条目有损截短。`TodoRead` 仍返回完整权威内容。
+pub fn sync_message_bounded(
+    snapshot: &TodoSnapshot,
+    read_provider: &str,
+    allowance_tokens: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "role": "user",
+        "content": format!(
+            "<todo-sync revision=\"{}\">\nThe persisted todo state is newer than the active conversation. This appended projection is authoritative.\n</todo-sync>\n\n{}",
+            snapshot.revision,
+            render_current_todos_bounded(snapshot, read_provider, allowance_tokens),
+        ),
+        "_mink": todo_state_metadata(snapshot.revision, "sync"),
+    })
+}
+
 pub fn render_current_todos(snapshot: &TodoSnapshot, read_provider: &str) -> String {
     let pending = snapshot
         .items
@@ -449,18 +522,6 @@ pub fn todo_state_metadata(revision: u64, kind: &str) -> serde_json::Value {
     serde_json::json!({
         "todo_revision": revision,
         "todo_state_kind": kind,
-    })
-}
-
-pub fn sync_message(snapshot: &TodoSnapshot, read_provider: &str) -> serde_json::Value {
-    serde_json::json!({
-        "role": "user",
-        "content": format!(
-            "<todo-sync revision=\"{}\">\nThe persisted todo state is newer than the active conversation. This appended projection is authoritative.\n</todo-sync>\n\n{}",
-            snapshot.revision,
-            render_current_todos(snapshot, read_provider),
-        ),
-        "_mink": todo_state_metadata(snapshot.revision, "sync"),
     })
 }
 

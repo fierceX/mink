@@ -26,7 +26,11 @@ pub(crate) fn predicted_todo_sync(
     if visible >= snapshot.revision {
         return None;
     }
-    Some(crate::session::todo::sync_message(&snapshot, read_provider))
+    Some(crate::session::todo::sync_message_bounded(
+        &snapshot,
+        read_provider,
+        crate::session::compaction::derived_display_tokens(&ctx.config),
+    ))
 }
 
 /// 折叠历史里真实出现、且仍存在于 artifact 索引中的引用（上限 8 条）。

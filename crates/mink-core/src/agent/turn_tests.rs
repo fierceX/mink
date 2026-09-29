@@ -1154,6 +1154,72 @@ async fn provider_overflow_shrinks_via_emergency_when_summary_is_unavailable() -
     Ok(())
 }
 
+/// 巨大 plan.md：模型可见的 plan checkpoint 必须有损截短，权威 plan 文件不变，
+/// 且投影仍能装进预算（应急接手而不是 fail-closed）。
+#[tokio::test]
+async fn huge_plan_checkpoint_is_bounded_in_the_projection() -> anyhow::Result<()> {
+    let backend = SummaryOutageBackend::new(
+        SummaryResponse::Unusable,
+        vec![CompactionStep::Text("done")],
+    );
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "turn-bounded-plan",
+        |cfg| {
+            cfg.max_context_tokens = 40_000;
+            cfg.context_reserve_tokens = 8_000;
+            cfg.context_compact_pct = 50;
+            cfg.context_compact_tail_tokens = 1_000;
+            cfg.llm_recovery.request_max_retries = 0;
+        },
+        backend.clone(),
+    )
+    .await?;
+    // 权威 plan 正文：远超窗口（≈200k 字符）。路径与引擎读取的权威位置一致。
+    let plan_path = ctx.summary_path.with_file_name("plan.md");
+    let plan_body = format!(
+        "# plan\n{}\nMIDDLE-MARKER\n{}\nTAIL-MARKER\n",
+        "p".repeat(100_000),
+        "p".repeat(100_000)
+    );
+    tokio::fs::write(&plan_path, &plan_body).await?;
+    seed_history(&ctx, 4, 60_000).await?;
+
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let (decision, _) = executor.execute("keep going", None).await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    let projection = serde_json::to_string(&ctx.compaction.active_messages().await?)?;
+    assert!(
+        projection.contains("[derived display truncated:"),
+        "plan checkpoint 必须有损截短：{}",
+        &projection[..projection.len().min(400)]
+    );
+    assert!(
+        !projection.contains("MIDDLE-MARKER"),
+        "被省略的中段内容不应出现在投影里"
+    );
+    assert!(
+        projection.contains("TAIL-MARKER"),
+        "长内容优先保留头部与尾部：{projection}"
+    );
+    // 展示上限 = 输入预算/8 = 4,000 token ≈ 12,000 字节（加包装与省略标记的余量）。
+    let plan_block = projection
+        .split("<active-plan-checkpoint>")
+        .nth(1)
+        .and_then(|rest| rest.split("</active-plan-checkpoint>").next())
+        .expect("plan checkpoint present");
+    assert!(
+        plan_block.len() <= 12_000 + 512,
+        "plan 展示必须受额度约束：{} bytes",
+        plan_block.len()
+    );
+    // 权威 plan 文件不被改写。
+    let on_disk = tokio::fs::read_to_string(&plan_path).await?;
+    assert_eq!(on_disk, plan_body);
+    let _ = tokio::fs::remove_dir_all(&ctx.home).await;
+    Ok(())
+}
+
 /// 应急摘录只列出「历史上真实出现且仍在 artifact 索引里」的引用，不虚构 URL。
 #[tokio::test]
 async fn emergency_checkpoint_lists_only_existing_artifact_refs() -> anyhow::Result<()> {

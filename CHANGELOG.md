@@ -9,6 +9,7 @@
 - **manual 与 turn 共用请求上下文**：手动压缩先用 immutable prefix 得到真实 system/tools，参与候选发布前验收；摘要不可用且投影本来就超预算时转确定性应急 checkpoint（`CompactOutcome::Compacted`），投影仍能发送时返回带原因的 `Skipped`，不再把摘要错误当成硬失败。
 - **provider overflow 有限收缩**：按「固定前缀 + 可变额度折半」给出更小目标，最多 `MAX_OVERFLOW_SHRINK_ATTEMPTS`(3) 次；每次都必须让请求严格变小，否则以原错误结束（不再是一旦常规压缩无收益就放弃）。
 - **应急摘录的 artifact 引用**：只列出历史里真实出现且仍存在于 artifact 索引中的 `artifact://` id（上限 8 条），不虚构 URL。
+- **plan/todo 派生展示限额**：模型可见的 `<active-plan-checkpoint>` 与 `<todo-sync>` 派生正文按 `输入预算/8` 的额度做头尾保留 + 省略标记（「能放下就原样输出」）；权威 `plan.md` / `todos.json` 与 revision、pending/in_progress/completed 计数不被改写，`TodoRead` 仍返回完整内容。候选验收与真实投影共用同一渲染函数，避免「检查短版、发送长版」。
 
 ### 新增：摘要不可用时的确定性应急 checkpoint（压缩不再终止 turn）
 

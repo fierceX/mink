@@ -619,7 +619,9 @@ impl CompactionEngine {
         if !summary.trim().is_empty() {
             checkpoints.push(compacted_summary_message(summary));
         }
-        if let Some(plan) = read_active_plan_checkpoint(&self.summary_path)? {
+        if let Some(plan) =
+            read_active_plan_checkpoint(&self.summary_path, derived_display_tokens(&self.config))?
+        {
             checkpoints.push(plan);
         }
         Ok(checkpoints)
@@ -1391,7 +1393,10 @@ impl CompactionEngine {
             source_messages.push(compacted_summary_message(summary));
         }
         if history_already_compacted
-            && let Some(plan) = read_active_plan_checkpoint(&self.summary_path)?
+            && let Some(plan) = read_active_plan_checkpoint(
+                &self.summary_path,
+                derived_display_tokens(&self.config),
+            )?
         {
             source_messages.push(plan);
         }

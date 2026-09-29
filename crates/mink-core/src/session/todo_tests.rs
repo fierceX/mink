@@ -474,3 +474,59 @@ fn poisoned_state_lock_rejects_writes_but_reads_keep_last_snapshot() {
     let _ = store.snapshot();
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// 有界展示：revision 与三类计数保持真实，正文/条目按额度有损截短；
+/// 额度充足时输出与完整渲染一致（授权文件与 TodoRead 路径不受影响）。
+#[test]
+fn bounded_projection_keeps_revision_and_counts() {
+    let snapshot = TodoSnapshot {
+        version: TODO_FILE_VERSION,
+        revision: 7,
+        next_id: 44,
+        items: vec![
+            TodoItem {
+                id: "T0001".into(),
+                content: "a".repeat(5_000),
+                status: TodoStatus::InProgress,
+            },
+            TodoItem {
+                id: "T0002".into(),
+                content: "b".repeat(5_000),
+                status: TodoStatus::InProgress,
+            },
+            TodoItem {
+                id: "T0003".into(),
+                content: "pending".into(),
+                status: TodoStatus::Pending,
+            },
+            TodoItem {
+                id: "T0004".into(),
+                content: "done".into(),
+                status: TodoStatus::Completed,
+            },
+        ],
+    };
+
+    let bounded = sync_message_bounded(&snapshot, "TodoRead", 256);
+    let content = bounded["content"].as_str().unwrap();
+    assert!(content.contains("revision=\"7\""), "{content}");
+    assert!(content.contains("pending=\"1\""), "{content}");
+    assert!(content.contains("in_progress=\"2\""), "{content}");
+    assert!(content.contains("completed=\"1\""), "{content}");
+    assert!(
+        content.contains("[derived display truncated:"),
+        "超额度必须有损展示：{content}"
+    );
+    assert!(
+        content.len() <= 256 * 3 + 512,
+        "投影必须受额度约束：{} bytes",
+        content.len()
+    );
+
+    // 额度充足（无限窗口）时不截短，且与完整渲染一致。
+    let full = sync_message_bounded(&snapshot, "TodoRead", usize::MAX);
+    let full_content = full["content"].as_str().unwrap();
+    assert!(!full_content.contains("[derived display truncated:"));
+    assert!(full_content.contains(&"a".repeat(5_000)));
+    assert!(full_content.contains(&render_current_todos(&snapshot, "TodoRead")));
+}

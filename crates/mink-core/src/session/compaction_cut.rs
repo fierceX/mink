@@ -30,7 +30,45 @@ pub(crate) fn compaction_instruction_message() -> Value {
     })
 }
 
-pub(crate) fn read_active_plan_checkpoint(summary_path: &Path) -> Result<Option<Value>> {
+/// 模型可见派生 checkpoint（plan / todo 展示）在本次请求里可用的 token 额度：
+/// 主请求输入预算的固定内部比例，带下限。权威文件与 revision 不受影响，只有
+/// 派生展示会被截短（有损展示，不宣称可用引用恢复细节）。
+pub(crate) const DERIVED_DISPLAY_MIN_TOKENS: usize = 256;
+
+pub(crate) fn derived_display_tokens(config: &Config) -> usize {
+    let limit = request_input_limit(config);
+    if limit == usize::MAX {
+        return usize::MAX;
+    }
+    (limit / 8).max(DERIVED_DISPLAY_MIN_TOKENS)
+}
+
+/// 按 token 额度有界渲染一段派生正文：能放下就原样返回，否则头部 + 省略标记 + 尾部。
+/// 省略量以字符计，按 UTF-8 边界裁剪。
+pub(crate) fn bounded_derived_text(content: &str, allowance_tokens: usize) -> String {
+    let max_bytes = allowance_tokens.saturating_mul(3);
+    if max_bytes == usize::MAX || content.len() <= max_bytes {
+        return content.to_string();
+    }
+    let chars: Vec<char> = content.chars().collect();
+    let max_chars = max_bytes / 3;
+    let head_chars = (max_chars / 2).max(1);
+    let tail_chars = max_chars.saturating_sub(head_chars + 24);
+    let omitted = chars.len().saturating_sub(head_chars + tail_chars);
+    let mut out: String = chars[..head_chars.min(chars.len())].iter().collect();
+    out.push_str(&format!(
+        "\n[derived display truncated: {omitted} characters omitted; the authoritative content is unchanged]\n"
+    ));
+    if tail_chars > 0 {
+        out.extend(chars[chars.len().saturating_sub(tail_chars)..].iter());
+    }
+    out
+}
+
+pub(crate) fn read_active_plan_checkpoint(
+    summary_path: &Path,
+    allowance_tokens: usize,
+) -> Result<Option<Value>> {
     let plan_path = summary_path.with_file_name("plan.md");
     let content = match std::fs::read_to_string(&plan_path) {
         Ok(content) => content,
@@ -42,7 +80,7 @@ pub(crate) fn read_active_plan_checkpoint(summary_path: &Path) -> Result<Option<
             ));
         }
     };
-    let content = content.trim();
+    let content = bounded_derived_text(content.trim(), allowance_tokens);
     Ok((!content.is_empty()).then(|| {
         json!({
             "role": "user",
