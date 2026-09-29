@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### 新增：provider HTTP 总超时可配置（长流式生成不再被固定 600s 砍断）
+
+- `[provider] http_timeout_secs`（Rust `ProviderOptions::http_timeout_secs` / `AgentOptions::with_provider_http_timeout_secs`、server `[provider]`、JSONL `options.provider.http_timeout_secs`）：单次物理请求（含流式响应体读取）的总超时，默认 **600 秒**（与修复前一致），`0` = 不设总超时，由 `llm_first_event_timeout` / `llm_idle_timeout` 兜底。
+- 修复前该值硬编码在 HTTP 客户端（`connect30s` + `total600s`）且无法配置：长文档生成/长思考的单次请求超过 600s 会被传输层中断并判为可重试，重试后仍会再次超时，最终以 `request_timeout: … error decoding response body … operation timed out` 结束该 turn（耗时呈 600s 整数倍）。现可用配置放宽或关闭。
+- 与 `[recovery] request_timeout_secs` 的关系：后者是“整个逻辑请求（含全部重试与退避）的总期限”，属于恢复策略；前者是传输层单次请求上限，不属于 `llm_recovery`。两者都设时，谁先到谁生效。
+
 ### 变更：同一用户输入可重复压缩（取消单轮一次互锁）
 
 - `TurnCompactor` 的 `compacted_this_turn` 布尔互锁改为计数（`compactions_this_turn`）：auto / preflight / overflow 不再按「每个用户输入一次」封顶；每次压缩必须严格降低请求估算（不降即停，避免在同一投影上重复摘要），无安全切点 / 收益不足时仍以 fail-closed 拒绝发送超预算请求。

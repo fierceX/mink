@@ -84,7 +84,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 
 ### LLM 有界恢复
 
-- 唯一恢复配置是 `Config.llm_recovery`（`format_window_size` 1..=1024、`format_max_errors` 0<=K<W、`request_max_retries` 0..=16、可选 `request_timeout_secs`>0）；Rust `AgentOptions::with_llm_recovery`、JSONL `options.recovery`、CLI/server `[recovery]`、Python 四字段全部映射到它并在 session 创建前校验，不得新增第二套默认值或策略层。
+- 唯一恢复配置是 `Config.llm_recovery`（`format_window_size` 1..=1024、`format_max_errors` 0<=K<W、`request_max_retries` 0..=16、可选 `request_timeout_secs`>0）；Rust `AgentOptions::with_llm_recovery`、JSONL `options.recovery`、CLI/server `[recovery]`、Python 四字段全部映射到它并在 session 创建前校验，不得新增第二套默认值或策略层。（provider HTTP 总超时 `http_timeout_secs` 是传输层配置，不属于本组恢复策略。）
 - 格式窗口是 turn 内的布尔滑动窗口（新用户 turn 清空、压缩不清空、子代理独立、不落盘）：每个可继续的 round 在唯一尾部先结算窗口一次（正常 false；需反馈纠错或曾有响应协议损坏为 true），再执行分支决策（todo 提醒/证据注入），最后刷新已提交历史——刷新必须在本轮所有追加之后，保证诊断、工具结果与注入状态都进入下一请求；预判（`would_exceed`）不得改变窗口；错误数 > K 以稳定前缀 `format_recovery_exhausted` 结束 turn 且不再发请求。
 - 请求恢复由 runtime 的 attempt 循环所有：一个 round 的请求投影（含图片物化）只构建一次；内置 backend 每次 `stream()` 对应一次物理请求，外层恰为 retries+1 次调用；退避 1s/2s/4s…上限 10s，`Retry-After` 仍为最早重试时间且不被退避上限截短；取消、持久化闩锁与可选总期限在每次 attempt 前与退避中生效（取消优先于等待中的重试），总期限同时约束建流与流消费（到点停止等待/消费，已收到的 usage 照常结算），耗尽用 `request_retry_exhausted` / `request_timeout` 终止并保留诊断。
 - 每个 attempt 独立结算 usage（成功 reported、失败或取消 unreported，恰一笔）；只有最终接受且指纹/投影匹配的主请求可更新 provider prompt usage 校准；自定义 backend 的聚合 `attempt_count` 原样保留，外层不乘算。

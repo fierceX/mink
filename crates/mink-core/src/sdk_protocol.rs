@@ -46,6 +46,8 @@ pub struct SdkOptions {
 #[serde(default, deny_unknown_fields)]
 pub struct SdkProviderOptions {
     pub model: Option<String>,
+    /// provider HTTP 请求总超时（秒，`0` = 不设总超时，仅由首事件/空闲期限兜底）。
+    pub http_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

@@ -253,6 +253,22 @@ fn validate_sdk_request_accepts_custom_model() {
     validate_sdk_request(&req).unwrap();
 }
 
+/// provider HTTP 总超时可从 JSONL 设置（`0` = 不设总超时），未知 provider 字段仍拒绝。
+#[test]
+fn sdk_request_accepts_provider_http_timeout_and_rejects_unknown_keys() {
+    let req = parse_agent_jsonl_request(
+        r#"{"prompt":"hi","options":{"provider":{"http_timeout_secs":0}}}"#,
+    )
+    .unwrap();
+    validate_sdk_request(&req).unwrap();
+    assert_eq!(req.options.provider.http_timeout_secs, Some(0));
+
+    let error =
+        parse_agent_jsonl_request(r#"{"prompt":"hi","options":{"provider":{"http_timeout":1}}}"#)
+            .unwrap_err();
+    assert!(error.contains("unknown field"), "{error}");
+}
+
 #[test]
 fn validate_sdk_request_rejects_empty_model() {
     let req = parse_agent_jsonl_request(r#"{"prompt":"hi","options":{"provider":{"model":" "}}}"#)

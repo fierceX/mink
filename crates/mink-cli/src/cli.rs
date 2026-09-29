@@ -450,6 +450,7 @@ fn assemble_runtime_options(
             token_param: cfg.openai_token_param,
             tool_choice: cfg.openai_tool_choice.clone(),
             extra_body: cfg.openai_extra_body.clone(),
+            http_timeout_secs: cfg.provider_http_timeout_secs,
         })
         .with_generation_options(GenerationOptions {
             max_tokens: cfg.max_tokens,

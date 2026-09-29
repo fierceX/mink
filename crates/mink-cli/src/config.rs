@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub use mink::runtime::{
-    EditMode, OutputFormat, SandboxConfig, SandboxPythonConfig, SignalPolicy, TokenParamKind,
-    ToolApprovalMode, ToolApprovalPolicy,
+    DEFAULT_PROVIDER_HTTP_TIMEOUT_SECS, EditMode, OutputFormat, SandboxConfig, SandboxPythonConfig,
+    SignalPolicy, TokenParamKind, ToolApprovalMode, ToolApprovalPolicy,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -72,6 +72,8 @@ pub struct ProviderConfigFile {
     pub openai_token_param: Option<String>,
     pub openai_tool_choice: Option<serde_json::Value>,
     pub openai_extra_body: Option<BTreeMap<String, serde_json::Value>>,
+    /// provider HTTP 请求总超时（秒，`0` = 不设总超时），默认 600 秒。
+    pub http_timeout_secs: Option<u64>,
     /// Explicit image-input capability: "on" | "off". Overrides the
     /// backend declaration (v7 §3.1).
     pub image_input: Option<String>,
@@ -203,6 +205,8 @@ pub struct CliConfig {
     pub openai_token_param: TokenParamKind,
     pub openai_tool_choice: Option<serde_json::Value>,
     pub openai_extra_body: BTreeMap<String, serde_json::Value>,
+    /// provider HTTP 请求总超时（秒，`0` = 不设总超时，仅由首事件/空闲期限兜底）。
+    pub provider_http_timeout_secs: u64,
     pub max_tokens: i32,
     pub tool_timeout_secs: i32,
     /// 单次 Bash/Python/自定义工具调用的超时上限（默认 600 秒，至少 5 秒）。
@@ -298,6 +302,7 @@ impl Default for CliConfig {
             openai_token_param: TokenParamKind::MaxTokens,
             openai_tool_choice: None,
             openai_extra_body: BTreeMap::new(),
+            provider_http_timeout_secs: DEFAULT_PROVIDER_HTTP_TIMEOUT_SECS,
             max_tokens: 81920,
             tool_timeout_secs: 600,
             tool_timeout_max_secs: 600,
@@ -829,6 +834,9 @@ fn apply_config_sources(
         if let Some(extra_body) = &toml_cfg.provider.openai_extra_body {
             cfg.openai_extra_body.extend(extra_body.clone());
         }
+        if let Some(http_timeout_secs) = toml_cfg.provider.http_timeout_secs {
+            cfg.provider_http_timeout_secs = http_timeout_secs;
+        }
         if !cli.api_key
             && let Some(api_key) = &toml_cfg.provider.api_key
         {
@@ -1156,6 +1164,9 @@ pub(crate) fn apply_sdk_request_options(
     let options = &request.options;
     if let Some(model) = &options.provider.model {
         cfg.model = model.clone();
+    }
+    if let Some(http_timeout_secs) = options.provider.http_timeout_secs {
+        cfg.provider_http_timeout_secs = http_timeout_secs;
     }
     let generation = &options.generation;
     for (value, target) in [

@@ -202,6 +202,7 @@ openai_reasoning_effort = "max"
 openai_include_usage = true
 openai_token_param = "max_tokens"
 openai_tool_choice = "auto"
+http_timeout_secs = 600                # provider HTTP 请求总超时（秒）；0 = 不设总超时（长流式生成）
 image_input = "on"                     # 可选：显式开启/关闭图片能力（覆盖 backend 声明）
 vision_models = ["deepseek-v4-flash-vision-exp"]  # 可选：视觉模型列表（空列表=全部关闭）
 
@@ -278,6 +279,7 @@ read_dirs = ["./data"]
 - 模型输出格式错误采用滑动的 round 窗口：`format_window_size`（默认 10）与 `format_max_errors`（默认 3）。每个完成判定的 round 只占一个槽；坏参数工具调用返回 `ArgumentInvalid` 失败结果让模型重发，缺名/缺 ID/重复 ID 的候选批整体丢弃并反馈一次内部诊断，`length`/`max_tokens` 候选整体废弃，空正文/未知 stop 不再静默成功；错误数超过 K 以 `format_recovery_exhausted` 结束，已执行工具不回滚。
 - 请求暂时故障（408/409/425/429/500/502/503/504、连接重置、首事件/idle 超时、响应协议损坏）自动重试：`request_max_retries`（默认 3）表示首次之外允许的重试调用数，退避 1s/2s/4s…上限 10s，`Retry-After`（秒数或 HTTP-date）作为最早重试时间；401/403、模型不存在、未知 provider 错误不重试。
 - `request_timeout_secs`（默认不设）限定一个逻辑请求的总期限，包含全部重试与等待，重试不会延长它。
+- 传输层还有一道**provider HTTP 总超时**（`[provider] http_timeout_secs`，默认 600 秒，`0` = 不设）：单次物理请求（含流式响应体读取）超过它就中断并归入可重试故障。它先于 `request_timeout_secs` 生效，长流式生成（文档生成、长思考）必须调大或设 `0`，否则每次尝试都会被固定墙钟时间砍断（表现为 `request_timeout: … error decoding response body … operation timed out`，且耗时呈 600s 的整数倍）。该字段属于传输层配置，不是 `[recovery]` 恢复策略。
 - 参数错反馈与请求重试是两条独立分支：参数错不会原样重发同一请求，502 也不会靠给模型追加提示恢复。
 - 取消、持久化闩锁与 `max_turns` 优先：取消立即结束等待中的重试；格式恢复消耗正常 round/max_turns，超限时返回 `format_recovery_exhausted`，未超限但轮次用尽仍是 `MaxTurnsExceeded`。
 

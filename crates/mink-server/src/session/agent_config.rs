@@ -53,6 +53,8 @@ pub(crate) struct ProviderConfigFile {
     pub openai_token_param: Option<String>,
     pub openai_tool_choice: Option<Value>,
     pub openai_extra_body: Option<BTreeMap<String, Value>>,
+    /// provider HTTP 请求总超时（秒，`0` = 不设总超时）。
+    pub http_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -166,6 +168,7 @@ pub(crate) struct AgentConfig {
     pub openai_token_param: Option<TokenParamKind>,
     pub openai_tool_choice: Option<Value>,
     pub openai_extra_body: BTreeMap<String, Value>,
+    pub http_timeout_secs: Option<u64>,
     pub max_tokens: Option<i32>,
     pub max_turns: Option<i32>,
     pub llm_first_event_timeout_secs: Option<i32>,
@@ -255,6 +258,7 @@ pub(crate) fn merge(base: AgentConfig, over: AgentConfig) -> AgentConfig {
             body.extend(over.openai_extra_body);
             body
         },
+        http_timeout_secs: pick(base.http_timeout_secs, over.http_timeout_secs),
         max_tokens: pick(base.max_tokens, over.max_tokens),
         max_turns: pick(base.max_turns, over.max_turns),
         llm_first_event_timeout_secs: pick(
@@ -393,6 +397,9 @@ fn from_file(file: &MinkConfigFile) -> AgentConfig {
     if let Some(extra_body) = &provider.openai_extra_body {
         cfg.openai_extra_body = extra_body.clone();
     }
+    if let Some(http_timeout_secs) = provider.http_timeout_secs {
+        cfg.http_timeout_secs = Some(http_timeout_secs);
+    }
     cfg.max_tokens = positive(file.generation.max_tokens, "max_tokens");
     cfg.max_turns = positive(file.generation.max_turns, "max_turns");
     cfg.llm_first_event_timeout_secs = positive(
@@ -508,6 +515,9 @@ pub(crate) fn apply_to(mut options: AgentOptions, cfg: &AgentConfig) -> AgentOpt
     }
     if !cfg.openai_extra_body.is_empty() {
         provider.extra_body = cfg.openai_extra_body.clone();
+    }
+    if let Some(v) = cfg.http_timeout_secs {
+        provider.http_timeout_secs = v;
     }
     options = options.with_provider_options(provider);
     for (alias, model) in &cfg.model_aliases {

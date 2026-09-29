@@ -68,7 +68,7 @@ echo '{"version":3,"prompt":"scan this repo"}' | mink-core --agent-jsonl
 
 | 分组 | 主要字段 | 说明 |
 |------|------|------|
-| `provider` | `model` | 模型名（别名或真实名） |
+| `provider` | `model`, `http_timeout_secs` | 模型名（别名或真实名）；`http_timeout_secs` 为 provider HTTP 请求总超时（秒，`0` = 不设，默认 600） |
 | `generation` | `max_tokens`, `max_turns`, `llm_*_timeout` | 生成和流超时 |
 | `context` | `max_context`, `context_compact_*`, `context_reserve_tokens` | 上下文与压缩；`max_context=0` 禁用自动压缩 |
 | `tools` | `enabled_tools`, `tool_timeout`, `tool_timeout_max`, `sub_agent_timeout`, edit 和 skill 字段 | 工具 surface 与执行策略 |
@@ -85,7 +85,7 @@ echo '{"version":3,"prompt":"scan this repo"}' | mink-core --agent-jsonl
   "prompt": "scan this repo and summarize",
   "session_id": "work-001",
   "options": {
-    "provider": {"model": "flash"},
+    "provider": {"model": "flash", "http_timeout_secs": 0},
     "generation": {"max_tokens": 8192, "max_turns": 20},
     "context": {
       "max_context": 64000,

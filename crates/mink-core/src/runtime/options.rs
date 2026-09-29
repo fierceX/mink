@@ -28,6 +28,8 @@ pub struct ProviderOptions {
     pub token_param: TokenParamKind,
     pub tool_choice: Option<serde_json::Value>,
     pub extra_body: BTreeMap<String, serde_json::Value>,
+    /// provider HTTP 请求总超时（秒，`0` = 不设总超时）。
+    pub http_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +83,7 @@ impl Default for ProviderOptions {
             token_param: config.openai_token_param,
             tool_choice: config.openai_tool_choice,
             extra_body: config.openai_extra_body,
+            http_timeout_secs: config.provider_http_timeout_secs,
         }
     }
 }
@@ -211,6 +214,7 @@ impl AgentOptions {
         self.config.openai_token_param = options.token_param;
         self.config.openai_tool_choice = options.tool_choice;
         self.config.openai_extra_body = options.extra_body;
+        self.config.provider_http_timeout_secs = options.http_timeout_secs;
         self
     }
 
@@ -393,6 +397,13 @@ impl AgentOptions {
         extra_body: BTreeMap<String, serde_json::Value>,
     ) -> Self {
         self.config.openai_extra_body = extra_body;
+        self
+    }
+
+    /// provider HTTP 请求总超时（秒）；`0` 表示不设总超时（长流式生成只受
+    /// 首事件 / 空闲期限兜底）。默认 600 秒。
+    pub fn with_provider_http_timeout_secs(mut self, seconds: u64) -> Self {
+        self.config.provider_http_timeout_secs = seconds;
         self
     }
 

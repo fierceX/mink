@@ -133,6 +133,7 @@ fn openai_body_respects_compatible_options() {
             include_usage: false,
             token_param: TokenParamKind::MaxCompletionTokens,
             parallel_tool_calls: Some(false),
+            http_timeout_secs: 0,
         },
     )
     .unwrap();
@@ -162,6 +163,7 @@ fn openai_body_merges_extra_body_and_tool_choice_without_overriding_core_fields(
         include_usage: false,
         token_param: TokenParamKind::MaxTokens,
         parallel_tool_calls: None,
+        http_timeout_secs: 0,
     };
     let tool_choice = json!("auto");
     let tools = vec![json!({
@@ -210,6 +212,7 @@ fn openai_body_omits_tool_choice_when_no_tools_are_sent() {
         include_usage: false,
         token_param: TokenParamKind::MaxTokens,
         parallel_tool_calls: None,
+        http_timeout_secs: 0,
     };
     let tool_choice = json!("auto");
 

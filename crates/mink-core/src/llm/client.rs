@@ -180,6 +180,9 @@ pub struct OpenAiCompatibleOptions {
     pub include_usage: bool,
     pub token_param: TokenParamKind,
     pub parallel_tool_calls: Option<bool>,
+    /// provider HTTP 请求总超时（秒，`0` = 不设总超时）。默认 600 秒；长流式
+    /// 生成（如文档生成）应调大或设 `0`，由首事件/空闲期限兜底。
+    pub http_timeout_secs: u64,
 }
 
 impl Default for OpenAiCompatibleOptions {
@@ -190,6 +193,7 @@ impl Default for OpenAiCompatibleOptions {
             include_usage: true,
             token_param: TokenParamKind::MaxTokens,
             parallel_tool_calls: None,
+            http_timeout_secs: crate::config::DEFAULT_PROVIDER_HTTP_TIMEOUT_SECS,
         }
     }
 }
@@ -238,6 +242,14 @@ impl OpenAiCompatibleBackend {
         self
     }
 
+    /// Override the provider HTTP request timeout in seconds (`0` disables the
+    /// total timeout; long streaming generations then rely on the first-event /
+    /// idle deadlines only).
+    pub fn with_http_timeout_secs(mut self, seconds: u64) -> Self {
+        self.options.http_timeout_secs = seconds;
+        self
+    }
+
     fn http_client(&self) -> Result<reqwest::Client> {
         let mut slot = self
             .client
@@ -246,7 +258,7 @@ impl OpenAiCompatibleBackend {
         if let Some(client) = slot.as_ref() {
             return Ok(client.clone());
         }
-        let client = build_http_client()?;
+        let client = build_http_client(self.options.http_timeout_secs)?;
         *slot = Some(client.clone());
         Ok(client)
     }
@@ -270,6 +282,7 @@ impl OpenAiCompatibleBackend {
             include_usage: config.openai_include_usage,
             token_param: config.openai_token_param,
             parallel_tool_calls: None,
+            http_timeout_secs: config.provider_http_timeout_secs,
         })
         .with_extra_body(config.openai_extra_body.clone())
         .with_optional_tool_choice(config.openai_tool_choice.clone())
@@ -409,18 +422,27 @@ pub(crate) enum SseSendStatus {
     Stopped,
 }
 
-fn build_http_client() -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
+fn build_http_client(http_timeout_secs: u64) -> reqwest::Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(600))
-        .user_agent(concat!("mink/", env!("CARGO_PKG_VERSION")))
-        .build()
+        .user_agent(concat!("mink/", env!("CARGO_PKG_VERSION")));
+    // `0` disables the total request timeout: a long but healthy streaming
+    // generation is then bounded only by the first-event / idle deadlines in
+    // the runtime attempt loop instead of a fixed wall-clock cap.
+    if http_timeout_secs > 0 {
+        builder = builder.timeout(Duration::from_secs(http_timeout_secs));
+    }
+    builder.build()
 }
 
 impl AsyncLlClient {
     #[cfg(test)]
     pub fn new(api_key: &str, api_url: &str) -> Result<Self> {
-        Ok(Self::from_client(build_http_client()?, api_key, api_url))
+        Ok(Self::from_client(
+            build_http_client(crate::config::DEFAULT_PROVIDER_HTTP_TIMEOUT_SECS)?,
+            api_key,
+            api_url,
+        ))
     }
 
     pub fn from_client(client: reqwest::Client, api_key: &str, api_url: &str) -> Self {

@@ -409,6 +409,7 @@ openai_reasoning_effort = "off"
 openai_include_usage = false
 openai_token_param = "max_completion_tokens"
 openai_tool_choice = "auto"
+http_timeout_secs = 0
 
 [provider.openai_extra_body]
 enable_thinking = true
@@ -430,6 +431,7 @@ temperature = 0.2
     assert_eq!(extra_body["enable_thinking"], serde_json::json!(true));
     assert_eq!(extra_body["thinking_budget"], serde_json::json!(8192));
     assert_eq!(extra_body["temperature"], serde_json::json!(0.2));
+    assert_eq!(parsed.provider.http_timeout_secs, Some(0));
 }
 
 #[test]
@@ -646,6 +648,7 @@ fn config_file_sets_openai_compatible_options() {
                 ("enable_thinking".to_string(), serde_json::json!(true)),
                 ("thinking_budget".to_string(), serde_json::json!(8192)),
             ])),
+            http_timeout_secs: Some(0),
             ..Default::default()
         },
         ..Default::default()
@@ -656,6 +659,7 @@ fn config_file_sets_openai_compatible_options() {
     assert!(!cfg.openai_include_usage);
     assert_eq!(cfg.openai_token_param, TokenParamKind::MaxCompletionTokens);
     assert_eq!(cfg.openai_tool_choice, Some(serde_json::json!("auto")));
+    assert_eq!(cfg.provider_http_timeout_secs, 0);
     assert_eq!(
         cfg.openai_extra_body["enable_thinking"],
         serde_json::json!(true)

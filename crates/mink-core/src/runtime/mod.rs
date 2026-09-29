@@ -19,6 +19,7 @@ pub use crate::capabilities::{
     CapabilityExposure, LoadedSkill, RuntimeSkill, SkillCapability, SkillDiscoveryPolicy,
     SkillLoadContext, SkillProvider, SourceLevel, SourceMeta,
 };
+pub use crate::config::DEFAULT_PROVIDER_HTTP_TIMEOUT_SECS;
 pub use crate::config::{
     EditMode, LlmRecoveryPolicy, ModelResolver, OutputFormat, ResolvedModel, SandboxConfig,
     SandboxPythonConfig, SignalPolicy, ToolApprovalMode, ToolApprovalPolicy,

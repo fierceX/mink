@@ -306,6 +306,12 @@ pub struct ResolvedConfig {
     pub openai_token_param: TokenParamKind,
     pub openai_tool_choice: Option<serde_json::Value>,
     pub openai_extra_body: BTreeMap<String, serde_json::Value>,
+    /// provider HTTP 请求总超时（秒）：单次物理请求（含响应体读取）超过该值会被
+    /// 传输层中断并归入可重试故障；`0` 表示不设总超时，此时长流式生成只受
+    /// `llm_first_event_timeout_secs` / `llm_idle_timeout_secs` 兜底。
+    /// 默认 [`DEFAULT_PROVIDER_HTTP_TIMEOUT_SECS`]；这是传输层配置，不属于
+    /// `llm_recovery` 恢复策略。
+    pub provider_http_timeout_secs: u64,
     pub max_tokens: i32,
     pub tool_timeout_secs: i32,
     /// 单次 Bash/Python/自定义工具调用的超时上限（显式 `timeout` 与全局
@@ -389,6 +395,7 @@ impl Default for ResolvedConfig {
             openai_token_param: TokenParamKind::MaxTokens,
             openai_tool_choice: None,
             openai_extra_body: BTreeMap::new(),
+            provider_http_timeout_secs: DEFAULT_PROVIDER_HTTP_TIMEOUT_SECS,
             max_tokens: 81920,
             tool_timeout_secs: 600,
             tool_timeout_max_secs: 600,
@@ -437,6 +444,10 @@ impl Default for ResolvedConfig {
         }
     }
 }
+
+/// provider HTTP 请求总超时的默认值（秒）。单次物理请求（含流式响应体读取）超过该值
+/// 会被传输层中断并归入可重试故障；长文档生成等长流式场景应调大或设 `0`。
+pub const DEFAULT_PROVIDER_HTTP_TIMEOUT_SECS: u64 = 600;
 
 pub fn api_url(cfg: &ResolvedConfig) -> String {
     let base = if cfg.base_url.is_empty() {
