@@ -1278,6 +1278,271 @@ async fn emergency_checkpoint_lists_only_existing_artifact_refs() -> anyhow::Res
     Ok(())
 }
 
+/// 修复回归 1：收缩必须严格变小并收敛（预算不足时返回 Ok(false)，不能自旋）。
+/// 修复回归 6：应急路径必须响应 runtime cancel（不提交、映射为 Interrupted）。
+#[tokio::test]
+async fn emergency_shrink_terminates_and_respects_cancel() -> anyhow::Result<()> {
+    let backend = SummaryOutageBackend::new(
+        SummaryResponse::Unusable,
+        vec![CompactionStep::Text("done")],
+    );
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "turn-emergency-terminate",
+        |cfg| {
+            // 窗口小到连最小摘录都装不下：以前会在收缩循环里自旋。
+            cfg.max_context_tokens = 200;
+            cfg.context_reserve_tokens = 100;
+            cfg.context_compact_pct = 100;
+            cfg.context_compact_tail_tokens = 1;
+            cfg.llm_recovery.request_max_retries = 0;
+        },
+        backend.clone(),
+    )
+    .await?;
+    seed_history(&ctx, 4, 60_000).await?;
+
+    let snapshot = ctx.todo_store.snapshot();
+    let context = crate::session::compaction::EmergencyCheckpointContext {
+        main_request: crate::session::compaction::MainRequestShape {
+            system_prompt: "",
+            tools: &[],
+        },
+        target_limit: Some(50),
+        current_user_input: Some("keep going"),
+        todo: crate::agent::compactor::todo_candidate_state(&ctx, &snapshot),
+        artifact_refs: Vec::new(),
+    };
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        ctx.compaction
+            .commit_emergency_checkpoint("regression", &context),
+    )
+    .await
+    .expect("收缩循环必须及时终止（不得自旋）")?;
+    assert!(!outcome, "连最小摘录都装不下时应返回 false：{outcome}");
+    assert!(
+        ctx.compaction.read_summary().await.is_none(),
+        "未提交不得写入摘要"
+    );
+
+    // runtime cancel 后必须拒绝提交并映射为 Interrupted。
+    ctx.cancel.cancel();
+    let error = ctx
+        .compaction
+        .commit_emergency_checkpoint("regression-cancel", &context)
+        .await
+        .unwrap_err();
+    assert!(
+        crate::session::compaction::is_compaction_interrupted(&error),
+        "取消必须定型为 CompactionInterrupted：{error:#}"
+    );
+    assert!(ctx.compaction.read_summary().await.is_none());
+    let _ = tokio::fs::remove_dir_all(&ctx.home).await;
+    Ok(())
+}
+
+/// 修复回归 2：TodoSync 需求按**压缩后的候选**判断——压缩前历史里带着最新 revision
+/// （候选折走后消失）时，应急投影必须包含同步消息，且最终请求仍在预算内。
+#[tokio::test]
+async fn emergency_includes_todo_sync_lost_by_the_fold() -> anyhow::Result<()> {
+    let backend = SummaryOutageBackend::new(
+        SummaryResponse::Unusable,
+        vec![CompactionStep::Text("done")],
+    );
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "turn-emergency-todo-sync",
+        |cfg| {
+            cfg.max_context_tokens = 40_000;
+            cfg.context_reserve_tokens = 8_000;
+            cfg.context_compact_pct = 50;
+            cfg.context_compact_tail_tokens = 1_000;
+            cfg.llm_recovery.request_max_retries = 0;
+        },
+        backend.clone(),
+    )
+    .await?;
+    // 让 store revision=1，并把「可见 revision=1」的消息放进历史（压缩前无需同步）。
+    ctx.todo_store.apply_structure(
+        0,
+        crate::session::todo::TodoChanges {
+            add: vec![crate::session::todo::TodoAdd {
+                content: "keep the fix small".into(),
+            }],
+            update: Vec::new(),
+            remove: Vec::new(),
+        },
+    )?;
+    let snapshot = ctx.todo_store.snapshot();
+    assert_eq!(snapshot.revision, 1, "测试前提：store 里有一条待办");
+    let sync = crate::session::todo::sync_message_bounded(&snapshot, "TodoRead", usize::MAX);
+    ctx.store.append_runtime_message(sync).await?;
+    seed_history(&ctx, 4, 60_000).await?;
+
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let (decision, _) = executor.execute("keep going", None).await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    let projection = serde_json::to_string(&ctx.compaction.active_messages().await?)?;
+    assert!(
+        projection.contains("emergency-context-excerpt"),
+        "{projection}"
+    );
+    assert!(
+        projection.contains("<todo-sync"),
+        "折叠掉最新 revision 后必须补上 TodoSync：{projection}"
+    );
+    let _ = tokio::fs::remove_dir_all(&ctx.home).await;
+    Ok(())
+}
+
+/// 修复回归 5：存在未完成工具交换时，应急必须拒绝提交（协议损坏不得被摘录掩盖）。
+#[tokio::test]
+async fn emergency_refuses_unpaired_tool_exchange() -> anyhow::Result<()> {
+    let backend = SummaryOutageBackend::new(
+        SummaryResponse::Unusable,
+        vec![CompactionStep::Text("done")],
+    );
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "turn-emergency-unpaired",
+        |cfg| {
+            cfg.max_context_tokens = 40_000;
+            cfg.context_reserve_tokens = 8_000;
+            cfg.context_compact_pct = 50;
+            cfg.context_compact_tail_tokens = 1_000;
+            cfg.llm_recovery.request_max_retries = 0;
+        },
+        backend.clone(),
+    )
+    .await?;
+    // 有 tool call、没有 result 的损坏历史。
+    ctx.store.add_user("do the thing").await?;
+    ctx.store
+        .add_assistant(
+            "running tests",
+            "",
+            &[crate::protocol::ToolCallEvent {
+                name: "Bash".into(),
+                id: "bash-orphan".into(),
+                input_json: serde_json::json!({"command":"cargo test"}),
+                fields: Default::default(),
+                parse_error: None,
+                raw_arguments_digest: None,
+            }],
+        )
+        .await?;
+    seed_history(&ctx, 4, 60_000).await?;
+
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let error = executor
+        .execute("keep going", None)
+        .await
+        .expect_err("协议损坏必须失败");
+    assert!(
+        format!("{error:#}").contains("incomplete tool exchange"),
+        "{error:#}"
+    );
+    assert!(
+        ctx.compaction.read_summary().await.is_none(),
+        "拒绝提交时不得写入摘要"
+    );
+    let _ = tokio::fs::remove_dir_all(&ctx.home).await;
+    Ok(())
+}
+
+/// 修复回归 4：overflow 收缩额度按「每个逻辑请求」重置——4 个 round 各自恢复成功。
+#[tokio::test]
+async fn overflow_shrink_budget_resets_per_round() -> anyhow::Result<()> {
+    let mut script: Vec<CompactionStep> = Vec::new();
+    for index in 0..4 {
+        script.push(CompactionStep::ProviderError(
+            "maximum context length exceeded",
+        ));
+        let path: &'static str = Box::leak(format!("round-{index}.txt").into_boxed_str());
+        script.push(CompactionStep::Write(path));
+    }
+    script.push(CompactionStep::Text("finished"));
+    let backend = SummaryOutageBackend::new(SummaryResponse::Unusable, script);
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "turn-overflow-per-round",
+        |cfg| {
+            cfg.max_context_tokens = 200_000;
+            cfg.context_reserve_tokens = 8_000;
+            cfg.context_compact_pct = 90;
+            cfg.context_compact_tail_tokens = 1_000;
+            cfg.context_compact_max_output_tokens = 1_000;
+            cfg.llm_recovery.request_max_retries = 0;
+            cfg.max_turns = 200;
+        },
+        backend.clone(),
+    )
+    .await?;
+    seed_history(&ctx, 4, 24_000).await?;
+
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let (decision, _) = executor.execute("keep going", None).await?;
+
+    assert_eq!(
+        decision,
+        TurnDecision::Stop,
+        "每个 round 都应有自己的 overflow 收缩额度"
+    );
+    assert_eq!(backend.agent_calls(), 9);
+    assert_eq!(
+        crate::regression::tool_result_ids(&ctx.store).await?.len(),
+        4
+    );
+    let _ = tokio::fs::remove_dir_all(&ctx.home).await;
+    Ok(())
+}
+
+/// 修复回归 3：摘要成功但没有缩小请求时，仍必须尝试应急而不是直接退出。
+#[tokio::test]
+async fn overflow_shrinks_via_emergency_when_summary_does_not_reduce() -> anyhow::Result<()> {
+    // 摘要比被折叠段更大（≈90k est 的摘要 + ≈30k 尾部 > 被拒的 ≈100k）：
+    // 候选通过验收（未超窗）但请求反而变大。
+    let backend = SummaryOutageBackend::new(
+        SummaryResponse::Huge(270_000),
+        vec![
+            CompactionStep::ProviderError("maximum context length exceeded"),
+            CompactionStep::Text("recovered"),
+        ],
+    );
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "turn-overflow-summary-not-smaller",
+        |cfg| {
+            cfg.max_context_tokens = 400_000;
+            cfg.context_reserve_tokens = 8_000;
+            cfg.context_compact_pct = 99;
+            cfg.context_compact_tail_tokens = 1_000;
+            cfg.context_compact_max_output_tokens = 60_000;
+            cfg.llm_recovery.request_max_retries = 0;
+        },
+        backend.clone(),
+    )
+    .await?;
+    seed_history(&ctx, 5, 30_000).await?;
+
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let (decision, _) = executor.execute("keep going", None).await?;
+
+    assert_eq!(
+        decision,
+        TurnDecision::Stop,
+        "摘要成功但没缩小请求时也必须尝试应急"
+    );
+    assert_eq!(backend.agent_calls(), 2);
+    assert!(
+        backend.summary_calls() >= 1,
+        "先走了常规摘要路径：{}",
+        backend.summary_calls()
+    );
+    ctx.flush_event_log().await?;
+    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    assert!(events.contains("_mode=emergency"), "{events}");
+    let _ = tokio::fs::remove_dir_all(&ctx.home).await;
+    Ok(())
+}
+
 /// 长跑：摘要永久失败 + 有限窗口，写 `rounds` 轮文件仍须正常结束。
 async fn run_summary_outage_endurance(rounds: usize) -> anyhow::Result<()> {
     let mut script: Vec<CompactionStep> = Vec::with_capacity(rounds + 1);

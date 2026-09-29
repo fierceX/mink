@@ -1998,3 +1998,28 @@ async fn startup_repair_loss_cleared_only_after_successful_commit() -> anyhow::R
     );
     Ok(())
 }
+
+/// 修复回归：应急摘录的收缩必须**严格变小**并在到达地板后收敛（曾经会把省略标记
+/// 排除在额度外，导致 1200 → … → 84 → 84 的自旋）。
+#[test]
+fn emergency_excerpt_shrinks_strictly_and_terminates() {
+    let mut text = "x".repeat(1_200);
+    let mut steps = 0usize;
+    while let Some(next) = super::shrink_excerpt(&text, super::request_head_floor(&text)) {
+        assert!(
+            next.chars().count() < text.chars().count(),
+            "每一步都必须严格变小：{} -> {}",
+            text.chars().count(),
+            next.chars().count()
+        );
+        text = next;
+        steps += 1;
+        assert!(steps < 64, "收缩必须在有限步内收敛");
+    }
+    assert!(steps > 0, "长文本至少要收缩一次");
+
+    // 已经到地板：不能再收缩（返回 None 而不是原样返回）。
+    let floored = "y".repeat(80);
+    assert!(super::shrink_excerpt(&floored, super::request_head_floor(&floored)).is_none());
+    assert!(super::shrink_excerpt("", 64).is_none());
+}

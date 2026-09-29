@@ -80,7 +80,73 @@ impl MainRequestShape<'_> {
     }
 }
 
-/// 应急 checkpoint 的请求上下文：全部来自调用方的真实数据（turn 输入、todo 预演、
+/// 候选投影用的 todo 来源：引擎按**压缩后的候选消息**判断是否需要预演 TodoSync
+/// （压缩会把最新 revision 折走，按压缩前历史判断会漏掉同步消息）。
+pub(crate) struct TodoCandidateState<'a> {
+    pub snapshot: &'a crate::session::todo::TodoSnapshot,
+    pub read_provider: &'a str,
+    pub allowance_tokens: usize,
+}
+
+/// 按候选投影决定是否需要补一条预演 TodoSync：候选里已经看不到目标 revision 时必须
+/// 带上（`_mink.todo_revision` 是判断依据，与 `reconcile_todo_state` 同源）。
+pub(crate) fn candidate_todo_sync(
+    candidate: &[Value],
+    todo: Option<&TodoCandidateState<'_>>,
+) -> Option<Value> {
+    let todo = todo?;
+    let visible = crate::session::todo::visible_revision(candidate).unwrap_or(0);
+    if visible >= todo.snapshot.revision {
+        return None;
+    }
+    Some(crate::session::todo::sync_message_bounded(
+        todo.snapshot,
+        todo.read_provider,
+        todo.allowance_tokens,
+    ))
+}
+
+/// 活跃窗口里是否存在未配对的工具调用/结果（正式历史协议损坏）。
+/// 应急 checkpoint 折叠整段历史，任何未完成交换都必须原样失败而不是被摘录掩盖。
+fn unpaired_tool_exchange(messages: &[Value]) -> Option<String> {
+    let mut pending: Vec<String> = Vec::new();
+    for message in messages {
+        let Some(blocks) = message.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for block in blocks {
+            match block.get("type").and_then(Value::as_str) {
+                Some("tool_use") => {
+                    let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
+                    if id.is_empty() {
+                        return Some("tool call without id".to_string());
+                    }
+                    pending.push(id.to_string());
+                }
+                Some("tool_result") => {
+                    let id = block
+                        .get("tool_use_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    match pending.iter().position(|pending_id| pending_id == id) {
+                        Some(position) => {
+                            pending.remove(position);
+                        }
+                        None => {
+                            return Some(format!("tool result {id} has no matching call"));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    pending
+        .first()
+        .map(|id| format!("tool call {id} has no result"))
+}
+
+/// 应急 checkpoint 的请求上下文：全部来自调用方的真实数据（turn 输入、todo 候选状态、
 /// 主请求形状），引擎不自行读取历史以外的东西。
 pub(crate) struct EmergencyCheckpointContext<'a> {
     pub main_request: MainRequestShape<'a>,
@@ -89,8 +155,8 @@ pub(crate) struct EmergencyCheckpointContext<'a> {
     pub target_limit: Option<usize>,
     /// 当前用户请求原文；manual 等没有当前输入时为 `None`（不得伪造）。
     pub current_user_input: Option<&'a str>,
-    /// 提交后即将追加的 TodoSync 预演消息（未写入 conversation，仅参与预算）。
-    pub todo_sync: Option<Value>,
+    /// todo 来源（快照 + 读 provider + 展示额度）：同步需求按候选投影判断。
+    pub todo: Option<TodoCandidateState<'a>>,
     /// 折叠历史里真实出现、且仍存在于 artifact 索引中的引用（不得虚构 URL）。
     pub artifact_refs: Vec<String>,
 }
@@ -150,20 +216,34 @@ impl EmergencyBlocks {
 }
 
 /// 头部+尾部裁剪：保留 `head` 个字符的头、`tail` 个字符的尾，中间标注省略量。
-/// 按 UTF-8 边界裁剪，`None` 表示已经无法再缩短。
+/// 省略标记计入额度，且**结果必须严格短于输入**，否则返回 `None`（否则外层收缩循环
+/// 会在同一个文本上无限重试）。`floor_chars` 是保留的真实字符下限；到达下限仍无法变短
+/// 就停止收缩。按 UTF-8 边界裁剪。
 fn shrink_excerpt(text: &str, floor_chars: usize) -> Option<String> {
     let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= floor_chars {
+    let len = chars.len();
+    if len == 0 {
         return None;
     }
-    let keep = (chars.len() / 2).max(floor_chars);
-    let head = (keep / 2).max(1);
-    let tail = keep.saturating_sub(head).max(1).min(chars.len() - head);
-    let omitted = chars.len().saturating_sub(head + tail);
-    let mut out: String = chars[..head].iter().collect();
-    out.push_str(&format!("[…{omitted} chars omitted…]"));
-    out.extend(chars[chars.len() - tail..].iter());
-    Some(out)
+    let floor = floor_chars.clamp(1, len.saturating_sub(1).max(1));
+    let mut keep = (len / 2).max(floor);
+    loop {
+        let head = (keep / 2).max(1).min(len);
+        let tail = keep.saturating_sub(head).min(len.saturating_sub(head));
+        let omitted = len.saturating_sub(head + tail);
+        let mut out: String = chars[..head].iter().collect();
+        out.push_str(&format!("[…{omitted} chars omitted…]"));
+        if tail > 0 {
+            out.extend(chars[len - tail..].iter());
+        }
+        if out.chars().count() < len {
+            return Some(out);
+        }
+        if keep <= floor {
+            return None;
+        }
+        keep = (keep / 2).max(floor);
+    }
 }
 
 /// 请求摘录的地板长度（标记之外必须留下的最小真实目标）。
@@ -627,6 +707,14 @@ impl CompactionEngine {
         Ok(checkpoints)
     }
 
+    /// 应急路径的取消/中断检查：runtime cancel 与用户 interrupt 都必须中断提交。
+    fn check_emergency_cancelled(&self) -> Result<()> {
+        if self.cancel.is_cancelled() || self.interrupt.load(Ordering::SeqCst) {
+            return Err(CompactionInterrupted::error());
+        }
+        Ok(())
+    }
+
     /// 确定性应急 checkpoint：不调用任何 LLM，把可变历史折成有界摘录并提交。
     ///
     /// 只在正常压缩无法让请求装下时由上层调用。`Ok(true)` 表示已提交（调用方必须重新
@@ -638,12 +726,18 @@ impl CompactionEngine {
         ctx: &EmergencyCheckpointContext<'_>,
     ) -> Result<bool> {
         self.fault.check()?;
-        if self.interrupt.load(Ordering::SeqCst) {
-            return Err(CompactionInterrupted::error());
-        }
+        self.check_emergency_cancelled()?;
         let _guard = self.compact_lock.lock().await;
+        // 等锁期间可能已经取消/中断：拿到锁后必须复检。
+        self.check_emergency_cancelled()?;
         let state = self.current_state()?;
         let active = self.store.lines_from(state.active_start).await?;
+        // 折叠整段历史前必须确认没有未完成的工具交换：协议损坏不能被摘录掩盖。
+        if let Some(problem) = unpaired_tool_exchange(&active) {
+            return Err(anyhow::anyhow!(
+                "refusing emergency checkpoint: the active history has an incomplete tool exchange ({problem})"
+            ));
+        }
         let mut blocks = emergency_blocks(
             reason,
             &active,
@@ -655,13 +749,16 @@ impl CompactionEngine {
             .target_limit
             .unwrap_or_else(|| request_input_limit(&self.config));
         loop {
+            self.check_emergency_cancelled()?;
             let summary = blocks.render();
             let mut candidate = self.checkpoint_prefix(&summary)?;
-            if let Some(todo_sync) = &ctx.todo_sync {
-                candidate.push(todo_sync.clone());
+            if let Some(todo_sync) = candidate_todo_sync(&candidate, ctx.todo.as_ref()) {
+                candidate.push(todo_sync);
             }
             let tokens = ctx.main_request.estimate(&candidate)?;
             if input_limit == usize::MAX || tokens <= input_limit {
+                // 提交前最后一次取消/中断复检：取消优先于提交。
+                self.check_emergency_cancelled()?;
                 // 折掉全部可变历史（尾部为空）；权威 history 只追加、不重写。
                 let next = CompactionState {
                     active_start: state.active_start + active.len(),
@@ -709,6 +806,7 @@ impl CompactionEngine {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -728,6 +826,8 @@ impl CompactionEngine {
         // 提交、报 `SummaryUnavailable`，由上层转应急）；`None`（manual 等旧入口）
         // 保持原有宽松行为。
         main_request: Option<MainRequestShape<'_>>,
+        // todo 候选状态：候选折走 revision 时必须把预演 TodoSync 计入验收。
+        todo_state: Option<TodoCandidateState<'_>>,
     ) -> Result<(bool, String)> {
         // Latched session: refuse before any summary request or state write.
         self.fault.check()?;
@@ -804,6 +904,11 @@ impl CompactionEngine {
         if let Some(shape) = main_request {
             let mut candidate = self.checkpoint_prefix(&summary)?;
             candidate.extend_from_slice(kept);
+            // 候选会折走最新 todo revision：验收必须包含随之出现的 TodoSync，否则
+            // 提交后 `reconcile_todo_state` 追加同步消息会再次超窗。
+            if let Some(todo_sync) = candidate_todo_sync(&candidate, todo_state.as_ref()) {
+                candidate.push(todo_sync);
+            }
             let candidate_tokens = shape.estimate(&candidate)?;
             let input_limit = request_input_limit(&self.config);
             if input_limit != usize::MAX && candidate_tokens > input_limit {

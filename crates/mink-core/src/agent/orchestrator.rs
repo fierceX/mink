@@ -122,7 +122,11 @@ impl OrchActor {
             return Ok(false);
         }
         let mut projected = ctx.compaction.active_messages().await?;
-        if let Some(todo_sync) = crate::agent::compactor::predicted_todo_sync(ctx, &projected) {
+        let snapshot = ctx.todo_store.snapshot();
+        if let Some(todo_sync) = crate::session::compaction::candidate_todo_sync(
+            &projected,
+            crate::agent::compactor::todo_candidate_state(ctx, &snapshot).as_ref(),
+        ) {
             projected.push(todo_sync);
         }
         let tokens = crate::llm::transport::estimate_openai_context_tokens(
@@ -213,6 +217,9 @@ impl OrchActor {
                             &active_model.actual,
                             active_model.alias.as_deref(),
                         );
+                        let todo_snapshot = self.ctx.todo_store.snapshot();
+                        let todo_candidate =
+                            crate::agent::compactor::todo_candidate_state(&self.ctx, &todo_snapshot);
                         let mut result = self
                             .ctx
                             .compaction
@@ -231,6 +238,7 @@ impl OrchActor {
                                         tools,
                                     }
                                 }),
+                                todo_candidate,
                             )
                             .await;
                         // 手动压缩的失败分流与 turn 一致：摘要侧不可用时，投影本来就

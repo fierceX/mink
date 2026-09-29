@@ -322,9 +322,17 @@ impl TurnExecutor {
                 .clone()
                 .or_else(|| last_detail.clone())
                 .unwrap_or_else(|| "over_budget_without_cut".to_string());
-            emergency = self
+            emergency = match self
                 .commit_emergency_checkpoint(&reason, messages, system_prompt, tools_json, None)
-                .await?;
+                .await
+            {
+                Ok(committed) => committed,
+                Err(error) if crate::session::compaction::is_compaction_interrupted(&error) => {
+                    // 应急路径的取消/中断必须映射为 Interrupted，而不是普通失败。
+                    return Err(anyhow::Error::new(TurnInterrupted));
+                }
+                Err(error) => return Err(error),
+            };
             if emergency {
                 request_messages = self.project_request_messages(messages)?;
                 estimated_tokens = crate::llm::transport::estimate_openai_context_tokens(
@@ -385,9 +393,6 @@ impl TurnExecutor {
 
         let mut turn = 0;
         let mut effects = Vec::new();
-        // provider overflow 的请求内收缩：每次严格变小，上限见
-        // MAX_OVERFLOW_SHRINK_ATTEMPTS。
-        let mut overflow_shrink_attempts = 0usize;
         let max_turns = self.ctx.max_turns() as usize;
 
         let (mut system_prompt, mut tools_json) = match self.ensure_prefix().await {
@@ -427,6 +432,9 @@ impl TurnExecutor {
                 Err(error) => return Err(error),
             };
 
+            // provider overflow 的请求内收缩额度只作用于**当前逻辑请求**（本 round）：
+            // 长任务里每个 round 都应有自己的恢复机会，不能共享一个终身额度。
+            let mut overflow_shrink_attempts = 0usize;
             // Phase 1: LLM 流式响应（同 round 内可含多次 attempt 重试）
             let stream_output = loop {
                 match self
@@ -494,10 +502,23 @@ impl TurnExecutor {
                             }
                             Err(error) => return Err(error),
                         };
-                        // 摘要不可用或没有收益时，应急 checkpoint 是唯一不依赖 LLM 的
-                        // 缩小手段（按折半目标构造，保证比被拒请求更小）。
-                        if !compacted
-                            && !self
+                        if compacted {
+                            self.ctx.display.render_info(
+                                "Context summary committed; verifying the request actually shrank.",
+                            );
+                        }
+                        // 「完成一次摘要」不等于恢复成功：必须看重新投影后的真实大小。
+                        request_messages = self.project_request_messages(&messages)?;
+                        let mut retried_tokens =
+                            crate::llm::transport::estimate_openai_context_tokens(
+                                &request_messages,
+                                &tools_json,
+                                &system_prompt,
+                            )?;
+                        if retried_tokens >= rejected_tokens {
+                            // 摘要不可用、没有收益或反而变大时，应急 checkpoint 是唯一
+                            // 不依赖 LLM 的缩小手段（按折半目标构造）。
+                            let committed = match self
                                 .commit_emergency_checkpoint(
                                     "provider_overflow",
                                     &mut messages,
@@ -505,16 +526,29 @@ impl TurnExecutor {
                                     &tools_json,
                                     Some(shrink_target),
                                 )
-                                .await?
-                        {
-                            return Err(error);
+                                .await
+                            {
+                                Ok(committed) => committed,
+                                Err(error)
+                                    if crate::session::compaction::is_compaction_interrupted(
+                                        &error,
+                                    ) =>
+                                {
+                                    self.ctx.display.render_stop("interrupted");
+                                    return Ok((TurnDecision::Interrupted, effects));
+                                }
+                                Err(error) => return Err(error),
+                            };
+                            if !committed {
+                                return Err(error);
+                            }
+                            request_messages = self.project_request_messages(&messages)?;
+                            retried_tokens = crate::llm::transport::estimate_openai_context_tokens(
+                                &request_messages,
+                                &tools_json,
+                                &system_prompt,
+                            )?;
                         }
-                        request_messages = self.project_request_messages(&messages)?;
-                        let retried_tokens = crate::llm::transport::estimate_openai_context_tokens(
-                            &request_messages,
-                            &tools_json,
-                            &system_prompt,
-                        )?;
                         if retried_tokens >= rejected_tokens {
                             // 没有变得更小：再发同样的请求只会再次被拒。
                             return Err(error);

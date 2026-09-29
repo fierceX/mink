@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### 修复：应急压缩的六项审核问题
+
+- **收缩必须严格变小**：`shrink_excerpt` 把省略标记计入额度，结果不短于输入时返回「无法继续」
+  而不是原样返回（此前 1200 → … → 84 → 84 会在外层收缩循环里自旋、持续占 CPU）。
+- **应急路径的取消/中断检查**：入口、拿到压缩锁后、每次收缩前、提交前都检查 `cancel` 与
+  `interrupt`，并统一映射为 `TurnDecision::Interrupted`（此前只查 interrupt，runtime cancel
+  仍会提交）。
+- **TodoSync 需求按压缩后的候选判断**：候选折走最新 `_mink.todo_revision` 时，预演同步消息计入
+  候选验收（普通摘要与应急两条路径），不再出现「验收通过、提交后 reconcile 追加同步消息又超窗」。
+- **overflow 以真实收缩为准**：不再把「完成一次摘要」当成恢复成功——重新投影后请求没有严格变小
+  （含摘要成功但变大）就转应急 checkpoint（按折半目标）。
+- **overflow 收缩额度按逻辑请求重置**：计数移入 round 循环，长任务不再共享一个终身 3 次额度。
+- **应急前验证工具配对**：活跃窗口存在未完成的 tool call/result 交换时拒绝提交
+  （`incomplete tool exchange`），协议损坏不被摘录掩盖。
+
 ### 优化：软额度与动态摘要预算（P1）
 
 - **摘要输出动态 cap**：`S_call = min(context_compact_max_output_tokens, 窗口 − 本次输入)`，每次 attempt（含纠错诊断追加之后）重新估算并重算；低于最小实用输出（`MIN_PRACTICAL_SUMMARY_TOKENS`）时直接转确定性应急，不再因「固定上限装不下」而放弃本可发出的摘要请求。
