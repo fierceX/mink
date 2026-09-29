@@ -527,40 +527,14 @@ pub(crate) fn validate_runtime_limits(
             context_reserve_tokens
         );
     }
+    // 软额度：`context_compact_tail_tokens` 与 `context_compact_max_output_tokens` 是
+    // 目标而不是地板——切点选择会按可用空间收紧热尾部，摘要请求的输出 cap 也会按
+    // 「输入 + 输出 ≤ 窗口」动态下调（低于最小实用输出时转确定性应急 checkpoint）。
+    // 因此这里不再对 S/T 的组合做硬校验：小窗口 + 大软目标仍可初始化，行为由每次
+    // 请求的实际预算决定。硬约束只有 `reserve < 窗口`（决定响应预留）。
     let compact_output = usize::try_from(context_compact_max_output_tokens)
         .map_err(|_| anyhow::anyhow!("context_compact_max_output_tokens is too large"))?;
-    if compact_output >= max_context {
-        bail!(
-            "context_compact_max_output_tokens ({compact_output}) must be less than max_context ({max_context})"
-        );
-    }
-
-    let requested_output =
-        usize::try_from(max_tokens).map_err(|_| anyhow::anyhow!("max_tokens is too large"))?;
-    let response_budget = requested_output.min(context_reserve_tokens);
-    let request_input_budget = max_context - response_budget;
-    if context_compact_tail_tokens >= request_input_budget {
-        bail!(
-            "context_compact_tail_tokens ({}) must be less than the request input budget ({request_input_budget} = max_context {max_context} - response budget {response_budget})",
-            context_compact_tail_tokens
-        );
-    }
-    // Post-compaction context = summary output + hot tail + response budget;
-    // the combination must still fit the window or compaction can never
-    // prevent provider overflow (each individual check above can pass while
-    // the sum exceeds max_context).
-    //
-    // 安全比较：tail < max_context - response_budget，因此
-    // tail + response_budget 不会溢出且严格小于 max_context；
-    // 再用减法比较 compact_output，避免三项直接相加在 usize 边界回绕。
-    let tail_response = context_compact_tail_tokens + response_budget;
-    if compact_output > max_context - tail_response {
-        let post_compact_total = tail_response.saturating_add(compact_output);
-        bail!(
-            "compaction budget exceeds the context window: context_compact_max_output_tokens ({compact_output}) + context_compact_tail_tokens ({}) + response budget ({response_budget}) = {post_compact_total} > max_context ({max_context})",
-            context_compact_tail_tokens
-        );
-    }
+    let _ = (compact_output, context_compact_tail_tokens, max_context);
     Ok(())
 }
 // ── Sandbox configuration ──────────────────────────────────────────
@@ -656,38 +630,21 @@ mod validation_tests {
     }
 
     #[test]
-    fn combined_compaction_budget_must_fit_window() {
-        // Each individual limit passes but summary + tail + response budget
-        // together overflow the window: compaction could never prevent
-        // provider overflow.
-        let mut cfg = ResolvedConfig {
+    fn soft_compaction_targets_may_exceed_the_window() {
+        // 热尾部与摘要输出是软目标：运行时按每次请求的剩余空间收紧（动态 cap），
+        // 因此组合超过窗口不再是配置错误——小窗口 + 大软目标必须能初始化。
+        let cfg = ResolvedConfig {
             max_context_tokens: 200_000,
             context_reserve_tokens: 190_000,
             max_tokens: 180_000,
-            // tail (10k) < input budget (20k) and each limit is individually
-            // below the window, yet summary (150k) + tail + response (180k)
-            // = 340k > 200k.
             context_compact_tail_tokens: 10_000,
             context_compact_max_output_tokens: 150_000,
             ..ResolvedConfig::default()
         };
-        let err = validate_runtime_config(&cfg).unwrap_err().to_string();
-        assert!(
-            err.contains("compaction budget exceeds the context window"),
-            "{err}"
-        );
-
-        // Shrinking the summary so the sum fits must pass.
-        cfg.context_compact_max_output_tokens = 9_000;
         assert!(validate_runtime_config(&cfg).is_ok());
-    }
 
-    #[test]
-    fn combined_compaction_budget_does_not_overflow_usize() {
-        // Every individual limit passes on 64-bit, and the naive three-way
-        // addition would overflow usize::MAX. The validation must still
-        // fail closed instead of panicking in debug or wrapping in release.
-        let cfg = ResolvedConfig {
+        // 极值也不再需要三项相加比较，不会回绕或 panic。
+        let huge = ResolvedConfig {
             max_context_tokens: usize::MAX,
             context_reserve_tokens: 1,
             max_tokens: 1,
@@ -695,11 +652,16 @@ mod validation_tests {
             context_compact_max_output_tokens: i32::MAX,
             ..ResolvedConfig::default()
         };
-        let err = validate_runtime_config(&cfg).unwrap_err().to_string();
-        assert!(
-            err.contains("compaction budget exceeds the context window"),
-            "{err}"
-        );
+        assert!(validate_runtime_config(&huge).is_ok());
+
+        // 硬约束保留：reserve 必须小于窗口。
+        let bad = ResolvedConfig {
+            max_context_tokens: 64_000,
+            context_reserve_tokens: 64_000,
+            ..ResolvedConfig::default()
+        };
+        let err = validate_runtime_config(&bad).unwrap_err().to_string();
+        assert!(err.contains("context_reserve_tokens"), "{err}");
     }
 
     #[test]

@@ -352,7 +352,7 @@ async fn orchestrator_manual_compact_uses_active_model_and_shared_backend() -> a
 }
 
 #[tokio::test]
-async fn orchestrator_manual_compact_failure_is_logged() -> anyhow::Result<()> {
+async fn orchestrator_manual_compact_summary_failure_is_skipped_and_logged() -> anyhow::Result<()> {
     let h = harness_with_config(
         "orch-compact-failure-event",
         false,
@@ -378,11 +378,16 @@ async fn orchestrator_manual_compact_failure_is_logged() -> anyhow::Result<()> {
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     tx.send(OrchCmd::Compact { done: done_tx })?;
     let outcome = done_rx.await?;
+    // 摘要侧不可用不再是 manual 压缩的硬失败：投影仍能发送时返回带原因的 Skipped，
+    // 投影超预算时才会转应急 checkpoint（见 manual_compaction_falls_back_to_emergency）。
+    let skipped = outcome.expect("manual compaction must not fail the command");
     assert!(
-        outcome
-            .unwrap_err()
-            .to_string()
-            .contains("planned compaction failure")
+        matches!(skipped, crate::runtime::CompactOutcome::Skipped { .. }),
+        "{skipped:?}"
+    );
+    assert!(
+        matches!(&skipped, crate::runtime::CompactOutcome::Skipped { reason } if reason.contains("planned compaction failure")),
+        "{skipped:?}"
     );
     drop(tx);
     handle.await??;
@@ -392,8 +397,8 @@ async fn orchestrator_manual_compact_failure_is_logged() -> anyhow::Result<()> {
     assert!(events.contains(r#""version":2"#), "{events}");
     assert!(events.contains(r#""trigger":"manual""#), "{events}");
     assert!(
-        events.contains("failed: planned compaction failure"),
-        "{events}"
+        events.contains("skipped: summary unavailable: planned compaction failure"),
+        "跳过原因必须留痕：{events}"
     );
     Ok(())
 }

@@ -80,7 +80,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - 正常路径的压缩统一调用 LLM 摘要，以唯一 internal user `<compacted-summary>` checkpoint 投影，不修改 immutable system/tools prefix；`context_compact_input_reduction=true` 只精简摘要请求，不改写完整历史或热尾部。当请求已经超出输入预算、而摘要侧不可用（输入装不下、调用/超时/重试耗尽、输出不合格、候选发布前验收不通过）时，允许**不调用 LLM 的确定性应急 checkpoint** 提交同一投影（有损摘录，见下一条）；取消、持久化 fault、正式历史协议损坏不得转为应急成功。
 - auto 压力优先用同模型、同 system/tools 指纹、同 projection generation 的最近 provider prompt usage 校准（基线须为当前投影严格前缀）；preflight 始终保守本地估算，基线只存 runtime 内存；`prompt_usage_calibration_safe=false` 的后端禁用校准；支持 cache projection 的后端必须让摘要复用主请求的实际 system/tools 与历史公共缓存前缀，无法证明边界或超预算时按 reduction 配置降级。
 - 压缩与子代理请求必须使用当前活动真实模型名与别名，并复用 runtime 共享 `LlmBackend`；provider context overflow 只允许在无部分输出时触发一次压缩与一次重试（该次压缩不受"本轮已压缩过"限制）。
-- `max_context_tokens=0` 禁用 auto/preflight 与本地输入预算上限、保留手动压缩；压缩百分比、响应预留、热尾部、摘要输出预算来自显式配置（不推断隐式档位）；有限窗口下 reserve 与摘要输出必须小于窗口、热尾部小于主请求预算。
+- `max_context_tokens=0` 禁用 auto/preflight 与本地输入预算上限、保留手动压缩；压缩百分比、响应预留、热尾部、摘要输出预算来自显式配置（不推断隐式档位）；有限窗口下只有 `reserve < 窗口` 是硬约束（决定响应预留），摘要输出上限与热尾部是**软目标**：切点按可用空间收紧热尾部，摘要输出 cap 按「输入 + 输出 ≤ 窗口」动态下调（低于最小实用输出转应急），因此不做 S/T 组合硬校验。
 - Agent JSONL `SdkOptions`、Python `SandboxConfig`、Rust `AgentOptions` 覆盖同一组压缩参数并映射到唯一 `Config`；runtime 创建 session 前调用 `validate_runtime_config()`。
 
 ### LLM 有界恢复

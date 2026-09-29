@@ -692,6 +692,8 @@ async fn provider_overflow_recovers_after_compaction_in_the_same_input() -> anyh
 enum SummaryResponse {
     /// 每次都返回不可用摘要（空正文 + stop）→ 触发纠错/恢复耗尽。
     Unusable,
+    /// 返回一份合法摘要（用于动态输出 cap 等成功路径）。
+    Ok,
     /// 摘要成功但正文巨大 → 触发候选发布前预算验收。
     Huge(usize),
     /// 摘要永不返回 → 用于中断优先级。
@@ -702,6 +704,8 @@ enum SummaryResponse {
 struct SummaryOutageBackend {
     summary: SummaryResponse,
     summary_calls: AtomicUsize,
+    /// 每个摘要请求申请的输出 cap（断言动态预算）。
+    summary_max_tokens: Mutex<Vec<i32>>,
     script: Mutex<std::vec::IntoIter<CompactionStep>>,
     agent_calls: AtomicUsize,
 }
@@ -711,6 +715,7 @@ impl SummaryOutageBackend {
         Arc::new(Self {
             summary,
             summary_calls: AtomicUsize::new(0),
+            summary_max_tokens: Mutex::new(Vec::new()),
             script: Mutex::new(script.into_iter()),
             agent_calls: AtomicUsize::new(0),
         })
@@ -722,6 +727,10 @@ impl SummaryOutageBackend {
 
     fn agent_calls(&self) -> usize {
         self.agent_calls.load(AtomicOrdering::SeqCst)
+    }
+
+    fn summary_max_tokens(&self) -> Vec<i32> {
+        self.summary_max_tokens.lock().unwrap().clone()
     }
 }
 
@@ -737,10 +746,22 @@ impl LlmBackend for SummaryOutageBackend {
     ) -> Result<crate::llm::client::LlmResponseStream> {
         if matches!(request.purpose, crate::runtime::LlmPurpose::Compaction) {
             self.summary_calls.fetch_add(1, AtomicOrdering::SeqCst);
+            self.summary_max_tokens
+                .lock()
+                .unwrap()
+                .push(request.max_tokens);
             return Ok(match self.summary {
                 SummaryResponse::Unusable => stream_of(vec![Ok(Event::Stop(StopEvent {
                     reason: "stop".into(),
                 }))]),
+                SummaryResponse::Ok => stream_of(vec![
+                    Ok(Event::Text(TextEvent {
+                        content: COMPACTED_SUMMARY.into(),
+                    })),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "stop".into(),
+                    })),
+                ]),
                 SummaryResponse::Huge(chars) => stream_of(vec![
                     Ok(Event::Text(TextEvent {
                         content: format!("OVERSIZED-SUMMARY-MARKER {}", "s".repeat(chars)),
@@ -768,6 +789,13 @@ impl LlmBackend for SummaryOutageBackend {
                     reason: "tool_calls".into(),
                 })),
             ],
+            Some(CompactionStep::ProviderError(message)) => {
+                vec![Ok(Event::Error(crate::protocol::ErrorEvent {
+                    message: message.into(),
+                    provider_code: None,
+                    status: None,
+                }))]
+            }
             Some(CompactionStep::Text(text)) => vec![
                 Ok(Event::Text(TextEvent {
                     content: text.into(),
@@ -1000,6 +1028,187 @@ async fn interrupt_during_compaction_reports_interrupted() -> anyhow::Result<()>
 
     assert_eq!(decision, TurnDecision::Interrupted);
     assert_eq!(backend.agent_calls(), 0, "中断不得发出主请求");
+    Ok(())
+}
+
+/// 摘要输入已经吃掉大部分窗口 → 动态输出 cap 接手：请求照发（cap 小于配置值），
+/// 摘要成功提交，而不是按配置上限过早放弃。
+#[tokio::test]
+async fn dynamic_summary_cap_shrinks_the_request_instead_of_giving_up() -> anyhow::Result<()> {
+    let backend =
+        SummaryOutageBackend::new(SummaryResponse::Ok, vec![CompactionStep::Text("done")]);
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "turn-dynamic-summary-cap",
+        |cfg| {
+            cfg.max_context_tokens = 40_000;
+            cfg.context_reserve_tokens = 8_000;
+            cfg.context_compact_pct = 100;
+            cfg.context_compact_tail_tokens = 1_000;
+            cfg.context_compact_max_output_tokens = 4_096;
+            cfg.llm_recovery.request_max_retries = 0;
+        },
+        backend.clone(),
+    )
+    .await?;
+    // 折叠段 ≈ 37k：窗口 40k 下按 4,096 的固定上限已装不下（需要 ≤ 35,904 才放行），
+    // 但按动态 cap 只需留一个最小实用输出，因此摘要请求应带 ~3k 的输出上限发出。
+    ctx.store
+        .add_user(&format!("old task {}", "x".repeat(111_000)))
+        .await?;
+    ctx.store.add_assistant("ack", "", &[]).await?;
+    ctx.store.add_user("next").await?;
+    ctx.store.add_assistant("ok", "", &[]).await?;
+
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let (decision, _) = executor.execute("keep going", None).await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert_eq!(backend.agent_calls(), 1);
+    let caps = backend.summary_max_tokens();
+    assert!(!caps.is_empty(), "摘要请求必须被发出");
+    assert!(
+        caps.iter().all(|cap| *cap < 4_096),
+        "输出 cap 必须按剩余空间收紧：{caps:?}"
+    );
+    ctx.flush_event_log().await?;
+    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    assert!(!events.contains("_mode=emergency"), "{events}");
+    Ok(())
+}
+
+/// 剩余空间连最小实用输出都放不下 → 不发物理摘要请求，直接转应急。
+#[tokio::test]
+async fn summary_output_budget_floor_falls_back_to_emergency() -> anyhow::Result<()> {
+    let backend =
+        SummaryOutageBackend::new(SummaryResponse::Ok, vec![CompactionStep::Text("done")]);
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "turn-summary-cap-floor",
+        |cfg| {
+            cfg.max_context_tokens = 36_000;
+            cfg.context_reserve_tokens = 8_000;
+            cfg.context_compact_pct = 100;
+            cfg.context_compact_tail_tokens = 1_000;
+            cfg.context_compact_max_output_tokens = 4_096;
+            cfg.llm_recovery.request_max_retries = 0;
+        },
+        backend.clone(),
+    )
+    .await?;
+    seed_history(&ctx, 2, 60_000).await?;
+
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let (decision, _) = executor.execute("keep going", None).await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert_eq!(backend.agent_calls(), 1);
+    assert_eq!(
+        backend.summary_calls(),
+        0,
+        "连最小输出都放不下时不得发出摘要请求"
+    );
+    ctx.flush_event_log().await?;
+    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    assert!(events.contains("_mode=emergency"), "{events}");
+    Ok(())
+}
+
+/// provider 报 overflow（本地估算却装得下）+ 摘要不可用 → 应急按折半目标收缩，
+/// 请求严格变小后重试成功。
+#[tokio::test]
+async fn provider_overflow_shrinks_via_emergency_when_summary_is_unavailable() -> anyhow::Result<()>
+{
+    let backend = SummaryOutageBackend::new(
+        SummaryResponse::Unusable,
+        vec![
+            CompactionStep::ProviderError("maximum context length exceeded"),
+            CompactionStep::Text("recovered"),
+        ],
+    );
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "turn-overflow-emergency-shrink",
+        |cfg| {
+            cfg.max_context_tokens = 200_000;
+            cfg.context_reserve_tokens = 8_000;
+            cfg.context_compact_pct = 90;
+            cfg.context_compact_tail_tokens = 1_000;
+            cfg.llm_recovery.request_max_retries = 0;
+        },
+        backend.clone(),
+    )
+    .await?;
+    // 本地估算远低于硬预算（192k），因此只在 provider 侧暴露 overflow。
+    seed_history(&ctx, 4, 24_000).await?;
+
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let (decision, _) = executor.execute("keep going", None).await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert_eq!(backend.agent_calls(), 2);
+    ctx.flush_event_log().await?;
+    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    assert!(events.contains("_mode=emergency"), "{events}");
+    assert!(
+        events.contains("_emergency_reason=provider_overflow"),
+        "overflow 收缩的原因必须落盘：{events}"
+    );
+    Ok(())
+}
+
+/// 应急摘录只列出「历史上真实出现且仍在 artifact 索引里」的引用，不虚构 URL。
+#[tokio::test]
+async fn emergency_checkpoint_lists_only_existing_artifact_refs() -> anyhow::Result<()> {
+    let backend = SummaryOutageBackend::new(
+        SummaryResponse::Unusable,
+        vec![CompactionStep::Text("done")],
+    );
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "turn-emergency-artifact-refs",
+        |cfg| {
+            cfg.max_context_tokens = 40_000;
+            cfg.context_reserve_tokens = 8_000;
+            cfg.context_compact_pct = 50;
+            cfg.context_compact_tail_tokens = 1_000;
+            cfg.llm_recovery.request_max_retries = 0;
+        },
+        backend.clone(),
+    )
+    .await?;
+    // 真实存在的 artifact + 一条只在历史文本里出现的伪造引用。
+    let record = ctx
+        .artifacts
+        .write_text("Bash", "long output", &"o".repeat(4_000))?;
+    ctx.store
+        .add_user(&format!(
+            "old task artifact://{} and artifact://deadbeefdeadbeef",
+            record.id
+        ))
+        .await?;
+    ctx.store
+        .add_assistant(&"y".repeat(60_000), "", &[])
+        .await?;
+    ctx.store
+        .add_user(&format!("older task {}", "z".repeat(60_000)))
+        .await?;
+    ctx.store.add_assistant("ack", "", &[]).await?;
+
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let (decision, _) = executor.execute("keep going", None).await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    let projection = serde_json::to_string(&ctx.compaction.active_messages().await?)?;
+    assert!(
+        projection.contains("emergency-context-excerpt"),
+        "{projection}"
+    );
+    assert!(
+        projection.contains(&format!("artifact://{}", record.id)),
+        "真实存在的 artifact 引用应保留：{projection}"
+    );
+    assert!(
+        !projection.contains("artifact://deadbeefdeadbeef"),
+        "索引里不存在的引用不得出现：{projection}"
+    );
+    let _ = tokio::fs::remove_dir_all(&ctx.home).await;
     Ok(())
 }
 

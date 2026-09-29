@@ -1570,6 +1570,42 @@ struct InterruptTestMockLlmBackend {
 
 struct InterruptibleCompactionBackend;
 
+/// 摘要请求始终返回不可用摘要（空正文 + stop），主请求正常。
+struct FailingSummaryBackend;
+
+#[async_trait::async_trait]
+impl crate::llm::client::LlmBackend for FailingSummaryBackend {
+    fn name(&self) -> &str {
+        "failing-summary"
+    }
+
+    async fn stream(
+        &self,
+        request: crate::runtime::LlmRequest,
+    ) -> anyhow::Result<crate::runtime::LlmResponseStream> {
+        use crate::protocol::{Event, StopEvent, TextEvent};
+        if matches!(request.purpose, crate::runtime::LlmPurpose::Compaction) {
+            return Ok(crate::runtime::LlmResponseStream {
+                events: Box::pin(futures::stream::iter(vec![Ok(Event::Stop(StopEvent {
+                    reason: "stop".into(),
+                }))])),
+                attempt_count: 1,
+            });
+        }
+        Ok(crate::runtime::LlmResponseStream {
+            events: Box::pin(futures::stream::iter(vec![
+                Ok(Event::Text(TextEvent {
+                    content: "done".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ])),
+            attempt_count: 1,
+        })
+    }
+}
+
 #[async_trait::async_trait]
 impl crate::llm::client::LlmBackend for InterruptibleCompactionBackend {
     fn name(&self) -> &str {
@@ -2013,6 +2049,67 @@ async fn interrupt_during_response_header_wait_ends_turn() {
     let _ = release_tx.send(());
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     let _ = server.join();
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+/// manual 压缩：摘要不可用且投影本来就超预算时，转确定性应急 checkpoint，
+/// 而不是返回 Skipped 让调用方继续带着超窗投影。
+#[tokio::test]
+async fn manual_compaction_falls_back_to_emergency_checkpoint() {
+    let home = unique_temp_dir("manual-emergency-home");
+    let cwd = unique_temp_dir("manual-emergency-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let cfg = Config {
+        model: "flash".into(),
+        api_key: "test-key".into(),
+        max_context_tokens: 40_000,
+        context_reserve_tokens: 8_000,
+        context_compact_pct: 100,
+        context_compact_tail_tokens: 1_000,
+        ..Config::default()
+    };
+    let runtime = build_runtime(
+        AgentRuntimeConfig::from_config(cfg, home.clone(), cwd.clone())
+            .with_llm_backend(Arc::new(FailingSummaryBackend)),
+    )
+    .await
+    .unwrap();
+    for index in 0..4 {
+        runtime
+            .ctx
+            .store
+            .add_user(&format!("request {index}: {}", "x".repeat(60_000)))
+            .await
+            .unwrap();
+        runtime
+            .ctx
+            .store
+            .add_assistant(
+                &format!("progress {index}: {}", "y".repeat(60_000)),
+                "",
+                &[],
+            )
+            .await
+            .unwrap();
+    }
+
+    let outcome = runtime.compact().await.unwrap();
+    assert!(
+        matches!(outcome, crate::runtime::CompactOutcome::Compacted { .. }),
+        "manual 压缩必须落到应急 checkpoint：{outcome:?}"
+    );
+    let summary = runtime
+        .ctx
+        .compaction
+        .read_summary()
+        .await
+        .unwrap_or_default();
+    assert!(
+        summary.contains("emergency-context-excerpt"),
+        "投影必须是应急摘录：{summary}"
+    );
     runtime.shutdown().await.unwrap();
     let _ = tokio::fs::remove_dir_all(home).await;
     let _ = tokio::fs::remove_dir_all(cwd).await;

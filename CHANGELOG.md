@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### 优化：软额度与动态摘要预算（P1）
+
+- **摘要输出动态 cap**：`S_call = min(context_compact_max_output_tokens, 窗口 − 本次输入)`，每次 attempt（含纠错诊断追加之后）重新估算并重算；低于最小实用输出（`MIN_PRACTICAL_SUMMARY_TOKENS`）时直接转确定性应急，不再因「固定上限装不下」而放弃本可发出的摘要请求。
+- **配置软额度**：`validate_runtime_limits` 不再拒绝 `context_compact_tail_tokens ≥ 主请求输入预算`、`context_compact_max_output_tokens ≥ 窗口` 与 `S + T + O > 窗口` 的组合——两者是目标值，运行时按每次请求的剩余空间收紧（切点收紧热尾部 + 动态 cap）；硬约束只有 `reserve < 窗口`。小窗口 + 大软目标可以初始化。
+- **manual 与 turn 共用请求上下文**：手动压缩先用 immutable prefix 得到真实 system/tools，参与候选发布前验收；摘要不可用且投影本来就超预算时转确定性应急 checkpoint（`CompactOutcome::Compacted`），投影仍能发送时返回带原因的 `Skipped`，不再把摘要错误当成硬失败。
+- **provider overflow 有限收缩**：按「固定前缀 + 可变额度折半」给出更小目标，最多 `MAX_OVERFLOW_SHRINK_ATTEMPTS`(3) 次；每次都必须让请求严格变小，否则以原错误结束（不再是一旦常规压缩无收益就放弃）。
+- **应急摘录的 artifact 引用**：只列出历史里真实出现且仍存在于 artifact 索引中的 `artifact://` id（上限 8 条），不虚构 URL。
+
 ### 新增：摘要不可用时的确定性应急 checkpoint（压缩不再终止 turn）
 
 - **两级机制**：正常路径仍是 LLM 摘要（含缓存对齐/降噪）；当请求已经超出输入预算、而摘要侧不可用（摘要输入装不下、调用超时/重试耗尽、输出不合格、候选发布前验收不通过）时，改由**不调用 LLM 的确定性应急 checkpoint**接管：有损摘录（固定标记 → 当前用户请求摘录 → 上一份摘要片段 → 最近已完成工具交换的结构化事实），`active_start` 推进到历史末尾，`conversation.jsonl` 只追加不重写，权威 plan/todo 不被改写。

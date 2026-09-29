@@ -331,6 +331,14 @@ fail-closed。未超预算的 auto/manual 路径不启用该退化，仍按严�
   一律原样传播——应急只替代“上下文装不下”这一种失败，不吞任何安全/耐久性故障。
 - auto 摘要失败且原请求仍可发送时不阻断发送；强制循环结束仍超预算或 provider 报 overflow 且常规压缩无收益时才进入应急。
 
+**软额度与动态摘要预算**：`context_compact_tail_tokens` / `context_compact_max_output_tokens` 是目标而非地板。
+切点搜索按可用空间收紧热尾部；每次摘要 attempt（含纠错追加之后）都重新估算输入并计算
+`S_call = min(S_config, 窗口 − 输入)`，低于最小实用输出（`MIN_PRACTICAL_SUMMARY_TOKENS`）时直接转应急，
+而不是发送装不下的请求。配置校验只保留硬约束 `reserve < 窗口`。manual 压缩入口与 turn 共用同一套
+请求形状（真实 system/tools）、候选验收与应急回退；应急摘录只列出仍存在于 artifact 索引中的
+`artifact://` 引用。provider overflow 时按「固定前缀 + 可变额度折半」给出更小目标，且每次收缩都必须让
+请求严格变小（上限 `MAX_OVERFLOW_SHRINK_ATTEMPTS`）。
+
 **最小收益检查**（`CompactionEngine::evaluate_and_compact`）：auto 触发下，如果压缩节省的 token 不足当前总量的 10%，
 跳过压缩，防止小上下文场景下的无意义压缩；强制触发（preflight / overflow）在请求已经超预算时只要真能省（`saved > 0`）就压，
 否则「需要的削减量小于 10% 阈值」会变成无法恢复的必然失败。

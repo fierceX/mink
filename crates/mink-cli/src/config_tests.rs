@@ -607,21 +607,18 @@ fn runtime_config_rejects_unusable_context_budget_combinations() {
     );
 
     cfg.context_reserve_tokens = 12_000;
-    let error = validate_runtime_config(&cfg).unwrap_err().to_string();
-    assert!(
-        error.contains("context_compact_tail_tokens (256000) must be less than"),
-        "{error}"
-    );
-
-    cfg.context_compact_tail_tokens = 16_000;
+    // 软额度：热尾部与摘要输出可以大于窗口/输入预算，运行时按每次请求收紧。
+    cfg.context_compact_tail_tokens = 256_000;
     validate_runtime_config(&cfg).unwrap();
 
     cfg.context_compact_max_output_tokens = 64_000;
+    validate_runtime_config(&cfg).unwrap();
+
+    // 硬约束仍然保留：reserve 必须小于窗口。
+    cfg.context_reserve_tokens = 64_000;
     let error = validate_runtime_config(&cfg).unwrap_err().to_string();
     assert!(
-        error.contains(
-            "context_compact_max_output_tokens (64000) must be less than max_context (64000)"
-        ),
+        error.contains("context_reserve_tokens (64000) must be less than max_context (64000)"),
         "{error}"
     );
 }

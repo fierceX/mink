@@ -14,6 +14,71 @@ pub struct TurnCompactor {
     compactions_this_turn: usize,
 }
 
+/// TodoSync 预演：与 turn 内的 `reconcile_todo_state` 同源判断，但不写入
+/// conversation。应急候选必须把这条同步消息计入预算。
+pub(crate) fn predicted_todo_sync(
+    ctx: &AgentSharedContext,
+    messages: &[serde_json::Value],
+) -> Option<serde_json::Value> {
+    let read_provider = ctx.todo_read_provider()?;
+    let visible = crate::session::todo::visible_revision(messages).ok()?;
+    let snapshot = ctx.todo_store.snapshot();
+    if visible >= snapshot.revision {
+        return None;
+    }
+    Some(crate::session::todo::sync_message(&snapshot, read_provider))
+}
+
+/// 折叠历史里真实出现、且仍存在于 artifact 索引中的引用（上限 8 条）。
+/// 只列出可验证的 id：不创建虚构 URL，也不猜测被删除的 artifact。
+fn existing_artifact_refs(ctx: &AgentSharedContext, messages: &[serde_json::Value]) -> Vec<String> {
+    const MAX_REFS: usize = 8;
+    let mut refs: Vec<String> = Vec::new();
+    for message in messages {
+        let text = serde_json::to_string(message).unwrap_or_default();
+        let mut rest = text.as_str();
+        while let Some(index) = rest.find("artifact://") {
+            rest = &rest[index + "artifact://".len()..];
+            let id: String = rest
+                .chars()
+                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+                .collect();
+            if id.is_empty() {
+                continue;
+            }
+            if !refs.contains(&id) && ctx.artifacts.get(&id).is_ok() {
+                refs.push(id);
+                if refs.len() >= MAX_REFS {
+                    return refs;
+                }
+            }
+        }
+    }
+    refs
+}
+
+/// 应急 checkpoint 的共用入口（turn 与 manual 两个入口共用同一实现）：
+/// 不调用 LLM，提交确定性有损摘录。返回是否提交。
+pub(crate) async fn commit_emergency_checkpoint(
+    ctx: &AgentSharedContext,
+    reason: &str,
+    main_request: crate::session::compaction::MainRequestShape<'_>,
+    current_user_input: Option<&str>,
+    target_limit: Option<usize>,
+    messages: &[serde_json::Value],
+) -> Result<bool> {
+    let context = crate::session::compaction::EmergencyCheckpointContext {
+        main_request,
+        target_limit,
+        current_user_input,
+        todo_sync: predicted_todo_sync(ctx, messages),
+        artifact_refs: existing_artifact_refs(ctx, messages),
+    };
+    ctx.compaction
+        .commit_emergency_checkpoint(reason, &context)
+        .await
+}
+
 impl TurnCompactor {
     pub fn new(ctx: Arc<AgentSharedContext>, prefix: PrefixManager) -> Self {
         Self {

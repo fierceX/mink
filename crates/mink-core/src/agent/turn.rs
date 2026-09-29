@@ -232,6 +232,10 @@ impl TurnExecutor {
 /// pathological estimate. Compaction itself has no per-input attempt cap.
 const MAX_FORCED_COMPACTIONS_PER_REQUEST: usize = 8;
 
+/// provider overflow 后的请求内收缩上限：每次都必须让请求严格变小（本地估算说
+/// 装得下、provider 却拒绝时，只靠本地闸门无法恢复）。
+const MAX_OVERFLOW_SHRINK_ATTEMPTS: usize = 3;
+
 impl TurnExecutor {
     /// Execute a full turn: send user input, stream response, execute tools, decide next.
     /// Phase 0 for one inner iteration: auto compaction, forced compaction and
@@ -319,7 +323,7 @@ impl TurnExecutor {
                 .or_else(|| last_detail.clone())
                 .unwrap_or_else(|| "over_budget_without_cut".to_string());
             emergency = self
-                .commit_emergency_checkpoint(&reason, messages, system_prompt, tools_json)
+                .commit_emergency_checkpoint(&reason, messages, system_prompt, tools_json, None)
                 .await?;
             if emergency {
                 request_messages = self.project_request_messages(messages)?;
@@ -381,7 +385,9 @@ impl TurnExecutor {
 
         let mut turn = 0;
         let mut effects = Vec::new();
-        let mut overflow_recovery_attempted = false;
+        // provider overflow 的请求内收缩：每次严格变小，上限见
+        // MAX_OVERFLOW_SHRINK_ATTEMPTS。
+        let mut overflow_shrink_attempts = 0usize;
         let max_turns = self.ctx.max_turns() as usize;
 
         let (mut system_prompt, mut tools_json) = match self.ensure_prefix().await {
@@ -442,9 +448,24 @@ impl TurnExecutor {
                     }
                     Err(error)
                         if error.downcast_ref::<ContextOverflowError>().is_some()
-                            && !overflow_recovery_attempted =>
+                            && overflow_shrink_attempts < MAX_OVERFLOW_SHRINK_ATTEMPTS =>
                     {
-                        overflow_recovery_attempted = true;
+                        overflow_shrink_attempts += 1;
+                        // 被拒请求的完整本地估算与固定前缀开销：可变额度折半作为
+                        // 本次更小的目标（固定前缀不参与折半）。
+                        let rejected_tokens =
+                            crate::llm::transport::estimate_openai_context_tokens(
+                                &request_messages,
+                                &tools_json,
+                                &system_prompt,
+                            )?;
+                        let prefix_tokens = crate::llm::transport::estimate_openai_context_tokens(
+                            &[],
+                            &tools_json,
+                            &system_prompt,
+                        )?;
+                        let shrink_target = prefix_tokens
+                            .saturating_add(rejected_tokens.saturating_sub(prefix_tokens) / 2);
                         let compacted = match self
                             .try_compact(
                                 "overflow",
@@ -474,7 +495,7 @@ impl TurnExecutor {
                             Err(error) => return Err(error),
                         };
                         // 摘要不可用或没有收益时，应急 checkpoint 是唯一不依赖 LLM 的
-                        // 缩小手段；仍然只重试一次（不新增物理请求次数）。
+                        // 缩小手段（按折半目标构造，保证比被拒请求更小）。
                         if !compacted
                             && !self
                                 .commit_emergency_checkpoint(
@@ -482,15 +503,26 @@ impl TurnExecutor {
                                     &mut messages,
                                     &system_prompt,
                                     &tools_json,
+                                    Some(shrink_target),
                                 )
                                 .await?
                         {
                             return Err(error);
                         }
                         request_messages = self.project_request_messages(&messages)?;
-                        self.ctx
-                            .display
-                            .render_info("Context overflow detected; compacted and retrying once.");
+                        let retried_tokens = crate::llm::transport::estimate_openai_context_tokens(
+                            &request_messages,
+                            &tools_json,
+                            &system_prompt,
+                        )?;
+                        if retried_tokens >= rejected_tokens {
+                            // 没有变得更小：再发同样的请求只会再次被拒。
+                            return Err(error);
+                        }
+                        self.ctx.display.render_info(&format!(
+                            "Context overflow detected; shrank the request ({} -> {} tokens) and retrying.",
+                            rejected_tokens, retried_tokens
+                        ));
                     }
                     Err(error) => return Err(error),
                 }

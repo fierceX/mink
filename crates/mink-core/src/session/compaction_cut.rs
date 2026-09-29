@@ -52,20 +52,41 @@ pub(crate) fn read_active_plan_checkpoint(summary_path: &Path) -> Result<Option<
     }))
 }
 
+/// 摘要请求的输出低于该值时不具备实用性：直接转应急，而不是发送几乎必然被截断的
+/// 请求（本轮不引入“模型最小摘要 token 数”这类未经验证的档位）。
+pub(crate) const MIN_PRACTICAL_SUMMARY_TOKENS: usize = 256;
+
+/// 一次摘要请求的输出 cap：取配置上限与「输入 + 输出必须装进窗口」的较小者。
+/// `None` 表示剩余空间不足以产出有实用价值的摘要（上层应转应急 checkpoint）。
+pub(crate) fn summary_output_cap(config: &Config, input_tokens: usize) -> Option<i32> {
+    let configured = compaction_max_output_tokens(config);
+    if config.max_context_tokens == 0 {
+        return Some(configured);
+    }
+    let available = config.max_context_tokens.saturating_sub(input_tokens);
+    let cap = available.min(usize::try_from(configured).unwrap_or(usize::MAX));
+    if cap < MIN_PRACTICAL_SUMMARY_TOKENS {
+        return None;
+    }
+    Some(i32::try_from(cap).unwrap_or(i32::MAX))
+}
+
+/// 摘要输入是否超出 `窗口 - reserved_output`。`reserved_output` 由调用方按路径选择：
+/// 缓存对齐候选按配置输出上限判断（装不下就退化到专用摘要路径），降噪/原始路径只需
+/// 为一个有实用价值的最小输出留位置，具体 cap 由 [`summary_output_cap`] 动态给出。
 pub(crate) fn summary_input_over_budget(
     config: &Config,
     messages: &[Value],
     tools: &[Value],
     system_prompt: &str,
+    reserved_output: usize,
 ) -> Result<bool> {
     if config.max_context_tokens == 0 {
         return Ok(false);
     }
     let input_tokens =
         crate::llm::transport::estimate_openai_context_tokens(messages, tools, system_prompt)?;
-    let input_limit = config
-        .max_context_tokens
-        .saturating_sub(usize::try_from(compaction_max_output_tokens(config)).unwrap_or(0));
+    let input_limit = config.max_context_tokens.saturating_sub(reserved_output);
     Ok(input_tokens > input_limit)
 }
 

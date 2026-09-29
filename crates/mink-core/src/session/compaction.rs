@@ -84,10 +84,15 @@ impl MainRequestShape<'_> {
 /// 主请求形状），引擎不自行读取历史以外的东西。
 pub(crate) struct EmergencyCheckpointContext<'a> {
     pub main_request: MainRequestShape<'a>,
+    /// 更小的目标预算（token）。provider 报 overflow 时上层传入「固定前缀 + 可变额度
+    /// 折半」的目标：本地估算说装得下、provider 却拒绝时，只靠本地闸门无法恢复。
+    pub target_limit: Option<usize>,
     /// 当前用户请求原文；manual 等没有当前输入时为 `None`（不得伪造）。
     pub current_user_input: Option<&'a str>,
     /// 提交后即将追加的 TodoSync 预演消息（未写入 conversation，仅参与预算）。
     pub todo_sync: Option<Value>,
+    /// 折叠历史里真实出现、且仍存在于 artifact 索引中的引用（不得虚构 URL）。
+    pub artifact_refs: Vec<String>,
 }
 
 /// 应急摘录的材料块，按优先级保留；[`Self::shrink`] 每次严格减少一块内容。
@@ -97,6 +102,7 @@ struct EmergencyBlocks {
     request: Option<String>,
     previous: Option<String>,
     recent: Option<String>,
+    artifacts: Option<String>,
 }
 
 impl EmergencyBlocks {
@@ -106,6 +112,7 @@ impl EmergencyBlocks {
             ("latest user request", &self.request),
             ("previous checkpoint (may be partial)", &self.previous),
             ("recent tool evidence", &self.recent),
+            ("available artifacts", &self.artifacts),
         ] {
             if let Some(block) = block.as_deref().filter(|b| !b.trim().is_empty()) {
                 out.push_str("\n\n[");
@@ -120,6 +127,9 @@ impl EmergencyBlocks {
     /// 严格减少一格内容：先丢低优先级块，再把请求摘录减半，最后只剩最小头部。
     /// 返回 false 表示已经到地板（标记 + 最小请求头部），无法继续缩小。
     fn shrink(&mut self) -> bool {
+        if self.artifacts.take().is_some() {
+            return true;
+        }
         if self.recent.take().is_some() {
             return true;
         }
@@ -360,6 +370,7 @@ fn emergency_blocks(
     active: &[Value],
     previous_summary: &str,
     current_user_input: Option<&str>,
+    artifact_refs: &[String],
 ) -> EmergencyBlocks {
     EmergencyBlocks {
         marker: format!(
@@ -375,6 +386,13 @@ fn emergency_blocks(
             .filter(|summary| !summary.is_empty())
             .map(|summary| truncate_chars(summary, EMERGENCY_BLOCK_CHARS / 2)),
         recent: recent_evidence(active),
+        artifacts: (!artifact_refs.is_empty()).then(|| {
+            artifact_refs
+                .iter()
+                .map(|id| format!("- artifact://{id}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }),
     }
 }
 
@@ -624,8 +642,16 @@ impl CompactionEngine {
         let _guard = self.compact_lock.lock().await;
         let state = self.current_state()?;
         let active = self.store.lines_from(state.active_start).await?;
-        let mut blocks = emergency_blocks(reason, &active, &state.summary, ctx.current_user_input);
-        let input_limit = request_input_limit(&self.config);
+        let mut blocks = emergency_blocks(
+            reason,
+            &active,
+            &state.summary,
+            ctx.current_user_input,
+            &ctx.artifact_refs,
+        );
+        let input_limit = ctx
+            .target_limit
+            .unwrap_or_else(|| request_input_limit(&self.config));
         loop {
             let summary = blocks.render();
             let mut candidate = self.checkpoint_prefix(&summary)?;
@@ -1015,22 +1041,6 @@ impl CompactionEngine {
             meta,
         } = input;
 
-        if self.config.max_context_tokens > 0 {
-            let input_tokens = crate::llm::transport::estimate_openai_context_tokens(
-                &messages,
-                &tools,
-                &system_prompt,
-            )?;
-            let input_limit = self.config.max_context_tokens.saturating_sub(
-                usize::try_from(compaction_max_output_tokens(&self.config)).unwrap_or(0),
-            );
-            if input_tokens > input_limit {
-                return Err(SummaryUnavailable::error(format!(
-                    "compaction summary input exceeds configured budget: {input_tokens} > {input_limit} tokens"
-                )));
-            }
-        }
-
         // The summary request uses the same request-retry budget and backoff
         // as the main agent, but keeps its own consumption loop: a completed
         // yet unusable summary (empty output, tool call, invalid stop reason)
@@ -1061,6 +1071,22 @@ impl CompactionEngine {
                     "content": correction,
                 }));
             }
+            // 每次 attempt 都重新估算输入并给出动态输出 cap：纠错文本、图片降级或
+            // 路径切换都可能改变输入长度，过期的预算检查会发出装不下的请求。
+            let attempt_input_tokens = crate::llm::transport::estimate_openai_context_tokens(
+                &attempt_messages,
+                &tools,
+                &system_prompt,
+            )?;
+            let summary_output_cap = match summary_output_cap(&self.config, attempt_input_tokens) {
+                Some(cap) => cap,
+                None => {
+                    return Err(SummaryUnavailable::error(format!(
+                        "compaction summary leaves no practical output budget: input {attempt_input_tokens} tokens of window {}",
+                        self.config.max_context_tokens
+                    )));
+                }
+            };
             // Cache-aligned summaries deliberately retain the Agent tool
             // schemas so the provider can reuse the immutable request prefix.
             // Those tools are alignment-only: compaction never executes them.
@@ -1073,7 +1099,7 @@ impl CompactionEngine {
                 system_prompt: system_prompt.clone(),
                 messages: attempt_messages,
                 tools: tools.clone(),
-                max_tokens: compaction_max_output_tokens(&self.config),
+                max_tokens: summary_output_cap,
                 cancel: attempt_cancel.clone(),
                 verbose: self.config.verbose,
                 display: self.display.clone(),
@@ -1482,6 +1508,7 @@ impl CompactionEngine {
                     &messages,
                     &candidate.tools,
                     &candidate.system_prompt,
+                    usize::try_from(compaction_max_output_tokens(&self.config)).unwrap_or(0),
                 )
                 .map_err(|error| format!("aligned_estimate_failed:{error}"))?
                 {
@@ -1538,7 +1565,13 @@ impl CompactionEngine {
             history
         };
         messages.push(compaction_instruction_message());
-        if summary_input_over_budget(&self.config, &messages, &[], FALLBACK_SYSTEM_PROMPT)? {
+        if summary_input_over_budget(
+            &self.config,
+            &messages,
+            &[],
+            FALLBACK_SYSTEM_PROMPT,
+            MIN_PRACTICAL_SUMMARY_TOKENS,
+        )? {
             return Err(SummaryUnavailable::error(
                 "compaction summary input exceeds configured budget",
             ));
