@@ -381,7 +381,16 @@ impl CompactionEngine {
         }
 
         let tail_target = self.config.context_compact_tail_tokens.max(1);
-        let cut = find_compaction_cut_point(&active, tail_target);
+        let mut cut = find_compaction_cut_point(&active, tail_target);
+        // 最后手段（仅在请求已经超出输入预算时启用）：严格规则找不到任何边界
+        // ——热尾部目标吞掉整个窗口，或窗口只剩最近两个用户轮次——时，退化为
+        // 「折到最新安全边界之前」，折叠内容照常进摘要，当前请求以摘要文本保留，
+        // 而不是让整个 turn fail-closed。
+        let mut degraded_cut = false;
+        if cut == 0 && context_tokens > request_input_limit(&self.config) {
+            cut = find_degraded_compaction_cut_point(&active);
+            degraded_cut = cut > 0;
+        }
         if cut == 0 {
             return Ok((false, "no safe boundary".into()));
         }
@@ -429,7 +438,7 @@ impl CompactionEngine {
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Vec::new();
         let result = format!(
-            "compacted_at_trigger={trigger}_kept={}_input_reduction={}_input_mode={}_aligned_messages={}_aligned_estimated_tokens={}_reduced_suffix_messages={}_fallback_reason={}{}",
+            "compacted_at_trigger={trigger}_kept={}_input_reduction={}_input_mode={}_aligned_messages={}_aligned_estimated_tokens={}_reduced_suffix_messages={}_fallback_reason={}{}{}",
             kept.len(),
             self.config.context_compact_input_reduction,
             summary_meta.input_mode,
@@ -440,6 +449,7 @@ impl CompactionEngine {
             compaction_ordinal
                 .map(|ordinal| format!("_compactions_this_turn={ordinal}"))
                 .unwrap_or_default(),
+            if degraded_cut { "_cut=degraded" } else { "" },
         );
         if self.config.log_events {
             self.write_event(crate::events::EventLog::Compact {

@@ -221,6 +221,23 @@ pub(crate) fn find_compaction_cut_point(messages: &[Value], tail_target: usize) 
     cut
 }
 
+/// Degraded cut point, used only as a last resort when the request is already
+/// over the input budget and [`find_compaction_cut_point`] returned nothing: it
+/// ignores the hot-tail token target and the "keep two verbatim user turns"
+/// guard, folding everything that precedes the newest safe boundary. The folded
+/// span is summarised like any other compaction, so the current request stays
+/// recoverable as summary text instead of failing the whole turn.
+pub(crate) fn find_degraded_compaction_cut_point(messages: &[Value]) -> usize {
+    if messages.len() < 2 {
+        return 0;
+    }
+    let candidate = messages.len() - 1;
+    (1..=candidate)
+        .rev()
+        .find(|&index| is_safe_context_start(&messages[index]))
+        .unwrap_or(0)
+}
+
 pub(crate) fn is_real_user_message(message: &Value) -> bool {
     if message.get("role").and_then(Value::as_str) != Some("user") {
         return false;
