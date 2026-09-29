@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### 新增：摘要不可用时的确定性应急 checkpoint（压缩不再终止 turn）
+
+- **两级机制**：正常路径仍是 LLM 摘要（含缓存对齐/降噪）；当请求已经超出输入预算、而摘要侧不可用（摘要输入装不下、调用超时/重试耗尽、输出不合格、候选发布前验收不通过）时，改由**不调用 LLM 的确定性应急 checkpoint**接管：有损摘录（固定标记 → 当前用户请求摘录 → 上一份摘要片段 → 最近已完成工具交换的结构化事实），`active_start` 推进到历史末尾，`conversation.jsonl` 只追加不重写，权威 plan/todo 不被改写。
+- **错误分类**：摘要侧失败在来源处定型为 `SummaryUnavailable`（可转应急）与 `CompactionInterrupted`（映射为 `TurnDecision::Interrupted`，不再报成 failed）；取消、持久化 fault、正式历史协议损坏仍原样传播（不允许 `Err(_) => emergency`）。
+- **auto 失败不再阻断可发送的请求**：auto 提前压缩失败时，若原请求仍在预算内则照常发送并记录诊断。
+- **候选发布前完整预算验收**：摘要 + 动态 checkpoint + 保留尾部必须先过 `estimate_openai_context_tokens` 才算提交，消除「摘要成功但请求反而变大」在下一层失败。
+- **观测**：`compact` 事件 `result` 串新增 `_mode=summary|emergency` 与 `_emergency_reason=<分类>`；应急提交使用 `trigger=emergency`，并向操作者输出一行提示。`<compacted-summary>` 包装文案改为中性（可能是摘要或摘录），标签不变。
+- 长跑验收：摘要 backend 持续失败 + 有限窗口下多轮工具调用仍以 `Stop` 结束，无压缩类 `turn_error`，每个工具调用只执行一次（见 `summary_outage_endurance_keeps_the_turn_alive`）。
+
 ### 新增：provider HTTP 总超时可配置（长流式生成不再被固定 600s 砍断）
 
 - `[provider] http_timeout_secs`（Rust `ProviderOptions::http_timeout_secs` / `AgentOptions::with_provider_http_timeout_secs`、server `[provider]`、JSONL `options.provider.http_timeout_secs`）：单次物理请求（含流式响应体读取）的总超时，默认 **600 秒**（与修复前一致），`0` = 不设总超时，由 `llm_first_event_timeout` / `llm_idle_timeout` 兜底。

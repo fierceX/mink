@@ -686,6 +686,402 @@ async fn provider_overflow_recovers_after_compaction_in_the_same_input() -> anyh
     Ok(())
 }
 
+// ── 摘要不可用 / 候选预算 / 中断：应急 checkpoint ──
+
+/// 摘要请求的可控结果。
+enum SummaryResponse {
+    /// 每次都返回不可用摘要（空正文 + stop）→ 触发纠错/恢复耗尽。
+    Unusable,
+    /// 摘要成功但正文巨大 → 触发候选发布前预算验收。
+    Huge(usize),
+    /// 摘要永不返回 → 用于中断优先级。
+    Pending,
+}
+
+/// 目的感知的 backend：摘要请求按 [`SummaryResponse`] 出牌并计数，主请求按脚本出牌。
+struct SummaryOutageBackend {
+    summary: SummaryResponse,
+    summary_calls: AtomicUsize,
+    script: Mutex<std::vec::IntoIter<CompactionStep>>,
+    agent_calls: AtomicUsize,
+}
+
+impl SummaryOutageBackend {
+    fn new(summary: SummaryResponse, script: Vec<CompactionStep>) -> Arc<Self> {
+        Arc::new(Self {
+            summary,
+            summary_calls: AtomicUsize::new(0),
+            script: Mutex::new(script.into_iter()),
+            agent_calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn summary_calls(&self) -> usize {
+        self.summary_calls.load(AtomicOrdering::SeqCst)
+    }
+
+    fn agent_calls(&self) -> usize {
+        self.agent_calls.load(AtomicOrdering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for SummaryOutageBackend {
+    fn name(&self) -> &str {
+        "summary-outage"
+    }
+
+    async fn stream(
+        &self,
+        request: crate::llm::client::LlmRequest,
+    ) -> Result<crate::llm::client::LlmResponseStream> {
+        if matches!(request.purpose, crate::runtime::LlmPurpose::Compaction) {
+            self.summary_calls.fetch_add(1, AtomicOrdering::SeqCst);
+            return Ok(match self.summary {
+                SummaryResponse::Unusable => stream_of(vec![Ok(Event::Stop(StopEvent {
+                    reason: "stop".into(),
+                }))]),
+                SummaryResponse::Huge(chars) => stream_of(vec![
+                    Ok(Event::Text(TextEvent {
+                        content: format!("OVERSIZED-SUMMARY-MARKER {}", "s".repeat(chars)),
+                    })),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "stop".into(),
+                    })),
+                ]),
+                SummaryResponse::Pending => crate::llm::client::LlmResponseStream {
+                    events: Box::pin(futures::stream::pending()),
+                    attempt_count: 1,
+                },
+            });
+        }
+        self.agent_calls.fetch_add(1, AtomicOrdering::SeqCst);
+        let step = self.script.lock().unwrap().next();
+        Ok(stream_of(match step {
+            Some(CompactionStep::Write(path)) => vec![
+                Ok(Event::ToolCall(write_call(
+                    &format!("write_{path}"),
+                    path,
+                    &"x".repeat(100_000),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_calls".into(),
+                })),
+            ],
+            Some(CompactionStep::Text(text)) => vec![
+                Ok(Event::Text(TextEvent {
+                    content: text.into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "stop".into(),
+                })),
+            ],
+            _ => Vec::new(),
+        }))
+    }
+}
+
+/// 预置历史：`turns` 轮 user/assistant 对，每轮正文 `chars` 字符（估算 ≈ chars/3）。
+async fn seed_history(
+    ctx: &crate::context::AgentSharedContext,
+    turns: usize,
+    chars: usize,
+) -> anyhow::Result<()> {
+    for index in 0..turns {
+        ctx.store
+            .add_user(&format!("old task {index} {}", "x".repeat(chars)))
+            .await?;
+        ctx.store
+            .add_assistant(&format!("progress {index} {}", "y".repeat(chars)), "", &[])
+            .await?;
+    }
+    Ok(())
+}
+
+/// 摘要持续不可用而请求已经装不下 → 确定性应急 checkpoint 接手，turn 不再以压缩
+/// 错误结束；当前请求原文仍出现在投影里。
+#[tokio::test]
+async fn summary_outage_falls_back_to_emergency_checkpoint() -> anyhow::Result<()> {
+    let backend = SummaryOutageBackend::new(
+        SummaryResponse::Unusable,
+        vec![CompactionStep::Text("done")],
+    );
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "turn-emergency-fallback",
+        |cfg| {
+            cfg.max_context_tokens = 200_000;
+            cfg.context_reserve_tokens = 8_000;
+            cfg.context_compact_pct = 50;
+            cfg.context_compact_tail_tokens = 1_000;
+            cfg.llm_recovery.request_max_retries = 0;
+        },
+        backend.clone(),
+    )
+    .await?;
+    // 8 × 24,000 est ≈ 192k：请求已超硬预算，但折叠段仍能装进摘要输入预算，
+    // 因此会真的发出物理摘要请求（provider 侧失败）。
+    seed_history(&ctx, 4, 72_000).await?;
+
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let (decision, _) = executor
+        .execute("carry on with the remaining work", None)
+        .await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert_eq!(backend.agent_calls(), 1);
+    assert!(
+        backend.summary_calls() >= 1,
+        "摘要请求确实被尝试过：{}",
+        backend.summary_calls()
+    );
+    ctx.flush_event_log().await?;
+    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    assert!(events.contains(r#""trigger":"emergency""#), "{events}");
+    assert!(events.contains("_mode=emergency"), "{events}");
+    let active = ctx.compaction.active_messages().await?;
+    let projection = serde_json::to_string(&active)?;
+    assert!(
+        projection.contains("emergency-context-excerpt"),
+        "{projection}"
+    );
+    assert!(
+        projection.contains("carry on with the remaining work"),
+        "当前请求原文必须留在投影里：{projection}"
+    );
+    assert!(
+        !projection.contains("old task 0"),
+        "被折叠的历史不得再进入投影：{projection}"
+    );
+    // 完整历史只追加不重写：被折叠的内容仍在权威会话记录里。
+    let history = serde_json::to_string(&ctx.store.lines_from(0).await?)?;
+    assert!(history.contains("old task 0"), "{history}");
+    assert!(
+        history.contains("carry on with the remaining work"),
+        "{history}"
+    );
+    Ok(())
+}
+
+/// 摘要输入可证明装不下（小窗口）→ 不浪费物理摘要请求，直接转应急。
+#[tokio::test]
+async fn oversized_summary_input_skips_the_request_and_uses_emergency() -> anyhow::Result<()> {
+    let backend = SummaryOutageBackend::new(
+        SummaryResponse::Unusable,
+        vec![CompactionStep::Text("done")],
+    );
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "turn-summary-input-over-budget",
+        |cfg| {
+            cfg.max_context_tokens = 40_000;
+            cfg.context_reserve_tokens = 8_000;
+            cfg.context_compact_pct = 50;
+            cfg.context_compact_tail_tokens = 1_000;
+            cfg.llm_recovery.request_max_retries = 0;
+        },
+        backend.clone(),
+    )
+    .await?;
+    seed_history(&ctx, 4, 60_000).await?;
+
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let (decision, _) = executor.execute("keep going", None).await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert_eq!(backend.agent_calls(), 1);
+    assert_eq!(backend.summary_calls(), 0, "装不下的摘要请求不应发出");
+    ctx.flush_event_log().await?;
+    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    assert!(events.contains("_mode=emergency"), "{events}");
+    Ok(())
+}
+
+/// auto 摘要失败但原请求本来就能发送 → 不提交压缩、不写应急，请求照常发出。
+#[tokio::test]
+async fn auto_summary_failure_does_not_block_a_sendable_request() -> anyhow::Result<()> {
+    let backend = SummaryOutageBackend::new(
+        SummaryResponse::Unusable,
+        vec![CompactionStep::Text("done")],
+    );
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "turn-auto-summary-outage",
+        |cfg| {
+            cfg.max_context_tokens = 400_000;
+            cfg.context_reserve_tokens = 8_000;
+            cfg.context_compact_pct = 1; // 低触发点：auto 会尝试，但请求远未超预算
+            cfg.context_compact_tail_tokens = 1_000;
+            cfg.llm_recovery.request_max_retries = 0;
+        },
+        backend.clone(),
+    )
+    .await?;
+    ctx.store.add_user("small task").await?;
+
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let (decision, _) = executor.execute("keep going", None).await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert_eq!(backend.agent_calls(), 1);
+    assert!(ctx.compaction.read_summary().await.is_none());
+    ctx.flush_event_log().await?;
+    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    assert!(!events.contains(r#""trigger":"emergency""#), "{events}");
+    assert!(!events.contains(r#""type":"compact""#), "{events}");
+    Ok(())
+}
+
+/// 摘要成功但完整投影装不下 → 该候选不提交（投影里不出现它的正文），转应急。
+#[tokio::test]
+async fn oversized_summary_candidate_is_rejected_and_falls_back_to_emergency() -> anyhow::Result<()>
+{
+    let backend = SummaryOutageBackend::new(
+        // ≈200k est 的摘要正文：摘要本身成功，但「摘要 + 保留尾部」装不进硬预算。
+        SummaryResponse::Huge(600_000),
+        vec![CompactionStep::Text("done")],
+    );
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "turn-candidate-over-budget",
+        |cfg| {
+            cfg.max_context_tokens = 200_000;
+            cfg.context_reserve_tokens = 8_000;
+            cfg.context_compact_pct = 50;
+            cfg.context_compact_tail_tokens = 1_000;
+            cfg.llm_recovery.request_max_retries = 0;
+        },
+        backend.clone(),
+    )
+    .await?;
+    seed_history(&ctx, 4, 72_000).await?;
+
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let (decision, _) = executor.execute("keep going", None).await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert_eq!(backend.agent_calls(), 1);
+    ctx.flush_event_log().await?;
+    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    assert!(events.contains("_mode=emergency"), "{events}");
+    let projection = serde_json::to_string(&ctx.compaction.active_messages().await?)?;
+    assert!(
+        !projection.contains("OVERSIZED-SUMMARY-MARKER"),
+        "超预算摘要不得进入投影：{projection}"
+    );
+    Ok(())
+}
+
+/// 压缩期间被中断必须报 Interrupted，而不是普通失败。
+#[tokio::test]
+async fn interrupt_during_compaction_reports_interrupted() -> anyhow::Result<()> {
+    let backend = SummaryOutageBackend::new(
+        SummaryResponse::Pending,
+        vec![CompactionStep::Text("never reached")],
+    );
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "turn-compaction-interrupt",
+        |cfg| {
+            cfg.max_context_tokens = 200_000;
+            cfg.context_reserve_tokens = 8_000;
+            cfg.context_compact_pct = 50;
+            cfg.context_compact_tail_tokens = 1_000;
+            cfg.llm_recovery.request_max_retries = 0;
+        },
+        backend.clone(),
+    )
+    .await?;
+    seed_history(&ctx, 4, 72_000).await?;
+
+    let interrupt = ctx.interrupt.clone();
+    let canceller = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        interrupt.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let (decision, _) = executor.execute("keep going", None).await?;
+    canceller.await?;
+
+    assert_eq!(decision, TurnDecision::Interrupted);
+    assert_eq!(backend.agent_calls(), 0, "中断不得发出主请求");
+    Ok(())
+}
+
+/// 长跑：摘要永久失败 + 有限窗口，写 `rounds` 轮文件仍须正常结束。
+async fn run_summary_outage_endurance(rounds: usize) -> anyhow::Result<()> {
+    let mut script: Vec<CompactionStep> = Vec::with_capacity(rounds + 1);
+    for index in 0..rounds {
+        // 每轮写不同路径：工具调用 ID 唯一，便于统计“精确执行一次”。
+        let path: &'static str = Box::leak(format!("grow-{index}.txt").into_boxed_str());
+        script.push(CompactionStep::Write(path));
+    }
+    script.push(CompactionStep::Text("finished"));
+    let backend = SummaryOutageBackend::new(SummaryResponse::Unusable, script);
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "turn-summary-outage-endurance",
+        |cfg| {
+            cfg.max_context_tokens = 120_000;
+            cfg.context_reserve_tokens = 20_000;
+            cfg.context_compact_pct = 100;
+            cfg.context_compact_tail_tokens = 1_000;
+            cfg.context_compact_max_output_tokens = 1_000;
+            cfg.llm_recovery.request_max_retries = 0;
+            // max_turns 不在本测试范围：调高以免长跑被轮次上限截断。
+            cfg.max_turns = rounds as i32 + 10;
+        },
+        backend.clone(),
+    )
+    .await?;
+
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let outcome = executor.execute("write every file", None).await;
+    let (decision, _) = outcome?;
+    assert_eq!(
+        decision,
+        TurnDecision::Stop,
+        "摘要永久失败不得让 turn 以压缩错误结束"
+    );
+    assert_eq!(backend.agent_calls(), rounds + 1);
+    assert!(
+        backend.summary_calls() > 0,
+        "摘要服务确实被尝试过（随后失败）"
+    );
+    assert_eq!(
+        crate::regression::tool_result_ids(&ctx.store).await?.len(),
+        rounds,
+        "每个工具调用只能执行一次"
+    );
+    ctx.flush_event_log().await?;
+    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    assert!(
+        !events.contains("\"type\":\"turn_error\""),
+        "长跑不得出现压缩类 turn_error：{events}"
+    );
+    let emergencies = events.matches("\"trigger\":\"emergency\"").count();
+    assert!(
+        emergencies >= 2,
+        "多次超预算应触发多次应急 checkpoint：{emergencies}"
+    );
+    // 完整历史只追加：所有写调用的参数仍在权威会话记录里。
+    let history = serde_json::to_string(&ctx.store.lines_from(0).await?)?;
+    assert!(history.contains("grow-0.txt"), "首轮记录必须保留");
+    assert!(
+        history.contains(&format!("grow-{}.txt", rounds - 1)),
+        "末轮记录必须保留"
+    );
+    Ok(())
+}
+
+/// 长跑回归：摘要永久失败 + 有限窗口 → 多轮写文件仍能正常结束；压缩类
+/// `turn_error` 不得出现，工具精确执行一次，完整历史只追加。
+#[tokio::test]
+async fn summary_outage_endurance_keeps_the_turn_alive() -> anyhow::Result<()> {
+    run_summary_outage_endurance(40).await
+}
+
+/// 同上的 300 轮版本（CI 以 `--features slow-tests -- --include-ignored` 运行）。
+#[cfg_attr(not(feature = "slow-tests"), ignore)]
+#[tokio::test]
+async fn summary_outage_endurance_long_run_300_rounds() -> anyhow::Result<()> {
+    run_summary_outage_endurance(300).await
+}
+
 /// Two 502s then a success — exactly three physical attempts and two
 /// runtime-managed Retry notifications.
 #[tokio::test]

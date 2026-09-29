@@ -317,6 +317,20 @@ transcript：用户和 assistant text 保留，thinking 删除，工具参数限
 目标与「保留最近两条真实 user 消息」守卫，把新边界之前的整段折进摘要（当前请求仅以摘要文本保留），而不是直接让本轮
 fail-closed。未超预算的 auto/manual 路径不启用该退化，仍按严格规则判定。
 
+**应急 checkpoint（`trigger=emergency`、`_mode=emergency`）**：即使有了退化切点，LLM 摘要本身仍是单点依赖（
+摘要输入装不下、调用超时/重试耗尽、输出不合格、候选装不下）。因此在「请求已经超出输入预算」时额外提供一层
+**不调用 LLM 的确定性应急投影**：
+
+- 材料优先级固定：有损标记 → 当前用户请求摘录（头尾裁剪 + 省略量）→ 上一份摘要片段 → 最近已完成工具交换的结构化
+  事实（工具名 / 调用 ID / 结果头尾摘录，不做展示文本反解）。摘录逐步缩短/删块直到候选投影装进预算；连最小摘录都装
+  不下时返回「最小工作空间不可用」，由上层 fail-closed，而不是发送空壳请求。
+- 投影纪律：`active_start` 推进到历史末尾（尾部为空）；`conversation.jsonl` 只追加；plan/todo 权威文件与 revision 不被
+  改写；提交仍然只经 `commit_state`（原子发布 + generation/epoch/repair-loss 规则不变）。
+- 分层与分类：严格切点 → 退化切点 → LLM 摘要 → 应急 checkpoint；摘要侧错误在来源处定型为 `SummaryUnavailable`
+  （可转应急）或 `CompactionInterrupted`（映射为 `TurnDecision::Interrupted`）。取消、持久化 fault、正式历史协议损坏
+  一律原样传播——应急只替代“上下文装不下”这一种失败，不吞任何安全/耐久性故障。
+- auto 摘要失败且原请求仍可发送时不阻断发送；强制循环结束仍超预算或 provider 报 overflow 且常规压缩无收益时才进入应急。
+
 **最小收益检查**（`CompactionEngine::evaluate_and_compact`）：auto 触发下，如果压缩节省的 token 不足当前总量的 10%，
 跳过压缩，防止小上下文场景下的无意义压缩；强制触发（preflight / overflow）在请求已经超预算时只要真能省（`saved > 0`）就压，
 否则「需要的削减量小于 10% 阈值」会变成无法恢复的必然失败。

@@ -16,7 +16,7 @@ pub(crate) fn compacted_summary_message(summary: &str) -> Value {
         "role": "user",
         "internal": true,
         "content": format!(
-            "This is an automatically generated checkpoint condensing an earlier span of the conversation. Treat it as established background and continue from the messages that follow without acknowledging the checkpoint.\n\n<compacted-summary>\n{}\n</compacted-summary>",
+            "This is a runtime-generated checkpoint replacing an earlier span of the conversation; it may be a model summary or a lossy excerpt, and details may be omitted. Treat it as background and continue from the messages that follow without acknowledging the checkpoint.\n\n<compacted-summary>\n{}\n</compacted-summary>",
             summary.trim()
         ),
     })

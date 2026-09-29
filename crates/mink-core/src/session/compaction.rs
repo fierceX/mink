@@ -7,7 +7,7 @@ use crate::session::stats::StatsTracker;
 use crate::session::store::ConversationStore;
 use crate::session::usage::{UsageJournal, UsageKind};
 use crate::ui::Display;
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -17,6 +17,166 @@ use std::sync::{Arc, Mutex, RwLock};
 pub(super) const COMPACTION_INSTRUCTION: &str = "Merge the conversation history above into one checkpoint. Preserve current user goals, constraints, decisions, progress, blockers, file changes, commands, errors, pending work, and exact identifiers. An earlier <compacted-summary>, if present, is established background and must be merged with the newer history. Output these seven non-empty fields: Task focus:, Latest request:, Progress:, Errors:, Decisions:, Tool evidence:, Reflections:. Write (none) for any field without content. Start directly with Task focus:, do not use code fences, do not continue the task, and do not call tools.";
 
 const FALLBACK_SYSTEM_PROMPT: &str = "Summarize coding-agent history for a later model. Preserve user goals, constraints, decisions, progress, blockers, file changes, commands, errors, pending work, and exact identifiers. Do not continue the task.";
+
+/// 摘要侧「本次压缩不可用」：摘要构建/调用/响应验收/候选预算验收失败。上层可以据此
+/// 转向确定性应急 checkpoint，而不是让整个 turn 失败。
+///
+/// fault、取消、正式历史协议损坏**不属于**这一类，它们必须原样传播。
+#[derive(Debug)]
+pub(crate) struct SummaryUnavailable {
+    pub reason: String,
+}
+
+impl SummaryUnavailable {
+    pub(crate) fn error(reason: impl Into<String>) -> anyhow::Error {
+        anyhow::Error::new(Self {
+            reason: reason.into(),
+        })
+    }
+}
+
+impl std::fmt::Display for SummaryUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for SummaryUnavailable {}
+
+/// 压缩过程中被取消/中断（用户 interrupt、runtime cancel）。上层必须把它映射为
+/// `TurnDecision::Interrupted`，而不是普通失败。
+#[derive(Debug)]
+pub(crate) struct CompactionInterrupted;
+
+impl CompactionInterrupted {
+    pub(crate) fn error() -> anyhow::Error {
+        anyhow::Error::new(Self)
+    }
+}
+
+impl std::fmt::Display for CompactionInterrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("compaction interrupted")
+    }
+}
+
+impl std::error::Error for CompactionInterrupted {}
+
+/// 主请求的形状（真实 system prompt 与 tools）。候选验收与应急 checkpoint 都必须按它
+/// 估算实际请求大小，而不是内部 raw JSON 的粗略估算。
+#[derive(Clone, Copy)]
+pub(crate) struct MainRequestShape<'a> {
+    pub system_prompt: &'a str,
+    pub tools: &'a [Value],
+}
+
+impl MainRequestShape<'_> {
+    fn estimate(&self, messages: &[Value]) -> Result<usize> {
+        crate::llm::transport::estimate_openai_context_tokens(
+            messages,
+            self.tools,
+            self.system_prompt,
+        )
+    }
+}
+
+/// 应急 checkpoint 的请求上下文：全部来自调用方的真实数据（turn 输入、todo 预演、
+/// 主请求形状），引擎不自行读取历史以外的东西。
+pub(crate) struct EmergencyCheckpointContext<'a> {
+    pub main_request: MainRequestShape<'a>,
+    /// 当前用户请求原文；manual 等没有当前输入时为 `None`（不得伪造）。
+    pub current_user_input: Option<&'a str>,
+    /// 提交后即将追加的 TodoSync 预演消息（未写入 conversation，仅参与预算）。
+    pub todo_sync: Option<Value>,
+}
+
+/// 应急摘录的材料块，按优先级保留；[`Self::shrink`] 每次严格减少一块内容。
+#[derive(Default)]
+struct EmergencyBlocks {
+    marker: String,
+    request: Option<String>,
+    previous: Option<String>,
+    recent: Option<String>,
+}
+
+impl EmergencyBlocks {
+    fn render(&self) -> String {
+        let mut out = self.marker.clone();
+        for (title, block) in [
+            ("latest user request", &self.request),
+            ("previous checkpoint (may be partial)", &self.previous),
+            ("recent tool evidence", &self.recent),
+        ] {
+            if let Some(block) = block.as_deref().filter(|b| !b.trim().is_empty()) {
+                out.push_str("\n\n[");
+                out.push_str(title);
+                out.push_str("]\n");
+                out.push_str(block);
+            }
+        }
+        out
+    }
+
+    /// 严格减少一格内容：先丢低优先级块，再把请求摘录减半，最后只剩最小头部。
+    /// 返回 false 表示已经到地板（标记 + 最小请求头部），无法继续缩小。
+    fn shrink(&mut self) -> bool {
+        if self.recent.take().is_some() {
+            return true;
+        }
+        if self.previous.take().is_some() {
+            return true;
+        }
+        if let Some(request) = self.request.take() {
+            let shrunk = shrink_excerpt(&request, request_head_floor(&request));
+            if let Some(shrunk) = shrunk {
+                self.request = Some(shrunk);
+                return true;
+            }
+            self.request = Some(request);
+            return false;
+        }
+        false
+    }
+}
+
+/// 头部+尾部裁剪：保留 `head` 个字符的头、`tail` 个字符的尾，中间标注省略量。
+/// 按 UTF-8 边界裁剪，`None` 表示已经无法再缩短。
+fn shrink_excerpt(text: &str, floor_chars: usize) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= floor_chars {
+        return None;
+    }
+    let keep = (chars.len() / 2).max(floor_chars);
+    let head = (keep / 2).max(1);
+    let tail = keep.saturating_sub(head).max(1).min(chars.len() - head);
+    let omitted = chars.len().saturating_sub(head + tail);
+    let mut out: String = chars[..head].iter().collect();
+    out.push_str(&format!("[…{omitted} chars omitted…]"));
+    out.extend(chars[chars.len() - tail..].iter());
+    Some(out)
+}
+
+/// 请求摘录的地板长度（标记之外必须留下的最小真实目标）。
+fn request_head_floor(text: &str) -> usize {
+    64.min(text.chars().count())
+}
+
+/// 单块正文的通用裁剪上限（用于初始构造，避免把整段历史塞进摘录）。
+const EMERGENCY_BLOCK_CHARS: usize = 1_200;
+
+/// 本次压缩失败是否可以转向应急 checkpoint（仅摘要不可用类）。
+pub(crate) fn is_summary_unavailable(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<SummaryUnavailable>().is_some())
+}
+
+/// 本次压缩失败是否由取消/中断造成（必须映射为 Interrupted）。
+pub(crate) fn is_compaction_interrupted(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<CompactionInterrupted>().is_some())
+}
 
 #[derive(Debug, Clone)]
 struct LatestAgentRequest {
@@ -111,6 +271,112 @@ pub struct CompactionEngine {
 }
 
 pub(crate) use crate::session::compaction_cut::*;
+
+/// 单行字段清洗（事件 result 串使用）：折叠空白并限长。
+fn sanitize_field(text: &str, max_chars: usize) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join("_");
+    truncate_chars(&collapsed, max_chars)
+}
+
+/// 按字符（UTF-8 边界安全）截断，超出时标注省略量。
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars {
+        return text.to_string();
+    }
+    let head = max_chars.saturating_sub(16).max(1);
+    let mut out: String = text.chars().take(head).collect();
+    out.push_str(&format!("[…{} chars omitted…]", count - head));
+    out
+}
+
+/// 活跃窗口里最后一条真实 user 消息的正文（结构性判断，不解析展示文本）。
+fn last_real_user_text(active: &[Value]) -> Option<String> {
+    active
+        .iter()
+        .rev()
+        .find(|message| is_real_user_message(message))
+        .and_then(|message| message.get("content").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+/// 最近已完成工具交换的结构化事实（工具名 / 调用 ID / 结果头尾摘录）。
+/// 不做展示文本反解，也不推断成功与否。
+fn recent_evidence(active: &[Value]) -> Option<String> {
+    const MAX_EXCHANGES: usize = 6;
+    let mut lines: Vec<String> = Vec::new();
+    let mut calls = 0usize;
+    for message in active.iter().rev() {
+        let Some(blocks) = message.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for block in blocks {
+            match block.get("type").and_then(Value::as_str) {
+                Some("tool_use") => {
+                    let name = block.get("name").and_then(Value::as_str).unwrap_or("?");
+                    let id = block.get("id").and_then(Value::as_str).unwrap_or("?");
+                    let input = block
+                        .get("input")
+                        .map(|value| value.to_string())
+                        .unwrap_or_default();
+                    lines.push(format!(
+                        "- call {name} ({id}): {}",
+                        truncate_chars(&input, 200)
+                    ));
+                    calls += 1;
+                    if calls >= MAX_EXCHANGES {
+                        break;
+                    }
+                }
+                Some("tool_result") => {
+                    let id = block
+                        .get("tool_use_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?");
+                    let text = block
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    lines.push(format!("- result {id}: {}", truncate_chars(text, 240)));
+                }
+                _ => {}
+            }
+        }
+        if calls >= MAX_EXCHANGES {
+            break;
+        }
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    lines.reverse();
+    Some(lines.join("\n"))
+}
+
+/// 应急摘录材料：固定标记 → 当前用户请求 → 上一份摘要片段 → 最近工具证据。
+/// 全部来自真实数据；不读取 artifact 索引，因此不产生任何可能失效的引用。
+fn emergency_blocks(
+    reason: &str,
+    active: &[Value],
+    previous_summary: &str,
+    current_user_input: Option<&str>,
+) -> EmergencyBlocks {
+    EmergencyBlocks {
+        marker: format!(
+            "[emergency-context-excerpt] This runtime-generated checkpoint replaces the earlier span of this conversation without a model summary (reason: {}). The full history is still stored in the session records; this is a lossy excerpt, not a completion signal, and details may be omitted.",
+            sanitize_field(reason, 96)
+        ),
+        request: current_user_input
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_string)
+            .or_else(|| last_real_user_text(active))
+            .map(|text| truncate_chars(text.trim(), EMERGENCY_BLOCK_CHARS)),
+        previous: Some(previous_summary.trim())
+            .filter(|summary| !summary.is_empty())
+            .map(|summary| truncate_chars(summary, EMERGENCY_BLOCK_CHARS / 2)),
+        recent: recent_evidence(active),
+    }
+}
 
 impl CompactionEngine {
     #[allow(clippy::too_many_arguments)]
@@ -322,16 +588,83 @@ impl CompactionEngine {
         if state.active_start == 0 {
             return Ok(());
         }
+        let mut checkpoints = self.checkpoint_prefix(&state.summary)?;
+        checkpoints.append(messages);
+        *messages = checkpoints;
+        Ok(())
+    }
+
+    /// 动态 checkpoint 前缀（摘要 + 权威 plan 派生片段）。权威投影与候选验收必须共用
+    /// 同一实现，否则候选预算与实际请求会漂移。
+    fn checkpoint_prefix(&self, summary: &str) -> Result<Vec<Value>> {
         let mut checkpoints = Vec::new();
-        if !state.summary.trim().is_empty() {
-            checkpoints.push(compacted_summary_message(&state.summary));
+        if !summary.trim().is_empty() {
+            checkpoints.push(compacted_summary_message(summary));
         }
         if let Some(plan) = read_active_plan_checkpoint(&self.summary_path)? {
             checkpoints.push(plan);
         }
-        checkpoints.append(messages);
-        *messages = checkpoints;
-        Ok(())
+        Ok(checkpoints)
+    }
+
+    /// 确定性应急 checkpoint：不调用任何 LLM，把可变历史折成有界摘录并提交。
+    ///
+    /// 只在正常压缩无法让请求装下时由上层调用。`Ok(true)` 表示已提交（调用方必须重新
+    /// 投影与重估）；`Ok(false)` 表示连最小摘录都装不下（最小工作空间不可用），调用方
+    /// 应以明确诊断 fail-closed。取消、持久化 fault 与正式历史损坏原样传播。
+    pub(crate) async fn commit_emergency_checkpoint(
+        &self,
+        reason: &str,
+        ctx: &EmergencyCheckpointContext<'_>,
+    ) -> Result<bool> {
+        self.fault.check()?;
+        if self.interrupt.load(Ordering::SeqCst) {
+            return Err(CompactionInterrupted::error());
+        }
+        let _guard = self.compact_lock.lock().await;
+        let state = self.current_state()?;
+        let active = self.store.lines_from(state.active_start).await?;
+        let mut blocks = emergency_blocks(reason, &active, &state.summary, ctx.current_user_input);
+        let input_limit = request_input_limit(&self.config);
+        loop {
+            let summary = blocks.render();
+            let mut candidate = self.checkpoint_prefix(&summary)?;
+            if let Some(todo_sync) = &ctx.todo_sync {
+                candidate.push(todo_sync.clone());
+            }
+            let tokens = ctx.main_request.estimate(&candidate)?;
+            if input_limit == usize::MAX || tokens <= input_limit {
+                // 折掉全部可变历史（尾部为空）；权威 history 只追加、不重写。
+                let next = CompactionState {
+                    active_start: state.active_start + active.len(),
+                    summary: summary.clone(),
+                };
+                self.commit_state(next).await?;
+                *self
+                    .startup_repair_loss
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Vec::new();
+                let result = format!(
+                    "compacted_at_trigger=emergency_kept=0_input_reduction={}_cut=all_mode=emergency_emergency_reason={}",
+                    self.config.context_compact_input_reduction,
+                    sanitize_field(reason, 96),
+                );
+                if self.config.log_events {
+                    self.write_event(crate::events::EventLog::Compact {
+                        version: Some(2),
+                        trigger: "emergency".into(),
+                        result,
+                    });
+                }
+                self.display.render_info(
+                    "Context emergency checkpoint committed (lossy excerpt; details may be omitted).",
+                );
+                return Ok(true);
+            }
+            if !blocks.shrink() {
+                return Ok(false);
+            }
+        }
     }
 
     pub async fn evaluate_and_compact(
@@ -340,10 +673,19 @@ impl CompactionEngine {
         context_tokens: usize,
         target: LlmModelTarget<'_>,
     ) -> Result<(bool, String)> {
-        self.evaluate_and_compact_with_prefix(trigger, context_tokens, target, None, None, None)
-            .await
+        self.evaluate_and_compact_with_prefix(
+            trigger,
+            context_tokens,
+            target,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)] // 主请求形状与诊断序号都是必要输入
     pub(crate) async fn evaluate_and_compact_with_prefix(
         &self,
         trigger: &str,
@@ -354,6 +696,10 @@ impl CompactionEngine {
         // Ordinal of this compaction inside the current user input (1-based),
         // recorded in the `compact` event. `None` for out-of-turn callers.
         compaction_ordinal: Option<usize>,
+        // 主请求的真实形状。`Some` 时在提交前做完整投影预算验收（候选装不下则不
+        // 提交、报 `SummaryUnavailable`，由上层转应急）；`None`（manual 等旧入口）
+        // 保持原有宽松行为。
+        main_request: Option<MainRequestShape<'_>>,
     ) -> Result<(bool, String)> {
         // Latched session: refuse before any summary request or state write.
         self.fault.check()?;
@@ -421,7 +767,22 @@ impl CompactionEngine {
             )
             .await?;
         if self.interrupt.load(Ordering::SeqCst) {
-            bail!("compaction interrupted");
+            return Err(CompactionInterrupted::error());
+        }
+
+        // 候选发布前完整预算验收：摘要 + 动态 checkpoint + 保留尾部必须能装进主请求
+        // 预算，否则不提交（上层可转确定性应急），避免「摘要成功但请求反而变大」在
+        // 外层以失败收场。真实的请求形状由调用方给出。
+        if let Some(shape) = main_request {
+            let mut candidate = self.checkpoint_prefix(&summary)?;
+            candidate.extend_from_slice(kept);
+            let candidate_tokens = shape.estimate(&candidate)?;
+            let input_limit = request_input_limit(&self.config);
+            if input_limit != usize::MAX && candidate_tokens > input_limit {
+                return Err(SummaryUnavailable::error(format!(
+                    "compaction candidate remains over the request input budget: {candidate_tokens} > {input_limit} tokens"
+                )));
+            }
         }
 
         self.validate_conversation_messages(kept, target.model)?;
@@ -451,6 +812,7 @@ impl CompactionEngine {
                 .unwrap_or_default(),
             if degraded_cut { "_cut=degraded" } else { "" },
         );
+        let result = format!("{result}_mode=summary");
         if self.config.log_events {
             self.write_event(crate::events::EventLog::Compact {
                 version: Some(2),
@@ -623,7 +985,7 @@ impl CompactionEngine {
         watcher.abort();
         cleanup_cancel.cancel();
         if self.interrupt.load(Ordering::SeqCst) {
-            bail!("compaction interrupted");
+            return Err(CompactionInterrupted::error());
         }
         result
     }
@@ -663,9 +1025,9 @@ impl CompactionEngine {
                 usize::try_from(compaction_max_output_tokens(&self.config)).unwrap_or(0),
             );
             if input_tokens > input_limit {
-                bail!(
+                return Err(SummaryUnavailable::error(format!(
                     "compaction summary input exceeds configured budget: {input_tokens} > {input_limit} tokens"
-                );
+                )));
             }
         }
 
@@ -681,14 +1043,14 @@ impl CompactionEngine {
         let mut correction: Option<String> = None;
         loop {
             if request_cancel.is_cancelled() {
-                bail!("compaction interrupted");
+                return Err(CompactionInterrupted::error());
             }
             self.fault.check()?;
             if retry.deadline_expired() {
-                bail!(
+                return Err(SummaryUnavailable::error(format!(
                     "{}: compaction summary deadline exceeded",
                     RequestTerminal::Timeout.message()
-                );
+                )));
             }
             let attempt_cancel = request_cancel.linked_child_token();
             let mut attempt_messages = messages.clone();
@@ -736,12 +1098,12 @@ impl CompactionEngine {
                     request,
                     capture,
                 ) => opened,
-                _ = request_cancel.cancelled() => bail!("compaction interrupted"),
+                _ = request_cancel.cancelled() => return Err(CompactionInterrupted::error()),
                 _ = recovery::wait_until(request_deadline) => {
-                    bail!(
+                    return Err(SummaryUnavailable::error(format!(
                         "{}: compaction summary deadline exceeded before the request was established",
                         RequestTerminal::Timeout.message()
-                    )
+                    )));
                 }
                 _ = wait_first_event_deadline(attempt_started, first_event_timeout) => {
                     let failure = SummaryRetry {
@@ -765,7 +1127,7 @@ impl CompactionEngine {
                     // a custom backend may still hold the attempt token (F7).
                     attempt_cancel.cancel();
                     if request_cancel.is_cancelled() {
-                        bail!("compaction interrupted");
+                        return Err(CompactionInterrupted::error());
                     }
                     let failure = classify_summary_failure(&error);
                     if let Some(failure) = failure {
@@ -774,7 +1136,7 @@ impl CompactionEngine {
                         attempt += 1;
                         continue;
                     }
-                    return Err(error);
+                    return Err(SummaryUnavailable::error(format!("{error:#}")));
                 }
             };
 
@@ -833,7 +1195,7 @@ impl CompactionEngine {
                     );
                     let message = format!("failed to generate context summary: {}", error.message);
                     if kind != UpstreamFailureKind::Recoverable {
-                        bail!("{message}");
+                        return Err(SummaryUnavailable::error(message));
                     }
                     let failure = SummaryRetry {
                         retry_after: None,
@@ -852,13 +1214,15 @@ impl CompactionEngine {
                         attempt += 1;
                         continue;
                     }
-                    return Err(error);
+                    return Err(SummaryUnavailable::error(format!("{error:#}")));
                 }
-                SummaryConsumption::Deadline => bail!(
-                    "{}: compaction summary deadline exceeded while streaming",
-                    RequestTerminal::Timeout.message()
-                ),
-                SummaryConsumption::Interrupted => bail!("compaction interrupted"),
+                SummaryConsumption::Deadline => {
+                    return Err(SummaryUnavailable::error(format!(
+                        "{}: compaction summary deadline exceeded while streaming",
+                        RequestTerminal::Timeout.message()
+                    )));
+                }
+                SummaryConsumption::Interrupted => return Err(CompactionInterrupted::error()),
             }
         }
     }
@@ -963,25 +1327,27 @@ impl CompactionEngine {
     ) -> Result<()> {
         use crate::llm::recovery::{self, RequestTerminal};
         if !retry.can_retry() {
-            bail!(
+            return Err(SummaryUnavailable::error(format!(
                 "{}: {}",
                 RequestTerminal::RetryExhausted.message(),
                 failure.message
-            );
+            )));
         }
         let wait = match retry.retry_wait(attempt, failure.retry_after, recovery::jitter_fraction())
         {
             Ok(wait) => wait,
-            Err(_) => bail!(
-                "{}: {}",
-                RequestTerminal::Timeout.message(),
-                failure.message
-            ),
+            Err(_) => {
+                return Err(SummaryUnavailable::error(format!(
+                    "{}: {}",
+                    RequestTerminal::Timeout.message(),
+                    failure.message
+                )));
+            }
         };
         retry.note_retry();
         tokio::select! {
             _ = tokio::time::sleep(wait) => Ok(()),
-            _ = request_cancel.cancelled() => bail!("compaction interrupted"),
+            _ = request_cancel.cancelled() => Err(CompactionInterrupted::error()),
         }
     }
 
@@ -1173,7 +1539,9 @@ impl CompactionEngine {
         };
         messages.push(compaction_instruction_message());
         if summary_input_over_budget(&self.config, &messages, &[], FALLBACK_SYSTEM_PROMPT)? {
-            bail!("compaction summary input exceeds configured budget");
+            return Err(SummaryUnavailable::error(
+                "compaction summary input exceeds configured budget",
+            ));
         }
         Ok(SummaryRequestInput {
             system_prompt: FALLBACK_SYSTEM_PROMPT.to_string(),

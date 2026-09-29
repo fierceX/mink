@@ -97,6 +97,50 @@ impl super::TurnExecutor {
         Ok((compacted, detail))
     }
 
+    /// TodoSync 预演：与 [`Self::reconcile_todo_state`] 同源判断，但不写入
+    /// conversation。可见 revision 落后时，应急候选必须把这条同步消息计入预算。
+    fn predicted_todo_sync(&self, messages: &[serde_json::Value]) -> Option<serde_json::Value> {
+        let read_provider = self.ctx.todo_read_provider()?;
+        let visible = crate::session::todo::visible_revision(messages).ok()?;
+        let snapshot = self.ctx.todo_store.snapshot();
+        if visible >= snapshot.revision {
+            return None;
+        }
+        Some(crate::session::todo::sync_message(&snapshot, read_provider))
+    }
+
+    /// 确定性应急 checkpoint：正常压缩无法让请求装下时的最后手段（不调用 LLM）。
+    /// 提交成功后刷新活跃投影并执行原有 TodoSync 追加，返回 `true`；连最小摘录都
+    /// 装不下返回 `false`，由调用方以明确诊断 fail-closed。
+    pub(super) async fn commit_emergency_checkpoint(
+        &mut self,
+        reason: &str,
+        messages: &mut Vec<serde_json::Value>,
+        system_prompt: &str,
+        tools_json: &[serde_json::Value],
+    ) -> Result<bool> {
+        let context = crate::session::compaction::EmergencyCheckpointContext {
+            main_request: crate::session::compaction::MainRequestShape {
+                system_prompt,
+                tools: tools_json,
+            },
+            current_user_input: Some(self.local.current_user_input.as_str())
+                .filter(|input| !input.trim().is_empty()),
+            todo_sync: self.predicted_todo_sync(messages),
+        };
+        if !self
+            .ctx
+            .compaction
+            .commit_emergency_checkpoint(reason, &context)
+            .await?
+        {
+            return Ok(false);
+        }
+        *messages = self.ctx.compaction.active_messages().await?;
+        self.reconcile_todo_state(messages).await?;
+        Ok(true)
+    }
+
     /// Phase 1: 发送 LLM 请求并流式读取响应，返回 `StreamOutput`。
     ///
     /// 一个 round 的请求投影（含图片物化结果）在此构建一次；每次真正重开

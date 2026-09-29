@@ -111,7 +111,7 @@ TurnExecutor (agent/turn.rs)
 │ session/artifacts.rs  │ artifact index、持久序号恢复、防覆盖完整输出
 │ session/stats.rs      │ token、请求数统计
 │ session/usage.rs      │ LLM 请求级 Token 明细 JSONL（UsageJournal / MeteredStream；兼容字段 cost_nano_cny：已上报为 0、未上报为 null）
-│ session/compaction.rs │ 显式策略、非破坏式投影、LLM 摘要、压缩状态；provider usage 压力校准与缓存对齐摘要
+│ session/compaction.rs │ 显式策略、非破坏式投影、LLM 摘要与确定性应急 checkpoint、压缩状态；压力校准与缓存对齐摘要
 │ session/compaction_input.rs │ 可选摘要输入降噪
 │ session/prefix.rs     │ ImmutablePrefix
 │ session/plan.rs       │ PlanStore 与 append-only 计划状态转换
@@ -329,7 +329,7 @@ bindings。发给 provider 的 schemas 直接来自 surface；prefix 直接消�
 | `session/artifacts.rs` | artifact 索引、持久序号恢复和正文防覆盖写入 |
 | `session/stats.rs` | session 累计 token 和请求数统计 |
 | `session/usage.rs` | LLM 请求级 Token 明细 journal（兼容字段 `cost_nano_cny`：已上报为 0、未上报为 null） |
-| `session/compaction.rs` | 显式压缩策略、非破坏式投影、LLM 摘要和压缩状态；provider usage 压力校准与缓存对齐摘要 |
+| `session/compaction.rs` | 显式压缩策略、非破坏式投影、LLM 摘要与摘要不可用时的确定性应急 checkpoint、压缩状态；provider usage 压力校准与缓存对齐摘要 |
 | `session/compaction_input.rs` | 摘要请求输入降噪 |
 | `session/prefix.rs` | ImmutablePrefix |
 | `session/plan.rs` | PlanStore、原子计划状态转换和 append-only transition |

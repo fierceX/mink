@@ -83,6 +83,11 @@ impl TurnCompactor {
                 Some(&source_fingerprint),
                 current_projection.as_ref(),
                 Some(self.compactions_this_turn + 1),
+                // 主请求的真实形状：候选验收与真实发送使用同一套 system/tools。
+                Some(crate::session::compaction::MainRequestShape {
+                    system_prompt,
+                    tools: tools_json,
+                }),
             )
             .await?;
         if did_compact {

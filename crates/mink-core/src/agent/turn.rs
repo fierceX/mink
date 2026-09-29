@@ -247,9 +247,23 @@ impl TurnExecutor {
         system_prompt: &mut String,
         tools_json: &mut Vec<serde_json::Value>,
     ) -> Result<(Vec<serde_json::Value>, usize)> {
-        // Phase 0: 上下文压缩（auto 按压力阈值触发，可多次）
-        self.try_compact("auto", messages, system_prompt, tools_json)
-            .await?;
+        // Phase 0: 上下文压缩（auto 按压力阈值触发，可多次）。可选提前压缩失败不得
+        // 阻断本来可以发送的请求：只有摘要不可用类错误被放行并继续。
+        match self
+            .try_compact("auto", messages, system_prompt, tools_json)
+            .await
+        {
+            Ok(_) => {}
+            Err(error) if crate::session::compaction::is_compaction_interrupted(&error) => {
+                return Err(anyhow::Error::new(TurnInterrupted));
+            }
+            Err(error) if crate::session::compaction::is_summary_unavailable(&error) => {
+                self.ctx
+                    .display
+                    .render_info("Context summary unavailable; continuing without compaction.");
+            }
+            Err(error) => return Err(error),
+        }
         let input_limit = crate::session::compaction::request_input_limit(&self.ctx.config);
         let mut request_messages = self.project_request_messages(messages)?;
         let mut estimated_tokens = crate::llm::transport::estimate_openai_context_tokens(
@@ -260,13 +274,27 @@ impl TurnExecutor {
         // 硬闸门：反复强制压缩，直到装得下、压无可压或压缩不再降低估算。
         let mut forced_attempts = 0usize;
         let mut last_detail: Option<String> = None;
+        let mut summary_failure: Option<String> = None;
         while estimated_tokens > input_limit && forced_attempts < MAX_FORCED_COMPACTIONS_PER_REQUEST
         {
             let before = estimated_tokens;
-            let (compacted, detail) = self
+            let compacted = match self
                 .try_compact("preflight", messages, system_prompt, tools_json)
-                .await?;
-            last_detail = Some(detail);
+                .await
+            {
+                Ok((compacted, detail)) => {
+                    last_detail = Some(detail);
+                    compacted
+                }
+                Err(error) if crate::session::compaction::is_compaction_interrupted(&error) => {
+                    return Err(anyhow::Error::new(TurnInterrupted));
+                }
+                Err(error) if crate::session::compaction::is_summary_unavailable(&error) => {
+                    summary_failure = Some(format!("{error}"));
+                    break;
+                }
+                Err(error) => return Err(error),
+            };
             forced_attempts += 1;
             if !compacted {
                 break;
@@ -282,15 +310,45 @@ impl TurnExecutor {
                 break;
             }
         }
+        // 正常压缩（含 LLM 摘要）无法让请求装下时，退化为确定性应急 checkpoint：
+        // 不调用 LLM，把可变历史折成有界摘录，保证上下文故障之后仍有继续路径。
+        let mut emergency = false;
+        if estimated_tokens > input_limit {
+            let reason = summary_failure
+                .clone()
+                .or_else(|| last_detail.clone())
+                .unwrap_or_else(|| "over_budget_without_cut".to_string());
+            emergency = self
+                .commit_emergency_checkpoint(&reason, messages, system_prompt, tools_json)
+                .await?;
+            if emergency {
+                request_messages = self.project_request_messages(messages)?;
+                estimated_tokens = crate::llm::transport::estimate_openai_context_tokens(
+                    &request_messages,
+                    tools_json,
+                    system_prompt,
+                )?;
+            }
+        }
         if estimated_tokens > input_limit {
             anyhow::bail!(
                 "context remains over the request input budget: estimated {estimated_tokens} tokens, \
                  limit {input_limit}; {} compaction(s) committed and {forced_attempts} forced attempt(s) \
-                 in this input{}",
+                 in this input; emergency checkpoint {} (last: {}){}",
                 self.compactor.compactions_this_turn(),
-                last_detail
-                    .map(|detail| format!(" (last: {detail})"))
-                    .unwrap_or_default()
+                if emergency {
+                    "committed but still over budget"
+                } else {
+                    "unavailable"
+                },
+                summary_failure
+                    .or(last_detail)
+                    .unwrap_or_else(|| "none".to_string()),
+                if emergency {
+                    " (minimal working space unavailable)"
+                } else {
+                    ""
+                }
             );
         }
         Ok((request_messages, estimated_tokens))
@@ -387,15 +445,45 @@ impl TurnExecutor {
                             && !overflow_recovery_attempted =>
                     {
                         overflow_recovery_attempted = true;
-                        if !self
+                        let compacted = match self
                             .try_compact(
                                 "overflow",
                                 &mut messages,
                                 &mut system_prompt,
                                 &mut tools_json,
                             )
-                            .await?
-                            .0
+                            .await
+                        {
+                            Ok((compacted, _)) => compacted,
+                            Err(error)
+                                if crate::session::compaction::is_compaction_interrupted(
+                                    &error,
+                                ) =>
+                            {
+                                self.ctx.display.render_stop("interrupted");
+                                return Ok((TurnDecision::Interrupted, effects));
+                            }
+                            Err(error)
+                                if crate::session::compaction::is_summary_unavailable(&error) =>
+                            {
+                                self.ctx.display.render_info(
+                                    "Context summary unavailable; falling back to an emergency checkpoint.",
+                                );
+                                false
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        // 摘要不可用或没有收益时，应急 checkpoint 是唯一不依赖 LLM 的
+                        // 缩小手段；仍然只重试一次（不新增物理请求次数）。
+                        if !compacted
+                            && !self
+                                .commit_emergency_checkpoint(
+                                    "provider_overflow",
+                                    &mut messages,
+                                    &system_prompt,
+                                    &tools_json,
+                                )
+                                .await?
                         {
                             return Err(error);
                         }
