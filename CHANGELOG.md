@@ -33,6 +33,7 @@
 - **就绪失败路径也能清理**：`wait_for_tree_ready` 改成「每轮先登记、再判定就绪」，超时出口再做一次发现/登记；即使工作负载没达到就绪形态，TreeCleanup 也已持有 bwrap/inner/子进程身份，可独立回收。
 - **就绪超时用例**：新增工作负载故意只启动 `tail`（无 `sleep` 子进程）+ 短就绪期限的用例，断言确实走到超时分支且记录的进程全部退出。
 - **panic 注入点可区分**：用专用 payload（`InjectedPanic`）区分「到达注入点」与「准备阶段失败」；有/无 `--die-with-parent` 两版，teardown 断言基于捕获区外保留的 PID 身份（含不带 token 的 `sleep`）；不再修改全局 panic hook。
+- **生产入口 Linux 端到端**：新增 `runtime::reexec_in_sandbox` 真跑用例（宿主父 shell → 生产 reexec → bwrap → 沙箱内探针 + `sleep` 孙进程）：断言宿主侧 NSpid 嵌套、孙进程挂在沙箱进程下；杀宿主父后 PDEATHSIG + `--die-with-parent` + 命名空间回收整棵树，无残留。宿主可见 PID 靠 argv[0] + 每次运行唯一 token 的 environ 定位（命名空间内 PID/NSpid 与宿主不可相互换算），孙进程靠 PPid 扫描（宿主看不到沙箱内的 children 列表）。
 
 ### 修复：应急压缩的六项审核问题
 

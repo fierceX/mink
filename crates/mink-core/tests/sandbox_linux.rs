@@ -122,6 +122,46 @@ fn proc_children(pid: u32) -> Vec<u32> {
         .unwrap_or_default()
 }
 
+fn proc_environ(pid: u32) -> Option<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    Some(
+        raw.split(|byte| *byte == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| String::from_utf8_lossy(part).into_owned())
+            .collect(),
+    )
+}
+
+/// 按「argv[0] == 测试二进制 + environ 携带本次唯一 token」定位宿主可见的进程。
+/// 环境变量是唯一区分并发测试实例的可靠标记（沙箱内 PID 在宿主不可用，
+/// NSpid 在沙箱内挂载的 procfs 里只列出最内层）。
+fn pids_with_token_and_argv0(argv0: &str, token: &str) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let needle = format!("MINK_TEST_SANDBOX_TOKEN={token}");
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Some(args) = proc_cmdline(pid) else {
+            continue;
+        };
+        if args.first().map(String::as_str) != Some(argv0) {
+            continue;
+        }
+        if proc_environ(pid).is_some_and(|env| env.iter().any(|entry| entry == &needle)) {
+            found.push(pid);
+        }
+    }
+    found
+}
+
 /// 找到 cmdline 含 `token` 的进程；`first_arg` 用于区分 bwrap 监工与沙箱内 shell。
 fn pids_matching(token: &str, first_arg: Option<&str>, exclude: &[u32]) -> Vec<u32> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -166,7 +206,78 @@ fn wait_until(timeout: Duration, mut check: impl FnMut() -> bool) -> bool {
     check()
 }
 
+fn proc_alive(pid: u32) -> bool {
+    proc_start_time(pid).is_some()
+}
+
+/// 列出 ppid 等于 `parent` 的进程。宿主视角下 `children` 文件只列同一 PID 命名空间
+/// 的子进程（沙箱内的孙进程不出现），必须改用 `/proc/<pid>/stat` 的 PPid 扫描。
+fn pids_with_ppid(parent: u32) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if proc_ppid(pid) == Some(parent) {
+            found.push(pid);
+        }
+    }
+    found
+}
+
+/// `/proc/<pid>/status` 中某个字段的值（如 `NSpid`）。
+fn proc_status_field(pid: u32, field: &str) -> Option<String> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    for line in status.lines() {
+        if let Some(value) = line
+            .strip_prefix(field)
+            .and_then(|rest| rest.strip_prefix(':'))
+        {
+            return Some(value.trim().to_string());
+        }
+    }
+    None
+}
+
+/// 父进程 PID（`/proc/<pid>/stat` 第 4 个字段）。
+fn proc_ppid(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let close = stat.rfind(')')?;
+    let fields: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+    fields.get(1).and_then(|value| value.parse::<u32>().ok())
+}
+
+/// 解析探针报告行：`MINK_PROBE_INSIDE ns_pid=<n> ns_child=<n> token=<t>`。
+/// 只用于**就绪握手**；宿主可见 PID 由 [`pids_with_token_and_argv0`] 定位。
+fn parse_probe_marker(line: &str) -> Option<(u32, u32)> {
+    let mut pid = None;
+    let mut child = None;
+    for part in line.split_whitespace() {
+        if let Some(value) = part.strip_prefix("ns_pid=") {
+            pid = value.parse::<u32>().ok();
+        }
+        if let Some(value) = part.strip_prefix("ns_child=") {
+            child = value.parse::<u32>().ok();
+        }
+    }
+    Some((pid?, child?))
+}
+
 // ── 进程身份与清理 ────────────────────────────────────────────────
+
+/// `/proc/<pid>/stat` 的进程状态字符（第三个字段；comm 可能含空格/括号）。
+fn proc_state(pid: u32) -> Option<char> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let close = stat.rfind(')')?;
+    stat[close + 1..].split_whitespace().next()?.chars().next()
+}
 
 /// 记录 PID + starttime：清理时先复核身份，避免误杀 PID 重用后的无关进程。
 #[derive(Clone, Debug)]
@@ -177,6 +288,12 @@ struct ProcessRef {
 
 impl ProcessRef {
     fn capture(pid: u32) -> Option<Self> {
+        // PID 1/2 是 init/kthreadd：命名空间内 PID 在宿主不可用时可能误指向它们，
+        // 绝不登记、绝不下杀手。
+        if pid <= 2 {
+            eprintln!("[cleanup] refusing to track kernel pid {pid}");
+            return None;
+        }
         proc_start_time(pid).map(|start_time| Self { pid, start_time })
     }
 
@@ -184,19 +301,25 @@ impl ProcessRef {
         proc_start_time(self.pid).as_deref() == Some(self.start_time.as_str())
     }
 
+    /// 僵尸（Z）已停止运行，只是等待父进程回收：不计为“仍存活”，否则会把
+    /// 未 reaped 的子进程误报为泄漏（测试进程自己就是这些子进程的父进程）。
     fn alive(&self) -> bool {
-        self.is_same_process()
+        self.is_same_process() && proc_state(self.pid) != Some('Z')
     }
 
     fn kill(&self, label: &str) {
         if !self.is_same_process() {
             return;
         }
-        let _ = Command::new("kill")
+        let killed = Command::new("kill")
             .arg("-9")
             .arg(self.pid.to_string())
-            .status();
-        eprintln!("[cleanup:{label}] killed pid={}", self.pid);
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if killed {
+            eprintln!("[cleanup:{label}] signalled pid={}", self.pid);
+        }
     }
 }
 
@@ -511,7 +634,7 @@ fn readiness_timeout_still_registers_and_reaps_the_started_tree() {
     );
     let mut parent_command = Command::new("/bin/sh");
     parent_command.arg("-c").arg(script);
-    let parent = ChildGuard::spawn("readiness-timeout parent", parent_command);
+    let mut parent = ChildGuard::spawn("readiness-timeout parent", parent_command);
     cleanup.track(parent.pid());
 
     let ready = wait_for_tree_ready(
@@ -530,6 +653,8 @@ fn readiness_timeout_still_registers_and_reaps_the_started_tree() {
         "timeout exit must register the started tree: {:?}",
         cleanup.pids()
     );
+    // 父 shell 是本测试进程的子进程：先 kill+wait 回收，避免僵尸干扰断言。
+    parent.kill_and_wait();
     cleanup.kill_all();
     assert!(
         cleanup.wait_gone(WAIT_TIMEOUT),
@@ -632,4 +757,152 @@ fn child_guard_reaps_sandbox_tree_on_panic_path_without_die_with_parent() {
         wait_for_tree_gone(&token, WAIT_TIMEOUT),
         "panic path (no die-with-parent) leaked token processes"
     );
+}
+
+// ── 生产入口（runtime::reexec_in_sandbox）端到端 ────────────────────
+
+/// 生产入口探针：仅当 driver 设置 `MINK_TEST_SANDBOX_TOKEN` + `MINK_TEST_SANDBOX_MODE`
+/// 时生效。宿主侧调用 `mink::runtime::reexec_in_sandbox`（成功即不返回）；沙箱内
+/// （`MINK_SANDBOXED=1`）报告自身与孙进程 PID 后保持运行，等待宿主侧父死回收。
+#[test]
+fn production_sandbox_probe() {
+    let Ok(token) = std::env::var("MINK_TEST_SANDBOX_TOKEN") else {
+        return; // 普通测试运行：不触发
+    };
+    if std::env::var("MINK_TEST_SANDBOX_MODE").is_err() {
+        return;
+    }
+    if std::env::var("MINK_SANDBOXED").is_ok() {
+        // 用 ChildGuard 持有孙进程：Drop 会 kill+wait，避免僵尸（也满足 clippy 的
+        // spawn-without-wait 检查）。
+        let mut grandchild_command = Command::new("sleep");
+        grandchild_command.arg("31337");
+        let grandchild = ChildGuard::spawn("sandbox grandchild sleep", grandchild_command);
+        // 沙箱内 `process::id()` 是命名空间内 PID，宿主不可直接使用；宿主侧靠
+        // argv[0] + 本次唯一 token 的 environ 定位本进程。
+        println!(
+            "MINK_PROBE_INSIDE ns_pid={} ns_child={} token={token}",
+            std::process::id(),
+            grandchild.pid(),
+        );
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        std::thread::sleep(Duration::from_secs(300));
+        return;
+    }
+    let exe = std::env::current_exe().expect("current_exe");
+    let cwd = std::env::current_dir()
+        .unwrap_or_default()
+        .display()
+        .to_string();
+    let config = mink::runtime::SandboxConfig {
+        enabled: true,
+        backend: "bwrap".into(),
+        read_dirs: vec![cwd.clone()],
+        write_dirs: vec![cwd],
+        allow_network: false,
+        ..Default::default()
+    };
+    let args: Vec<String> = std::env::args().collect();
+    mink::runtime::reexec_in_sandbox(&config, &exe, &args);
+    unreachable!("reexec_in_sandbox must not return");
+}
+
+/// 生产入口端到端：宿主父死 → `reexec_in_sandbox` 注册的 PDEATHSIG 杀掉沙箱监工 →
+/// bwrap `--die-with-parent` + PID 命名空间回收整棵树（含不带 token 的孙进程）。
+#[test]
+fn production_reexec_reaps_namespace_on_host_parent_death() {
+    if let Err(reason) = probe_bwrap() {
+        skip_or_panic(&reason);
+        return;
+    }
+    let exe = std::env::current_exe().expect("current_exe");
+    let exe_str = exe.display().to_string();
+    let token = unique_token("production-reexec");
+    let mut cleanup = TreeCleanup::new("production-reexec tree");
+
+    // 宿主父 shell：后台启动本测试二进制（走生产 reexec），自身等待成为被杀的父。
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg("\"$1\" --exact production_sandbox_probe --nocapture & wait")
+        .arg("sh")
+        .arg(&exe_str)
+        .env("MINK_TEST_SANDBOX_TOKEN", &token)
+        .env("MINK_TEST_SANDBOX_MODE", "1")
+        .stdout(Stdio::piped());
+    let mut parent = ChildGuard::spawn("production-reexec host parent", command);
+    cleanup.track(parent.pid());
+
+    let stdout = parent.child.stdout.take().expect("piped stdout");
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut marker = None;
+    while marker.is_none() && Instant::now() < deadline {
+        if let Ok(line) = rx.recv_timeout(Duration::from_secs(5))
+            && line.contains("MINK_PROBE_INSIDE")
+        {
+            marker = Some(line);
+        }
+    }
+    let marker =
+        marker.unwrap_or_else(|| panic!("the sandboxed probe never reported in ({token})"));
+    let (ns_pid, ns_child) =
+        parse_probe_marker(&marker).unwrap_or_else(|| panic!("bad probe marker: {marker}"));
+    let _ = (ns_pid, ns_child);
+    // 宿主可见 PID：argv[0] 是测试二进制且 environ 携带本次唯一 token（沙箱内
+    // PID 与 NSpid 在宿主/沙箱两侧视角不同，不能相互换算）。
+    let mut payloads = Vec::new();
+    wait_until(WAIT_TIMEOUT, || {
+        payloads = pids_with_token_and_argv0(&exe_str, &token);
+        !payloads.is_empty()
+    });
+    assert!(
+        !payloads.is_empty(),
+        "the sandboxed payload is not visible on the host: {marker}"
+    );
+    let inside_pid = payloads[0];
+    cleanup.track(inside_pid);
+    // 孙进程从宿主侧按 PPid 扫描发现（宿主看不到沙箱命名空间内的 children 列表）。
+    let grandchild_pid = *pids_with_ppid(inside_pid)
+        .iter()
+        .find(|pid| process_named(**pid, "sleep"))
+        .unwrap_or_else(|| panic!("no sandbox grandchild under pid {inside_pid}: {marker}"));
+    cleanup.track(grandchild_pid);
+    let monitors = cleanup.track_matching(&exe_str, Some("bwrap"), &[]);
+    assert!(
+        !monitors.is_empty(),
+        "the production reexec must exec the bwrap monitor"
+    );
+
+    // 宿主视角复验：该进程确实处于嵌套 PID 命名空间，孙进程挂在它下面。
+    let nspid_host = proc_status_field(inside_pid, "NSpid").unwrap_or_default();
+    assert!(
+        nspid_host.split_whitespace().count() >= 2,
+        "expected a nested PID namespace for host pid {inside_pid}: NSpid={nspid_host:?}"
+    );
+    assert_eq!(proc_ppid(grandchild_pid), Some(inside_pid));
+
+    // 宿主父死 → PDEATHSIG → 监工死 → 命名空间回收（不能只杀得到父 shell）。
+    parent.kill_and_wait();
+    assert!(
+        wait_until(WAIT_TIMEOUT, || {
+            !proc_alive(inside_pid)
+                && !proc_alive(grandchild_pid)
+                && pids_matching(&exe_str, None, &[std::process::id()]).is_empty()
+        }),
+        "the production sandbox tree survived host parent death: {marker}"
+    );
+    assert!(cleanup.wait_gone(WAIT_TIMEOUT), "cleanup recorded leaks");
 }
