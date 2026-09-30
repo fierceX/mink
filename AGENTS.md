@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-09-28
+> 更新日期：2026-09-30
 
 ## 项目概览
 
@@ -53,7 +53,7 @@ Mink 是用 Rust 实现的轻量 AI coding agent，面向 DeepSeek/OpenAI-compat
 ```
 main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
   TurnExecutor 内循环（同一用户输入可多轮 tool_use）：
-  1. 压缩检查（同输入最多一次，TurnCompactor 守卫）
+  1. 压缩检查（同一输入内可重复压缩，严格下降终止，无次数上限）
   2. LLM 流式请求（SSE → Event；工具层解析）
   3. Scavenge 回收遗漏工具调用 → 持久化 assistant 消息
   4. ToolRunner::execute_all（surface gate → StormBreaker → dispatch → 格式化/artifact）
@@ -70,7 +70,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 
 ### 压缩与持久化
 
-- `TurnCompactor`：同一用户输入的内循环可重复压缩，不设次数上限；auto 按压力阈值触发，preflight/overflow 在请求超预算时强制折叠直到装得下、压无可压（`no safe boundary` / `savings too small`）或估算不再下降，随后仍按 fail-closed 拒绝发送超预算请求；强制触发只要真能省就压（auto 保留 ≥10% 收益门控）；请求已超预算时，严格切点不可用会退化为 `_cut=degraded`（见下一条）。摘要侧失败在来源处定型为 `SummaryUnavailable`（可转应急）或 `CompactionInterrupted`（映射为 `TurnDecision::Interrupted`）：auto 失败且原请求仍可发送时不得阻断该请求，强制循环结束后仍超预算则转应急 checkpoint。
+- `TurnCompactor`：同一用户输入的内循环可重复压缩，不设次数上限；不得用隐藏常量给强制循环或 overflow 收缩封顶（终止条件是「每次必须严格下降/严格缩小」）。auto 按压力阈值触发，preflight/overflow 在请求超预算时强制折叠直到装得下、压无可压（`no safe boundary` / `savings too small`）或估算不再下降，随后仍按 fail-closed 拒绝发送超预算请求；发布前必须过净收益门控（auto 要求 ≥10% 净下降，强制路径要求严格下降），不满足则不提交。请求已超预算时，严格切点不可用会退化为 `_cut=degraded`（见下一条）。摘要侧失败在来源处定型为 `SummaryUnavailable`（可转应急）或 `CompactionInterrupted`（映射为 `TurnDecision::Interrupted`）：auto 失败且原请求仍可发送时不得阻断该请求，强制循环结束后仍超预算则转应急 checkpoint。
 - `ImmutablePrefix`：system prompt/tools 变更必须 invalidate 并重建；每次构建/重建向 events.jsonl 写一条 `prefix_snapshot`（fingerprint/dependency_fingerprint/system_prompt/tools_json），缓存命中不得重复写。
 - `conversation.jsonl` 完整保留且只追加；压缩只推进 `context-state.json` 的活跃投影边界；`ConversationStore` 缓存只保留活跃后缀并随 append 增量更新，模型请求只能经 `active_messages()` 读取活跃投影。
 - `context-state.json` 必须同目录临时文件 + rename 原子替换，成功后更新内存并按新 `active_start` 裁剪缓存；JSONL 续写前修复未换行尾记录、以含换行的单缓冲区追加、append 经内部写锁串行化，读盘只容忍文件末尾半截记录。
@@ -80,7 +80,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - 应急 checkpoint（`trigger=emergency`、`_mode=emergency`）：仅在上一条与 LLM 摘要都不能让请求装下时提交；提交前必须①检查 runtime cancel 与 interrupt（入锁后、每次收缩前、提交前各一次，映射为 `Interrupted`）②验证活跃窗口没有未完成的工具交换（否则以 `incomplete tool exchange` 原样失败）③收缩每步严格变小并在到达地板后返回「无法继续」（不得原样返回同一文本）。候选验收（普通摘要与应急共用）必须把「候选折走 revision 后随之上场的 TodoSync」计入预算，材料优先级为固定有损标记 → 当前用户请求摘录 → 上一份摘要片段 → 最近已完成工具交换的结构化事实；`active_start` 推进到历史末尾（尾部为空），`conversation.jsonl` 只追加不重写；候选投影（摘录 + plan 派生片段 + 预演 TodoSync）必须过一遍 `estimate_openai_context_tokens` 才算提交，连最小摘录都装不下时返回 `Ok(false)`，由上层以「最小工作空间不可用」诊断 fail-closed。权威 plan/todo/conversation 不被改写。
 - 正常路径的压缩统一调用 LLM 摘要，以唯一 internal user `<compacted-summary>` checkpoint 投影，不修改 immutable system/tools prefix；`context_compact_input_reduction=true` 只精简摘要请求，不改写完整历史或热尾部。当请求已经超出输入预算、而摘要侧不可用（输入装不下、调用/超时/重试耗尽、输出不合格、候选发布前验收不通过）时，允许**不调用 LLM 的确定性应急 checkpoint** 提交同一投影（有损摘录，见下一条）；取消、持久化 fault、正式历史协议损坏不得转为应急成功。
 - auto 压力优先用同模型、同 system/tools 指纹、同 projection generation 的最近 provider prompt usage 校准（基线须为当前投影严格前缀）；preflight 始终保守本地估算，基线只存 runtime 内存；`prompt_usage_calibration_safe=false` 的后端禁用校准；支持 cache projection 的后端必须让摘要复用主请求的实际 system/tools 与历史公共缓存前缀，无法证明边界或超预算时按 reduction 配置降级。
-- 压缩与子代理请求必须使用当前活动真实模型名与别名，并复用 runtime 共享 `LlmBackend`；provider context overflow 只允许在无部分输出时触发一次压缩与一次重试（该次压缩不受"本轮已压缩过"限制）。
+- 压缩与子代理请求必须使用当前活动真实模型名与别名，并复用 runtime 共享 `LlmBackend`；provider context overflow 只在无可见输出时触发本 round 的收缩恢复：收缩次数不设硬上限（每次必须严格缩小，否则报错或转应急），且 overflow 收缩、其摘要请求与主请求共享同一 round 绝对期限（`request_timeout_secs`），overflow 后重进 stream 不得重置总期限。
 - `max_context_tokens=0` 禁用 auto/preflight 与本地输入预算上限、保留手动压缩；压缩百分比、响应预留、热尾部、摘要输出预算来自显式配置（不推断隐式档位）；有限窗口下只有 `reserve < 窗口` 是硬约束（决定响应预留），摘要输出上限与热尾部是**软目标**：切点按可用空间收紧热尾部，摘要输出 cap 按「输入 + 输出 ≤ 窗口」动态下调（低于最小实用输出转应急），因此不做 S/T 组合硬校验。
 - Agent JSONL `SdkOptions`、Python `SandboxConfig`、Rust `AgentOptions` 覆盖同一组压缩参数并映射到唯一 `Config`；runtime 创建 session 前调用 `validate_runtime_config()`。
 

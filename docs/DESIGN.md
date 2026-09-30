@@ -83,7 +83,7 @@ SubAgent 由 `SubAgentCoordinator` 在 turn 内部启动、收集和注入结果
 ```
 
 各个阶段之间有严格的依赖关系：
-- 同一用户输入的压缩可重复执行（不再有次数互锁）：auto / preflight / overflow 共用同一引擎入口，每次压缩必须严格降低请求估算；Plan transition 不强制压缩
+- 同一用户输入的压缩可重复执行（不再有次数互锁）：auto / preflight / overflow 共用同一引擎入口，不设次数上限（终止条件是严格下降/严格缩小）；发布前过净收益门控——auto 要求 ≥10% 净下降，强制路径要求严格下降；Plan transition 不强制压缩
 - 步骤 4 依赖步骤 3 收集的 thinking + text 内容
 - 步骤 6 依赖步骤 4 补充后的 calls 列表
 - 步骤 7 根据 stop_reason 决定是否循环
@@ -309,8 +309,8 @@ transcript：用户和 assistant text 保留，thinking 删除，工具参数限
 ### 防护措施
 
 **同轮可重复压缩**（`TurnCompactor::compactions_this_turn`）：auto、preflight 和 overflow 共用同一入口，不设次数上限；每次
-提交后重新投影并重估，只要求严格降低请求估算（不降即停，避免在同一投影上重复摘要）；压无可压时仍以 fail-closed
-拒绝发送超预算请求。长任务（尤其嵌入式单输入长任务）因此不再在首次压缩后必然失败。
+提交后重新投影并重估，只要求严格降低请求估算（不降即停，避免在同一投影上重复摘要），且发布前必须过净收益门控（auto ≥10% 净下降，强制路径严格下降）；压无可压时仍以 fail-closed
+拒绝发送超预算请求。长任务（尤其嵌入式单输入长任务）因此不再在首次压缩后必然失败。同轮内的 overflow 收缩、其摘要请求与主请求共享 round 绝对期限（`request_timeout_secs`）。
 
 **最后手段切点（`_cut=degraded`）**：当请求已经超出输入预算（`local_tokens > request_input_limit`）而严格切点搜索
 返回 0（热尾部目标吞掉整个窗口，或窗口只剩最近两个用户轮次）时，退化为「折到最新安全边界之前」：忽略热尾部 token
@@ -974,7 +974,7 @@ pub enum Event {
 | runtime 在 session 创建前校验上下文预算组合 | `config.rs`、`runtime/builder.rs` | 首次请求才因零输入预算或不可压缩热尾部失败 |
 | StormBreaker 窗口每用户输入重置 | `agent/turn.rs` | 跨意图抑制误判 |
 | BeliefTracker 每用户输入衰减、ToolSignalProcessor/DecisionEngine 每用户输入重置 | `agent/orchestrator.rs`、`agent/turn.rs` | 跨意图信号累积误升级 |
-| 同一用户输入的压缩必须严格降低请求估算（无次数上限，压不动即 fail-closed） | `agent/turn.rs`、`agent/compactor.rs` | 同一投影上重复摘要或死循环；超预算请求被发送 |
+| 同一用户输入的压缩不设次数上限，但发布前必须净收益达标（auto ≥10%、强制严格下降） | `agent/turn.rs`、`agent/compactor.rs` | 同一投影上重复摘要、死循环或发布越压越大的摘要 |
 | PrefixManager 校验完整依赖 fingerprint，漂移时重建 ImmutablePrefix | `agent/prefix.rs`、`session/prefix.rs` | 缓存偏移不可检测 |
 | Plan/SubAgent 延迟结果完成并执行大小保护后才能采集信号 | `agent/turn.rs`、`tools/runner.rs` | 信号观察占位结果或未保护正文 |
 | store 只缓存活跃后缀，append 增量更新 | `store.rs` | 长 session 内存持续增长或读盘性能下降 |

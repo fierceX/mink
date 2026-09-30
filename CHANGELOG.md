@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased
+## v0.6.6 (2026-09-30)
+
+### 修复：0.6.6 发布前审核整改（R01–R11）
+
+- **manual 压缩错误交付**：失败经命令通道原样返回一次，不再退出 orchestrator actor（不再出现 `channel closed`）；闩锁会话入口拒绝，零摘要调用、零状态写入。
+- **唯一前缀获取路径**：manual 无条件经 `PrefixManager::ensure()`（含依赖指纹与宿主 `PrefixSource`），删除「无前缀预算验收」降级。
+- **候选与真实请求同一投影**：新增 `estimate_candidate_tokens`（预演 TodoSync → `project_full_request` → 主请求形状估算），候选验收/应急循环/`projection_over_budget` 共用；已消费图片不重复计费；TodoSync 预演的历史 revision 领先或元数据损坏时 fail closed。
+- **应急摘录保留首尾**：按 UTF-8 字节预算保留请求头尾，收缩始终从原文重建（地板 160B），单个省略标记。
+- **派生展示严格额度**：plan/todo 展示按完整块字节计费（信封、ID、计数、省略标记都计入），4 字节字符不再超额；最小元数据装不下时明确声明不可表示。
+- **软尾部闭环**：切点目标取 `min(配置 tail, 可用空间)`（扣除固定前缀、派生展示与摘要空间）；manual 传真实投影估算；cache-aligned 路径改用动态输出 cap。
+- **净收益发布门控**：auto 要求 ≥10% 净下降、强制路径要求严格下降，不发布越压越大的摘要。
+- **round 绝对期限**：stream 重试、overflow 收缩与其摘要请求共享同一 `request_timeout_secs` 期限；删除隐藏的 8 次强制压缩、3 次 overflow 收缩常量（改为严格下降终止，不设次数上限）。
+- **provider HTTP 超时**：`with_http_timeout_secs` 丢弃已缓存 client（用过一次后改值也生效）；新增本地 SSE 行为测试；Python `SandboxConfig.provider_http_timeout_secs`；server 层合并测试。
+- **Linux 父死亡回收**：`PR_SET_PDEATHSIG` 检查返回值并在注册后复检父身份；bwrap argv 抽成纯函数并有参数测试；新增 Linux 进程树集成测试（父死/直接杀 bwrap 两条路径）与 CI 强制运行。
+- **诊断**：应急 checkpoint 单独计数并出现在「本输入 committed」诊断中；「最小工作空间不可用」由失败原因驱动；摘要不可用提示改为稳定原因码（`retry_exhausted`/`timeout`/`budget`/`invalid_output`/`upstream`/`unavailable`）。
 
 ### 修复：应急压缩的六项审核问题
 
@@ -43,9 +57,9 @@
 
 ### 变更：同一用户输入可重复压缩（取消单轮一次互锁）
 
-- `TurnCompactor` 的 `compacted_this_turn` 布尔互锁改为计数（`compactions_this_turn`）：auto / preflight / overflow 不再按「每个用户输入一次」封顶；每次压缩必须严格降低请求估算（不降即停，避免在同一投影上重复摘要），无安全切点 / 收益不足时仍以 fail-closed 拒绝发送超预算请求。
+- `TurnCompactor` 的 `compacted_this_turn` 布尔互锁改为计数（`compactions_this_turn`）：auto / preflight / overflow 不再按「每个用户输入一次」封顶；每次压缩必须严格降低请求估算（不降即停，避免在同一投影上重复摘要），并在发布前过净收益门控（auto 要求 ≥10% 净下降，强制路径要求严格下降），否则不提交；无安全切点 / 收益不足时仍以 fail-closed 拒绝发送超预算请求。
 - `prepare_request` 改为「压到装得下为止」：估算超硬闸门时反复强制 preflight，每轮重新投影与重估；错误消息现在带上本轮已提交压缩次数、强制尝试次数与最后一次跳过原因（便于嵌入侧区分「预算用尽请续跑」与真故障）。
-- provider context overflow 恢复不再要求「本轮尚未压缩」：只在无可见输出时触发，且每个输入仍最多一次压缩 + 一次重试。
+- provider context overflow 恢复不再要求「本轮尚未压缩」：只在无可见输出时触发；收缩次数不设硬上限（每次必须严格缩小，否则报错或转应急），并与主请求共享同一 round 绝对期限（`request_timeout_secs`），重进 stream 不重置总期限。
 - 最小收益检查分档：auto 保持「节省 < 10% 跳过」；preflight / overflow 在请求已经超预算时只要真能省（`saved > 0`）就压——否则「需要的削减量小于阈值」会变成无法恢复的必然失败。
 - `compact` 事件 `result` 串追加 `_compactions_this_turn=<n>`（本轮第几次压缩，1-based；`manual` 等输入外调用不带该字段）。
 - **最后手段切点 `_cut=degraded`**：请求已经超出输入预算（`local_tokens > request_input_limit`）而严格切点搜索返回 0 时（热尾部目标吞掉整个窗口，或窗口只剩最近两个用户轮次），退化为「折到最新安全边界之前」——忽略热尾部 token 目标与「保留最近两条真实 user 消息」守卫，折叠内容照常进摘要（当前请求仅以摘要文本保留），不再直接让本轮 fail-closed。未超预算的 auto/manual 路径不启用。

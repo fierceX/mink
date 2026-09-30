@@ -444,7 +444,8 @@ TodoWrite / TodoAdvance 的成功结果都在 conversation 尾部追加两部分
 `<todo-event>`，以及包含 revision、状态计数和当前 active batch 的 `<current-todos>` 紧凑
 物化投影。它们不会在每次请求前重新插入状态，因此不会因 todo 更新改写已有消息前缀。
 恢复、fork 或压缩后若文件 revision 领先活跃历史，runtime 追加一次 TodoSync；历史 revision
-领先文件时 fail closed。
+领先文件时 fail closed。`TodoRead` 返回完整权威内容；而 `<todo-sync>`/`<current-todos>`
+是**有损展示**：额度不足时按条目截短正文（revision 与状态计数保持真实），不能当作权威读取。
 
 状态保存在 session 的 `todos.json`，包含格式版本、revision、下一个 ID 序号和条目数组。
 文件通过同目录临时文件和 rename 原子替换；缺失文件表示空列表，损坏或不支持的版本会在
