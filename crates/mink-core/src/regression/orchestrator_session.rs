@@ -432,7 +432,7 @@ async fn manual_compaction_prefix_writer_failure_delivers_error_and_recovers() -
     .await?;
     for index in 0..3 {
         h.store
-            .add_user(&format!("user history {index}: {}", "x".repeat(256)))
+            .add_user(&format!("user history {index}: {}", "x".repeat(5_000)))
             .await?;
         h.store
             .add_assistant(&format!("assistant history {index}"), "", &[])

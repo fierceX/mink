@@ -350,7 +350,10 @@ async fn context_overflow_after_visible_output_is_not_recoverable() -> anyhow::R
     let mut executor = TurnExecutor::new(ctx);
 
     let window = super::format_recovery::FormatRecoveryWindow::new(10, 3);
-    let error = match executor.stream_llm_response(&window, &[], "", &[], 0).await {
+    let error = match executor
+        .stream_llm_response(&window, &[], "", &[], 0, None)
+        .await
+    {
         Ok(_) => panic!("overflow after partial output should fail"),
         Err(error) => error,
     };
@@ -682,6 +685,99 @@ async fn provider_overflow_recovers_after_compaction_in_the_same_input() -> anyh
         backend.compactions() >= 2,
         "overflow recovery must be able to compact after an earlier compaction: {}",
         backend.compactions()
+    );
+    Ok(())
+}
+
+// ── round 绝对期限（同一逻辑请求不得被 overflow 恢复延长） ──
+
+struct PanicOnStreamBackend;
+
+#[async_trait::async_trait]
+impl LlmBackend for PanicOnStreamBackend {
+    fn name(&self) -> &str {
+        "panic-on-stream"
+    }
+
+    async fn stream(
+        &self,
+        _request: crate::llm::client::LlmRequest,
+    ) -> Result<crate::llm::client::LlmResponseStream> {
+        panic!("no stream may be opened after the round deadline expired")
+    }
+}
+
+/// R08：round 绝对期限已过期时，连一次流都不得开（request_timeout）。
+#[tokio::test]
+async fn expired_round_deadline_prevents_any_new_stream() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "expired-round-deadline",
+        |cfg| {
+            cfg.llm_recovery.request_timeout_secs = Some(1);
+        },
+        Arc::new(PanicOnStreamBackend),
+    )
+    .await?;
+    let mut executor = TurnExecutor::new(ctx);
+    let window = super::format_recovery::FormatRecoveryWindow::new(10, 3);
+    let expired = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    let error = match executor
+        .stream_llm_response(&window, &[], "", &[], 0, Some(expired))
+        .await
+    {
+        Ok(_) => panic!("an expired round deadline must fail before opening a stream"),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains("request_timeout"),
+        "{error:#}"
+    );
+    Ok(())
+}
+
+/// R08：overflow 恢复共享 round 绝对期限：摘要等到期限耗尽后不再开新的主请求，
+/// 总期限不被第二次建流重置。
+#[tokio::test]
+async fn overflow_recovery_shares_round_deadline() -> anyhow::Result<()> {
+    let backend = SummaryOutageBackend::new(
+        SummaryResponse::Pending,
+        vec![
+            CompactionStep::ProviderError("maximum context length exceeded"),
+            CompactionStep::Text("recovered"),
+        ],
+    );
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "overflow-round-deadline",
+        |cfg| {
+            cfg.max_context_tokens = 64_000;
+            cfg.context_reserve_tokens = 8_000;
+            cfg.context_compact_tail_tokens = 1;
+            cfg.llm_recovery.request_timeout_secs = Some(1);
+            cfg.llm_recovery.request_max_retries = 0;
+        },
+        backend.clone(),
+    )
+    .await?;
+    ctx.store
+        .add_user(&format!("seed {}", "x".repeat(1_000)))
+        .await?;
+    ctx.store
+        .add_assistant(&format!("progress {}", "y".repeat(1_000)), "", &[])
+        .await?;
+    ctx.store.add_user("keep going").await?;
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let error = executor
+        .execute("keep going", None)
+        .await
+        .expect_err("the expired round deadline must end the turn");
+    assert!(
+        format!("{error:#}").contains("request_timeout"),
+        "{error:#}"
+    );
+    assert_eq!(
+        backend.agent_calls(),
+        1,
+        "no second main stream may open after the round deadline"
     );
     Ok(())
 }

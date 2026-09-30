@@ -230,9 +230,8 @@ impl TurnExecutor {
 // `prepare_request` 的强制压缩循环不设次数上限：每次迭代必须严格降低投影估算
 // （否则 break），有限整数度量自然终止；不得用隐藏常量给用户输入封顶。
 
-/// provider overflow 后的请求内收缩上限：每次都必须让请求严格变小（本地估算说
-/// 装得下、provider 却拒绝时，只靠本地闸门无法恢复）。
-const MAX_OVERFLOW_SHRINK_ATTEMPTS: usize = 3;
+// 一个 round 的 overflow 收缩不设次数上限：每次收缩必须严格缩小（否则报错/
+// 转应急），并由 round 绝对期限约束总时长；不得用隐藏常量给恢复封顶。
 
 impl TurnExecutor {
     /// Execute a full turn: send user input, stream response, execute tools, decide next.
@@ -248,11 +247,12 @@ impl TurnExecutor {
         messages: &mut Vec<serde_json::Value>,
         system_prompt: &mut String,
         tools_json: &mut Vec<serde_json::Value>,
+        round_deadline: Option<std::time::Instant>,
     ) -> Result<(Vec<serde_json::Value>, usize)> {
         // Phase 0: 上下文压缩（auto 按压力阈值触发，可多次）。可选提前压缩失败不得
         // 阻断本来可以发送的请求：只有摘要不可用类错误被放行并继续。
         match self
-            .try_compact("auto", messages, system_prompt, tools_json)
+            .try_compact("auto", messages, system_prompt, tools_json, round_deadline)
             .await
         {
             Ok(_) => {}
@@ -280,7 +280,13 @@ impl TurnExecutor {
         while estimated_tokens > input_limit {
             let before = estimated_tokens;
             let compacted = match self
-                .try_compact("preflight", messages, system_prompt, tools_json)
+                .try_compact(
+                    "preflight",
+                    messages,
+                    system_prompt,
+                    tools_json,
+                    round_deadline,
+                )
                 .await
             {
                 Ok((compacted, detail)) => {
@@ -414,8 +420,22 @@ impl TurnExecutor {
             turn += 1;
             self.local.round = turn as u32;
 
+            // 一个 round = 一个逻辑请求：绝对期限在 round 入口创建，stream、overflow
+            // 收缩与它们的摘要请求都共享；`request_timeout_secs` 未配置时为 None。
+            let round_deadline = self
+                .ctx
+                .config
+                .llm_recovery
+                .request_timeout_secs
+                .map(|secs| std::time::Instant::now() + std::time::Duration::from_secs(secs));
+
             let (mut request_messages, current_context_tokens) = match self
-                .prepare_request(&mut messages, &mut system_prompt, &mut tools_json)
+                .prepare_request(
+                    &mut messages,
+                    &mut system_prompt,
+                    &mut tools_json,
+                    round_deadline,
+                )
                 .await
             {
                 Ok(prepared) => prepared,
@@ -429,8 +449,9 @@ impl TurnExecutor {
                 Err(error) => return Err(error),
             };
 
-            // provider overflow 的请求内收缩额度只作用于**当前逻辑请求**（本 round）：
-            // 长任务里每个 round 都应有自己的恢复机会，不能共享一个终身额度。
+            // provider overflow 的收缩额度只作用于**当前逻辑请求**（本 round）：
+            // 长任务里每个 round 都应有自己的恢复机会，不能共享一个终身额度；
+            // 次数不再设硬上限（每轮必须严格缩小），总时长由 round 绝对期限约束。
             let mut overflow_shrink_attempts = 0usize;
             // Phase 1: LLM 流式响应（同 round 内可含多次 attempt 重试）
             let stream_output = loop {
@@ -441,6 +462,7 @@ impl TurnExecutor {
                         &system_prompt,
                         &tools_json,
                         current_context_tokens,
+                        round_deadline,
                     )
                     .await
                 {
@@ -451,10 +473,7 @@ impl TurnExecutor {
                         self.ctx.display.render_stop("interrupted");
                         return Ok((TurnDecision::Interrupted, effects));
                     }
-                    Err(error)
-                        if error.downcast_ref::<ContextOverflowError>().is_some()
-                            && overflow_shrink_attempts < MAX_OVERFLOW_SHRINK_ATTEMPTS =>
-                    {
+                    Err(error) if error.downcast_ref::<ContextOverflowError>().is_some() => {
                         overflow_shrink_attempts += 1;
                         // 被拒请求的完整本地估算与固定前缀开销：可变额度折半作为
                         // 本次更小的目标（固定前缀不参与折半）。
@@ -477,6 +496,7 @@ impl TurnExecutor {
                                 &mut messages,
                                 &mut system_prompt,
                                 &mut tools_json,
+                                round_deadline,
                             )
                             .await
                         {
@@ -551,7 +571,7 @@ impl TurnExecutor {
                             return Err(error);
                         }
                         self.ctx.display.render_info(&format!(
-                            "Context overflow detected; shrank the request ({} -> {} tokens) and retrying.",
+                            "Context overflow detected; shrank the request ({} -> {} tokens) and retrying (round shrink #{overflow_shrink_attempts}).",
                             rejected_tokens, retried_tokens
                         ));
                     }

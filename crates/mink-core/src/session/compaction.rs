@@ -836,6 +836,34 @@ impl CompactionEngine {
         target: LlmModelTarget<'_>,
         source_fingerprint: Option<&str>,
         current_projection: Option<&LlmCacheProjection>,
+        compaction_ordinal: Option<usize>,
+        main_request: Option<MainRequestShape<'_>>,
+        todo_state: Option<TodoCandidateState<'_>>,
+    ) -> Result<(bool, String)> {
+        self.evaluate_and_compact_with_prefix_bounded(
+            trigger,
+            context_tokens,
+            target,
+            source_fingerprint,
+            current_projection,
+            compaction_ordinal,
+            main_request,
+            todo_state,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::evaluate_and_compact_with_prefix`] 带 round 绝对期限：摘要请求取
+    /// 「自身预算与剩余总期限的较小值」，同一逻辑请求内的 overflow 恢复不得延长总期限。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn evaluate_and_compact_with_prefix_bounded(
+        &self,
+        trigger: &str,
+        context_tokens: usize,
+        target: LlmModelTarget<'_>,
+        source_fingerprint: Option<&str>,
+        current_projection: Option<&LlmCacheProjection>,
         // Ordinal of this compaction inside the current user input (1-based),
         // recorded in the `compact` event. `None` for out-of-turn callers.
         compaction_ordinal: Option<usize>,
@@ -845,6 +873,7 @@ impl CompactionEngine {
         main_request: Option<MainRequestShape<'_>>,
         // todo 候选状态：候选折走 revision 时必须把预演 TodoSync 计入验收。
         todo_state: Option<TodoCandidateState<'_>>,
+        round_deadline: Option<std::time::Instant>,
     ) -> Result<(bool, String)> {
         // Latched session: refuse before any summary request or state write.
         self.fault.check()?;
@@ -909,6 +938,7 @@ impl CompactionEngine {
                 (!state.summary.is_empty()).then_some(state.summary.as_str()),
                 state.active_start > 0,
                 target,
+                round_deadline,
             )
             .await?;
         if self.interrupt.load(Ordering::SeqCst) {
@@ -918,6 +948,7 @@ impl CompactionEngine {
         // 候选发布前完整预算验收：摘要 + 动态 checkpoint + 保留尾部必须能装进主请求
         // 预算，否则不提交（上层可转确定性应急），避免「摘要成功但请求反而变大」在
         // 外层以失败收场。真实的请求形状由调用方给出。
+        let mut net_after: Option<usize> = None;
         if let Some(shape) = main_request {
             let mut candidate = self.checkpoint_prefix(&summary)?;
             candidate.extend_from_slice(kept);
@@ -925,12 +956,22 @@ impl CompactionEngine {
             // 真实请求共用完整投影（图片单次消费等），否则提交后消息会再次超窗。
             let candidate_tokens =
                 estimate_candidate_tokens(shape, &candidate, todo_state.as_ref())?;
+            net_after = Some(candidate_tokens);
             let input_limit = request_input_limit(&self.config);
             if input_limit != usize::MAX && candidate_tokens > input_limit {
                 return Err(SummaryUnavailable::error(format!(
                     "compaction candidate remains over the request input budget: {candidate_tokens} > {input_limit} tokens"
                 )));
             }
+        }
+        // 净收益门控：不得发布比原请求更大的候选（auto 要求 ≥10% 净下降）。
+        if let Some(after) = net_after
+            && !net_benefit_sufficient(trigger, context_tokens, after)
+        {
+            return Ok((
+                false,
+                format!("summary has no net benefit: {context_tokens} -> {after} tokens"),
+            ));
         }
 
         self.validate_conversation_messages(kept, target.model)?;
@@ -1125,6 +1166,7 @@ impl CompactionEngine {
         previous_summary: Option<&str>,
         history_already_compacted: bool,
         target: LlmModelTarget<'_>,
+        round_deadline: Option<std::time::Instant>,
     ) -> Result<(String, SummaryInputMeta)> {
         let request_cancel = self.cancel.linked_child_token();
         let watcher_cancel = request_cancel.clone();
@@ -1150,6 +1192,7 @@ impl CompactionEngine {
                 history_already_compacted,
                 target,
                 request_cancel,
+                round_deadline,
             )
             .await;
         watcher.abort();
@@ -1160,6 +1203,7 @@ impl CompactionEngine {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_summary_call_with_cancel(
         &self,
         active: &[Value],
@@ -1168,6 +1212,7 @@ impl CompactionEngine {
         history_already_compacted: bool,
         target: LlmModelTarget<'_>,
         request_cancel: crate::cancel::CancellationToken,
+        round_deadline: Option<std::time::Instant>,
     ) -> Result<(String, SummaryInputMeta)> {
         use crate::llm::recovery::{self, RequestRetryState, RequestTerminal, UpstreamFailureKind};
 
@@ -1190,7 +1235,7 @@ impl CompactionEngine {
         // yet unusable summary (empty output, tool call, invalid stop reason)
         // is retried with a purpose correction appended to this temporary
         // request only — never written to the parent conversation.
-        let mut retry = RequestRetryState::new(&self.config.llm_recovery);
+        let mut retry = RequestRetryState::new_bounded(&self.config.llm_recovery, round_deadline);
         // Same deadline for establishment, consumption and every wait.
         let request_deadline = retry.deadline();
         let mut attempt: u32 = 0;

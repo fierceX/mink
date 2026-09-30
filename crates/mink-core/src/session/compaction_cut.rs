@@ -110,6 +110,20 @@ pub(crate) fn floor_char_boundary(text: &str, mut index: usize) -> usize {
     index
 }
 
+/// 发布前的真实净收益判定：auto 要求 ≥10% 净下降（摘要/checkpoint/TodoSync 都计入）；
+/// 强制路径（manual/preflight/overflow）只要严格下降。`before == 0` 表示调用方没有
+/// 真实估算（旧测试入口），不做门控。
+pub(crate) fn net_benefit_sufficient(trigger: &str, before: usize, after: usize) -> bool {
+    if before == 0 {
+        return true;
+    }
+    if trigger == "auto" {
+        after.saturating_mul(10) <= before.saturating_mul(9)
+    } else {
+        after < before
+    }
+}
+
 pub(crate) fn read_active_plan_checkpoint(
     summary_path: &Path,
     allowance_tokens: usize,

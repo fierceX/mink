@@ -91,6 +91,29 @@ impl LlmBackend for CapturingSummaryBackend {
     }
 }
 
+struct HugeSummaryBackend;
+
+#[async_trait::async_trait]
+impl LlmBackend for HugeSummaryBackend {
+    fn name(&self) -> &str {
+        "huge-summary"
+    }
+
+    async fn stream(&self, _request: LlmRequest) -> Result<crate::llm::client::LlmResponseStream> {
+        Ok(crate::llm::client::LlmResponseStream {
+            events: Box::pin(futures::stream::iter(vec![
+                Ok(Event::Text(TextEvent {
+                    content: "S".repeat(400_000),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ])),
+            attempt_count: 1,
+        })
+    }
+}
+
 fn summary_backend() -> Arc<dyn LlmBackend> {
     Arc::new(MockLlmBackend::new(
             "summary-model",
@@ -1468,6 +1491,74 @@ fn candidate_todo_sync_fails_closed_on_ahead_or_broken_revisions() {
         candidate_todo_sync(&broken, Some(&todo)).is_err(),
         "corrupt metadata must fail closed instead of defaulting to revision 0"
     );
+}
+
+/// R07：净收益门控的边界（auto ≥10%，强制路径严格下降）。
+#[test]
+fn net_benefit_gate_boundaries() {
+    assert!(net_benefit_sufficient("auto", 100, 90));
+    assert!(net_benefit_sufficient("auto", 100, 89));
+    assert!(!net_benefit_sufficient("auto", 100, 91));
+    assert!(!net_benefit_sufficient("auto", 100, 100));
+    assert!(!net_benefit_sufficient("auto", 100, 101));
+    assert!(!net_benefit_sufficient("auto", 100, 99));
+    assert!(net_benefit_sufficient("preflight", 100, 99));
+    assert!(net_benefit_sufficient("manual", 100, 99));
+    assert!(net_benefit_sufficient("overflow", 100, 99));
+    assert!(!net_benefit_sufficient("preflight", 100, 100));
+    assert!(!net_benefit_sufficient("manual", 100, 100));
+    // 没有真实估算的旧入口不做门控。
+    assert!(net_benefit_sufficient("auto", 0, usize::MAX));
+}
+
+/// R07：摘要 + checkpoint 比原请求更大时不得发布，状态不变。
+#[tokio::test]
+async fn oversized_net_summary_is_not_published() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "net-benefit-rejection",
+        |config| {
+            config.max_context_tokens = 200_000;
+            config.context_reserve_tokens = 8_000;
+            config.context_compact_tail_tokens = 1;
+        },
+        Arc::new(HugeSummaryBackend),
+    )
+    .await?;
+    for index in 0..4 {
+        ctx.store
+            .add_user(&format!("request {index}: {}", "x".repeat(200)))
+            .await?;
+        ctx.store
+            .add_assistant(&format!("progress {index}"), "", &[])
+            .await?;
+    }
+    let shape = MainRequestShape {
+        system_prompt: "",
+        tools: &[],
+    };
+    let before = estimate_candidate_tokens(shape, &ctx.compaction.active_messages().await?, None)?;
+    let (compacted, reason) = ctx
+        .compaction
+        .evaluate_and_compact_with_prefix(
+            "preflight",
+            before,
+            LlmModelTarget::new("flash", None),
+            None,
+            None,
+            None,
+            Some(shape),
+            None,
+        )
+        .await?;
+    assert!(!compacted, "{reason}");
+    assert!(reason.contains("no net benefit"), "{reason}");
+    let after = estimate_candidate_tokens(shape, &ctx.compaction.active_messages().await?, None)?;
+    assert_eq!(
+        after, before,
+        "a rejected summary must not change the projection"
+    );
+    assert!(ctx.compaction.read_summary().await.is_none());
+    Ok(())
 }
 
 #[tokio::test]

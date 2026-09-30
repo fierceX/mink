@@ -84,17 +84,19 @@ impl super::TurnExecutor {
         messages: &mut Vec<serde_json::Value>,
         system_prompt: &mut String,
         tools_json: &mut Vec<serde_json::Value>,
+        round_deadline: Option<std::time::Instant>,
     ) -> Result<(bool, String)> {
         let model_name = self.model_name.clone();
         let model_alias = self.model_alias.clone();
         let (compacted, detail) = self
             .compactor
-            .maybe_compact(
+            .maybe_compact_bounded(
                 trigger,
                 messages,
                 system_prompt,
                 tools_json,
                 LlmModelTarget::new(&model_name, model_alias.as_deref()),
+                round_deadline,
             )
             .await?;
         if compacted {
@@ -147,6 +149,7 @@ impl super::TurnExecutor {
         system_prompt: &str,
         tools_json: &[serde_json::Value],
         current_context_tokens: usize,
+        round_deadline: Option<std::time::Instant>,
     ) -> anyhow::Result<StreamOutput> {
         let policy = self.ctx.config.llm_recovery;
         let prepared = crate::llm::client::prepare_llm_request(
@@ -159,7 +162,7 @@ impl super::TurnExecutor {
             system_prompt,
         )
         .await?;
-        let mut retry = RequestRetryState::new(&policy);
+        let mut retry = RequestRetryState::new_bounded(&policy, round_deadline);
         // The same deadline covers request establishment, stream consumption
         // and every backoff wait — a retry never extends it.
         let request_deadline = retry.deadline();

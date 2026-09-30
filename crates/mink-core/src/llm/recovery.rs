@@ -290,13 +290,26 @@ pub(crate) struct RequestRetryState {
 pub(crate) struct DeadlineExceeded;
 
 impl RequestRetryState {
-    pub(crate) fn new(policy: &crate::config::LlmRecoveryPolicy) -> Self {
+    /// Retry state whose deadline is the earlier of the configured
+    /// per-logical-request deadline and an absolute round deadline: overflow
+    /// re-projections inside one round must not extend the total budget.
+    pub(crate) fn new_bounded(
+        policy: &crate::config::LlmRecoveryPolicy,
+        absolute_deadline: Option<Instant>,
+    ) -> Self {
+        let own = policy
+            .request_timeout_secs
+            .map(|secs| Instant::now() + Duration::from_secs(secs));
+        let deadline = match (own, absolute_deadline) {
+            (Some(own), Some(absolute)) => Some(own.min(absolute)),
+            (Some(own), None) => Some(own),
+            (None, Some(absolute)) => Some(absolute),
+            (None, None) => None,
+        };
         Self {
             max_retries: policy.request_max_retries,
             used_retries: 0,
-            deadline: policy
-                .request_timeout_secs
-                .map(|secs| Instant::now() + Duration::from_secs(secs)),
+            deadline,
         }
     }
 
@@ -561,6 +574,34 @@ mod tests {
             .retry_wait(0, Some(Duration::from_secs(30)), 0.5)
             .expect("no deadline");
         assert_eq!(waited, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn bounded_retry_state_uses_the_earlier_deadline() {
+        let policy = crate::config::LlmRecoveryPolicy {
+            request_max_retries: 2,
+            request_timeout_secs: Some(600),
+            ..Default::default()
+        };
+        // 绝对期限更早：立即过期且拒绝重试。
+        let expired =
+            RequestRetryState::new_bounded(&policy, Some(Instant::now() - Duration::from_secs(1)));
+        assert!(expired.deadline_expired());
+        assert!(!expired.can_retry());
+        // 无绝对期限时退回自身预算。
+        let own = RequestRetryState::new_bounded(&policy, None);
+        assert!(!own.deadline_expired());
+        assert!(own.can_retry());
+        // 未配置总期限时，绝对期限仍生效。
+        let no_policy = crate::config::LlmRecoveryPolicy {
+            request_timeout_secs: None,
+            ..Default::default()
+        };
+        let absolute = RequestRetryState::new_bounded(
+            &no_policy,
+            Some(Instant::now() + Duration::from_secs(30)),
+        );
+        assert!(absolute.deadline().is_some());
     }
 
     #[test]

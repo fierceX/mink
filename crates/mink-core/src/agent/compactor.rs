@@ -96,16 +96,17 @@ impl TurnCompactor {
         self.compactions_this_turn
     }
 
-    /// One compaction attempt. Returns `(compacted, detail)` where `detail` is
-    /// the engine's success summary or its skip reason, so callers can report
-    /// why a request could not be reduced.
-    pub async fn maybe_compact(
+    /// [`Self::maybe_compact_bounded`] 带 round 绝对期限：本次压缩（含摘要请求）与主请求
+    /// 共享同一总期限，overflow 后的重复压缩不得延长它。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn maybe_compact_bounded(
         &mut self,
         trigger: &str,
         messages: &mut Vec<serde_json::Value>,
         system_prompt: &mut String,
         tools_json: &mut Vec<serde_json::Value>,
         target: LlmModelTarget<'_>,
+        round_deadline: Option<std::time::Instant>,
     ) -> Result<(bool, String)> {
         // Same projection as the real request: consumed image references
         // become text citations FIRST, so the compaction estimate counts
@@ -141,7 +142,7 @@ impl TurnCompactor {
         let (did_compact, detail) = self
             .ctx
             .compaction
-            .evaluate_and_compact_with_prefix(
+            .evaluate_and_compact_with_prefix_bounded(
                 trigger,
                 local_tokens,
                 target,
@@ -154,6 +155,7 @@ impl TurnCompactor {
                     tools: tools_json,
                 }),
                 todo_candidate_state(&self.ctx, &self.ctx.todo_store.snapshot()),
+                round_deadline,
             )
             .await?;
         if did_compact {

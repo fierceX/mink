@@ -57,12 +57,13 @@ async fn maybe_compact_attempts_again_after_a_successful_compaction() -> anyhow:
     let target = LlmModelTarget::new("test-model", None);
 
     let (first, detail) = compactor
-        .maybe_compact(
+        .maybe_compact_bounded(
             "manual",
             &mut messages,
             &mut system_prompt,
             &mut tools,
             target,
+            None,
         )
         .await?;
     assert!(first, "the seeded history must compact: {detail}");
@@ -74,12 +75,13 @@ async fn maybe_compact_attempts_again_after_a_successful_compaction() -> anyhow:
         .await?;
     messages = ctx.store.lines().await?;
     let (second, detail) = compactor
-        .maybe_compact(
+        .maybe_compact_bounded(
             "preflight",
             &mut messages,
             &mut system_prompt,
             &mut tools,
             target,
+            None,
         )
         .await?;
     assert!(
@@ -128,12 +130,13 @@ async fn maybe_compact_success_refreshes_context_and_prefix() -> anyhow::Result<
     let mut tools = Vec::new();
 
     let (did_compact, detail) = compactor
-        .maybe_compact(
+        .maybe_compact_bounded(
             "manual",
             &mut messages,
             &mut system_prompt,
             &mut tools,
             LlmModelTarget::new("test-model", None),
+            None,
         )
         .await?;
 
