@@ -793,6 +793,41 @@ async fn overflow_recovery_shares_round_deadline() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// F03 反面：round 期限尚未耗尽时，独立的摘要失败仍允许应急 checkpoint。
+#[tokio::test]
+async fn round_deadline_alive_still_allows_emergency_on_summary_failure() -> anyhow::Result<()> {
+    let backend = SummaryOutageBackend::new(
+        SummaryResponse::Unusable,
+        vec![CompactionStep::Text("done")],
+    );
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "round-deadline-alive-emergency",
+        |cfg| {
+            cfg.max_context_tokens = 200_000;
+            cfg.context_reserve_tokens = 8_000;
+            cfg.context_compact_pct = 50;
+            cfg.context_compact_tail_tokens = 1_000;
+            cfg.llm_recovery.request_max_retries = 0;
+            cfg.llm_recovery.request_timeout_secs = Some(30);
+        },
+        backend.clone(),
+    )
+    .await?;
+    seed_history(&ctx, 4, 72_000).await?;
+
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let (decision, _) = executor
+        .execute("carry on with the remaining work", None)
+        .await?;
+    assert_eq!(decision, TurnDecision::Stop);
+    assert!(backend.summary_calls() >= 1);
+    assert_eq!(executor.compactor.emergency_commits_this_turn(), 1);
+    ctx.flush_event_log().await?;
+    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    assert!(events.contains("trigger=emergency"), "{events}");
+    Ok(())
+}
+
 // ── 摘要不可用 / 候选预算 / 中断：应急 checkpoint ──
 
 /// 摘要请求的可控结果。

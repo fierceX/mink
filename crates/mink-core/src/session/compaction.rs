@@ -997,10 +997,17 @@ impl CompactionEngine {
         if over_budget {
             let strict_fits = match main_request {
                 Some(shape) if cut > 0 => {
-                    let kept_candidate = active[cut..].to_vec();
-                    let kept_tokens =
-                        estimate_candidate_tokens(shape, &kept_candidate, todo_state.as_ref())?;
-                    kept_tokens.saturating_add(MIN_PRACTICAL_SUMMARY_TOKENS) <= limit
+                    // 复用真实候选前缀（含 active-plan checkpoint）与摘要消息包装，
+                    // 再为最小可用摘要正文预留空间：否则「裸尾部」看似可行，加上
+                    // Plan 包装后才发现超额，白白丢掉可行的 degraded 摘要机会。
+                    let mut candidate = self.checkpoint_prefix("")?;
+                    candidate.push(compacted_summary_message(
+                        &"x".repeat(MIN_PRACTICAL_SUMMARY_TOKENS.saturating_mul(3)),
+                    ));
+                    candidate.extend_from_slice(&active[cut..]);
+                    let candidate_tokens =
+                        estimate_candidate_tokens(shape, &candidate, todo_state.as_ref())?;
+                    candidate_tokens <= limit
                 }
                 _ => cut > 0,
             };

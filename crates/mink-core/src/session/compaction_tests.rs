@@ -1619,6 +1619,78 @@ async fn over_budget_strict_candidate_falls_back_to_budget_feasible_cut() -> any
     Ok(())
 }
 
+/// G01：严格可行性预判必须复用真实候选前缀（含 active-plan checkpoint）
+/// 与摘要消息包装；长 Plan 存在时不能因「裸尾部可行」而放弃 degraded 摘要。
+#[tokio::test]
+async fn strict_feasibility_accounts_for_active_plan() -> anyhow::Result<()> {
+    use crate::session::compaction::request_input_limit;
+    let backend = Arc::new(CapturingSummaryBackend::default());
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "strict-feasibility-plan",
+        |cfg| {
+            cfg.max_context_tokens = 20_000;
+            cfg.context_reserve_tokens = 4_000;
+            cfg.context_compact_tail_tokens = 1;
+        },
+        backend.clone(),
+    )
+    .await?;
+    // 长 Plan（6000 ASCII 字符）通过 PlanStore 建立，不直接写运行时文件。
+    ctx.plan_store
+        .set_draft(&format!("# Plan\n{}", "p".repeat(6_000)), 64_000)?;
+    ctx.plan_store.confirm()?;
+    let plan_before = std::fs::read_to_string(&ctx.plan_path)?;
+    assert!(plan_before.contains(&"p".repeat(1_000)));
+
+    // 旧轮次 + 两个 22,000 字符 user 轮次：裸尾部看似可行，加上 Plan 后超额。
+    ctx.store
+        .add_user(&format!("old {}", "o".repeat(6_000)))
+        .await?;
+    ctx.store.add_assistant("old progress", "", &[]).await?;
+    ctx.store
+        .add_user(&format!("first {}", "x".repeat(22_000)))
+        .await?;
+    ctx.store.add_assistant("progress", "", &[]).await?;
+    ctx.store
+        .add_user(&format!("second {}", "y".repeat(22_000)))
+        .await?;
+    ctx.store.add_assistant("progress two", "", &[]).await?;
+    let shape = MainRequestShape {
+        system_prompt: "",
+        tools: &[],
+    };
+    let active = ctx.compaction.active_messages().await?;
+    let context_tokens = estimate_candidate_tokens(shape, &active, None)?;
+    assert!(
+        context_tokens > request_input_limit(&ctx.config),
+        "the fixture must be over budget: {context_tokens}"
+    );
+    let (compacted, detail) = ctx
+        .compaction
+        .evaluate_and_compact_with_prefix_bounded(
+            "preflight",
+            context_tokens,
+            LlmModelTarget::new("flash", None),
+            None,
+            None,
+            None,
+            Some(shape),
+            None,
+            None,
+        )
+        .await?;
+    assert!(compacted, "{detail}");
+    assert!(detail.contains("_mode=summary"), "{detail}");
+    assert!(detail.contains("_cut=degraded"), "{detail}");
+    assert_eq!(backend.requests.lock().unwrap().len(), 1);
+
+    // 权威 Plan 与原始历史不得被改写。
+    assert_eq!(std::fs::read_to_string(&ctx.plan_path)?, plan_before);
+    let history = serde_json::to_string(&ctx.store.lines().await?)?;
+    assert!(history.contains(&"y".repeat(1_000)));
+    Ok(())
+}
+
 /// F03：共享 round 期限耗尽后，摘要评估与应急都必须拒绝发布；取消优先于期限。
 #[tokio::test]
 async fn expired_round_deadline_blocks_emergency_publish() -> anyhow::Result<()> {
