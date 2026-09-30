@@ -335,9 +335,18 @@ async fn preflight_rejects_context_that_cannot_fit_the_request_budget() -> anyho
         .to_string();
     assert!(error.contains("over the request input budget"), "{error}");
     // 诊断必须带上本轮压缩尝试的事实（嵌入侧据此区分「预算用尽请续跑」与真故障）。
-    assert!(error.contains("compaction(s) committed"), "{error}");
+    assert!(error.contains("summary compaction(s)"), "{error}");
+    assert!(
+        error.contains("emergency checkpoint(s) committed"),
+        "{error}"
+    );
     assert!(error.contains("forced attempt(s)"), "{error}");
     assert!(error.contains("(last: "), "{error}");
+    // R11：最小摘录都装不下时必须给出明确原因（不再只在 committed 时附加提示）。
+    assert!(
+        error.contains("minimal working space unavailable"),
+        "{error}"
+    );
     Ok(())
 }
 

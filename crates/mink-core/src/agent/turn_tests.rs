@@ -958,6 +958,8 @@ async fn summary_outage_falls_back_to_emergency_checkpoint() -> anyhow::Result<(
         "摘要请求确实被尝试过：{}",
         backend.summary_calls()
     );
+    // R11：应急 checkpoint 也计入本输入的提交计数，诊断不再漏计。
+    assert_eq!(executor.compactor.emergency_commits_this_turn(), 1);
     ctx.flush_event_log().await?;
     let events = tokio::fs::read_to_string(&ctx.events_path).await?;
     assert!(events.contains(r#""trigger":"emergency""#), "{events}");

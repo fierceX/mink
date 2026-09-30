@@ -263,6 +263,30 @@ pub(crate) fn is_summary_unavailable(error: &anyhow::Error) -> bool {
         .any(|cause| cause.downcast_ref::<SummaryUnavailable>().is_some())
 }
 
+/// 摘要不可用失败的有界原因码：只映射已知分类，不把 provider 长正文带进模型提示。
+pub(crate) fn summary_unavailable_reason(error: &anyhow::Error) -> Option<&'static str> {
+    let message = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<SummaryUnavailable>())
+        .map(ToString::to_string)?;
+    Some(if message.starts_with("request_retry_exhausted") {
+        "retry_exhausted"
+    } else if message.starts_with("request_timeout") {
+        "timeout"
+    } else if message.contains("budget") || message.contains("leaves no practical output") {
+        "budget"
+    } else if message.contains("empty response")
+        || message.contains("invalid stop reason")
+        || message.contains("invalid tool call")
+    {
+        "invalid_output"
+    } else if message.starts_with("failed to generate context summary") {
+        "upstream"
+    } else {
+        "unavailable"
+    })
+}
+
 /// 本次压缩失败是否由取消/中断造成（必须映射为 Interrupted）。
 pub(crate) fn is_compaction_interrupted(error: &anyhow::Error) -> bool {
     error

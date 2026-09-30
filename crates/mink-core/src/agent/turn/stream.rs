@@ -131,6 +131,7 @@ impl super::TurnExecutor {
         if !committed {
             return Ok(false);
         }
+        self.compactor.note_emergency_commit();
         *messages = self.ctx.compaction.active_messages().await?;
         self.reconcile_todo_state(messages).await?;
         Ok(true)

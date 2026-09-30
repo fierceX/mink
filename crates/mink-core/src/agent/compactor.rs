@@ -12,6 +12,8 @@ pub struct TurnCompactor {
     /// legal cut exists, and the caller stops only when compaction can no
     /// longer reduce the projection.
     compactions_this_turn: usize,
+    /// 应急 checkpoint 提交次数（同样属于本输入）：诊断中与摘要提交分开计数。
+    emergency_commits_this_turn: usize,
 }
 
 /// 候选投影的 todo 状态（快照 + 读 provider + 展示额度）。压缩候选会折走最新
@@ -85,15 +87,26 @@ impl TurnCompactor {
             ctx,
             prefix,
             compactions_this_turn: 0,
+            emergency_commits_this_turn: 0,
         }
     }
 
     pub fn reset(&mut self) {
         self.compactions_this_turn = 0;
+        self.emergency_commits_this_turn = 0;
     }
 
     pub fn compactions_this_turn(&self) -> usize {
         self.compactions_this_turn
+    }
+
+    /// 应急 checkpoint 也是本输入的占位提交：单独计数，避免「committed N 次」漏计。
+    pub fn note_emergency_commit(&mut self) {
+        self.emergency_commits_this_turn += 1;
+    }
+
+    pub fn emergency_commits_this_turn(&self) -> usize {
+        self.emergency_commits_this_turn
     }
 
     /// [`Self::maybe_compact_bounded`] 带 round 绝对期限：本次压缩（含摘要请求）与主请求

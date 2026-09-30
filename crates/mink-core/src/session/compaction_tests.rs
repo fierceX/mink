@@ -1603,6 +1603,52 @@ async fn startup_rebuilds_missing_or_stale_summary_projection() -> anyhow::Resul
     Ok(())
 }
 
+/// R11：摘要失败诊断的稳定原因码（不把 provider 长正文带进提示）。
+#[test]
+fn summary_unavailable_reason_codes_are_bounded() {
+    let make = |message: &str| SummaryUnavailable::error(message.to_string());
+    assert_eq!(
+        summary_unavailable_reason(&make("request_retry_exhausted: empty response")),
+        Some("retry_exhausted")
+    );
+    assert_eq!(
+        summary_unavailable_reason(&make(
+            "request_timeout: compaction summary deadline exceeded"
+        )),
+        Some("timeout")
+    );
+    assert_eq!(
+        summary_unavailable_reason(&make(
+            "compaction candidate remains over the request input budget: 10 > 5 tokens"
+        )),
+        Some("budget")
+    );
+    assert_eq!(
+        summary_unavailable_reason(&make(
+            "compaction summary leaves no practical output budget: input 7 tokens of window 6"
+        )),
+        Some("budget")
+    );
+    assert_eq!(
+        summary_unavailable_reason(&make("invalid stop reason \"length\"")),
+        Some("invalid_output")
+    );
+    assert_eq!(
+        summary_unavailable_reason(&make(
+            "failed to generate context summary: HTTP 500: huge body"
+        )),
+        Some("upstream")
+    );
+    assert_eq!(
+        summary_unavailable_reason(&make("something else entirely")),
+        Some("unavailable")
+    );
+    assert_eq!(
+        summary_unavailable_reason(&anyhow::anyhow!("plain error")),
+        None
+    );
+}
+
 #[tokio::test]
 async fn startup_repairs_legacy_cut_on_internal_user_message() -> anyhow::Result<()> {
     let ctx = crate::regression::test_context_for_agent_with_config_and_backend(

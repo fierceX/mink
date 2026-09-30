@@ -260,9 +260,11 @@ impl TurnExecutor {
                 return Err(anyhow::Error::new(TurnInterrupted));
             }
             Err(error) if crate::session::compaction::is_summary_unavailable(&error) => {
-                self.ctx
-                    .display
-                    .render_info("Context summary unavailable; continuing without compaction.");
+                let reason = crate::session::compaction::summary_unavailable_reason(&error)
+                    .unwrap_or("unavailable");
+                self.ctx.display.render_info(&format!(
+                    "Context summary unavailable ({reason}); continuing without compaction."
+                ));
             }
             Err(error) => return Err(error),
         }
@@ -320,6 +322,9 @@ impl TurnExecutor {
         // 正常压缩（含 LLM 摘要）无法让请求装下时，退化为确定性应急 checkpoint：
         // 不调用 LLM，把可变历史折成有界摘录，保证上下文故障之后仍有继续路径。
         let mut emergency = false;
+        // 应急尝试返回 false 表示“最小工作空间不可用”：诊断必须由失败原因驱动，
+        // 不能只在 committed==true 时附加提示。
+        let mut emergency_refused = false;
         if estimated_tokens > input_limit {
             let reason = summary_failure
                 .clone()
@@ -336,6 +341,7 @@ impl TurnExecutor {
                 }
                 Err(error) => return Err(error),
             };
+            emergency_refused = !emergency;
             if emergency {
                 request_messages = self.project_request_messages(messages)?;
                 estimated_tokens = crate::llm::transport::estimate_openai_context_tokens(
@@ -348,9 +354,10 @@ impl TurnExecutor {
         if estimated_tokens > input_limit {
             anyhow::bail!(
                 "context remains over the request input budget: estimated {estimated_tokens} tokens, \
-                 limit {input_limit}; {} compaction(s) committed and {forced_attempts} forced attempt(s) \
-                 in this input; emergency checkpoint {} (last: {}){}",
+                 limit {input_limit}; {} summary compaction(s) and {} emergency checkpoint(s) committed \
+                 and {forced_attempts} forced attempt(s) in this input; emergency checkpoint {} (last: {}){}",
                 self.compactor.compactions_this_turn(),
+                self.compactor.emergency_commits_this_turn(),
                 if emergency {
                     "committed but still over budget"
                 } else {
@@ -359,8 +366,10 @@ impl TurnExecutor {
                 summary_failure
                     .or(last_detail)
                     .unwrap_or_else(|| "none".to_string()),
-                if emergency {
-                    " (minimal working space unavailable)"
+                if emergency_refused {
+                    " (minimal working space unavailable: even the smallest checkpoint does not fit)"
+                } else if emergency {
+                    " (emergency checkpoint committed but the request is still over budget)"
                 } else {
                     ""
                 }
@@ -512,9 +521,12 @@ impl TurnExecutor {
                             Err(error)
                                 if crate::session::compaction::is_summary_unavailable(&error) =>
                             {
-                                self.ctx.display.render_info(
-                                    "Context summary unavailable; falling back to an emergency checkpoint.",
-                                );
+                                let reason =
+                                    crate::session::compaction::summary_unavailable_reason(&error)
+                                        .unwrap_or("unavailable");
+                                self.ctx.display.render_info(&format!(
+                                    "Context summary unavailable ({reason}); falling back to an emergency checkpoint."
+                                ));
                                 false
                             }
                             Err(error) => return Err(error),
