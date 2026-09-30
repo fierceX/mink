@@ -779,6 +779,17 @@ async fn overflow_recovery_shares_round_deadline() -> anyhow::Result<()> {
         1,
         "no second main stream may open after the round deadline"
     );
+    // F03：超时后不得再发布任何有损 checkpoint（active_start/generation 与 TodoSync 不变）。
+    assert!(
+        ctx.compaction.read_summary().await.is_none(),
+        "a timed-out round must not publish an emergency checkpoint"
+    );
+    let projection = serde_json::to_string(&ctx.compaction.active_messages().await?)?;
+    assert!(
+        !projection.contains("emergency-context-excerpt"),
+        "{projection}"
+    );
+    assert!(backend.summary_calls() >= 1);
     Ok(())
 }
 
@@ -1409,6 +1420,7 @@ async fn emergency_shrink_terminates_and_respects_cancel() -> anyhow::Result<()>
         current_user_input: Some("keep going"),
         todo: crate::agent::compactor::todo_candidate_state(&ctx, &snapshot),
         artifact_refs: Vec::new(),
+        deadline: None,
     };
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(2),

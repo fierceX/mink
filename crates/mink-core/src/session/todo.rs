@@ -406,6 +406,10 @@ impl TodoStore {
     }
 }
 
+/// 每条 active 正文的最小展示额度（字节）：低于它时整条省略并在父块给省略声明，
+/// 不让正文退化成无提示的空串。
+const MIN_TODO_BODY_BYTES: usize = 8;
+
 /// 模型可见的 todo 派生展示：revision 与 pending/in_progress/completed 计数保持真实，
 /// 只有正文/条目数按额度有损截短（权威 todos.json 不变）。额度覆盖**完整块**：
 /// 信封、revision/计数、ID、条目前缀与省略标记都计入。
@@ -469,9 +473,9 @@ pub fn render_current_todos_bounded(
             } else {
                 available / remaining_items.max(1)
             };
-            // 条目前缀也计入额度；分到的额度连前缀都放不下就整体省略。
+            // 条目前缀也计入额度；分到的额度连前缀 + 最小正文都放不下就整条省略。
             let prefix = format!("\n- {}: ", item.id);
-            if share <= prefix.len() {
+            if share <= prefix.len() + MIN_TODO_BODY_BYTES {
                 if budget == usize::MAX || content.len() + omission.len() + footer.len() <= budget {
                     content.push_str(&omission);
                 }

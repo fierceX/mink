@@ -1561,6 +1561,155 @@ async fn oversized_net_summary_is_not_published() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// F04：严格切点非零、但「保留两条 user」的候选放不下时，超预算请求按预算可行性
+/// 退化到最新安全边界（`_cut=degraded`），而不是直接转应急。
+#[tokio::test]
+async fn over_budget_strict_candidate_falls_back_to_budget_feasible_cut() -> anyhow::Result<()> {
+    use crate::session::compaction::request_input_limit;
+    let backend = Arc::new(CapturingSummaryBackend::default());
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "over-budget-strict-kept",
+        |cfg| {
+            cfg.max_context_tokens = 20_000;
+            cfg.context_reserve_tokens = 4_000;
+            cfg.context_compact_tail_tokens = 1;
+        },
+        backend.clone(),
+    )
+    .await?;
+    // 一个小旧轮次 + 两个各 27,000 字符的 user 轮次：严格 cut 非零，但保留两条 user
+    // 的候选超过输入预算；最新安全边界的短摘要可以装下。
+    ctx.store.add_user("old request").await?;
+    ctx.store.add_assistant("old progress", "", &[]).await?;
+    ctx.store
+        .add_user(&format!("first {}", "x".repeat(27_000)))
+        .await?;
+    ctx.store.add_assistant("progress", "", &[]).await?;
+    ctx.store
+        .add_user(&format!("second {}", "y".repeat(27_000)))
+        .await?;
+    ctx.store.add_assistant("progress two", "", &[]).await?;
+    let shape = MainRequestShape {
+        system_prompt: "",
+        tools: &[],
+    };
+    let active = ctx.compaction.active_messages().await?;
+    let context_tokens = estimate_candidate_tokens(shape, &active, None)?;
+    assert!(
+        context_tokens > request_input_limit(&ctx.config),
+        "the fixture must be over budget: {context_tokens}"
+    );
+    let (compacted, detail) = ctx
+        .compaction
+        .evaluate_and_compact_with_prefix_bounded(
+            "preflight",
+            context_tokens,
+            LlmModelTarget::new("flash", None),
+            None,
+            None,
+            None,
+            Some(shape),
+            None,
+            None,
+        )
+        .await?;
+    assert!(compacted, "{detail}");
+    assert!(detail.contains("_cut=degraded"), "{detail}");
+    assert_eq!(backend.requests.lock().unwrap().len(), 1);
+    Ok(())
+}
+
+/// F03：共享 round 期限耗尽后，摘要评估与应急都必须拒绝发布；取消优先于期限。
+#[tokio::test]
+async fn expired_round_deadline_blocks_emergency_publish() -> anyhow::Result<()> {
+    use crate::session::compaction::{is_compaction_deadline_expired, is_compaction_interrupted};
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "expired-round-emergency",
+        |cfg| {
+            cfg.max_context_tokens = 64_000;
+            cfg.context_reserve_tokens = 8_000;
+            cfg.context_compact_tail_tokens = 1;
+        },
+        summary_backend(),
+    )
+    .await?;
+    ctx.store
+        .add_user(&format!("seed {}", "x".repeat(2_000)))
+        .await?;
+    ctx.store.add_assistant("progress", "", &[]).await?;
+    ctx.store
+        .add_user(&format!("seed two {}", "y".repeat(2_000)))
+        .await?;
+    ctx.store.add_assistant("progress two", "", &[]).await?;
+    ctx.store
+        .add_user(&format!("seed three {}", "z".repeat(2_000)))
+        .await?;
+    ctx.store.add_assistant("progress three", "", &[]).await?;
+    let messages = ctx.compaction.active_messages().await?;
+    let shape = MainRequestShape {
+        system_prompt: "",
+        tools: &[],
+    };
+    let expired = std::time::Instant::now() - std::time::Duration::from_secs(1);
+
+    // 1) 摘要评估在共享期限已过时定型为 deadline，而不是可转应急的摘要失败。
+    let error = ctx
+        .compaction
+        .evaluate_and_compact_with_prefix_bounded(
+            "preflight",
+            1,
+            LlmModelTarget::new("flash", None),
+            None,
+            None,
+            None,
+            Some(shape),
+            None,
+            Some(expired),
+        )
+        .await
+        .expect_err("an expired round deadline must fail the summary evaluation");
+    assert!(is_compaction_deadline_expired(&error), "{error:#}");
+
+    // 2) 应急入口同样拒绝，且不产生任何状态变更。
+    let error = crate::agent::compactor::commit_emergency_checkpoint(
+        &ctx,
+        "audit_expired",
+        shape,
+        None,
+        None,
+        Some(expired),
+        &messages,
+    )
+    .await
+    .expect_err("an expired round deadline must refuse the emergency checkpoint");
+    assert!(is_compaction_deadline_expired(&error), "{error:#}");
+    assert!(ctx.compaction.read_summary().await.is_none());
+    let projection = serde_json::to_string(&ctx.compaction.active_messages().await?)?;
+    assert!(
+        !projection.contains("emergency-context-excerpt"),
+        "{projection}"
+    );
+
+    // 3) cancel 与期限同时到达：取消优先（不得因超时改变中断分类）。
+    ctx.interrupt
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let error = crate::agent::compactor::commit_emergency_checkpoint(
+        &ctx,
+        "audit_cancel",
+        shape,
+        None,
+        None,
+        Some(expired),
+        &messages,
+    )
+    .await
+    .expect_err("cancel must win over the deadline");
+    assert!(is_compaction_interrupted(&error), "{error:#}");
+    ctx.interrupt
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
 #[tokio::test]
 async fn startup_rebuilds_missing_or_stale_summary_projection() -> anyhow::Result<()> {
     let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
@@ -2504,6 +2653,7 @@ async fn emergency_checkpoint_keeps_long_request_ends_in_projection() -> anyhow:
                 current_user_input: Some(&request),
                 todo: None,
                 artifact_refs: Vec::new(),
+                deadline: None,
             },
         )
         .await?;

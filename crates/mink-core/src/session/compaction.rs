@@ -62,6 +62,50 @@ impl std::fmt::Display for CompactionInterrupted {
 
 impl std::error::Error for CompactionInterrupted {}
 
+/// 共享 round 绝对期限耗尽：这是主请求终态 timeout，区别于摘要服务自身的失败，
+/// 上层不得据此转应急 checkpoint。
+#[derive(Debug)]
+pub(crate) struct CompactionDeadlineExpired;
+
+impl CompactionDeadlineExpired {
+    pub(crate) fn error() -> anyhow::Error {
+        anyhow::Error::new(Self)
+    }
+}
+
+impl std::fmt::Display for CompactionDeadlineExpired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("request_timeout: compaction deadline exceeded")
+    }
+}
+
+impl std::error::Error for CompactionDeadlineExpired {}
+
+/// 共享绝对期限是否已耗尽（`None` 表示未配置，永不判定耗尽）。
+pub(crate) fn shared_deadline_expired(deadline: Option<std::time::Instant>) -> bool {
+    deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
+}
+
+/// 共享期限耗尽时，摘要侧的 `SummaryUnavailable` 必须定型为主请求终态 timeout：
+/// 否则上层会把它当作可转应急的摘要服务失败，超时后仍发布有损 checkpoint。
+fn map_shared_deadline(
+    error: anyhow::Error,
+    round_deadline: Option<std::time::Instant>,
+) -> anyhow::Error {
+    if shared_deadline_expired(round_deadline) && is_summary_unavailable(&error) {
+        CompactionDeadlineExpired::error()
+    } else {
+        error
+    }
+}
+
+/// 错误链中是否存在共享期限耗尽。
+pub(crate) fn is_compaction_deadline_expired(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<CompactionDeadlineExpired>().is_some())
+}
+
 /// 主请求的形状（真实 system prompt 与 tools）。候选验收与应急 checkpoint 都必须按它
 /// 估算实际请求大小，而不是内部 raw JSON 的粗略估算。
 #[derive(Clone, Copy)]
@@ -183,6 +227,8 @@ pub(crate) struct EmergencyCheckpointContext<'a> {
     pub todo: Option<TodoCandidateState<'a>>,
     /// 折叠历史里真实出现、且仍存在于 artifact 索引中的引用（不得虚构 URL）。
     pub artifact_refs: Vec<String>,
+    /// 共享 round 绝对期限：耗尽时应急必须 fail closed，不得发布新的有损 checkpoint。
+    pub deadline: Option<std::time::Instant>,
 }
 
 /// 应急摘录的材料块，按优先级保留；[`Self::shrink`] 每次严格减少一块内容。
@@ -753,6 +799,15 @@ impl CompactionEngine {
         Ok(())
     }
 
+    /// 应急路径的共享期限检查：期限耗尽时不得发布新的有损 checkpoint。
+    /// 取消优先于期限（调用方先调 [`Self::check_emergency_cancelled`]）。
+    fn check_emergency_deadline(&self, deadline: Option<std::time::Instant>) -> Result<()> {
+        if shared_deadline_expired(deadline) {
+            return Err(CompactionDeadlineExpired::error());
+        }
+        Ok(())
+    }
+
     /// 确定性应急 checkpoint：不调用任何 LLM，把可变历史折成有界摘录并提交。
     ///
     /// 只在正常压缩无法让请求装下时由上层调用。`Ok(true)` 表示已提交（调用方必须重新
@@ -765,9 +820,11 @@ impl CompactionEngine {
     ) -> Result<bool> {
         self.fault.check()?;
         self.check_emergency_cancelled()?;
+        self.check_emergency_deadline(ctx.deadline)?;
         let _guard = self.compact_lock.lock().await;
-        // 等锁期间可能已经取消/中断：拿到锁后必须复检。
+        // 等锁期间可能已经取消/中断或超过共享期限：拿到锁后必须复检。
         self.check_emergency_cancelled()?;
+        self.check_emergency_deadline(ctx.deadline)?;
         let state = self.current_state()?;
         let active = self.store.lines_from(state.active_start).await?;
         // 折叠整段历史前必须确认没有未完成的工具交换：协议损坏不能被摘录掩盖。
@@ -788,14 +845,16 @@ impl CompactionEngine {
             .unwrap_or_else(|| request_input_limit(&self.config));
         loop {
             self.check_emergency_cancelled()?;
+            self.check_emergency_deadline(ctx.deadline)?;
             let summary = blocks.render();
             // 候选与真实请求同一投影（含预演 TodoSync）；应急折叠后尾部为空。
             let candidate = self.checkpoint_prefix(&summary)?;
             let tokens =
                 estimate_candidate_tokens(ctx.main_request, &candidate, ctx.todo.as_ref())?;
             if input_limit == usize::MAX || tokens <= input_limit {
-                // 提交前最后一次取消/中断复检：取消优先于提交。
+                // 提交前最后一次取消/中断/期限复检：取消优先于提交。
                 self.check_emergency_cancelled()?;
+                self.check_emergency_deadline(ctx.deadline)?;
                 // 折掉全部可变历史（尾部为空）；权威 history 只追加、不重写。
                 let next = CompactionState {
                     active_start: state.active_start + active.len(),
@@ -924,16 +983,34 @@ impl CompactionEngine {
             return Ok((false, "empty".into()));
         }
 
+        let limit = request_input_limit(&self.config);
         let tail_target = self.planned_tail_target(main_request)?;
         let mut cut = find_compaction_cut_point(&active, tail_target);
-        // 最后手段（仅在请求已经超出输入预算时启用）：严格规则找不到任何边界
-        // ——热尾部目标吞掉整个窗口，或窗口只剩最近两个用户轮次——时，退化为
-        // 「折到最新安全边界之前」，折叠内容照常进摘要，当前请求以摘要文本保留，
-        // 而不是让整个 turn fail-closed。
+        // 预算可行性选择（仅在请求已经超出输入预算时启用）：
+        // - 严格切点（含保留最近两条真实 user 的守卫）的候选连「固定前缀 + 派生展示 +
+        //   预演 TodoSync + 最小摘要位」都放不下时，不再直接报 SummaryUnavailable/
+        //   转应急，而是按安全边界退化为「折到最新安全边界之前」（`_cut=degraded`）。
+        // - 未超预算时仍保护 user 守卫，交给候选验收报错。
+        // - degraded 只能在安全边界真的更靠后时生效，不额外丢失逐字上下文。
         let mut degraded_cut = false;
-        if cut == 0 && context_tokens > request_input_limit(&self.config) {
-            cut = find_degraded_compaction_cut_point(&active);
-            degraded_cut = cut > 0;
+        let over_budget = limit != usize::MAX && context_tokens > limit;
+        if over_budget {
+            let strict_fits = match main_request {
+                Some(shape) if cut > 0 => {
+                    let kept_candidate = active[cut..].to_vec();
+                    let kept_tokens =
+                        estimate_candidate_tokens(shape, &kept_candidate, todo_state.as_ref())?;
+                    kept_tokens.saturating_add(MIN_PRACTICAL_SUMMARY_TOKENS) <= limit
+                }
+                _ => cut > 0,
+            };
+            if !strict_fits {
+                let degraded = find_degraded_compaction_cut_point(&active);
+                if degraded > cut {
+                    cut = degraded;
+                    degraded_cut = true;
+                }
+            }
         }
         if cut == 0 {
             return Ok((false, "no safe boundary".into()));
@@ -964,7 +1041,8 @@ impl CompactionEngine {
                 target,
                 round_deadline,
             )
-            .await?;
+            .await
+            .map_err(|error| map_shared_deadline(error, round_deadline))?;
         if self.interrupt.load(Ordering::SeqCst) {
             return Err(CompactionInterrupted::error());
         }
@@ -999,6 +1077,10 @@ impl CompactionEngine {
         }
 
         self.validate_conversation_messages(kept, target.model)?;
+        // 发布前共享期限复检：摘要生成可能跨过 round 期限，超时后不得再提交。
+        if shared_deadline_expired(round_deadline) {
+            return Err(CompactionDeadlineExpired::error());
+        }
         let next = CompactionState {
             active_start: state.active_start + cut,
             summary: summary.clone(),

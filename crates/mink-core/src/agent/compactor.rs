@@ -66,6 +66,7 @@ pub(crate) async fn commit_emergency_checkpoint(
     main_request: crate::session::compaction::MainRequestShape<'_>,
     current_user_input: Option<&str>,
     target_limit: Option<usize>,
+    deadline: Option<std::time::Instant>,
     messages: &[serde_json::Value],
 ) -> Result<bool> {
     let snapshot = ctx.todo_store.snapshot();
@@ -75,6 +76,7 @@ pub(crate) async fn commit_emergency_checkpoint(
         current_user_input,
         todo: todo_candidate_state(ctx, &snapshot),
         artifact_refs: existing_artifact_refs(ctx, messages),
+        deadline,
     };
     ctx.compaction
         .commit_emergency_checkpoint(reason, &context)

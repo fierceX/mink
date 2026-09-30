@@ -115,6 +115,7 @@ impl super::TurnExecutor {
         system_prompt: &str,
         tools_json: &[serde_json::Value],
         target_limit: Option<usize>,
+        deadline: Option<std::time::Instant>,
     ) -> Result<bool> {
         let committed = crate::agent::compactor::commit_emergency_checkpoint(
             &self.ctx,
@@ -125,6 +126,7 @@ impl super::TurnExecutor {
             },
             Some(self.local.current_user_input.as_str()).filter(|input| !input.trim().is_empty()),
             target_limit,
+            deadline,
             messages,
         )
         .await?;

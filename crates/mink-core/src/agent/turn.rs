@@ -259,6 +259,10 @@ impl TurnExecutor {
             Err(error) if crate::session::compaction::is_compaction_interrupted(&error) => {
                 return Err(anyhow::Error::new(TurnInterrupted));
             }
+            // 共享 round 期限耗尽（类型化）：主请求终态 timeout，不得因摘要失败继续压缩或转应急。
+            Err(error) if crate::session::compaction::is_compaction_deadline_expired(&error) => {
+                return Err(error);
+            }
             Err(error) if crate::session::compaction::is_summary_unavailable(&error) => {
                 let reason = crate::session::compaction::summary_unavailable_reason(&error)
                     .unwrap_or("unavailable");
@@ -298,6 +302,12 @@ impl TurnExecutor {
                 Err(error) if crate::session::compaction::is_compaction_interrupted(&error) => {
                     return Err(anyhow::Error::new(TurnInterrupted));
                 }
+                // 共享期限耗尽不可转应急：直接以主请求终态 timeout 结束。
+                Err(error)
+                    if crate::session::compaction::is_compaction_deadline_expired(&error) =>
+                {
+                    return Err(error);
+                }
                 Err(error) if crate::session::compaction::is_summary_unavailable(&error) => {
                     summary_failure = Some(format!("{error}"));
                     break;
@@ -331,7 +341,14 @@ impl TurnExecutor {
                 .or_else(|| last_detail.clone())
                 .unwrap_or_else(|| "over_budget_without_cut".to_string());
             emergency = match self
-                .commit_emergency_checkpoint(&reason, messages, system_prompt, tools_json, None)
+                .commit_emergency_checkpoint(
+                    &reason,
+                    messages,
+                    system_prompt,
+                    tools_json,
+                    None,
+                    round_deadline,
+                )
                 .await
             {
                 Ok(committed) => committed,
@@ -518,6 +535,14 @@ impl TurnExecutor {
                                 self.ctx.display.render_stop("interrupted");
                                 return Ok((TurnDecision::Interrupted, effects));
                             }
+                            // 共享期限耗尽不可转应急：直接以主请求终态 timeout 结束。
+                            Err(error)
+                                if crate::session::compaction::is_compaction_deadline_expired(
+                                    &error,
+                                ) =>
+                            {
+                                return Err(error);
+                            }
                             Err(error)
                                 if crate::session::compaction::is_summary_unavailable(&error) =>
                             {
@@ -554,6 +579,7 @@ impl TurnExecutor {
                                     &system_prompt,
                                     &tools_json,
                                     Some(shrink_target),
+                                    round_deadline,
                                 )
                                 .await
                             {

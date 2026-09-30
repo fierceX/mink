@@ -61,15 +61,44 @@ pub(crate) fn bounded_derived_text(content: &str, allowance_tokens: usize) -> St
 /// 按 UTF-8 字节预算保留首尾：省略标记（prefix + 省略字节数 + suffix）计入预算，
 /// 正常路径下结果**严格短于输入**；输入已在预算内时原样返回。始终从原文生成
 /// （绝不在已省略的文本上二次裁剪），按字符边界切片。
+/// 优先使用完整标记；额度放不下完整标记时退回短标记 `…`，**任何被截短的文本
+/// 都带显式省略提示**（仅预算 < 3 字节、连单字符标记都放不下时例外）。
 pub(crate) fn head_tail_with_marker(
     text: &str,
     budget_bytes: usize,
     marker_prefix: &str,
     marker_suffix: &str,
 ) -> String {
+    if budget_bytes == 0 {
+        return String::new();
+    }
     if text.len() <= budget_bytes {
         return text.to_string();
     }
+    if let Some(fitted) = fit_head_tail(text, budget_bytes, &|omitted| {
+        format!("{marker_prefix}{omitted}{marker_suffix}")
+    }) {
+        return fitted;
+    }
+    if let Some(fitted) = fit_head_tail(text, budget_bytes, &|_| "…".to_string()) {
+        return fitted;
+    }
+    // 预算小于短标记（3 字节）：无法容纳任何标记，只能保留能装下的部分。
+    // 调用方的正常额度到不了这里（Todo/plan 会先按最小正文额度整条省略）。
+    let short = "…";
+    let head = floor_char_boundary(text, budget_bytes.saturating_sub(short.len()));
+    if head == 0 {
+        return short[..floor_char_boundary(short, budget_bytes)].to_string();
+    }
+    format!("{}{short}", &text[..head])
+}
+
+/// 在给定预算内按 `marker(omitted_bytes)` 生成头部 + 标记 + 尾部；放不下返回 `None`。
+fn fit_head_tail(
+    text: &str,
+    budget_bytes: usize,
+    marker: &dyn Fn(usize) -> String,
+) -> Option<String> {
     let mut head = (budget_bytes / 2).min(text.len());
     let mut tail = (budget_bytes / 2).min(text.len());
     for _ in 0..64 {
@@ -81,24 +110,25 @@ pub(crate) fn head_tail_with_marker(
         }
         tail = text.len().saturating_sub(tail_start);
         let omitted = text.len().saturating_sub(head + tail);
-        let marker = format!("{marker_prefix}{omitted}{marker_suffix}");
-        if head + marker.len() + tail <= budget_bytes {
-            let mut out = String::with_capacity(head + marker.len() + tail);
+        let marker_text = marker(omitted);
+        if head + marker_text.len() + tail <= budget_bytes {
+            let mut out = String::with_capacity(head + marker_text.len() + tail);
             out.push_str(&text[..head]);
-            out.push_str(&marker);
+            out.push_str(&marker_text);
             out.push_str(&text[text.len() - tail..]);
-            return out;
+            return Some(out);
         }
-        let excess = head + marker.len() + tail - budget_bytes;
+        let excess = head + marker_text.len() + tail - budget_bytes;
         if head >= tail {
             head = head.saturating_sub(excess.max(1));
         } else {
             tail = tail.saturating_sub(excess.max(1));
+            if tail == 0 && head == 0 {
+                return None;
+            }
         }
     }
-    // 极端预算（标记本身就放不下）：只保留能装下的头部；调用方的正常额度
-    // 到不了这里。
-    text[..floor_char_boundary(text, budget_bytes)].to_string()
+    None
 }
 
 /// 按 UTF-8 边界向下取整的字节位置。

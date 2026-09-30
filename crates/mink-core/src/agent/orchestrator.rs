@@ -306,6 +306,8 @@ impl OrchActor {
                     shape,
                     None,
                     None,
+                    // manual 不在某个 round 内：没有共享绝对期限。
+                    None,
                     &self.ctx.compaction.active_messages().await?,
                 )
                 .await?;

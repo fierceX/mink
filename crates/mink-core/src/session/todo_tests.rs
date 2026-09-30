@@ -531,8 +531,8 @@ fn bounded_projection_keeps_revision_and_counts() {
     assert!(full_content.contains(&render_current_todos(&snapshot, "TodoRead")));
 }
 
-/// R06：额度覆盖完整块（信封、计数、ID、省略标记）；0/1/255/256/MAX 与
-/// 1/1000 条 active 条目都不越界，权威快照不被渲染修改。
+/// R06/F05：额度覆盖完整块（信封、计数、ID、省略标记）；0/1/255/256/MAX 与
+/// 1/8/100/1000 条 active 条目都不越界；**任何被截短的正文都必须带省略提示**。
 #[test]
 fn bounded_projection_respects_byte_allowance_across_shapes() {
     let snapshot = TodoSnapshot {
@@ -542,7 +542,7 @@ fn bounded_projection_respects_byte_allowance_across_shapes() {
         items: (0..1_000)
             .map(|index| TodoItem {
                 id: format!("T{index:04}"),
-                content: format!("{}中😀", "x".repeat(200)),
+                content: format!("{}#{index}中😀", "x".repeat(200)),
                 status: if index % 2 == 0 {
                     TodoStatus::InProgress
                 } else {
@@ -553,7 +553,7 @@ fn bounded_projection_respects_byte_allowance_across_shapes() {
     };
     let before = snapshot.clone();
     for allowance in [0usize, 1, 255, 256, usize::MAX] {
-        for count in [1usize, 1_000] {
+        for count in [1usize, 8, 100, 1_000] {
             let mut snap = snapshot.clone();
             snap.items.truncate(count);
             let message = sync_message_bounded(&snap, "TodoRead", allowance);
@@ -568,6 +568,23 @@ fn bounded_projection_respects_byte_allowance_across_shapes() {
                     "allowance {allowance}, count {count}: {} bytes",
                     content.len()
                 );
+            }
+            // F05：正文不完整出现时必须有显式省略说明（列表级或条目级）；
+            // 整块不可表示（unrepresentable）本身即明确声明，视为已标注。
+            let unrepresentable = content.contains("truncated=\"unrepresentable\"");
+            for item in snap
+                .items
+                .iter()
+                .filter(|item| item.status == TodoStatus::InProgress)
+            {
+                if !unrepresentable && !content.contains(&item.content) {
+                    assert!(
+                        content.contains("…") || content.contains("omitted"),
+                        "allowance {allowance}, count {count}: item {} body was truncated \
+                         without an omission marker: {content}",
+                        item.id
+                    );
+                }
             }
         }
     }
