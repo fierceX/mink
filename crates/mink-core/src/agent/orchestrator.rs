@@ -250,12 +250,20 @@ impl OrchActor {
         let todo_snapshot = self.ctx.todo_store.snapshot();
         let todo_candidate =
             crate::agent::compactor::todo_candidate_state(&self.ctx, &todo_snapshot);
+        // manual 不传伪 0：用与真实请求同源的投影估算本次输入（含预演 TodoSync），
+        // 否则「已超预算」永远不会启用 degraded 切点，也不会收紧尾部。
+        let projected = self.ctx.compaction.active_messages().await?;
+        let context_tokens = crate::session::compaction::estimate_candidate_tokens(
+            shape,
+            &projected,
+            todo_candidate.as_ref(),
+        )?;
         let mut result = self
             .ctx
             .compaction
             .evaluate_and_compact_with_prefix(
                 "manual",
-                0,
+                context_tokens,
                 target,
                 None,
                 None,

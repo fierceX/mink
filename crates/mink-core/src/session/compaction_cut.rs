@@ -44,25 +44,70 @@ pub(crate) fn derived_display_tokens(config: &Config) -> usize {
 }
 
 /// 按 token 额度有界渲染一段派生正文：能放下就原样返回，否则头部 + 省略标记 + 尾部。
-/// 省略量以字符计，按 UTF-8 边界裁剪。
+/// 省略标记计入额度；按 UTF-8 字节上界约束（4 字节字符不会超额）。
 pub(crate) fn bounded_derived_text(content: &str, allowance_tokens: usize) -> String {
     let max_bytes = allowance_tokens.saturating_mul(3);
     if max_bytes == usize::MAX || content.len() <= max_bytes {
         return content.to_string();
     }
-    let chars: Vec<char> = content.chars().collect();
-    let max_chars = max_bytes / 3;
-    let head_chars = (max_chars / 2).max(1);
-    let tail_chars = max_chars.saturating_sub(head_chars + 24);
-    let omitted = chars.len().saturating_sub(head_chars + tail_chars);
-    let mut out: String = chars[..head_chars.min(chars.len())].iter().collect();
-    out.push_str(&format!(
-        "\n[derived display truncated: {omitted} characters omitted; the authoritative content is unchanged]\n"
-    ));
-    if tail_chars > 0 {
-        out.extend(chars[chars.len().saturating_sub(tail_chars)..].iter());
+    head_tail_with_marker(
+        content,
+        max_bytes,
+        "\n[derived display truncated: ",
+        " bytes omitted; the authoritative content is unchanged]\n",
+    )
+}
+
+/// 按 UTF-8 字节预算保留首尾：省略标记（prefix + 省略字节数 + suffix）计入预算，
+/// 正常路径下结果**严格短于输入**；输入已在预算内时原样返回。始终从原文生成
+/// （绝不在已省略的文本上二次裁剪），按字符边界切片。
+pub(crate) fn head_tail_with_marker(
+    text: &str,
+    budget_bytes: usize,
+    marker_prefix: &str,
+    marker_suffix: &str,
+) -> String {
+    if text.len() <= budget_bytes {
+        return text.to_string();
     }
-    out
+    let mut head = (budget_bytes / 2).min(text.len());
+    let mut tail = (budget_bytes / 2).min(text.len());
+    for _ in 0..64 {
+        head = floor_char_boundary(text, head);
+        // 尾部切片起点向“更少保留”方向对齐到字符边界。
+        let mut tail_start = text.len().saturating_sub(tail);
+        while tail_start < text.len() && !text.is_char_boundary(tail_start) {
+            tail_start += 1;
+        }
+        tail = text.len().saturating_sub(tail_start);
+        let omitted = text.len().saturating_sub(head + tail);
+        let marker = format!("{marker_prefix}{omitted}{marker_suffix}");
+        if head + marker.len() + tail <= budget_bytes {
+            let mut out = String::with_capacity(head + marker.len() + tail);
+            out.push_str(&text[..head]);
+            out.push_str(&marker);
+            out.push_str(&text[text.len() - tail..]);
+            return out;
+        }
+        let excess = head + marker.len() + tail - budget_bytes;
+        if head >= tail {
+            head = head.saturating_sub(excess.max(1));
+        } else {
+            tail = tail.saturating_sub(excess.max(1));
+        }
+    }
+    // 极端预算（标记本身就放不下）：只保留能装下的头部；调用方的正常额度
+    // 到不了这里。
+    text[..floor_char_boundary(text, budget_bytes)].to_string()
+}
+
+/// 按 UTF-8 边界向下取整的字节位置。
+pub(crate) fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 pub(crate) fn read_active_plan_checkpoint(
@@ -80,7 +125,17 @@ pub(crate) fn read_active_plan_checkpoint(
             ));
         }
     };
-    let content = bounded_derived_text(content.trim(), allowance_tokens);
+    // 额度覆盖完整块：先扣掉 <active-plan-checkpoint> 包装再分配正文额度。
+    let wrapper = "<active-plan-checkpoint>\n\n</active-plan-checkpoint>";
+    let inner_tokens = if allowance_tokens == usize::MAX {
+        usize::MAX
+    } else {
+        allowance_tokens
+            .saturating_mul(3)
+            .saturating_sub(wrapper.len())
+            / 3
+    };
+    let content = bounded_derived_text(content.trim(), inner_tokens);
     Ok((!content.is_empty()).then(|| {
         json!({
             "role": "user",

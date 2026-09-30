@@ -227,10 +227,8 @@ impl TurnExecutor {
     }
 }
 
-/// Safety bound for the forced-compaction loop in `prepare_request`: every
-/// iteration must strictly reduce the estimate, so this only guards against a
-/// pathological estimate. Compaction itself has no per-input attempt cap.
-const MAX_FORCED_COMPACTIONS_PER_REQUEST: usize = 8;
+// `prepare_request` 的强制压缩循环不设次数上限：每次迭代必须严格降低投影估算
+// （否则 break），有限整数度量自然终止；不得用隐藏常量给用户输入封顶。
 
 /// provider overflow 后的请求内收缩上限：每次都必须让请求严格变小（本地估算说
 /// 装得下、provider 却拒绝时，只靠本地闸门无法恢复）。
@@ -279,8 +277,7 @@ impl TurnExecutor {
         let mut forced_attempts = 0usize;
         let mut last_detail: Option<String> = None;
         let mut summary_failure: Option<String> = None;
-        while estimated_tokens > input_limit && forced_attempts < MAX_FORCED_COMPACTIONS_PER_REQUEST
-        {
+        while estimated_tokens > input_limit {
             let before = estimated_tokens;
             let compacted = match self
                 .try_compact("preflight", messages, system_prompt, tools_json)

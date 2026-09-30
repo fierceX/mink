@@ -494,6 +494,61 @@ async fn manual_compaction_prefix_writer_failure_delivers_error_and_recovers() -
 }
 
 #[tokio::test]
+async fn manual_compaction_tightens_huge_tail_instead_of_degrading() -> anyhow::Result<()> {
+    // 40k 窗口配 256k 尾部目标：软目标必须收紧到可用空间，否则会直接
+    // 「no safe boundary」/应急，而可行的 LLM 摘要一次都不尝试。
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let backend = Arc::new(RecordingCompactionBackend {
+        requests: requests.clone(),
+    });
+    let h = harness_with_config(
+        "orch-compact-soft-tail",
+        false,
+        300,
+        |config| {
+            config.max_context_tokens = 40_000;
+            config.context_reserve_tokens = 8_000;
+            config.context_compact_tail_tokens = 256_000;
+        },
+        Some(backend),
+    )
+    .await?;
+    for index in 0..45 {
+        h.ctx
+            .store
+            .add_user(&format!("USER-MARKER-{index}: {}", "x".repeat(2_000)))
+            .await?;
+        h.ctx
+            .store
+            .add_assistant(&format!("progress {index}"), "", &[])
+            .await?;
+    }
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let actor = OrchActor::new(h.ctx.clone(), rx);
+    let handle = tokio::spawn(actor.run());
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    tx.send(OrchCmd::Compact { done: done_tx })?;
+    let outcome = done_rx.await??;
+    let reason = match &outcome {
+        crate::runtime::CompactOutcome::Compacted { reason } => reason.clone(),
+        other => panic!("manual compaction must commit a summary, got {other:?}"),
+    };
+    assert!(
+        !reason.contains("_cut=degraded"),
+        "huge tail must be tightened, not degraded: {reason}"
+    );
+    assert_eq!(requests.lock().unwrap().len(), 1, "reason: {reason}");
+    let projection = serde_json::to_string(&h.ctx.compaction.active_messages().await?)?;
+    assert!(projection.contains("USER-MARKER-43"), "{projection}");
+    assert!(projection.contains("USER-MARKER-44"), "{projection}");
+
+    drop(tx);
+    handle.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()> {
     let backend = Arc::new(PlanPipelineBackend {
         calls: std::sync::atomic::AtomicUsize::new(0),

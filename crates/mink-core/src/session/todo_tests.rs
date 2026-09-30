@@ -518,7 +518,7 @@ fn bounded_projection_keeps_revision_and_counts() {
         "超额度必须有损展示：{content}"
     );
     assert!(
-        content.len() <= 256 * 3 + 512,
+        content.len() <= 256 * 3,
         "投影必须受额度约束：{} bytes",
         content.len()
     );
@@ -529,4 +529,47 @@ fn bounded_projection_keeps_revision_and_counts() {
     assert!(!full_content.contains("[derived display truncated:"));
     assert!(full_content.contains(&"a".repeat(5_000)));
     assert!(full_content.contains(&render_current_todos(&snapshot, "TodoRead")));
+}
+
+/// R06：额度覆盖完整块（信封、计数、ID、省略标记）；0/1/255/256/MAX 与
+/// 1/1000 条 active 条目都不越界，权威快照不被渲染修改。
+#[test]
+fn bounded_projection_respects_byte_allowance_across_shapes() {
+    let snapshot = TodoSnapshot {
+        version: TODO_FILE_VERSION,
+        revision: u64::MAX - 1,
+        next_id: 1_001,
+        items: (0..1_000)
+            .map(|index| TodoItem {
+                id: format!("T{index:04}"),
+                content: format!("{}中😀", "x".repeat(200)),
+                status: if index % 2 == 0 {
+                    TodoStatus::InProgress
+                } else {
+                    TodoStatus::Pending
+                },
+            })
+            .collect(),
+    };
+    let before = snapshot.clone();
+    for allowance in [0usize, 1, 255, 256, usize::MAX] {
+        for count in [1usize, 1_000] {
+            let mut snap = snapshot.clone();
+            snap.items.truncate(count);
+            let message = sync_message_bounded(&snap, "TodoRead", allowance);
+            let content = message["content"].as_str().unwrap();
+            assert!(
+                content.contains(&format!("revision=\"{}\"", snap.revision)),
+                "allowance {allowance}, count {count}: {content}"
+            );
+            if allowance != usize::MAX && !content.contains("truncated=\"unrepresentable\"") {
+                assert!(
+                    content.len() <= allowance * 3,
+                    "allowance {allowance}, count {count}: {} bytes",
+                    content.len()
+                );
+            }
+        }
+    }
+    assert_eq!(snapshot, before, "权威快照不得被渲染修改");
 }

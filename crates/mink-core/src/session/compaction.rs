@@ -189,6 +189,10 @@ pub(crate) struct EmergencyCheckpointContext<'a> {
 #[derive(Default)]
 struct EmergencyBlocks {
     marker: String,
+    /// 请求原文：收缩始终从这里重新生成，绝不在省略结果上二次裁剪。
+    request_source: Option<String>,
+    /// 本次请求摘录的字节预算；每次收缩减半，直到最低可读预算。
+    request_budget: usize,
     request: Option<String>,
     previous: Option<String>,
     recent: Option<String>,
@@ -226,54 +230,28 @@ impl EmergencyBlocks {
         if self.previous.take().is_some() {
             return true;
         }
-        if let Some(request) = self.request.take() {
-            let shrunk = shrink_excerpt(&request, request_head_floor(&request));
-            if let Some(shrunk) = shrunk {
-                self.request = Some(shrunk);
+        let Some(source) = self.request_source.as_deref() else {
+            return false;
+        };
+        let current_len = self.request.as_deref().map_or(0, str::len);
+        let mut next_budget = self.request_budget / 2;
+        while next_budget >= EMERGENCY_REQUEST_MIN_BYTES {
+            let next = head_tail_with_marker(source, next_budget, "[…", " bytes omitted…]");
+            if next.len() < current_len {
+                self.request_budget = next_budget;
+                self.request = Some(next);
                 return true;
             }
-            self.request = Some(request);
-            return false;
+            next_budget /= 2;
         }
         false
     }
 }
 
-/// 头部+尾部裁剪：保留 `head` 个字符的头、`tail` 个字符的尾，中间标注省略量。
-/// 省略标记计入额度，且**结果必须严格短于输入**，否则返回 `None`（否则外层收缩循环
-/// 会在同一个文本上无限重试）。`floor_chars` 是保留的真实字符下限；到达下限仍无法变短
-/// 就停止收缩。按 UTF-8 边界裁剪。
-fn shrink_excerpt(text: &str, floor_chars: usize) -> Option<String> {
-    let chars: Vec<char> = text.chars().collect();
-    let len = chars.len();
-    if len == 0 {
-        return None;
-    }
-    let floor = floor_chars.clamp(1, len.saturating_sub(1).max(1));
-    let mut keep = (len / 2).max(floor);
-    loop {
-        let head = (keep / 2).max(1).min(len);
-        let tail = keep.saturating_sub(head).min(len.saturating_sub(head));
-        let omitted = len.saturating_sub(head + tail);
-        let mut out: String = chars[..head].iter().collect();
-        out.push_str(&format!("[…{omitted} chars omitted…]"));
-        if tail > 0 {
-            out.extend(chars[len - tail..].iter());
-        }
-        if out.chars().count() < len {
-            return Some(out);
-        }
-        if keep <= floor {
-            return None;
-        }
-        keep = (keep / 2).max(floor);
-    }
-}
-
-/// 请求摘录的地板长度（标记之外必须留下的最小真实目标）。
-fn request_head_floor(text: &str) -> usize {
-    64.min(text.chars().count())
-}
+/// 请求摘录的初始字节预算（首尾共享）与最低可读预算：低于最低预算后不再收缩，
+/// 由调用方按「最小工作空间不可用」处理。
+const EMERGENCY_REQUEST_BUDGET_BYTES: usize = 3_600;
+const EMERGENCY_REQUEST_MIN_BYTES: usize = 160;
 
 /// 单块正文的通用裁剪上限（用于初始构造，避免把整段历史塞进摘录）。
 const EMERGENCY_BLOCK_CHARS: usize = 1_200;
@@ -476,16 +454,28 @@ fn emergency_blocks(
     current_user_input: Option<&str>,
     artifact_refs: &[String],
 ) -> EmergencyBlocks {
+    // 请求原文只取真实来源（当前输入优先，否则最近一条真实 user）；空文本不伪造。
+    let request_source = current_user_input
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| last_real_user_text(active))
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty());
     EmergencyBlocks {
         marker: format!(
             "[emergency-context-excerpt] This runtime-generated checkpoint replaces the earlier span of this conversation without a model summary (reason: {}). The full history is still stored in the session records; this is a lossy excerpt, not a completion signal, and details may be omitted.",
             sanitize_field(reason, 96)
         ),
-        request: current_user_input
-            .filter(|text| !text.trim().is_empty())
-            .map(str::to_string)
-            .or_else(|| last_real_user_text(active))
-            .map(|text| truncate_chars(text.trim(), EMERGENCY_BLOCK_CHARS)),
+        request: request_source.as_deref().map(|text| {
+            head_tail_with_marker(
+                text,
+                EMERGENCY_REQUEST_BUDGET_BYTES,
+                "[…",
+                " bytes omitted…]",
+            )
+        }),
+        request_source,
+        request_budget: EMERGENCY_REQUEST_BUDGET_BYTES,
         previous: Some(previous_summary.trim())
             .filter(|summary| !summary.is_empty())
             .map(|summary| truncate_chars(summary, EMERGENCY_BLOCK_CHARS / 2)),
@@ -881,7 +871,7 @@ impl CompactionEngine {
             return Ok((false, "empty".into()));
         }
 
-        let tail_target = self.config.context_compact_tail_tokens.max(1);
+        let tail_target = self.planned_tail_target(main_request)?;
         let mut cut = find_compaction_cut_point(&active, tail_target);
         // 最后手段（仅在请求已经超出输入预算时启用）：严格规则找不到任何边界
         // ——热尾部目标吞掉整个窗口，或窗口只剩最近两个用户轮次——时，退化为
@@ -979,6 +969,28 @@ impl CompactionEngine {
             });
         }
         Ok((true, result))
+    }
+
+    /// 热尾部软目标：`min(配置 tail, 可用空间)`。可用空间从主请求输入预算中扣除
+    /// 固定前缀、派生展示预留与目标摘要空间；没有主请求形状或无界窗口时用配置值。
+    fn planned_tail_target(&self, main_request: Option<MainRequestShape<'_>>) -> Result<usize> {
+        let configured = self.config.context_compact_tail_tokens.max(1);
+        let Some(shape) = main_request else {
+            return Ok(configured);
+        };
+        let limit = request_input_limit(&self.config);
+        if limit == usize::MAX {
+            return Ok(configured);
+        }
+        let fixed = shape.estimate(&[])?;
+        let derived = derived_display_tokens(&self.config);
+        let summary_space =
+            usize::try_from(compaction_max_output_tokens(&self.config)).unwrap_or(0);
+        let available = limit
+            .saturating_sub(fixed)
+            .saturating_sub(derived)
+            .saturating_sub(summary_space);
+        Ok(configured.min(available))
     }
 
     fn pressure_decision(
@@ -1638,12 +1650,24 @@ impl CompactionEngine {
                     )
                     .map_err(|error| format!("aligned_estimate_failed:{error}"))?;
                 messages.push(compaction_instruction_message());
+                // 与专用摘要路径相同的动态 cap 判定：先按实际输入算可用输出预算，
+                // 用固定配置 cap 提前淘汰会白白丢掉可缓存的对齐请求。
+                let aligned_total_tokens = crate::llm::transport::estimate_openai_context_tokens(
+                    &messages,
+                    &candidate.tools,
+                    &candidate.system_prompt,
+                )
+                .map_err(|error| format!("aligned_estimate_failed:{error}"))?;
+                let Some(reserved_output) = summary_output_cap(&self.config, aligned_total_tokens)
+                else {
+                    return Err("aligned_no_practical_output".into());
+                };
                 if summary_input_over_budget(
                     &self.config,
                     &messages,
                     &candidate.tools,
                     &candidate.system_prompt,
-                    usize::try_from(compaction_max_output_tokens(&self.config)).unwrap_or(0),
+                    usize::try_from(reserved_output).unwrap_or(0),
                 )
                 .map_err(|error| format!("aligned_estimate_failed:{error}"))?
                 {

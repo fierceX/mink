@@ -407,12 +407,14 @@ impl TodoStore {
 }
 
 /// 模型可见的 todo 派生展示：revision 与 pending/in_progress/completed 计数保持真实，
-/// 只有正文/条目数按 token 额度有损截短（权威 todos.json 不变）。
+/// 只有正文/条目数按额度有损截短（权威 todos.json 不变）。额度覆盖**完整块**：
+/// 信封、revision/计数、ID、条目前缀与省略标记都计入。
 pub fn render_current_todos_bounded(
     snapshot: &TodoSnapshot,
     read_provider: &str,
     allowance_tokens: usize,
 ) -> String {
+    let budget = allowance_tokens.saturating_mul(3);
     let pending = snapshot
         .items
         .iter()
@@ -428,52 +430,98 @@ pub fn render_current_todos_bounded(
         .iter()
         .filter(|item| item.status == TodoStatus::Completed)
         .count();
-    let mut content = format!(
+    let footer = "\n</current-todos>";
+    let header = format!(
         "<current-todos revision=\"{}\" pending=\"{pending}\" in_progress=\"{}\" completed=\"{completed}\">",
         snapshot.revision,
         active.len()
     );
+    if budget != usize::MAX && header.len() + footer.len() > budget {
+        // 连最小元数据都装不下：明确声明不可表示，不输出假称满足额度的块。
+        return format!(
+            "<current-todos revision=\"{}\" pending=\"{pending}\" in_progress=\"{}\" completed=\"{completed}\" truncated=\"unrepresentable\"/>",
+            snapshot.revision,
+            active.len()
+        );
+    }
+    let mut content = header;
     if active.is_empty() && pending > 0 {
-        content.push_str(&format!(
+        let note = format!(
             "\nPending todo items exist, but none are active. Call {read_provider} before selecting the next batch."
-        ));
+        );
+        if budget == usize::MAX || content.len() + note.len() + footer.len() <= budget {
+            content.push_str(&note);
+        }
     } else if !active.is_empty() {
-        // 额度按 active 条目均分（至少 2 个字符位），超出部分按条目省略并给出真实计数。
-        let per_item_chars = (allowance_tokens.saturating_mul(3) / active.len().max(1)).max(2);
         content.push_str("\nActive batch:");
         for (index, item) in active.iter().enumerate() {
-            let body = crate::session::compaction_cut::bounded_derived_text(
-                &escape_prompt_markup(&item.content),
-                per_item_chars / 3,
+            let remaining_items = active.len() - index;
+            let omission = format!(
+                "\n- …{remaining_items} more active item(s) omitted (see the persisted todo list)"
             );
-            let entry = format!("\n- {}: {}", item.id, body);
-            if content.len() + entry.len() > allowance_tokens.saturating_mul(3) && index > 0 {
-                content.push_str(&format!(
-                    "\n- …{} more active item(s) omitted (see the persisted todo list)",
-                    active.len() - index
-                ));
+            let available = if budget == usize::MAX {
+                usize::MAX
+            } else {
+                budget.saturating_sub(content.len() + footer.len() + omission.len())
+            };
+            let share = if budget == usize::MAX {
+                usize::MAX
+            } else {
+                available / remaining_items.max(1)
+            };
+            // 条目前缀也计入额度；分到的额度连前缀都放不下就整体省略。
+            let prefix = format!("\n- {}: ", item.id);
+            if share <= prefix.len() {
+                if budget == usize::MAX || content.len() + omission.len() + footer.len() <= budget {
+                    content.push_str(&omission);
+                }
                 break;
             }
-            content.push_str(&entry);
+            let body = if budget == usize::MAX {
+                escape_prompt_markup(&item.content)
+            } else {
+                crate::session::compaction_cut::bounded_derived_text(
+                    &escape_prompt_markup(&item.content),
+                    (share.saturating_sub(prefix.len())) / 3,
+                )
+            };
+            content.push_str(&prefix);
+            content.push_str(&body);
         }
     }
-    content.push_str("\n</current-todos>");
+    content.push_str(footer);
+    debug_assert!(
+        budget == usize::MAX || content.len() <= budget,
+        "derived todo display must respect its byte budget"
+    );
     content
 }
 
-/// 模型可见的 `<todo-sync>` 投影：额度足够时与完整渲染一致（`usize::MAX`），
-/// 空间不足时按条目有损截短。`TodoRead` 仍返回完整权威内容。
+/// 模型可见的 `<todo-sync>` 投影：额度充足时与完整渲染一致（`usize::MAX`），
+/// 空间不足时按条目有损截短。额度覆盖**完整消息**（信封与派生块共享）。
+/// `TodoRead` 仍返回完整权威内容。
 pub fn sync_message_bounded(
     snapshot: &TodoSnapshot,
     read_provider: &str,
     allowance_tokens: usize,
 ) -> serde_json::Value {
+    let envelope = format!(
+        "<todo-sync revision=\"{}\">\nThe persisted todo state is newer than the active conversation. This appended projection is authoritative.\n</todo-sync>\n\n",
+        snapshot.revision
+    );
+    let inner_tokens = if allowance_tokens == usize::MAX {
+        usize::MAX
+    } else {
+        allowance_tokens
+            .saturating_mul(3)
+            .saturating_sub(envelope.len())
+            / 3
+    };
     serde_json::json!({
         "role": "user",
         "content": format!(
-            "<todo-sync revision=\"{}\">\nThe persisted todo state is newer than the active conversation. This appended projection is authoritative.\n</todo-sync>\n\n{}",
-            snapshot.revision,
-            render_current_todos_bounded(snapshot, read_provider, allowance_tokens),
+            "{envelope}{}",
+            render_current_todos_bounded(snapshot, read_provider, inner_tokens),
         ),
         "_mink": todo_state_metadata(snapshot.revision, "sync"),
     })

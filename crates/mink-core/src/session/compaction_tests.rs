@@ -413,6 +413,105 @@ async fn stored_projection_hashes_messages_and_shares_usage_baseline() -> anyhow
     Ok(())
 }
 
+/// R05：配置的输出 cap 大于窗口时，对齐路径必须用动态 cap 判定，
+/// 而不是用固定配置值提前淘汰可缓存请求。
+#[tokio::test]
+async fn cache_aligned_summary_uses_dynamic_cap_when_configured_cap_exceeds_window()
+-> anyhow::Result<()> {
+    let backend = Arc::new(CapturingSummaryBackend::default());
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "cache-aligned-dynamic-cap",
+        |config| {
+            config.max_context_tokens = 64_000;
+            config.context_reserve_tokens = 8_000;
+            config.context_compact_tail_tokens = 1;
+            config.context_compact_max_output_tokens = 150_000;
+            config.context_compact_input_reduction = true;
+        },
+        backend.clone(),
+    )
+    .await?;
+    for index in 0..3 {
+        ctx.store.add_user(&format!("request {index}")).await?;
+        ctx.store
+            .add_assistant(&format!("progress {index}"), "", &[])
+            .await?;
+    }
+    let messages =
+        crate::llm::image_projection::project_consumed_attachments(&ctx.store.lines().await?);
+    let system = "stable agent system".to_string();
+    let tools = vec![json!({"name":"Read","description":"read"})];
+    let resolved = crate::config::model_resolver(&ctx.config).resolve(&ctx.config.model);
+    let projection = LlmCacheProjection {
+        model: resolved.actual.clone(),
+        system_prompt: system.clone(),
+        tools: tools.clone(),
+        messages: messages.clone(),
+    };
+    ctx.compaction.record_agent_request(
+        &resolved.actual,
+        &prefix_fingerprint(&system, &tools),
+        1_000,
+        backend.name().into(),
+        system.clone(),
+        tools.clone(),
+        Some(projection),
+    );
+
+    let (did_compact, reason) = compact(&ctx, "manual", 0).await?;
+    assert!(did_compact, "{reason}");
+    assert!(
+        reason.contains("input_mode=cache_aligned"),
+        "dynamic cap must keep the aligned path: {reason}"
+    );
+    Ok(())
+}
+
+/// R05：热尾部软目标按可用空间收紧，不再直接判定无切点。
+#[tokio::test]
+async fn tail_target_is_tightened_to_available_space() -> anyhow::Result<()> {
+    let backend = Arc::new(CapturingSummaryBackend::default());
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "soft-tail-tightening",
+        |config| {
+            config.max_context_tokens = 40_000;
+            config.context_reserve_tokens = 8_000;
+            config.context_compact_tail_tokens = 256_000;
+        },
+        backend.clone(),
+    )
+    .await?;
+    for index in 0..40 {
+        ctx.store
+            .add_user(&format!("request {index}: {}", "x".repeat(2_000)))
+            .await?;
+        ctx.store
+            .add_assistant(&format!("progress {index}"), "", &[])
+            .await?;
+    }
+    let shape = MainRequestShape {
+        system_prompt: "",
+        tools: &[],
+    };
+    let (did_compact, reason) = ctx
+        .compaction
+        .evaluate_and_compact_with_prefix(
+            "manual",
+            0,
+            LlmModelTarget::new("flash", None),
+            None,
+            None,
+            None,
+            Some(shape),
+            None,
+        )
+        .await?;
+    assert!(did_compact, "{reason}");
+    assert!(!reason.contains("_cut=degraded"), "{reason}");
+    assert_eq!(backend.requests.lock().unwrap().len(), 1);
+    Ok(())
+}
+
 #[tokio::test]
 async fn cache_aligned_summary_reuses_agent_system_tools_and_prefix() -> anyhow::Result<()> {
     let backend = Arc::new(CapturingSummaryBackend::default());
@@ -1219,6 +1318,77 @@ fn audit_066_candidate_estimate_matches_real_projection() {
         accepted < raw,
         "a consumed image must not be billed twice: {accepted} vs {raw}"
     );
+}
+
+/// R06 复现：派生展示额度按 UTF-8 字节上界约束，4 字节字符不得超额。
+#[test]
+fn audit_066_derived_display_respects_four_byte_text_budget() {
+    let rendered = super::bounded_derived_text(&"😀".repeat(2_000), 256);
+    assert!(rendered.len() <= 256 * 3, "{} > 768 bytes", rendered.len());
+}
+
+/// R06：ASCII/CJK/emoji/控制字符在 0/1/255/256/MAX 额度下都不越界，
+/// 额度充足时与原文一致。
+#[test]
+fn derived_display_respects_byte_allowance_across_text_shapes() {
+    for allowance in [0usize, 1, 255, 256, usize::MAX] {
+        for text in [
+            "a".repeat(4_000),
+            "中".repeat(4_000),
+            "😀".repeat(2_000),
+            "esc\u{7}\t\n".repeat(1_000),
+        ] {
+            let rendered = super::bounded_derived_text(&text, allowance);
+            if allowance == usize::MAX {
+                assert_eq!(rendered, text);
+                continue;
+            }
+            assert!(
+                rendered.len() <= allowance * 3,
+                "allowance {allowance}: {} bytes > {}",
+                rendered.len(),
+                allowance * 3
+            );
+        }
+    }
+}
+
+/// R06：plan 派生 checkpoint 的额度也覆盖包装，正文按剩余空间截短。
+#[tokio::test]
+async fn plan_checkpoint_respects_whole_block_budget() -> anyhow::Result<()> {
+    let dir = std::env::temp_dir().join(format!(
+        "mink-plan-bound-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir)?;
+    let summary_path = dir.join("summary.txt");
+    std::fs::write(dir.join("plan.md"), "中😀".repeat(10_000))?;
+
+    let message = crate::session::compaction_cut::read_active_plan_checkpoint(&summary_path, 256)?
+        .expect("plan checkpoint present");
+    let content = message["content"].as_str().unwrap();
+    assert!(
+        content.len() <= 256 * 3,
+        "plan checkpoint must respect the whole-block budget: {} bytes",
+        content.len()
+    );
+    assert!(content.contains("<active-plan-checkpoint>"));
+
+    let full =
+        crate::session::compaction_cut::read_active_plan_checkpoint(&summary_path, usize::MAX)?
+            .expect("plan checkpoint present");
+    assert!(
+        !full["content"]
+            .as_str()
+            .unwrap()
+            .contains("derived display truncated")
+    );
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
 }
 
 #[test]
@@ -2106,27 +2276,114 @@ async fn startup_repair_loss_cleared_only_after_successful_commit() -> anyhow::R
     Ok(())
 }
 
-/// 修复回归：应急摘录的收缩必须**严格变小**并在到达地板后收敛（曾经会把省略标记
-/// 排除在额度外，导致 1200 → … → 84 → 84 的自旋）。
+/// R03 修复回归：应急摘录的收缩必须**严格变小**并在到达地板后收敛，
+/// 且始终从请求原文重建（不在已省略的结果上二次裁剪）。
 #[test]
 fn emergency_excerpt_shrinks_strictly_and_terminates() {
-    let mut text = "x".repeat(1_200);
+    let request = format!("HEAD{}", "x".repeat(1_200));
+    let request = format!("{request}TAIL-DO-NOT-DELETE");
+    let mut blocks = super::emergency_blocks("audit", &[], "", Some(&request), &[]);
+    let mut last_len = blocks.render().len();
     let mut steps = 0usize;
-    while let Some(next) = super::shrink_excerpt(&text, super::request_head_floor(&text)) {
-        assert!(
-            next.chars().count() < text.chars().count(),
-            "每一步都必须严格变小：{} -> {}",
-            text.chars().count(),
-            next.chars().count()
-        );
-        text = next;
+    while blocks.shrink() {
+        let len = blocks.render().len();
+        assert!(len < last_len, "每一步都必须严格变小：{last_len} -> {len}");
+        last_len = len;
         steps += 1;
         assert!(steps < 64, "收缩必须在有限步内收敛");
+        // 收缩始终基于原文：尾部约束不能因为中间插入了省略标记而丢失。
+        assert!(
+            blocks.render().contains("TAIL-DO-NOT-DELETE"),
+            "floor 之前尾部必须保留：{}",
+            blocks.render()
+        );
     }
     assert!(steps > 0, "长文本至少要收缩一次");
+    // 已经到地板：不能再收缩（返回 false 而不是原样自旋）。
+    assert!(!blocks.shrink());
+}
 
-    // 已经到地板：不能再收缩（返回 None 而不是原样返回）。
-    let floored = "y".repeat(80);
-    assert!(super::shrink_excerpt(&floored, super::request_head_floor(&floored)).is_none());
-    assert!(super::shrink_excerpt("", 64).is_none());
+/// R03 复现：长请求的尾部约束必须在应急摘录中可见。
+#[test]
+fn audit_066_emergency_keeps_request_tail() {
+    let request = format!("HEAD{}TAIL-DO-NOT-DELETE", "x".repeat(5000));
+    let blocks = super::emergency_blocks("audit", &[], "", Some(&request), &[]);
+    assert!(blocks.render().contains("TAIL-DO-NOT-DELETE"));
+}
+
+/// 长度与多字节边界：0/1/64/1200/5000，中文与 emoji 都保持合法 UTF-8，
+/// 首尾真实目标都在；超预算时只有一个省略标记。
+#[test]
+fn emergency_request_excerpt_keeps_both_ends_across_lengths() {
+    for length in [0usize, 1, 64, 1_200, 5_000] {
+        let request = format!("HEAD-{}-TAIL-DO-NOT-DELETE", "中😀".repeat(length));
+        let blocks = super::emergency_blocks("audit", &[], "", Some(&request), &[]);
+        let rendered = blocks.render();
+        assert!(rendered.contains("HEAD-"), "length {length}: {rendered}");
+        assert!(
+            rendered.contains("TAIL-DO-NOT-DELETE"),
+            "length {length}: {rendered}"
+        );
+        assert!(
+            rendered.contains("[latest user request]"),
+            "length {length}"
+        );
+        if request.len() > super::EMERGENCY_REQUEST_BUDGET_BYTES {
+            assert_eq!(
+                rendered.matches("bytes omitted").count(),
+                1,
+                "超预算时只能有一个省略标记：{rendered}"
+            );
+        }
+    }
+}
+
+/// R03：应急提交后的投影保留长请求首尾，完整原文仍只追加地留在历史里。
+#[tokio::test]
+async fn emergency_checkpoint_keeps_long_request_ends_in_projection() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "emergency-request-ends",
+        |cfg| {
+            cfg.max_context_tokens = 200_000;
+            cfg.context_reserve_tokens = 8_000;
+            cfg.llm_recovery.request_max_retries = 0;
+        },
+        summary_backend(),
+    )
+    .await?;
+    let request = format!("HEAD-MARKER{}TAIL-DO-NOT-DELETE", "x".repeat(20_000));
+    ctx.store.add_user(&request).await?;
+    let shape = MainRequestShape {
+        system_prompt: "",
+        tools: &[],
+    };
+    let committed = ctx
+        .compaction
+        .commit_emergency_checkpoint(
+            "audit_request_ends",
+            &EmergencyCheckpointContext {
+                main_request: shape,
+                target_limit: None,
+                current_user_input: Some(&request),
+                todo: None,
+                artifact_refs: Vec::new(),
+            },
+        )
+        .await?;
+    assert!(committed, "应急 checkpoint 必须提交");
+
+    let projection = serde_json::to_string(&ctx.compaction.active_messages().await?)?;
+    assert!(projection.contains("HEAD-MARKER"), "{projection}");
+    assert!(projection.contains("TAIL-DO-NOT-DELETE"), "{projection}");
+    assert!(projection.contains("lossy excerpt"), "{projection}");
+    assert!(
+        !projection.contains(&"x".repeat(3_000)),
+        "投影里的摘录不能是全文"
+    );
+    let history = serde_json::to_string(&ctx.store.lines().await?)?;
+    assert!(
+        history.contains("TAIL-DO-NOT-DELETE") && history.contains(&"x".repeat(1_000)),
+        "完整原文必须留在历史里"
+    );
+    Ok(())
 }
