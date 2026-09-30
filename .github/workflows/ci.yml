@@ -31,6 +31,11 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
       - run: cargo test -p mink-core --features python-sandbox
+      # R10：真实 Linux 进程树回收验证（bwrap 缺失或命名空间受限则失败）。
+      - name: Install bubblewrap for Linux sandbox integration
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Linux sandbox process-tree integration
+        run: MINK_REQUIRE_SANDBOX=1 cargo test -p mink-core --test sandbox_linux -- --nocapture
       - run: make feature-matrix
       - run: npm test -- --run
         working-directory: crates/mink-server/web
