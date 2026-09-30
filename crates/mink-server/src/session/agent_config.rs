@@ -902,6 +902,32 @@ timeout = 60
     }
 
     #[test]
+    fn provider_http_timeout_merges_per_field_and_parses_file_layer() {
+        // R09：server 的 provider http_timeout 合并语义：项目层优先、缺省保留上层，
+        // 0 是合法值（不设总超时），不能被当成 None。
+        let user = parse_layer("[provider]\nhttp_timeout_secs = 0\n", "user");
+        let project = parse_layer("[provider]\nhttp_timeout_secs = 1200\n", "project");
+        assert_eq!(user.http_timeout_secs, Some(0));
+        let merged = merge(user, project);
+        assert_eq!(merged.http_timeout_secs, Some(1200), "project layer wins");
+
+        let user_only = parse_layer("[provider]\nhttp_timeout_secs = 0\n", "user");
+        let merged_absent = merge(user_only, parse_layer("", "project"));
+        assert_eq!(
+            merged_absent.http_timeout_secs,
+            Some(0),
+            "an absent project field keeps the user value"
+        );
+
+        // 文件层解析：Some(0) 必须保留为 Some(0)（0 = 不设总超时），
+        // 未配置时为 None（由 Rust 默认 600 接管）。
+        let file: MinkConfigFile = toml::from_str("[provider]\nhttp_timeout_secs = 0\n").unwrap();
+        assert_eq!(from_file(&file).http_timeout_secs, Some(0));
+        let none: MinkConfigFile = toml::from_str("[provider]\nmodel = \"flash\"\n").unwrap();
+        assert_eq!(from_file(&none).http_timeout_secs, None);
+    }
+
+    #[test]
     fn size_suffixes_match_cli_semantics() {
         assert_eq!(parse_size_bytes("120k").unwrap(), 120_000);
         assert_eq!(parse_size_bytes("2m").unwrap(), 2_000_000);

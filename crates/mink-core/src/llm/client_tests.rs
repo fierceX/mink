@@ -618,3 +618,206 @@ async fn extra_usage_event_is_recorded_as_unreported() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+// ── R09：provider HTTP 总超时的真实行为 ──
+
+/// 启动慢速 SSE 服务：立即写响应头，然后每 `interval` 发一个非完成帧，
+/// 持续 `duration`；`finish` 时追加 finish_reason + [DONE]。
+async fn start_slow_sse_server(
+    interval: Duration,
+    duration: Duration,
+    finish: bool,
+) -> anyhow::Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut buf = vec![0u8; 8192];
+        let _ = socket.read(&mut buf).await;
+        if socket
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let started = std::time::Instant::now();
+        while started.elapsed() < duration {
+            let frame = format!("data: {}\n\n", json!({"choices":[{"delta":{}}]}));
+            if socket.write_all(frame.as_bytes()).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(interval).await;
+        }
+        if finish {
+            let tail = format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                json!({"choices":[{"finish_reason":"stop","delta":{}}]})
+            );
+            let _ = socket.write_all(tail.as_bytes()).await;
+        }
+    });
+    Ok(format!("http://{addr}/chat/completions"))
+}
+
+/// 每个连接在响应头之后延迟 `delay` 再发完成帧。
+async fn start_delayed_sse_server(connections: usize, delay: Duration) -> anyhow::Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    tokio::spawn(async move {
+        for _ in 0..connections {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            if socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
+                .await
+                .is_err()
+            {
+                return;
+            }
+            tokio::time::sleep(delay).await;
+            let tail = format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                json!({"choices":[{"finish_reason":"stop","delta":{}}]})
+            );
+            let _ = socket.write_all(tail.as_bytes()).await;
+        }
+    });
+    Ok(format!("http://{addr}/chat/completions"))
+}
+
+fn timeout_test_request(ctx: &Arc<AgentSharedContext>, api_url: String) -> LlmRequest {
+    LlmRequest {
+        purpose: LlmPurpose::Agent,
+        model: "deepseek-v4-flash".into(),
+        model_alias: Some("flash".into()),
+        api_url,
+        api_key: "secret-key".into(),
+        system_prompt: "system".into(),
+        messages: vec![json!({"role":"user","content":"ping"})],
+        tools: Vec::new(),
+        max_tokens: ctx.max_tokens(),
+        cancel: ctx.cancel.clone(),
+        verbose: ctx.verbose(),
+        display: ctx.display.clone(),
+    }
+}
+
+/// R09：`http_timeout_secs=1` 时，非 idle 的长流（每 100ms 有事件）
+/// 也必须在 1 秒总超时处终止。
+#[tokio::test]
+#[ignore = "requires local loopback sockets"]
+async fn http_total_timeout_terminates_a_heartbeat_sse_stream() -> anyhow::Result<()> {
+    let api_url = start_slow_sse_server(
+        Duration::from_millis(100),
+        Duration::from_millis(2_000),
+        true,
+    )
+    .await?;
+    let ctx = test_context("http-total-timeout", &api_url).await?;
+    let backend = OpenAiCompatibleBackend::deepseek_defaults().with_http_timeout_secs(1);
+    let response = backend.stream(timeout_test_request(&ctx, api_url)).await?;
+    let started = std::time::Instant::now();
+    let mut stream = response.events;
+    let mut stop = false;
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(Event::Stop(_)) => {
+                stop = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        !stop,
+        "the 1s total timeout must cut the stream before completion"
+    );
+    assert!(
+        elapsed < Duration::from_millis(1_800),
+        "the total timeout must fire near 1s: {elapsed:?}"
+    );
+    Ok(())
+}
+
+/// R09：`http_timeout_secs=0` 关闭总超时，同一长流正常读到完成帧。
+#[tokio::test]
+#[ignore = "requires local loopback sockets"]
+async fn zero_http_timeout_lets_the_stream_finish() -> anyhow::Result<()> {
+    let api_url = start_slow_sse_server(
+        Duration::from_millis(100),
+        Duration::from_millis(1_200),
+        true,
+    )
+    .await?;
+    let ctx = test_context("http-no-timeout", &api_url).await?;
+    let backend = OpenAiCompatibleBackend::deepseek_defaults().with_http_timeout_secs(0);
+    let response = backend.stream(timeout_test_request(&ctx, api_url)).await?;
+    let started = std::time::Instant::now();
+    let mut stream = response.events;
+    let mut stop = false;
+    while let Some(event) = stream.next().await {
+        if matches!(event?, Event::Stop(_)) {
+            stop = true;
+            break;
+        }
+    }
+    assert!(
+        stop,
+        "0 = no total timeout: the stream must reach its finish"
+    );
+    assert!(started.elapsed() >= Duration::from_millis(1_000));
+    Ok(())
+}
+
+/// R09：backend 已经用过一次后，`with_http_timeout_secs` 必须丢弃缓存的
+/// HTTP client，否则新配置不会生效。
+#[tokio::test]
+#[ignore = "requires local loopback sockets"]
+async fn http_timeout_setter_applies_after_first_use() -> anyhow::Result<()> {
+    let api_url = start_delayed_sse_server(2, Duration::from_millis(1_500)).await?;
+    let ctx = test_context("http-timeout-setter", &api_url).await?;
+    let backend = OpenAiCompatibleBackend::deepseek_defaults().with_http_timeout_secs(600);
+    let response = backend
+        .stream(timeout_test_request(&ctx, api_url.clone()))
+        .await?;
+    let mut stream = response.events;
+    let mut stop = false;
+    while let Some(event) = stream.next().await {
+        if matches!(event?, Event::Stop(_)) {
+            stop = true;
+            break;
+        }
+    }
+    assert!(stop, "the first (600s) request must complete");
+
+    let backend = backend.with_http_timeout_secs(1);
+    let response = backend.stream(timeout_test_request(&ctx, api_url)).await?;
+    let started = std::time::Instant::now();
+    let mut stream = response.events;
+    let mut stop = false;
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(Event::Stop(_)) => {
+                stop = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(!stop, "the 1s timeout must cut the second request");
+    assert!(
+        started.elapsed() < Duration::from_millis(1_400),
+        "a cached client would still wait 1.5s: {:?}",
+        started.elapsed()
+    );
+    Ok(())
+}

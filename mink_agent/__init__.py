@@ -192,6 +192,9 @@ class SandboxConfig:
     tool_timeout_max:
         Upper limit (seconds) for a single Bash/Python/custom tool call.
         Explicit per-call timeouts above this value fail closed; default 600.
+    provider_http_timeout_secs:
+        Provider HTTP total timeout in seconds (``0`` disables it). ``None``
+        keeps the Rust default (600). Not part of the recovery policy.
     llm_first_event_timeout:
         Seconds to wait for the first model stream event.
     llm_idle_timeout:
@@ -278,6 +281,9 @@ class SandboxConfig:
     api_key: str = ""
     api_url: str = ""
     model: str = ""
+    # Provider transport: HTTP 请求总超时（秒，0 = 不设）。
+    # None 沿用 Rust 默认值（600）；与 recovery.request_timeout_secs 无关。
+    provider_http_timeout_secs: Optional[int] = None
 
     # Session
     session_id: str = ""
@@ -809,6 +815,8 @@ class AgentSession:
         output: dict[str, Any] = {}
         if self._config.model:
             provider["model"] = self._config.model
+        if self._config.provider_http_timeout_secs is not None:
+            provider["http_timeout_secs"] = self._config.provider_http_timeout_secs
         if self._config.max_tokens != 81920:
             generation["max_tokens"] = self._config.max_tokens
         if self._config.max_turns != 40:
@@ -981,6 +989,14 @@ class AgentSession:
                     "inline skill exposure must be 'model_discoverable', "
                     "'model_addressable', or 'host_only'"
                 )
+        if cfg.provider_http_timeout_secs is not None:
+            value = cfg.provider_http_timeout_secs
+            if type(value) is bool or not isinstance(value, int):
+                raise ValueError("provider_http_timeout_secs must be an integer number of seconds")
+            if value < 0:
+                raise ValueError("provider_http_timeout_secs must be zero or greater")
+            if value > 2**64 - 1:
+                raise ValueError("provider_http_timeout_secs must fit in u64")
         self._validate_recovery_config(cfg)
 
     @staticmethod

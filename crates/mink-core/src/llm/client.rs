@@ -244,9 +244,11 @@ impl OpenAiCompatibleBackend {
 
     /// Override the provider HTTP request timeout in seconds (`0` disables the
     /// total timeout; long streaming generations then rely on the first-event /
-    /// idle deadlines only).
+    /// idle deadlines only). Drops any cached HTTP client so the new value
+    /// applies to subsequent requests even after the backend was used once.
     pub fn with_http_timeout_secs(mut self, seconds: u64) -> Self {
         self.options.http_timeout_secs = seconds;
+        self.client = Mutex::new(None);
         self
     }
 
