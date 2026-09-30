@@ -26,6 +26,13 @@
 ### 修复：第三轮复审整改（G01–G02）
 
 - **严格可行性预判计入 Plan/包装**：`strict_fits` 现在复用真实候选前缀（含 active-plan checkpoint）与摘要消息包装，并为最小可用摘要正文预留空间；长 Plan 存在时不再因「裸尾部看似可行」而错失可行的 degraded 摘要。
+- **Linux 测试生命周期修正**：`ChildGuard` 创建即持有 Child；进程清理按 PID + starttime 身份复核（避免误杀 PID 重用），`TreeCleanup` 在 Drop 中始终生效（含 panic 路径）；token 每次运行唯一；就绪判定要求沙箱内 shell 及其 `sleep` 子进程都出现后才触发父死；新增 panic 失败注入与串行/并行重复执行（CI）。
+
+### 修复：第四轮复审整改（G02 失败路径）
+
+- **就绪失败路径也能清理**：`wait_for_tree_ready` 改成「每轮先登记、再判定就绪」，超时出口再做一次发现/登记；即使工作负载没达到就绪形态，TreeCleanup 也已持有 bwrap/inner/子进程身份，可独立回收。
+- **就绪超时用例**：新增工作负载故意只启动 `tail`（无 `sleep` 子进程）+ 短就绪期限的用例，断言确实走到超时分支且记录的进程全部退出。
+- **panic 注入点可区分**：用专用 payload（`InjectedPanic`）区分「到达注入点」与「准备阶段失败」；有/无 `--die-with-parent` 两版，teardown 断言基于捕获区外保留的 PID 身份（含不带 token 的 `sleep`）；不再修改全局 panic hook。
 
 ### 修复：应急压缩的六项审核问题
 

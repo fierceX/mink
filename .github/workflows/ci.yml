@@ -35,7 +35,9 @@ jobs:
       - name: Install bubblewrap for Linux sandbox integration
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - name: Linux sandbox process-tree integration
-        run: MINK_REQUIRE_SANDBOX=1 cargo test -p mink-core --test sandbox_linux -- --nocapture
+        run: |
+          MINK_REQUIRE_SANDBOX=1 cargo test -p mink-core --test sandbox_linux -- --nocapture
+          MINK_REQUIRE_SANDBOX=1 cargo test -p mink-core --test sandbox_linux -- --nocapture --test-threads=1
       - run: make feature-matrix
       - run: npm test -- --run
         working-directory: crates/mink-server/web
