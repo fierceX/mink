@@ -2168,6 +2168,188 @@ async fn interrupt_manual_compaction_releases_gate_for_next_turn() {
     let _ = tokio::fs::remove_dir_all(cwd).await;
 }
 
+/// R01 复现：manual 应急路径的原始错误必须交付给调用方一次，而且 actor
+/// 不能因此退出（第二次命令得到同一原始诊断，而不是 channel closed）。
+#[tokio::test]
+async fn audit_066_manual_error_is_delivered_without_dropping_actor() {
+    let home = unique_temp_dir("audit-066-manual-home");
+    let cwd = unique_temp_dir("audit-066-manual-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let cfg = Config {
+        model: "flash".into(),
+        api_key: "test-key".into(),
+        max_context_tokens: 40_000,
+        context_reserve_tokens: 8_000,
+        context_compact_tail_tokens: 256_000,
+        llm_recovery: crate::config::LlmRecoveryPolicy {
+            request_max_retries: 0,
+            ..Default::default()
+        },
+        ..Config::default()
+    };
+    let runtime = build_runtime(
+        AgentRuntimeConfig::from_config(cfg, home.clone(), cwd.clone())
+            .with_llm_backend(Arc::new(FailingSummaryBackend)),
+    )
+    .await
+    .unwrap();
+    runtime
+        .ctx
+        .store
+        .add_user(&"x".repeat(150_000))
+        .await
+        .unwrap();
+    runtime
+        .ctx
+        .store
+        .append_runtime_message(serde_json::json!({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "audit-unpaired",
+                "name": "Read",
+                "input": {"path": "example"}
+            }]
+        }))
+        .await
+        .unwrap();
+
+    let error = runtime.compact().await.unwrap_err().to_string();
+    assert!(
+        error.contains("incomplete tool exchange"),
+        "original error was lost: {error}"
+    );
+
+    // actor 存活：同一命令再次返回原始诊断，而不是 channel closed。
+    let second = runtime.compact().await.unwrap_err().to_string();
+    assert!(
+        second.contains("incomplete tool exchange"),
+        "actor died after the first failure: {second}"
+    );
+
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+/// R01：投影读取失败（plan.md 不可读）也必须交付原始错误，且 actor 存活。
+#[tokio::test]
+async fn manual_projection_read_failure_is_delivered_and_actor_survives() {
+    use crate::protocol::{Event, StopEvent, TextEvent};
+    let home = unique_temp_dir("manual-projection-home");
+    let cwd = unique_temp_dir("manual-projection-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let cfg = Config {
+        model: "flash".into(),
+        api_key: "test-key".into(),
+        max_context_tokens: 64_000,
+        context_reserve_tokens: 8_000,
+        context_compact_tail_tokens: 1,
+        llm_recovery: crate::config::LlmRecoveryPolicy {
+            request_max_retries: 0,
+            ..Default::default()
+        },
+        ..Config::default()
+    };
+    let runtime = build_runtime(
+        AgentRuntimeConfig::from_config(cfg, home.clone(), cwd.clone()).with_llm_backend(Arc::new(
+            crate::llm::mock::MockLlmBackend::new(
+                "flash",
+                vec![vec![
+                    Ok(Event::Text(TextEvent {
+                        content: "compacted summary".into(),
+                    })),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "stop".into(),
+                    })),
+                ]],
+            ),
+        )),
+    )
+    .await
+    .unwrap();
+    for index in 0..3 {
+        runtime
+            .ctx
+            .store
+            .add_user(&format!("request {index}: {}", "x".repeat(2_000)))
+            .await
+            .unwrap();
+        runtime
+            .ctx
+            .store
+            .add_assistant(&format!("progress {index}: {}", "y".repeat(2_000)), "", &[])
+            .await
+            .unwrap();
+    }
+    let plan_path = runtime.handle().session.plan_path.clone();
+    tokio::fs::create_dir_all(&plan_path)
+        .await
+        .expect("plan.md is replaced by a directory to force a read failure");
+
+    let error = runtime.compact().await.unwrap_err().to_string();
+    assert!(
+        error.contains("cannot read active plan checkpoint"),
+        "projection read error was lost: {error}"
+    );
+
+    // actor 存活：后续命令仍被受理。
+    runtime.handle().set_model("flash").await.unwrap();
+
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+/// R01：闩锁会话的 manual 压缩必须在入口拒绝：fatal 诊断交付一次，不调用
+/// 摘要 backend，也不写入任何状态；actor 保持存活以返回同一诊断。
+#[tokio::test]
+async fn manual_compaction_delivers_latched_fault_without_model_call_or_write() {
+    let home = unique_temp_dir("manual-latched-home");
+    let cwd = unique_temp_dir("manual-latched-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let cfg = Config {
+        model: "flash".into(),
+        api_key: "test-key".into(),
+        ..Config::default()
+    };
+    let runtime = build_runtime(
+        AgentRuntimeConfig::from_config(cfg, home.clone(), cwd.clone())
+            .with_llm_backend(Arc::new(PanicIfCalledBackend)),
+    )
+    .await
+    .unwrap();
+    let state_path = runtime
+        .handle()
+        .session
+        .summary_path
+        .with_file_name("context-state.json");
+    let before = std::fs::read(&state_path).ok();
+    let _ = runtime
+        .ctx
+        .persistence_fault
+        .raise(std::path::Path::new("todos.json"), "injected fault");
+
+    let error = runtime.compact().await.unwrap_err().to_string();
+    assert!(
+        error.contains("persistence fault"),
+        "latched fault was lost: {error}"
+    );
+    assert_eq!(
+        std::fs::read(&state_path).ok(),
+        before,
+        "a latched manual compaction must not write state"
+    );
+
+    // actor 存活：再次命令仍返回同一 fatal 诊断（而不是 channel closed）。
+    let second = runtime.compact().await.unwrap_err().to_string();
+    assert!(second.contains("persistence fault"), "{second}");
+
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
 /// Runtime whose compaction request never returns until interrupted, with
 /// enough history for a manual compaction to actually run.
 async fn seeded_compaction_runtime(

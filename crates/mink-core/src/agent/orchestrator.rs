@@ -121,18 +121,13 @@ impl OrchActor {
         if limit == usize::MAX {
             return Ok(false);
         }
-        let mut projected = ctx.compaction.active_messages().await?;
+        let projected = ctx.compaction.active_messages().await?;
         let snapshot = ctx.todo_store.snapshot();
-        if let Some(todo_sync) = crate::session::compaction::candidate_todo_sync(
+        let todo_candidate = crate::agent::compactor::todo_candidate_state(ctx, &snapshot);
+        let tokens = crate::session::compaction::estimate_candidate_tokens(
+            shape,
             &projected,
-            crate::agent::compactor::todo_candidate_state(ctx, &snapshot).as_ref(),
-        ) {
-            projected.push(todo_sync);
-        }
-        let tokens = crate::llm::transport::estimate_openai_context_tokens(
-            &projected,
-            shape.tools,
-            shape.system_prompt,
+            todo_candidate.as_ref(),
         )?;
         Ok(tokens > limit)
     }
@@ -176,164 +171,18 @@ impl OrchActor {
                         let _ = done.send(result);
                     }
                     Some(OrchCmd::Compact { done }) => {
-                        self.ctx.display.render_info("Compressing...");
-                        let active_model = self.resolve_active();
-
-                        // manual 与 turn 共用同一套候选预算验收：先确保 immutable prefix
-                        // （与每次请求同源），用真实 system/tools 估算候选；prefix 构建失败时
-                        // 退回既有宽松路径。
-                        let prefix_shape = {
-                            let cached = self
-                                .ctx
-                                .immutable_prefix
-                                .lock()
-                                .unwrap_or_else(|error| error.into_inner())
-                                .as_ref()
-                                .map(|prefix| {
-                                    (
-                                        prefix.system_prompt().to_string(),
-                                        prefix.tools_json().to_vec(),
-                                    )
+                        let outcome = match self.handle_compact().await {
+                            Ok(outcome) => Ok(outcome),
+                            Err(error) => {
+                                // 失败只交付一次原始诊断：可恢复错误与取消不再结束 actor；
+                                // 闩锁会话由 handle_compact 入口检查拒绝后续命令。
+                                self.ctx.log_event(crate::events::EventLog::Compact {
+                                    version: Some(2),
+                                    trigger: "manual".into(),
+                                    result: format!("failed: {error:#}"),
                                 });
-                            match cached {
-                                Some(shape) => Some(shape),
-                                None => match crate::agent::prefix::PrefixManager::new(
-                                    self.ctx.clone(),
-                                )
-                                .ensure()
-                                .await
-                                {
-                                    Ok(shape) => Some(shape),
-                                    Err(error) => {
-                                        self.ctx.display.render_info(&format!(
-                                            "Manual compaction without prefix budget check: {error}"
-                                        ));
-                                        None
-                                    }
-                                },
-                            }
-                        };
-                        let target = crate::llm::client::LlmModelTarget::new(
-                            &active_model.actual,
-                            active_model.alias.as_deref(),
-                        );
-                        let todo_snapshot = self.ctx.todo_store.snapshot();
-                        let todo_candidate =
-                            crate::agent::compactor::todo_candidate_state(&self.ctx, &todo_snapshot);
-                        let mut result = self
-                            .ctx
-                            .compaction
-                            .evaluate_and_compact_with_prefix(
-                                "manual",
-                                0,
-                                target,
-                                None,
-                                None,
-                                // manual 不在某个用户输入内：不携带本轮序号，也不带
-                                // 当前请求原文（不得伪造）。
-                                None,
-                                prefix_shape.as_ref().map(|(system_prompt, tools)| {
-                                    crate::session::compaction::MainRequestShape {
-                                        system_prompt,
-                                        tools,
-                                    }
-                                }),
-                                todo_candidate,
-                            )
-                            .await;
-                        // 手动压缩的失败分流与 turn 一致：摘要侧不可用时，投影本来就
-                        // 超预算就转确定性应急 checkpoint（明确原因），投影仍能发送就返回
-                        // 清晰的 Skipped，不伪装摘要成功；取消/持久化错误原样传播。
-                        let mut emergency_committed = false;
-                        let summary_error = match &result {
-                            Err(error)
-                                if crate::session::compaction::is_summary_unavailable(error) =>
-                            {
-                                Some(format!("{error:#}"))
-                            }
-                            _ => None,
-                        };
-                        if let Some((system_prompt, tools)) = prefix_shape.as_ref() {
-                            let shape = crate::session::compaction::MainRequestShape {
-                                system_prompt,
-                                tools,
-                            };
-                            let needs_emergency = match &result {
-                                Ok((compacted, _)) => {
-                                    !*compacted
-                                        && Self::projection_over_budget(&self.ctx, shape).await?
-                                }
+                                self.ctx.display.render_error(&format!("Compact failed: {error}"));
                                 Err(error)
-                                    if crate::session::compaction::is_summary_unavailable(error) =>
-                                {
-                                    Self::projection_over_budget(&self.ctx, shape).await?
-                                }
-                                Err(_) => false,
-                            };
-                            if needs_emergency {
-                                let reason = if summary_error.is_some() {
-                                    "manual_summary_unavailable"
-                                } else {
-                                    "manual_projection_over_budget"
-                                };
-                                emergency_committed = crate::agent::compactor::commit_emergency_checkpoint(
-                                    &self.ctx,
-                                    reason,
-                                    shape,
-                                    None,
-                                    None,
-                                    &self.ctx.compaction.active_messages().await?,
-                                )
-                                .await?;
-                                if emergency_committed {
-                                    self.ctx.display.render_info(
-                                        "Manual compaction fell back to an emergency checkpoint.",
-                                    );
-                                    result = Ok((
-                                        true,
-                                        "manual emergency checkpoint committed".to_string(),
-                                    ));
-                                }
-                            }
-                        }
-                        if !emergency_committed
-                            && let Some(error) = summary_error
-                        {
-                            result = Ok((false, format!("summary unavailable: {error}")));
-                        }
-
-                        let outcome = match &result {
-                            Ok((true, _reason)) => {
-                                if let Some(summary) = self.ctx.compaction.read_summary().await {
-                                    let trimmed = summary.trim();
-                                    if !trimmed.is_empty() {
-                                        self.ctx.display.render_text(trimmed);
-                                        if !trimmed.ends_with('\n') {
-                                            self.ctx.display.render_text("\n");
-                                        }
-                                    }
-                                }
-                                self.refresh_title().await;
-                                Ok(crate::runtime::CompactOutcome::Compacted { reason: _reason.clone() })
-                            }
-                            Ok((false, reason)) => {
-                                self.ctx.display.render_info(&format!("Compact skipped: {reason}"));
-                                // 跳过也要留痕：摘要不可用等失败不能只在终端出现。
-                                self.ctx.log_event(crate::events::EventLog::Compact {
-                                    version: Some(2),
-                                    trigger: "manual".into(),
-                                    result: format!("skipped: {reason}"),
-                                });
-                                Ok(crate::runtime::CompactOutcome::Skipped { reason: reason.clone() })
-                            }
-                            Err(e) => {
-                                self.ctx.log_event(crate::events::EventLog::Compact {
-                                    version: Some(2),
-                                    trigger: "manual".into(),
-                                    result: format!("failed: {e:#}"),
-                                });
-                                self.ctx.display.render_error(&format!("Compact failed: {e}"));
-                                Err(anyhow::anyhow!("{e:#}"))
                             }
                         };
                         self.ctx.display.render_stop("end_turn");
@@ -362,6 +211,137 @@ impl OrchActor {
         Ok(())
     }
 
+    /// Manual compaction as a self-contained operation: the actor loop only
+    /// receives the command, delivers the result exactly once and keeps
+    /// running. Recoverable failures and cancellations reach the caller with
+    /// their original diagnostic; a latched session refuses new work here
+    /// (before any prefix/history/LLM access) instead of dying with a
+    /// channel-closed error.
+    async fn handle_compact(&mut self) -> Result<crate::runtime::CompactOutcome> {
+        self.ctx.persistence_fault.check()?;
+        self.ctx.display.render_info("Compressing...");
+        let active_model = self.resolve_active();
+
+        // manual 与每次真实请求同源：无条件经唯一的 PrefixManager 获取前缀形状
+        // （缓存命中校验、依赖指纹与宿主 PrefixSource 都在其中）。前缀失败原样
+        // 返回调用方，不得降级为“无预算验收”继续压缩。
+        let (system_prompt, tools) = crate::agent::prefix::PrefixManager::new(self.ctx.clone())
+            .ensure()
+            .await
+            .map_err(|error| {
+                // 前缀构建阶段的取消/中断与压缩中断同义（沿用既有错误文案）。
+                if error
+                    .downcast_ref::<crate::agent::turn::TurnInterrupted>()
+                    .is_some()
+                {
+                    crate::session::compaction::CompactionInterrupted::error()
+                } else {
+                    error
+                }
+            })?;
+        let shape = crate::session::compaction::MainRequestShape {
+            system_prompt: &system_prompt,
+            tools: &tools,
+        };
+        let target = crate::llm::client::LlmModelTarget::new(
+            &active_model.actual,
+            active_model.alias.as_deref(),
+        );
+        let todo_snapshot = self.ctx.todo_store.snapshot();
+        let todo_candidate =
+            crate::agent::compactor::todo_candidate_state(&self.ctx, &todo_snapshot);
+        let mut result = self
+            .ctx
+            .compaction
+            .evaluate_and_compact_with_prefix(
+                "manual",
+                0,
+                target,
+                None,
+                None,
+                // manual 不在某个用户输入内：不携带本轮序号，也不带
+                // 当前请求原文（不得伪造）。
+                None,
+                Some(shape),
+                todo_candidate,
+            )
+            .await;
+        // 手动压缩的失败分流与 turn 一致：摘要侧不可用时，投影本来就
+        // 超预算就转确定性应急 checkpoint（明确原因），投影仍能发送就返回
+        // 清晰的 Skipped，不伪装摘要成功；取消/持久化错误原样传播。
+        let mut emergency_committed = false;
+        let summary_error = match &result {
+            Err(error) if crate::session::compaction::is_summary_unavailable(error) => {
+                Some(format!("{error:#}"))
+            }
+            _ => None,
+        };
+        {
+            let needs_emergency = match &result {
+                Ok((compacted, _)) => {
+                    !*compacted && Self::projection_over_budget(&self.ctx, shape).await?
+                }
+                Err(error) if crate::session::compaction::is_summary_unavailable(error) => {
+                    Self::projection_over_budget(&self.ctx, shape).await?
+                }
+                Err(_) => false,
+            };
+            if needs_emergency {
+                let reason = if summary_error.is_some() {
+                    "manual_summary_unavailable"
+                } else {
+                    "manual_projection_over_budget"
+                };
+                emergency_committed = crate::agent::compactor::commit_emergency_checkpoint(
+                    &self.ctx,
+                    reason,
+                    shape,
+                    None,
+                    None,
+                    &self.ctx.compaction.active_messages().await?,
+                )
+                .await?;
+                if emergency_committed {
+                    self.ctx
+                        .display
+                        .render_info("Manual compaction fell back to an emergency checkpoint.");
+                    result = Ok((true, "manual emergency checkpoint committed".to_string()));
+                }
+            }
+        }
+        if !emergency_committed && let Some(error) = summary_error {
+            result = Ok((false, format!("summary unavailable: {error}")));
+        }
+
+        match result {
+            Ok((true, _reason)) => {
+                if let Some(summary) = self.ctx.compaction.read_summary().await {
+                    let trimmed = summary.trim();
+                    if !trimmed.is_empty() {
+                        self.ctx.display.render_text(trimmed);
+                        if !trimmed.ends_with('\n') {
+                            self.ctx.display.render_text("\n");
+                        }
+                    }
+                }
+                self.refresh_title().await;
+                Ok(crate::runtime::CompactOutcome::Compacted { reason: _reason })
+            }
+            Ok((false, reason)) => {
+                self.ctx
+                    .display
+                    .render_info(&format!("Compact skipped: {reason}"));
+                // 跳过也要留痕：摘要不可用等失败不能只在终端出现。
+                self.ctx.log_event(crate::events::EventLog::Compact {
+                    version: Some(2),
+                    trigger: "manual".into(),
+                    result: format!("skipped: {reason}"),
+                });
+                Ok(crate::runtime::CompactOutcome::Skipped { reason })
+            }
+            Err(error) => Err(error),
+        }
+    }
     async fn handle_user_input(&mut self, input: String) -> TurnRunResult {
         let started_at = Instant::now();
         let billing_turn_id = self.ctx.usage.begin_turn();

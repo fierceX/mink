@@ -90,20 +90,44 @@ pub(crate) struct TodoCandidateState<'a> {
 
 /// 按候选投影决定是否需要补一条预演 TodoSync：候选里已经看不到目标 revision 时必须
 /// 带上（`_mink.todo_revision` 是判断依据，与 `reconcile_todo_state` 同源）。
+/// 历史 revision 领先权威文件或元数据损坏时 fail closed，不得静默按旧快照同步。
 pub(crate) fn candidate_todo_sync(
     candidate: &[Value],
     todo: Option<&TodoCandidateState<'_>>,
-) -> Option<Value> {
-    let todo = todo?;
-    let visible = crate::session::todo::visible_revision(candidate).unwrap_or(0);
-    if visible >= todo.snapshot.revision {
-        return None;
+) -> Result<Option<Value>> {
+    let Some(todo) = todo else {
+        return Ok(None);
+    };
+    let visible = crate::session::todo::visible_revision(candidate)?;
+    if visible > todo.snapshot.revision {
+        anyhow::bail!(
+            "todo conversation revision {visible} is newer than persisted revision {}; refusing to compact",
+            todo.snapshot.revision
+        );
     }
-    Some(crate::session::todo::sync_message_bounded(
+    if visible == todo.snapshot.revision {
+        return Ok(None);
+    }
+    Ok(Some(crate::session::todo::sync_message_bounded(
         todo.snapshot,
         todo.read_provider,
         todo.allowance_tokens,
-    ))
+    )))
+}
+
+/// 候选验收与真实请求使用同一投影：预演 TodoSync → 完整请求投影（已消费图片降为文本
+/// 引用等）→ 按主请求形状估算。候选与发送不允许走两套计费口径。
+pub(crate) fn estimate_candidate_tokens(
+    shape: MainRequestShape<'_>,
+    candidate: &[Value],
+    todo: Option<&TodoCandidateState<'_>>,
+) -> Result<usize> {
+    let mut projected = candidate.to_vec();
+    if let Some(todo_sync) = candidate_todo_sync(&projected, todo)? {
+        projected.push(todo_sync);
+    }
+    let projected = crate::session::plan::project_full_request(&projected)?;
+    shape.estimate(&projected)
 }
 
 /// 活跃窗口里是否存在未配对的工具调用/结果（正式历史协议损坏）。
@@ -751,11 +775,10 @@ impl CompactionEngine {
         loop {
             self.check_emergency_cancelled()?;
             let summary = blocks.render();
-            let mut candidate = self.checkpoint_prefix(&summary)?;
-            if let Some(todo_sync) = candidate_todo_sync(&candidate, ctx.todo.as_ref()) {
-                candidate.push(todo_sync);
-            }
-            let tokens = ctx.main_request.estimate(&candidate)?;
+            // 候选与真实请求同一投影（含预演 TodoSync）；应急折叠后尾部为空。
+            let candidate = self.checkpoint_prefix(&summary)?;
+            let tokens =
+                estimate_candidate_tokens(ctx.main_request, &candidate, ctx.todo.as_ref())?;
             if input_limit == usize::MAX || tokens <= input_limit {
                 // 提交前最后一次取消/中断复检：取消优先于提交。
                 self.check_emergency_cancelled()?;
@@ -792,6 +815,10 @@ impl CompactionEngine {
         }
     }
 
+    /// Legacy relaxed entry point (no main-request shape): test-only. Production
+    /// callers must use [`Self::evaluate_and_compact_with_prefix`] so candidate
+    /// acceptance and manual compaction share the real request budget.
+    #[cfg(test)]
     pub async fn evaluate_and_compact(
         &self,
         trigger: &str,
@@ -904,12 +931,10 @@ impl CompactionEngine {
         if let Some(shape) = main_request {
             let mut candidate = self.checkpoint_prefix(&summary)?;
             candidate.extend_from_slice(kept);
-            // 候选会折走最新 todo revision：验收必须包含随之出现的 TodoSync，否则
-            // 提交后 `reconcile_todo_state` 追加同步消息会再次超窗。
-            if let Some(todo_sync) = candidate_todo_sync(&candidate, todo_state.as_ref()) {
-                candidate.push(todo_sync);
-            }
-            let candidate_tokens = shape.estimate(&candidate)?;
+            // 候选会折走最新 todo revision：验收必须包含随之出现的 TodoSync，并与
+            // 真实请求共用完整投影（图片单次消费等），否则提交后消息会再次超窗。
+            let candidate_tokens =
+                estimate_candidate_tokens(shape, &candidate, todo_state.as_ref())?;
             let input_limit = request_input_limit(&self.config);
             if input_limit != usize::MAX && candidate_tokens > input_limit {
                 return Err(SummaryUnavailable::error(format!(

@@ -352,6 +352,22 @@ pub(crate) async fn context_with_event_log(
         .ctx)
 }
 
+/// Internal test hook: full context with an injected event-log writer, a
+/// config customizer and a backend, so manual compaction can be exercised
+/// against a real prefix-writer failure without touching production APIs.
+pub(crate) async fn context_with_writer_config(
+    name: &str,
+    configure: impl FnOnce(&mut Config),
+    llm_backend: Arc<dyn LlmBackend>,
+    writer: crate::session::event_log::EventLogWriter,
+) -> anyhow::Result<Arc<AgentSharedContext>> {
+    Ok(
+        harness_inner(name, false, 300, configure, Some(llm_backend), Some(writer))
+            .await?
+            .ctx,
+    )
+}
+
 async fn harness_inner(
     name: &str,
     is_sub_agent: bool,

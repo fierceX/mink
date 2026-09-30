@@ -404,6 +404,96 @@ async fn orchestrator_manual_compact_summary_failure_is_skipped_and_logged() -> 
 }
 
 #[tokio::test]
+async fn manual_compaction_prefix_writer_failure_delivers_error_and_recovers() -> anyhow::Result<()>
+{
+    // Real writer failure (no fault-injection flag): the events path lives in
+    // a missing directory, so the prefix snapshot commit fails and manual
+    // compaction must not fall back to a budget-less path.
+    let dir = std::env::temp_dir().join(format!(
+        "mink-orch-prefix-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let events_path = dir.join("missing").join("events.jsonl");
+    let writer = crate::session::event_log::EventLogWriter::start(events_path.clone());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let backend = Arc::new(RecordingCompactionBackend {
+        requests: requests.clone(),
+    });
+    let h = context_with_writer_config(
+        "orch-prefix-writer",
+        |config| config.context_compact_tail_tokens = 1,
+        backend,
+        writer.clone(),
+    )
+    .await?;
+    for index in 0..3 {
+        h.store
+            .add_user(&format!("user history {index}: {}", "x".repeat(256)))
+            .await?;
+        h.store
+            .add_assistant(&format!("assistant history {index}"), "", &[])
+            .await?;
+    }
+    let state_path = crate::session::paths::paths_for(&h.home, &h.cwd, "regression")
+        .summary
+        .with_file_name("context-state.json");
+    let before = std::fs::read(&state_path).ok();
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let actor = OrchActor::new(h.clone(), rx);
+    let handle = tokio::spawn(actor.run());
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    tx.send(OrchCmd::Compact { done: done_tx })?;
+    let error = done_rx
+        .await?
+        .expect_err("a prefix failure must reach the caller")
+        .to_string();
+    assert!(error.contains("failed to open"), "{error}");
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "no summary request may run without a proven prefix"
+    );
+    assert_eq!(
+        std::fs::read(&state_path).ok(),
+        before,
+        "prefix failure must not commit context state"
+    );
+
+    // Recovery: once the writer can open its file, manual compaction runs for
+    // real and writes the prefix snapshot exactly once.
+    std::fs::create_dir_all(events_path.parent().unwrap())?;
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    tx.send(OrchCmd::Compact { done: done_tx })?;
+    let outcome = done_rx
+        .await?
+        .expect("manual compaction must succeed once the writer recovers");
+    assert!(
+        matches!(outcome, crate::runtime::CompactOutcome::Compacted { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    let _ = writer.flush().await;
+    let events = std::fs::read_to_string(&events_path)?;
+    let snapshots = events
+        .lines()
+        .filter(|line| line.contains("\"prefix_snapshot\""))
+        .count();
+    assert_eq!(
+        snapshots, 1,
+        "retry must write exactly one snapshot: {events}"
+    );
+
+    drop(tx);
+    handle.await??;
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
+
+#[tokio::test]
 async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()> {
     let backend = Arc::new(PlanPipelineBackend {
         calls: std::sync::atomic::AtomicUsize::new(0),

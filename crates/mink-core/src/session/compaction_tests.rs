@@ -1193,6 +1193,113 @@ fn cut_point_with_few_users_keeps_token_based_boundary() {
     assert_eq!(messages[cut]["role"], "assistant");
 }
 
+/// R04 复现：候选验收必须与真实请求走同一投影。已消费的图片降为文本引用后
+/// 不得再按图片计费；未消费的图片仍按像素预算计入。
+#[test]
+fn audit_066_candidate_estimate_matches_real_projection() {
+    let candidate = vec![
+        json!({"role":"user","content":[{"type":"tool_attachment",
+            "url":"image://audit","width":4096,"height":4096,"format":"png"}]}),
+        json!({"role":"assistant","content":"Image already inspected"}),
+    ];
+    let shape = MainRequestShape {
+        system_prompt: "",
+        tools: &[],
+    };
+    let projected = shape
+        .estimate(&crate::session::plan::project_full_request(&candidate).unwrap())
+        .unwrap();
+    let accepted = estimate_candidate_tokens(shape, &candidate, None).unwrap();
+    assert_eq!(
+        accepted, projected,
+        "candidate acceptance must use the real projection"
+    );
+    let raw = shape.estimate(&candidate).unwrap();
+    assert!(
+        accepted < raw,
+        "a consumed image must not be billed twice: {accepted} vs {raw}"
+    );
+}
+
+#[test]
+fn candidate_estimate_keeps_unconsumed_attachment_billed() {
+    let fresh = vec![json!({"role":"user","content":[{"type":"tool_attachment",
+            "url":"image://fresh","width":512,"height":512,"format":"png"}]})];
+    let shape = MainRequestShape {
+        system_prompt: "",
+        tools: &[],
+    };
+    let accepted = estimate_candidate_tokens(shape, &fresh, None).unwrap();
+    assert_eq!(accepted, shape.estimate(&fresh).unwrap());
+}
+
+#[test]
+fn candidate_estimate_includes_predicted_todo_sync() {
+    let candidate = vec![json!({"role":"user","content":"hello"})];
+    let snapshot = crate::session::todo::TodoSnapshot {
+        revision: 1,
+        items: vec![crate::session::todo::TodoItem {
+            id: "T0001".into(),
+            content: "inspect".into(),
+            status: crate::session::todo::TodoStatus::InProgress,
+        }],
+        ..Default::default()
+    };
+    let todo = TodoCandidateState {
+        snapshot: &snapshot,
+        read_provider: "TodoRead",
+        allowance_tokens: usize::MAX,
+    };
+    let shape = MainRequestShape {
+        system_prompt: "",
+        tools: &[],
+    };
+    let mut expected = candidate.clone();
+    expected.push(crate::session::todo::sync_message_bounded(
+        &snapshot,
+        "TodoRead",
+        usize::MAX,
+    ));
+    let expected_tokens = shape
+        .estimate(&crate::session::plan::project_full_request(&expected).unwrap())
+        .unwrap();
+    assert_eq!(
+        estimate_candidate_tokens(shape, &candidate, Some(&todo)).unwrap(),
+        expected_tokens
+    );
+    assert!(
+        expected_tokens > shape.estimate(&candidate).unwrap(),
+        "the predicted TodoSync must be billed"
+    );
+}
+
+/// R11：历史 revision 领先权威文件或元数据损坏时必须 fail closed，
+/// 不得静默按旧快照同步或把损坏值当成 revision 0。
+#[test]
+fn candidate_todo_sync_fails_closed_on_ahead_or_broken_revisions() {
+    let snapshot = crate::session::todo::TodoSnapshot {
+        revision: 1,
+        ..Default::default()
+    };
+    let todo = TodoCandidateState {
+        snapshot: &snapshot,
+        read_provider: "TodoRead",
+        allowance_tokens: 0,
+    };
+    let ahead = vec![json!({"role":"user","content":"x",
+        "_mink":{"todo_revision":5,"todo_state_kind":"sync"}})];
+    let error = candidate_todo_sync(&ahead, Some(&todo))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("newer than persisted revision"), "{error}");
+    let broken = vec![json!({"role":"user","content":"x",
+        "_mink":{"todo_revision":"not-a-number"}})];
+    assert!(
+        candidate_todo_sync(&broken, Some(&todo)).is_err(),
+        "corrupt metadata must fail closed instead of defaulting to revision 0"
+    );
+}
+
 #[tokio::test]
 async fn startup_rebuilds_missing_or_stale_summary_projection() -> anyhow::Result<()> {
     let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
