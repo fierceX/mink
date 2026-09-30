@@ -32,7 +32,7 @@ regression-mock:
 regression-client:
 	cargo test llm::client::tests:: -- --ignored --nocapture
 	cargo test builtin_http_retry_uses_exactly_three_requests -- --ignored --nocapture
-	cargo test session::compaction::tests::evaluate_and_compact_writes_clean_summary_and_keeps_valid_conversation -- --ignored --nocapture
+	cargo test -p mink-core --features slow-tests summary_outage_endurance_long_run_300_rounds -- --nocapture
 
 regression-api:
 	MINK_REAL_API=1 cargo test regression::real_deepseek_api_smoke_streams_response -- --ignored --nocapture
