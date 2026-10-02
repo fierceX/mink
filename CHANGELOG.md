@@ -9,86 +9,45 @@
 - **环境层对齐**：server 新增 `MINK_IMAGE_INPUT` / `MINK_VISION_MODELS` 覆盖（非法值告警忽略）。
 - **防回归**：新增跨 crate schema 对齐测试（`crates/mink-server/tests/config_parity.rs`，解析两份源码的 config-file 结构体字段名集合，缺字段即失败）与 image 配置的解析/非法值容忍/层级合并/环境覆盖/「新建会话冻结能力」行为测试。
 
-### 修复：压缩、超时与沙箱的发布前整改
+### 新增：摘要不可用时的确定性应急 checkpoint（压缩失败不再终止本轮）
 
-- **manual 压缩错误交付**：失败经命令通道原样返回一次，不再退出 orchestrator actor（不再出现 `channel closed`）；闩锁会话入口拒绝，零摘要调用、零状态写入。
-- **唯一前缀获取路径**：manual 无条件经 `PrefixManager::ensure()`（含依赖指纹与宿主 `PrefixSource`），删除「无前缀预算验收」降级。
-- **候选与真实请求同一投影**：新增 `estimate_candidate_tokens`（预演 TodoSync → `project_full_request` → 主请求形状估算），候选验收/应急循环/`projection_over_budget` 共用；已消费图片不重复计费；TodoSync 预演的历史 revision 领先或元数据损坏时 fail closed。
-- **应急摘录保留首尾**：按 UTF-8 字节预算保留请求头尾，收缩始终从原文重建（地板 160B），单个省略标记。
-- **派生展示严格额度**：plan/todo 展示按完整块字节计费（信封、ID、计数、省略标记都计入），4 字节字符不再超额；最小元数据装不下时明确声明不可表示。
-- **软尾部闭环**：切点目标取 `min(配置 tail, 可用空间)`（扣除固定前缀、派生展示与摘要空间）；manual 传真实投影估算；cache-aligned 路径改用动态输出 cap。
-- **净收益发布门控**：auto 要求 ≥10% 净下降、强制路径要求严格下降，不发布越压越大的摘要。
-- **round 绝对期限**：stream 重试、overflow 收缩与其摘要请求共享同一 `request_timeout_secs` 期限；删除隐藏的 8 次强制压缩、3 次 overflow 收缩常量（改为严格下降终止，不设次数上限）。
-- **provider HTTP 超时**：`with_http_timeout_secs` 丢弃已缓存 client（用过一次后改值也生效）；新增本地 SSE 行为测试；Python `SandboxConfig.provider_http_timeout_secs`；server 层合并测试。
-- **Linux 父死亡回收**：`PR_SET_PDEATHSIG` 检查返回值并在注册后复检父身份；bwrap argv 抽成纯函数并有参数测试；新增 Linux 进程树集成测试（父死/直接杀 bwrap 两条路径）与 CI 强制运行。
-- **诊断**：应急 checkpoint 单独计数并出现在「本输入 committed」诊断中；「最小工作空间不可用」由失败原因驱动；摘要不可用提示改为稳定原因码（`retry_exhausted`/`timeout`/`budget`/`invalid_output`/`upstream`/`unavailable`）。
-
-### 修复：压缩与沙箱的复审整改
-
-- **round 期限耗尽不可转应急**：共享期限到期后的摘要失败定型为 `CompactionDeadlineExpired`（主请求终态 timeout），应急入口/拿锁后/每次收缩/提交前都检查共享期限；超时后不再发布新的有损 checkpoint。取消优先于期限。
-- **软尾部预算可行性闭环**：严格切点非零但「保留两条真实 user」的候选装不进预算时（且请求已超预算），按安全边界退化到 `_cut=degraded`，优先尝试可行的 LLM 摘要，而不是直接转应急。
-- **截断必须有显式省略提示**：`head_tail_with_marker` 在完整标记放不下时退回短标记 `…`；Todo 条目分到的额度不足前缀 + 最小正文时整条省略并在父块给声明，正文不再无提示截短。
-- **Linux 集成测试修正**：探针挂载可执行文件与库并保留 stderr/退出状态；测试标记不再被 shell 注释吞掉、每个测试独立 token、就绪判定来自沙箱内进程（排除 launcher）并记录子进程、RAII kill/wait 清理；新增「撤掉 `--die-with-parent` 树仍存活」负例。
-
-### 修复：压缩预判与 Linux 测试的复审整改
-
-- **严格可行性预判计入 Plan/包装**：`strict_fits` 现在复用真实候选前缀（含 active-plan checkpoint）与摘要消息包装，并为最小可用摘要正文预留空间；长 Plan 存在时不再因「裸尾部看似可行」而错失可行的 degraded 摘要。
-- **Linux 测试生命周期修正**：`ChildGuard` 创建即持有 Child；进程清理按 PID + starttime 身份复核（避免误杀 PID 重用），`TreeCleanup` 在 Drop 中始终生效（含 panic 路径）；token 每次运行唯一；就绪判定要求沙箱内 shell 及其 `sleep` 子进程都出现后才触发父死；新增 panic 失败注入与串行/并行重复执行（CI）。
-
-### 修复：Linux 测试的失败路径与清理整改
-
-- **就绪失败路径也能清理**：`wait_for_tree_ready` 改成「每轮先登记、再判定就绪」，超时出口再做一次发现/登记；即使工作负载没达到就绪形态，TreeCleanup 也已持有 bwrap/inner/子进程身份，可独立回收。
-- **就绪超时用例**：新增工作负载故意只启动 `tail`（无 `sleep` 子进程）+ 短就绪期限的用例，断言确实走到超时分支且记录的进程全部退出。
-- **panic 注入点可区分**：用专用 payload（`InjectedPanic`）区分「到达注入点」与「准备阶段失败」；有/无 `--die-with-parent` 两版，teardown 断言基于捕获区外保留的 PID 身份（含不带 token 的 `sleep`）；不再修改全局 panic hook。
-- **生产入口 Linux 端到端**：新增 `runtime::reexec_in_sandbox` 真跑用例（宿主父 shell → 生产 reexec → bwrap → 沙箱内探针 + `sleep` 孙进程）：断言宿主侧 NSpid 嵌套、孙进程挂在沙箱进程下；杀宿主父后 PDEATHSIG + `--die-with-parent` + 命名空间回收整棵树，无残留。宿主可见 PID 靠 argv[0] + 每次运行唯一 token 的 environ 定位（命名空间内 PID/NSpid 与宿主不可相互换算），孙进程靠 PPid 扫描（宿主看不到沙箱内的 children 列表）。
-
-### 修复：应急压缩的六项审核问题
-
-- **收缩必须严格变小**：`shrink_excerpt` 把省略标记计入额度，结果不短于输入时返回「无法继续」
-  而不是原样返回（此前 1200 → … → 84 → 84 会在外层收缩循环里自旋、持续占 CPU）。
-- **应急路径的取消/中断检查**：入口、拿到压缩锁后、每次收缩前、提交前都检查 `cancel` 与
-  `interrupt`，并统一映射为 `TurnDecision::Interrupted`（此前只查 interrupt，runtime cancel
-  仍会提交）。
-- **TodoSync 需求按压缩后的候选判断**：候选折走最新 `_mink.todo_revision` 时，预演同步消息计入
-  候选验收（普通摘要与应急两条路径），不再出现「验收通过、提交后 reconcile 追加同步消息又超窗」。
-- **overflow 以真实收缩为准**：不再把「完成一次摘要」当成恢复成功——重新投影后请求没有严格变小
-  （含摘要成功但变大）就转应急 checkpoint（按折半目标）。
-- **overflow 收缩额度按逻辑请求重置**：计数移入 round 循环，长任务不再共享一个终身 3 次额度。
-- **应急前验证工具配对**：活跃窗口存在未完成的 tool call/result 交换时拒绝提交
-  （`incomplete tool exchange`），协议损坏不被摘录掩盖。
-
-### 优化：软额度与动态摘要预算
-
-- **摘要输出动态 cap**：`S_call = min(context_compact_max_output_tokens, 窗口 − 本次输入)`，每次 attempt（含纠错诊断追加之后）重新估算并重算；低于最小实用输出（`MIN_PRACTICAL_SUMMARY_TOKENS`）时直接转确定性应急，不再因「固定上限装不下」而放弃本可发出的摘要请求。
-- **配置软额度**：`validate_runtime_limits` 不再拒绝 `context_compact_tail_tokens ≥ 主请求输入预算`、`context_compact_max_output_tokens ≥ 窗口` 与 `S + T + O > 窗口` 的组合——两者是目标值，运行时按每次请求的剩余空间收紧（切点收紧热尾部 + 动态 cap）；硬约束只有 `reserve < 窗口`。小窗口 + 大软目标可以初始化。
-- **manual 与 turn 共用请求上下文**：手动压缩先用 immutable prefix 得到真实 system/tools，参与候选发布前验收；摘要不可用且投影本来就超预算时转确定性应急 checkpoint（`CompactOutcome::Compacted`），投影仍能发送时返回带原因的 `Skipped`，不再把摘要错误当成硬失败。
-- **provider overflow 有限收缩**：按「固定前缀 + 可变额度折半」给出更小目标，最多 `MAX_OVERFLOW_SHRINK_ATTEMPTS`(3) 次；每次都必须让请求严格变小，否则以原错误结束（不再是一旦常规压缩无收益就放弃）。
-- **应急摘录的 artifact 引用**：只列出历史里真实出现且仍存在于 artifact 索引中的 `artifact://` id（上限 8 条），不虚构 URL。
-- **plan/todo 派生展示限额**：模型可见的 `<active-plan-checkpoint>` 与 `<todo-sync>` 派生正文按 `输入预算/8` 的额度做头尾保留 + 省略标记（「能放下就原样输出」）；权威 `plan.md` / `todos.json` 与 revision、pending/in_progress/completed 计数不被改写，`TodoRead` 仍返回完整内容。候选验收与真实投影共用同一渲染函数，避免「检查短版、发送长版」。
-
-### 新增：摘要不可用时的确定性应急 checkpoint（压缩不再终止 turn）
-
-- **两级机制**：正常路径仍是 LLM 摘要（含缓存对齐/降噪）；当请求已经超出输入预算、而摘要侧不可用（摘要输入装不下、调用超时/重试耗尽、输出不合格、候选发布前验收不通过）时，改由**不调用 LLM 的确定性应急 checkpoint**接管：有损摘录（固定标记 → 当前用户请求摘录 → 上一份摘要片段 → 最近已完成工具交换的结构化事实），`active_start` 推进到历史末尾，`conversation.jsonl` 只追加不重写，权威 plan/todo 不被改写。
-- **错误分类**：摘要侧失败在来源处定型为 `SummaryUnavailable`（可转应急）与 `CompactionInterrupted`（映射为 `TurnDecision::Interrupted`，不再报成 failed）；取消、持久化 fault、正式历史协议损坏仍原样传播（不允许 `Err(_) => emergency`）。
-- **auto 失败不再阻断可发送的请求**：auto 提前压缩失败时，若原请求仍在预算内则照常发送并记录诊断。
-- **候选发布前完整预算验收**：摘要 + 动态 checkpoint + 保留尾部必须先过 `estimate_openai_context_tokens` 才算提交，消除「摘要成功但请求反而变大」在下一层失败。
-- **观测**：`compact` 事件 `result` 串新增 `_mode=summary|emergency` 与 `_emergency_reason=<分类>`；应急提交使用 `trigger=emergency`，并向操作者输出一行提示。`<compacted-summary>` 包装文案改为中性（可能是摘要或摘录），标签不变。
+- **两级机制**：正常路径仍是 LLM 摘要（含缓存对齐/降噪）；当请求已经超出输入预算、而摘要侧不可用（摘要输入装不下、调用超时/重试耗尽、输出不合格、候选发布前验收不通过）时，改由**不调用 LLM 的确定性应急 checkpoint** 接管：有损摘录（固定标记 → 当前用户请求摘录 → 上一份摘要片段 → 最近已完成工具交换的结构化事实），`active_start` 推进到历史末尾，`conversation.jsonl` 只追加不重写，权威 plan/todo 不被改写。
+- **摘录格式与收缩**：按 UTF-8 字节预算保留首尾（地板 160B、单个省略标记，标记计入额度）；收缩始终从原文重建，结果不短于输入即停止（不原样返回、不自旋）；`artifact://` 引用只列历史中真实出现且仍存在于索引的 id（上限 8 条）。
+- **候选与真实请求同一投影**：新增 `estimate_candidate_tokens`（预演 TodoSync → `project_full_request` → 主请求形状估算），候选验收/应急循环/`projection_over_budget` 共用；摘要 + 动态 checkpoint + 保留尾部必须过 `estimate_openai_context_tokens` 才算提交；已消费图片不重复计费；TodoSync 预演的历史 revision 领先或元数据损坏时 fail closed。
+- **取消与协议完整性**：入口、拿锁后、每次收缩前、提交前都检查 `cancel` 与 `interrupt`（统一映射 `TurnDecision::Interrupted`）；活跃窗口存在未完成的 tool call/result 交换时以 `incomplete tool exchange` 拒绝提交，协议损坏不被摘录掩盖。
+- **错误分类**：摘要侧失败在来源处定型为 `SummaryUnavailable`（可转应急）与 `CompactionInterrupted`（映射为 `TurnDecision::Interrupted`，不再报成 failed）；取消、持久化 fault、正式历史协议损坏仍原样传播（不允许 `Err(_) => emergency`）。auto 提前压缩失败时，若原请求仍在预算内则照常发送并记录诊断。
+- **观测**：`compact` 事件新增 `_mode=summary|emergency` 与 `_emergency_reason=<分类>`；应急提交使用 `trigger=emergency` 并向操作者输出一行提示；应急 checkpoint 单独计数并出现在「本输入 committed」诊断中；「最小工作空间不可用」由失败原因驱动；摘要不可用提示改为稳定原因码（`retry_exhausted`/`timeout`/`budget`/`invalid_output`/`upstream`/`unavailable`）。`<compacted-summary>` 包装文案改为中性（可能是摘要或摘录），标签不变。
 - 长跑验收：摘要 backend 持续失败 + 有限窗口下多轮工具调用仍以 `Stop` 结束，无压缩类 `turn_error`，每个工具调用只执行一次（见 `summary_outage_endurance_keeps_the_turn_alive`）。
+
+### 变更：同一用户输入可重复压缩（含 provider overflow 与最后手段切点）
+
+- `TurnCompactor` 的 `compacted_this_turn` 布尔互锁改为计数（`compactions_this_turn`）：auto / preflight / overflow 不再按「每个用户输入一次」封顶；每次压缩必须严格降低请求估算（不降即停，避免在同一投影上重复摘要），并在发布前过净收益门控（auto 要求 ≥10% 净下降，强制路径要求严格下降），否则不提交；无安全切点 / 收益不足时仍以 fail-closed 拒绝发送超预算请求。
+- 最小收益检查分档：auto 保持「节省 < 10% 跳过」；preflight / overflow 在请求已经超预算时只要真能省（`saved > 0`）就压，避免「需要的削减量小于阈值」变成无法恢复的必然失败。
+- `prepare_request` 改为「压到装得下为止」：估算超硬闸门时反复强制 preflight，每轮重新投影与重估；错误消息带上本轮已提交压缩次数、强制尝试次数与最后一次跳过原因，便于嵌入侧区分「预算用尽请续跑」与真故障。
+- **provider overflow 恢复**：只在无可见输出时触发；收缩次数不设硬上限（每次必须严格缩小，否则报错或转应急），额度按逻辑请求重置，不再是终身 3 次；以真实收缩为准——重新投影后请求没有严格变小（含摘要成功但变大）就转应急 checkpoint。
+- **最后手段切点 `_cut=degraded`**：请求已经超出输入预算而严格切点搜索返回 0（热尾部目标吞掉整个窗口，或窗口只剩最近两个用户轮次），或严格切点存在但保留最近两条真实 user 的候选装不进预算时，退化为「折到最新安全边界之前」（当前请求仅以摘要文本保留），不再直接 fail-closed；未超预算的 auto/manual 路径不启用。严格可行性预判（`strict_fits`）复用真实候选前缀（含 active-plan checkpoint）与摘要消息包装，并为最小可用摘要正文预留空间。
+- **round 绝对期限**：stream 重试、overflow 收缩与其摘要请求共享同一 `request_timeout_secs` 期限，重进 stream 不重置总期限；期限到期后的摘要失败定型为 `CompactionDeadlineExpired`（主请求终态 timeout），超时后不再发布新的有损 checkpoint；取消优先于期限。
+- `compact` 事件 `result` 串追加 `_compactions_this_turn=<n>`（本轮第几次压缩，1-based；`manual` 等输入外调用不带该字段）。
 
 ### 新增：provider HTTP 总超时可配置（长流式生成不再被固定 600s 砍断）
 
-- `[provider] http_timeout_secs`（Rust `ProviderOptions::http_timeout_secs` / `AgentOptions::with_provider_http_timeout_secs`、server `[provider]`、JSONL `options.provider.http_timeout_secs`）：单次物理请求（含流式响应体读取）的总超时，默认 **600 秒**（与修复前一致），`0` = 不设总超时，由 `llm_first_event_timeout` / `llm_idle_timeout` 兜底。
-- 修复前该值硬编码在 HTTP 客户端（`connect30s` + `total600s`）且无法配置：长文档生成/长思考的单次请求超过 600s 会被传输层中断并判为可重试，重试后仍会再次超时，最终以 `request_timeout: … error decoding response body … operation timed out` 结束该 turn（耗时呈 600s 整数倍）。现可用配置放宽或关闭。
-- 与 `[recovery] request_timeout_secs` 的关系：后者是“整个逻辑请求（含全部重试与退避）的总期限”，属于恢复策略；前者是传输层单次请求上限，不属于 `llm_recovery`。两者都设时，谁先到谁生效。
+- `[provider] http_timeout_secs`（Rust `ProviderOptions::http_timeout_secs` / `AgentOptions::with_provider_http_timeout_secs`、CLI/server `.minkrc`、JSONL `options.provider.http_timeout_secs`、Python `SandboxConfig.provider_http_timeout_secs`）：单次物理请求（含流式响应体读取）的总超时，默认 **600 秒**（与修复前一致），`0` = 不设总超时，由 `llm_first_event_timeout` / `llm_idle_timeout` 兜底。
+- 修复前该值硬编码在 HTTP 客户端（`connect30s` + `total600s`）且无法配置：长文档生成/长思考的单次请求超过 600s 会被传输层中断并判为可重试，重试后仍会再次超时，最终以 `request_timeout: … error decoding response body … operation timed out` 结束该 turn（耗时呈 600s 整数倍）。现可用配置放宽或关闭；`with_http_timeout_secs` 会丢弃已缓存 client，改值在客户端用过一次后同样生效。
+- 与 `[recovery] request_timeout_secs` 的关系：后者是「整个逻辑请求（含全部重试与退避）的总期限」，属于恢复策略；前者是传输层单次请求上限，不属于 `llm_recovery`。两者都设时，谁先到谁生效。
 
-### 变更：同一用户输入可重复压缩（取消单轮一次互锁）
+### 优化：软额度、动态摘要预算与有损派生展示
 
-- `TurnCompactor` 的 `compacted_this_turn` 布尔互锁改为计数（`compactions_this_turn`）：auto / preflight / overflow 不再按「每个用户输入一次」封顶；每次压缩必须严格降低请求估算（不降即停，避免在同一投影上重复摘要），并在发布前过净收益门控（auto 要求 ≥10% 净下降，强制路径要求严格下降），否则不提交；无安全切点 / 收益不足时仍以 fail-closed 拒绝发送超预算请求。
-- `prepare_request` 改为「压到装得下为止」：估算超硬闸门时反复强制 preflight，每轮重新投影与重估；错误消息现在带上本轮已提交压缩次数、强制尝试次数与最后一次跳过原因（便于嵌入侧区分「预算用尽请续跑」与真故障）。
-- provider context overflow 恢复不再要求「本轮尚未压缩」：只在无可见输出时触发；收缩次数不设硬上限（每次必须严格缩小，否则报错或转应急），并与主请求共享同一 round 绝对期限（`request_timeout_secs`），重进 stream 不重置总期限。
-- 最小收益检查分档：auto 保持「节省 < 10% 跳过」；preflight / overflow 在请求已经超预算时只要真能省（`saved > 0`）就压——否则「需要的削减量小于阈值」会变成无法恢复的必然失败。
-- `compact` 事件 `result` 串追加 `_compactions_this_turn=<n>`（本轮第几次压缩，1-based；`manual` 等输入外调用不带该字段）。
-- **最后手段切点 `_cut=degraded`**：请求已经超出输入预算（`local_tokens > request_input_limit`）而严格切点搜索返回 0（热尾部目标吞掉整个窗口，或窗口只剩最近两个用户轮次），**或**严格切点存在但保留最近两条真实 user 的候选装不进预算时，退化为「折到最新安全边界之前」——忽略热尾部 token 目标与「保留最近两条真实 user 消息」守卫，折叠内容照常进摘要（当前请求仅以摘要文本保留），不再直接让本轮 fail-closed。未超预算的 auto/manual 路径不启用。
+- **摘要输出动态 cap**：`S_call = min(context_compact_max_output_tokens, 窗口 − 本次输入)`，每次 attempt（含纠错诊断追加之后）重新估算；低于最小实用输出（`MIN_PRACTICAL_SUMMARY_TOKENS`）时直接转确定性应急，不再因「固定上限装不下」而放弃本可发出的摘要请求。
+- **配置软额度**：`validate_runtime_limits` 不再拒绝 `context_compact_tail_tokens ≥ 主请求输入预算`、`context_compact_max_output_tokens ≥ 窗口` 与 `S + T + O > 窗口` 的组合——它们是目标值，运行时按剩余空间收紧（切点目标取 `min(配置 tail, 可用空间)`，扣除固定前缀、派生展示与摘要空间；cache-aligned 路径同样改用动态输出 cap）；硬约束只有 `reserve < 窗口`。
+- **manual 与 turn 共用请求上下文**：手动压缩无条件经 `PrefixManager::ensure()` 取真实 system/tools（含依赖指纹与宿主 `PrefixSource`），传真实投影估算并参与候选发布前验收；摘要不可用且投影本来就超预算时转确定性应急，投影仍能发送时返回带原因的 `Skipped`；失败经命令通道原样返回一次，不再退出 orchestrator actor（不再出现 `channel closed`），闩锁会话入口拒绝（零摘要调用、零状态写入）。
+- **plan/todo 派生展示有损**：`<active-plan-checkpoint>` 与 `<todo-sync>` 派生正文按 `输入预算/8` 头尾保留 + 省略标记；权威 `plan.md` / `todos.json` 与 revision、pending/in_progress/completed 计数不被改写，`TodoRead` 仍返回完整内容；候选验收与真实投影共用同一渲染函数，避免「检查短版、发送长版」。
+- **有损展示的字节与省略纪律**：展示与摘录按完整块字节计费（信封、ID、计数、省略标记与 4 字节字符都计入）；`head_tail_with_marker` 在完整标记放不下时退回短标记 `…`；Todo 条目额度不足前缀 + 最小正文时整条省略并在父块声明；最小元数据装不下时明确声明不可表示。
+
+### 修复：Linux 沙箱进程树回收与集成测试
+
+- **父进程死亡回收**：`PR_SET_PDEATHSIG` 检查返回值并在注册后复检父身份；bwrap argv 抽成纯函数并有参数测试；新增 Linux 进程树集成测试（父死与直接杀 bwrap 两条路径），CI 强制运行。
+- **生产入口端到端**：新增 `runtime::reexec_in_sandbox` 真跑用例（宿主父 shell → 生产 reexec → bwrap → 沙箱内探针 + `sleep` 孙进程）：断言宿主侧 NSpid 嵌套、孙进程挂在沙箱进程下；杀宿主父后 PDEATHSIG + `--die-with-parent` + 命名空间回收整棵树，无残留。
+- **测试生命周期与失败路径**：探针挂载可执行文件与库并保留 stderr/退出状态；就绪判定来自沙箱内进程，`wait_for_tree_ready` 每轮先登记再判定、超时出口再发现一次（工作负载未达就绪形态也能独立回收）；进程清理按 PID + starttime 身份复核（避免误杀 PID 重用），`TreeCleanup` 在 Drop 中始终生效，RAII kill/wait 不残留；新增就绪超时用例、「撤掉 `--die-with-parent` 树仍存活」负例与可区分的 panic 注入分级（含串行/并行重复执行）。
 
 ### 已知边界
 
