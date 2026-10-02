@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.6.6 (2026-09-30)
+## v0.6.6 (2026-10-02)
 
 ### 修复：mink-server 的 `.minkrc` 复刻同步与既有会话复用
 
@@ -99,7 +99,8 @@
 
 - 事件形状不变，仅 `compact.result` 字符串新增字段；公共 API 不变（`agent` 模块为私有）；`--print` / `--agent-jsonl` 协议不变。
 - 行为变化：同一用户输入内可发生多次压缩；错误文案由 `context remains over the request input budget after compaction: ...` 变为 `context remains over the request input budget: ... N compaction(s) committed and M forced attempt(s) in this input (last: ...)`。
-- 文档同步：`AGENTS.md`（不变式 + 日期）、`docs/DESIGN.md`、`docs/ARCHITECTURE.md`、`docs/USAGE.md`。
+- server 配置兼容性：`.minkrc` 的 `[provider] image_input` / `vision_models` / `[provider.image]` 与 `MINK_IMAGE_INPUT` / `MINK_VISION_MODELS` 现被 mink-server 正确解析并映射到 `AgentOptions`（此前因 `.minkrc` 复刻缺字段，整份配置被拒绝并静默回退默认值）；TUI/CLI 与 server 创建的会话恢复互相打开（冻结图像能力指纹一致）。
+- 文档同步：`AGENTS.md`（不变式 + 日期）、`docs/DESIGN.md`、`docs/ARCHITECTURE.md`、`docs/USAGE.md`、`docs/server.md`。
 
 ## v0.6.5 (2026-09-26)
 
