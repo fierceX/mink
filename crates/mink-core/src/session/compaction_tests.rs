@@ -436,7 +436,7 @@ async fn stored_projection_hashes_messages_and_shares_usage_baseline() -> anyhow
     Ok(())
 }
 
-/// R05：配置的输出 cap 大于窗口时，对齐路径必须用动态 cap 判定，
+/// 配置的输出 cap 大于窗口时，对齐路径必须用动态 cap 判定，
 /// 而不是用固定配置值提前淘汰可缓存请求。
 #[tokio::test]
 async fn cache_aligned_summary_uses_dynamic_cap_when_configured_cap_exceeds_window()
@@ -490,7 +490,7 @@ async fn cache_aligned_summary_uses_dynamic_cap_when_configured_cap_exceeds_wind
     Ok(())
 }
 
-/// R05：热尾部软目标按可用空间收紧，不再直接判定无切点。
+/// 热尾部软目标按可用空间收紧，不再直接判定无切点。
 #[tokio::test]
 async fn tail_target_is_tightened_to_available_space() -> anyhow::Result<()> {
     let backend = Arc::new(CapturingSummaryBackend::default());
@@ -1315,10 +1315,10 @@ fn cut_point_with_few_users_keeps_token_based_boundary() {
     assert_eq!(messages[cut]["role"], "assistant");
 }
 
-/// R04 复现：候选验收必须与真实请求走同一投影。已消费的图片降为文本引用后
+/// 候选验收必须与真实请求走同一投影。已消费的图片降为文本引用后
 /// 不得再按图片计费；未消费的图片仍按像素预算计入。
 #[test]
-fn audit_066_candidate_estimate_matches_real_projection() {
+fn candidate_estimate_matches_real_projection() {
     let candidate = vec![
         json!({"role":"user","content":[{"type":"tool_attachment",
             "url":"image://audit","width":4096,"height":4096,"format":"png"}]}),
@@ -1343,14 +1343,14 @@ fn audit_066_candidate_estimate_matches_real_projection() {
     );
 }
 
-/// R06 复现：派生展示额度按 UTF-8 字节上界约束，4 字节字符不得超额。
+/// 派生展示额度按 UTF-8 字节上界约束，4 字节字符不得超额。
 #[test]
-fn audit_066_derived_display_respects_four_byte_text_budget() {
+fn derived_display_respects_four_byte_text_budget() {
     let rendered = super::bounded_derived_text(&"😀".repeat(2_000), 256);
     assert!(rendered.len() <= 256 * 3, "{} > 768 bytes", rendered.len());
 }
 
-/// R06：ASCII/CJK/emoji/控制字符在 0/1/255/256/MAX 额度下都不越界，
+/// ASCII/CJK/emoji/控制字符在 0/1/255/256/MAX 额度下都不越界，
 /// 额度充足时与原文一致。
 #[test]
 fn derived_display_respects_byte_allowance_across_text_shapes() {
@@ -1376,7 +1376,7 @@ fn derived_display_respects_byte_allowance_across_text_shapes() {
     }
 }
 
-/// R06：plan 派生 checkpoint 的额度也覆盖包装，正文按剩余空间截短。
+/// plan 派生 checkpoint 的额度也覆盖包装，正文按剩余空间截短。
 #[tokio::test]
 async fn plan_checkpoint_respects_whole_block_budget() -> anyhow::Result<()> {
     let dir = std::env::temp_dir().join(format!(
@@ -1466,7 +1466,7 @@ fn candidate_estimate_includes_predicted_todo_sync() {
     );
 }
 
-/// R11：历史 revision 领先权威文件或元数据损坏时必须 fail closed，
+/// 历史 revision 领先权威文件或元数据损坏时必须 fail closed，
 /// 不得静默按旧快照同步或把损坏值当成 revision 0。
 #[test]
 fn candidate_todo_sync_fails_closed_on_ahead_or_broken_revisions() {
@@ -1493,7 +1493,7 @@ fn candidate_todo_sync_fails_closed_on_ahead_or_broken_revisions() {
     );
 }
 
-/// R07：净收益门控的边界（auto ≥10%，强制路径严格下降）。
+/// 净收益门控的边界（auto ≥10%，强制路径严格下降）。
 #[test]
 fn net_benefit_gate_boundaries() {
     assert!(net_benefit_sufficient("auto", 100, 90));
@@ -1511,7 +1511,7 @@ fn net_benefit_gate_boundaries() {
     assert!(net_benefit_sufficient("auto", 0, usize::MAX));
 }
 
-/// R07：摘要 + checkpoint 比原请求更大时不得发布，状态不变。
+/// 摘要 + checkpoint 比原请求更大时不得发布，状态不变。
 #[tokio::test]
 async fn oversized_net_summary_is_not_published() -> anyhow::Result<()> {
     let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
@@ -1561,7 +1561,7 @@ async fn oversized_net_summary_is_not_published() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// F04：严格切点非零、但「保留两条 user」的候选放不下时，超预算请求按预算可行性
+/// 严格切点非零、但「保留两条 user」的候选放不下时，超预算请求按预算可行性
 /// 退化到最新安全边界（`_cut=degraded`），而不是直接转应急。
 #[tokio::test]
 async fn over_budget_strict_candidate_falls_back_to_budget_feasible_cut() -> anyhow::Result<()> {
@@ -1619,7 +1619,7 @@ async fn over_budget_strict_candidate_falls_back_to_budget_feasible_cut() -> any
     Ok(())
 }
 
-/// G01：严格可行性预判必须复用真实候选前缀（含 active-plan checkpoint）
+/// 严格可行性预判必须复用真实候选前缀（含 active-plan checkpoint）
 /// 与摘要消息包装；长 Plan 存在时不能因「裸尾部可行」而放弃 degraded 摘要。
 #[tokio::test]
 async fn strict_feasibility_accounts_for_active_plan() -> anyhow::Result<()> {
@@ -1691,7 +1691,7 @@ async fn strict_feasibility_accounts_for_active_plan() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// F03：共享 round 期限耗尽后，摘要评估与应急都必须拒绝发布；取消优先于期限。
+/// 共享 round 期限耗尽后，摘要评估与应急都必须拒绝发布；取消优先于期限。
 #[tokio::test]
 async fn expired_round_deadline_blocks_emergency_publish() -> anyhow::Result<()> {
     use crate::session::compaction::{is_compaction_deadline_expired, is_compaction_interrupted};
@@ -1824,7 +1824,7 @@ async fn startup_rebuilds_missing_or_stale_summary_projection() -> anyhow::Resul
     Ok(())
 }
 
-/// R11：摘要失败诊断的稳定原因码（不把 provider 长正文带进提示）。
+/// 摘要失败诊断的稳定原因码（不把 provider 长正文带进提示）。
 #[test]
 fn summary_unavailable_reason_codes_are_bounded() {
     let make = |message: &str| SummaryUnavailable::error(message.to_string());
@@ -2634,7 +2634,7 @@ async fn startup_repair_loss_cleared_only_after_successful_commit() -> anyhow::R
     Ok(())
 }
 
-/// R03 修复回归：应急摘录的收缩必须**严格变小**并在到达地板后收敛，
+/// 回归：应急摘录的收缩必须**严格变小**并在到达地板后收敛，
 /// 且始终从请求原文重建（不在已省略的结果上二次裁剪）。
 #[test]
 fn emergency_excerpt_shrinks_strictly_and_terminates() {
@@ -2661,9 +2661,9 @@ fn emergency_excerpt_shrinks_strictly_and_terminates() {
     assert!(!blocks.shrink());
 }
 
-/// R03 复现：长请求的尾部约束必须在应急摘录中可见。
+/// 长请求的尾部约束必须在应急摘录中可见。
 #[test]
-fn audit_066_emergency_keeps_request_tail() {
+fn emergency_keeps_request_tail() {
     let request = format!("HEAD{}TAIL-DO-NOT-DELETE", "x".repeat(5000));
     let blocks = super::emergency_blocks("audit", &[], "", Some(&request), &[]);
     assert!(blocks.render().contains("TAIL-DO-NOT-DELETE"));
@@ -2696,7 +2696,7 @@ fn emergency_request_excerpt_keeps_both_ends_across_lengths() {
     }
 }
 
-/// R03：应急提交后的投影保留长请求首尾，完整原文仍只追加地留在历史里。
+/// 应急提交后的投影保留长请求首尾，完整原文仍只追加地留在历史里。
 #[tokio::test]
 async fn emergency_checkpoint_keeps_long_request_ends_in_projection() -> anyhow::Result<()> {
     let ctx = crate::regression::test_context_for_agent_with_config_and_backend(

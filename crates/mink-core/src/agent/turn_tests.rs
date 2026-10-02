@@ -707,7 +707,7 @@ impl LlmBackend for PanicOnStreamBackend {
     }
 }
 
-/// R08：round 绝对期限已过期时，连一次流都不得开（request_timeout）。
+/// round 绝对期限已过期时，连一次流都不得开（request_timeout）。
 #[tokio::test]
 async fn expired_round_deadline_prevents_any_new_stream() -> anyhow::Result<()> {
     let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
@@ -735,7 +735,7 @@ async fn expired_round_deadline_prevents_any_new_stream() -> anyhow::Result<()> 
     Ok(())
 }
 
-/// R08：overflow 恢复共享 round 绝对期限：摘要等到期限耗尽后不再开新的主请求，
+/// overflow 恢复共享 round 绝对期限：摘要等到期限耗尽后不再开新的主请求，
 /// 总期限不被第二次建流重置。
 #[tokio::test]
 async fn overflow_recovery_shares_round_deadline() -> anyhow::Result<()> {
@@ -779,7 +779,7 @@ async fn overflow_recovery_shares_round_deadline() -> anyhow::Result<()> {
         1,
         "no second main stream may open after the round deadline"
     );
-    // F03：超时后不得再发布任何有损 checkpoint（active_start/generation 与 TodoSync 不变）。
+    // 超时后不得再发布任何有损 checkpoint（active_start/generation 与 TodoSync 不变）。
     assert!(
         ctx.compaction.read_summary().await.is_none(),
         "a timed-out round must not publish an emergency checkpoint"
@@ -793,7 +793,7 @@ async fn overflow_recovery_shares_round_deadline() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// F03 反面：round 期限尚未耗尽时，独立的摘要失败仍允许应急 checkpoint。
+/// 反面用例：round 期限尚未耗尽时，独立的摘要失败仍允许应急 checkpoint。
 #[tokio::test]
 async fn round_deadline_alive_still_allows_emergency_on_summary_failure() -> anyhow::Result<()> {
     let backend = SummaryOutageBackend::new(
@@ -1004,7 +1004,7 @@ async fn summary_outage_falls_back_to_emergency_checkpoint() -> anyhow::Result<(
         "摘要请求确实被尝试过：{}",
         backend.summary_calls()
     );
-    // R11：应急 checkpoint 也计入本输入的提交计数，诊断不再漏计。
+    // 应急 checkpoint 也计入本输入的提交计数，诊断不再漏计。
     assert_eq!(executor.compactor.emergency_commits_this_turn(), 1);
     ctx.flush_event_log().await?;
     let events = tokio::fs::read_to_string(&ctx.events_path).await?;

@@ -291,7 +291,7 @@ mod tests {
         }
     }
 
-    /// R10：进程树回收依赖的命名空间与父死标志必须存在（Linux 不变量）。
+    /// 进程树回收依赖的命名空间与父死标志必须存在（Linux 不变量）。
     #[test]
     fn bwrap_argv_pins_namespace_and_parent_death_flags() {
         let argv = bwrap_argv(
@@ -323,7 +323,7 @@ mod tests {
         assert_eq!(&argv[separator + 2..], &["run".to_string()]);
     }
 
-    /// R10：写目录隐含读权限（ro-bind 不得遮蔽 bind）、相对路径按 cwd 解析、
+    /// 写目录隐含读权限（ro-bind 不得遮蔽 bind）、相对路径按 cwd 解析、
     /// 工作目录取第一个写目录、网络开关生效。
     #[test]
     fn bwrap_argv_write_dirs_imply_read_and_choose_workdir() {

@@ -2168,12 +2168,12 @@ async fn interrupt_manual_compaction_releases_gate_for_next_turn() {
     let _ = tokio::fs::remove_dir_all(cwd).await;
 }
 
-/// R01 复现：manual 应急路径的原始错误必须交付给调用方一次，而且 actor
+/// manual 应急路径的原始错误必须交付给调用方一次，而且 actor
 /// 不能因此退出（第二次命令得到同一原始诊断，而不是 channel closed）。
 #[tokio::test]
-async fn audit_066_manual_error_is_delivered_without_dropping_actor() {
-    let home = unique_temp_dir("audit-066-manual-home");
-    let cwd = unique_temp_dir("audit-066-manual-cwd");
+async fn manual_error_is_delivered_without_dropping_actor() {
+    let home = unique_temp_dir("manual-error-home");
+    let cwd = unique_temp_dir("manual-error-cwd");
     tokio::fs::create_dir_all(&cwd).await.unwrap();
     let cfg = Config {
         model: "flash".into(),
@@ -2232,7 +2232,7 @@ async fn audit_066_manual_error_is_delivered_without_dropping_actor() {
     let _ = tokio::fs::remove_dir_all(cwd).await;
 }
 
-/// R01：投影读取失败（plan.md 不可读）也必须交付原始错误，且 actor 存活。
+/// 投影读取失败（plan.md 不可读）也必须交付原始错误，且 actor 存活。
 #[tokio::test]
 async fn manual_projection_read_failure_is_delivered_and_actor_survives() {
     use crate::protocol::{Event, StopEvent, TextEvent};
@@ -2301,7 +2301,7 @@ async fn manual_projection_read_failure_is_delivered_and_actor_survives() {
     let _ = tokio::fs::remove_dir_all(cwd).await;
 }
 
-/// R01：闩锁会话的 manual 压缩必须在入口拒绝：fatal 诊断交付一次，不调用
+/// 闩锁会话的 manual 压缩必须在入口拒绝：fatal 诊断交付一次，不调用
 /// 摘要 backend，也不写入任何状态；actor 保持存活以返回同一诊断。
 #[tokio::test]
 async fn manual_compaction_delivers_latched_fault_without_model_call_or_write() {

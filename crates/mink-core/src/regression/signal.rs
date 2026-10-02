@@ -342,7 +342,7 @@ async fn preflight_rejects_context_that_cannot_fit_the_request_budget() -> anyho
     );
     assert!(error.contains("forced attempt(s)"), "{error}");
     assert!(error.contains("(last: "), "{error}");
-    // R11：最小摘录都装不下时必须给出明确原因（不再只在 committed 时附加提示）。
+    // 最小摘录都装不下时必须给出明确原因（不再只在 committed 时附加提示）。
     assert!(
         error.contains("minimal working space unavailable"),
         "{error}"

@@ -1,4 +1,4 @@
-//! Linux 进程树回收集成测试（R10 / F01 / F02 / G02）。
+//! Linux 进程树回收集成测试。
 //!
 //! 真实执行 bwrap，验证 mink 所依赖的「父死 → 监工死 → PID 命名空间回收」假设，
 //! 并用“撤掉 `--die-with-parent` 树仍存活”的负例证明正例不是空断言。
@@ -57,7 +57,7 @@ fn bwrap_available() -> bool {
         .unwrap_or(false)
 }
 
-/// F01：探测挂载可执行文件与库；失败时保留 stderr/退出状态，区分
+/// 探测挂载可执行文件与库；失败时保留 stderr/退出状态，区分
 /// 「环境不允许命名空间」与「脚本构造错误」。
 fn probe_bwrap() -> Result<(), String> {
     if !bwrap_available() {
@@ -666,7 +666,7 @@ fn readiness_timeout_still_registers_and_reaps_the_started_tree() {
     );
 }
 
-// ── G02：失败注入（panic 路径）────────────────────────────────────
+// ── 失败注入（panic 路径）────────────────────────────────────
 
 /// 专用 panic payload：外部据此区分「到达注入点」与「准备阶段就失败」。
 struct InjectedPanic;

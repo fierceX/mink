@@ -619,7 +619,7 @@ async fn extra_usage_event_is_recorded_as_unreported() -> anyhow::Result<()> {
     Ok(())
 }
 
-// ── R09：provider HTTP 总超时的真实行为 ──
+// ── provider HTTP 总超时的真实行为 ──
 
 /// 启动慢速 SSE 服务：立即写响应头，然后每 `interval` 发一个非完成帧，
 /// 持续 `duration`；`finish` 时追加 finish_reason + [DONE]。
@@ -708,7 +708,7 @@ fn timeout_test_request(ctx: &Arc<AgentSharedContext>, api_url: String) -> LlmRe
     }
 }
 
-/// R09：`http_timeout_secs=1` 时，非 idle 的长流（每 100ms 有事件）
+/// `http_timeout_secs=1` 时，非 idle 的长流（每 100ms 有事件）
 /// 也必须在 1 秒总超时处终止。
 #[tokio::test]
 #[ignore = "requires local loopback sockets"]
@@ -747,7 +747,7 @@ async fn http_total_timeout_terminates_a_heartbeat_sse_stream() -> anyhow::Resul
     Ok(())
 }
 
-/// R09：`http_timeout_secs=0` 关闭总超时，同一长流正常读到完成帧。
+/// `http_timeout_secs=0` 关闭总超时，同一长流正常读到完成帧。
 #[tokio::test]
 #[ignore = "requires local loopback sockets"]
 async fn zero_http_timeout_lets_the_stream_finish() -> anyhow::Result<()> {
@@ -777,7 +777,7 @@ async fn zero_http_timeout_lets_the_stream_finish() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// R09：backend 已经用过一次后，`with_http_timeout_secs` 必须丢弃缓存的
+/// backend 已经用过一次后，`with_http_timeout_secs` 必须丢弃缓存的
 /// HTTP client，否则新配置不会生效。
 #[tokio::test]
 #[ignore = "requires local loopback sockets"]

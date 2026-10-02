@@ -531,7 +531,7 @@ fn bounded_projection_keeps_revision_and_counts() {
     assert!(full_content.contains(&render_current_todos(&snapshot, "TodoRead")));
 }
 
-/// R06/F05：额度覆盖完整块（信封、计数、ID、省略标记）；0/1/255/256/MAX 与
+/// 额度覆盖完整块（信封、计数、ID、省略标记）；0/1/255/256/MAX 与
 /// 1/8/100/1000 条 active 条目都不越界；**任何被截短的正文都必须带省略提示**。
 #[test]
 fn bounded_projection_respects_byte_allowance_across_shapes() {
@@ -569,7 +569,7 @@ fn bounded_projection_respects_byte_allowance_across_shapes() {
                     content.len()
                 );
             }
-            // F05：正文不完整出现时必须有显式省略说明（列表级或条目级）；
+            // 正文不完整出现时必须有显式省略说明（列表级或条目级）；
             // 整块不可表示（unrepresentable）本身即明确声明，视为已标注。
             let unrepresentable = content.contains("truncated=\"unrepresentable\"");
             for item in snap

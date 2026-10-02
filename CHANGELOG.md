@@ -2,7 +2,7 @@
 
 ## v0.6.6 (2026-09-30)
 
-### 修复：0.6.6 发布前审核整改（R01–R11）
+### 修复：压缩、超时与沙箱的发布前整改
 
 - **manual 压缩错误交付**：失败经命令通道原样返回一次，不再退出 orchestrator actor（不再出现 `channel closed`）；闩锁会话入口拒绝，零摘要调用、零状态写入。
 - **唯一前缀获取路径**：manual 无条件经 `PrefixManager::ensure()`（含依赖指纹与宿主 `PrefixSource`），删除「无前缀预算验收」降级。
@@ -16,19 +16,19 @@
 - **Linux 父死亡回收**：`PR_SET_PDEATHSIG` 检查返回值并在注册后复检父身份；bwrap argv 抽成纯函数并有参数测试；新增 Linux 进程树集成测试（父死/直接杀 bwrap 两条路径）与 CI 强制运行。
 - **诊断**：应急 checkpoint 单独计数并出现在「本输入 committed」诊断中；「最小工作空间不可用」由失败原因驱动；摘要不可用提示改为稳定原因码（`retry_exhausted`/`timeout`/`budget`/`invalid_output`/`upstream`/`unavailable`）。
 
-### 修复：复审整改（F01–F05）
+### 修复：压缩与沙箱的复审整改
 
 - **round 期限耗尽不可转应急**：共享期限到期后的摘要失败定型为 `CompactionDeadlineExpired`（主请求终态 timeout），应急入口/拿锁后/每次收缩/提交前都检查共享期限；超时后不再发布新的有损 checkpoint。取消优先于期限。
 - **软尾部预算可行性闭环**：严格切点非零但「保留两条真实 user」的候选装不进预算时（且请求已超预算），按安全边界退化到 `_cut=degraded`，优先尝试可行的 LLM 摘要，而不是直接转应急。
 - **截断必须有显式省略提示**：`head_tail_with_marker` 在完整标记放不下时退回短标记 `…`；Todo 条目分到的额度不足前缀 + 最小正文时整条省略并在父块给声明，正文不再无提示截短。
 - **Linux 集成测试修正**：探针挂载可执行文件与库并保留 stderr/退出状态；测试标记不再被 shell 注释吞掉、每个测试独立 token、就绪判定来自沙箱内进程（排除 launcher）并记录子进程、RAII kill/wait 清理；新增「撤掉 `--die-with-parent` 树仍存活」负例。
 
-### 修复：第三轮复审整改（G01–G02）
+### 修复：压缩预判与 Linux 测试的复审整改
 
 - **严格可行性预判计入 Plan/包装**：`strict_fits` 现在复用真实候选前缀（含 active-plan checkpoint）与摘要消息包装，并为最小可用摘要正文预留空间；长 Plan 存在时不再因「裸尾部看似可行」而错失可行的 degraded 摘要。
 - **Linux 测试生命周期修正**：`ChildGuard` 创建即持有 Child；进程清理按 PID + starttime 身份复核（避免误杀 PID 重用），`TreeCleanup` 在 Drop 中始终生效（含 panic 路径）；token 每次运行唯一；就绪判定要求沙箱内 shell 及其 `sleep` 子进程都出现后才触发父死；新增 panic 失败注入与串行/并行重复执行（CI）。
 
-### 修复：第四轮复审整改（G02 失败路径）
+### 修复：Linux 测试的失败路径与清理整改
 
 - **就绪失败路径也能清理**：`wait_for_tree_ready` 改成「每轮先登记、再判定就绪」，超时出口再做一次发现/登记；即使工作负载没达到就绪形态，TreeCleanup 也已持有 bwrap/inner/子进程身份，可独立回收。
 - **就绪超时用例**：新增工作负载故意只启动 `tail`（无 `sleep` 子进程）+ 短就绪期限的用例，断言确实走到超时分支且记录的进程全部退出。
@@ -50,7 +50,7 @@
 - **应急前验证工具配对**：活跃窗口存在未完成的 tool call/result 交换时拒绝提交
   （`incomplete tool exchange`），协议损坏不被摘录掩盖。
 
-### 优化：软额度与动态摘要预算（P1）
+### 优化：软额度与动态摘要预算
 
 - **摘要输出动态 cap**：`S_call = min(context_compact_max_output_tokens, 窗口 − 本次输入)`，每次 attempt（含纠错诊断追加之后）重新估算并重算；低于最小实用输出（`MIN_PRACTICAL_SUMMARY_TOKENS`）时直接转确定性应急，不再因「固定上限装不下」而放弃本可发出的摘要请求。
 - **配置软额度**：`validate_runtime_limits` 不再拒绝 `context_compact_tail_tokens ≥ 主请求输入预算`、`context_compact_max_output_tokens ≥ 窗口` 与 `S + T + O > 窗口` 的组合——两者是目标值，运行时按每次请求的剩余空间收紧（切点收紧热尾部 + 动态 cap）；硬约束只有 `reserve < 窗口`。小窗口 + 大软目标可以初始化。

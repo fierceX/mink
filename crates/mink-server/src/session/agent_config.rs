@@ -903,7 +903,7 @@ timeout = 60
 
     #[test]
     fn provider_http_timeout_merges_per_field_and_parses_file_layer() {
-        // R09：server 的 provider http_timeout 合并语义：项目层优先、缺省保留上层，
+        // server 的 provider http_timeout 合并语义：项目层优先、缺省保留上层，
         // 0 是合法值（不设总超时），不能被当成 None。
         let user = parse_layer("[provider]\nhttp_timeout_secs = 0\n", "user");
         let project = parse_layer("[provider]\nhttp_timeout_secs = 1200\n", "project");
