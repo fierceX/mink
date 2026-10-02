@@ -83,6 +83,9 @@ pub enum AgentEventKind {
     },
 }
 
+// async_trait expands a bare `#[must_use]` into generated code; the lint
+// cannot be satisfied there (macro output cannot carry a reason message).
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait EventSink: Send + Sync {
     async fn on_event(&self, event: AgentEvent) -> Result<(), String>;
@@ -258,7 +261,7 @@ impl ProgressBudget {
         let bytes = payload_len.max(PROGRESS_EVENT_MIN_BYTES);
         let _ = self
             .pending
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 debug_assert!(
                     current >= bytes,
                     "progress budget released more than reserved: {current} < {bytes}"

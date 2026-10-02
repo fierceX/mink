@@ -136,6 +136,9 @@ impl std::fmt::Display for ToolError {
 }
 impl std::error::Error for ToolError {}
 
+// async_trait expands a bare `#[must_use]` into generated code; the lint
+// cannot be satisfied there (macro output cannot carry a reason message).
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait AgentTool: Send + Sync {
     fn definition(&self) -> ToolDefinition;

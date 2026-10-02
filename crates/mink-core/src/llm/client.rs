@@ -108,6 +108,9 @@ pub struct LlmRequest {
     pub display: Arc<dyn crate::ui::Display>,
 }
 
+// async_trait expands a bare `#[must_use]` into generated code; the lint
+// cannot be satisfied there (macro output cannot carry a reason message).
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait LlmBackend: Send + Sync {
     fn name(&self) -> &str;
