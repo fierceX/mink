@@ -2,6 +2,13 @@
 
 ## v0.6.6 (2026-09-30)
 
+### 修复：mink-server 的 `.minkrc` 复刻同步与既有会话复用
+
+- **多模态配置补齐**：server 侧的 `.minkrc` 复刻（`session/agent_config.rs`）缺少 `[provider] image_input` / `vision_models` 与 `[provider.image]`，而 `deny_unknown_fields` 使整份用户/项目配置被拒绝并静默回退默认值——模型别名、api_key、超时、context 等随之中断。现按 CLI 同源语义补齐解析、层级合并（`[provider.image]` 逐字段、`image_input`/`vision_models` 整值覆盖）与 `AgentOptions` 映射（`with_image_input` / `with_image_limits` / `with_vision_models`）。
+- **修复后果**：TUI/CLI 创建的视觉会话（冻结 `open_ai_chat_image_url` 能力快照）此前被 server 以 `model ... is incompatible with this session's frozen image capability` 拒绝打开（open 接口 500）；server 新建的会话也错误地冻结为文本能力。修复后两端解析出同一能力指纹（实测 `8b9a2fd7…`），会话可跨前端互相打开。
+- **环境层对齐**：server 新增 `MINK_IMAGE_INPUT` / `MINK_VISION_MODELS` 覆盖（非法值告警忽略）。
+- **防回归**：新增跨 crate schema 对齐测试（`crates/mink-server/tests/config_parity.rs`，解析两份源码的 config-file 结构体字段名集合，缺字段即失败）与 image 配置的解析/非法值容忍/层级合并/环境覆盖/「新建会话冻结能力」行为测试。
+
 ### 修复：压缩、超时与沙箱的发布前整改
 
 - **manual 压缩错误交付**：失败经命令通道原样返回一次，不再退出 orchestrator actor（不再出现 `channel closed`）；闩锁会话入口拒绝，零摘要调用、零状态写入。

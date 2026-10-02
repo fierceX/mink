@@ -1,6 +1,6 @@
 # mink-server：Server 与 Web 前端
 
-> 更新日期：2026-08-19
+> 更新日期：2026-10-02
 
 ---
 
@@ -57,11 +57,12 @@ MINK_SERVER_PORT=9000 ./target/debug/mink-server
 `~/.minkrc` 与 TUI/CLI 共享同一配置文件，**schema 完全一致**（分组格式，扁平键拒绝，与 CLI 相同的 `deny_unknown_fields` 规则）：
 
 - 每个会话启动时按 **项目级 `<cwd>/.minkrc` 覆盖用户级 `~/.minkrc`** 的层级合并，覆盖 CLI 的同一套分组：
-  `[provider]`（model/api_key/base_url/model_aliases/openai_*/http_timeout_secs）、`[generation]`、`[context]`、
+  `[provider]`（model/api_key/base_url/model_aliases/openai_*/http_timeout_secs/image_input/vision_models/`[provider.image]`）、`[generation]`、`[context]`、
   `[tools]` / `[tools.edit]`、`[signal]`、`[recovery]`、`[sandbox]` / `[sandbox_python]`。
-- 会话运行时选项（provider/generation/context/tools/signal/recovery/sandbox）完整应用到 `AgentOptions`，
-  与 CLI 的 `assemble_runtime_options` 行为一致。
-- 环境变量 `MODEL` / `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `MINK_SIGNAL_POLICY` /
+- 会话运行时选项（provider/generation/context/tools/signal/recovery/sandbox/image）完整应用到 `AgentOptions`，
+  与 CLI 的 `assemble_runtime_options` 行为一致；schema 对齐由 `crates/mink-server/tests/config_parity.rs` 机械校验。
+- 环境变量 `MODEL` / `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `MINK_IMAGE_INPUT` /
+  `MINK_VISION_MODELS` / `MINK_SIGNAL_POLICY` /
   `LOG_EVENTS` 在文件层之上覆盖（server 文档化优先级：环境变量 > `mink-server.toml` >
   项目 `.minkrc` > 用户 `~/.minkrc` > 默认值）。
 
@@ -153,7 +154,7 @@ MINK_SERVER_PORT=9000 ./target/debug/mink-server
 cd crates/mink-server/web
 npx playwright test      # E2E 14 用例（真实浏览器 + 真实 server）
 npx vitest run           # 单元测试（reducer 39 / sessionController 7 / sse 1 / session 8）
-cargo test -p mink-server # 服务端测试（registry/lease/config/runtime/SSE envelope，14 用例）
+cargo test -p mink-server # 服务端测试（registry/lease/config/runtime/SSE envelope，36 用例）
 ```
 
 E2E 通过 global-setup 构造隔离临时 home + 模板会话，serial 模式顺序执行，失败产出

@@ -8,10 +8,12 @@
 //! documented environment overrides (env wins), and converts the result into
 //! the same grouped `AgentOptions` the CLI builds.
 //!
-//! Keep the structs below in sync with `mink-cli::config::MinkConfigFile`.
+//! Keep the structs below in sync with `mink-cli::config::MinkConfigFile`;
+//! `crates/mink-server/tests/config_parity.rs` fails when a field is missing.
 
 use mink::runtime::{
-    AgentOptions, ContextPolicy, EditMode, GenerationOptions, ProviderOptions, SandboxConfig,
+    AgentOptions, ContextPolicy, EditMode, GenerationOptions, ImageDetail, ImageInputCapability,
+    ImageLimitsOverrides, OpenAiChatImageUrlLimits, ProviderOptions, SandboxConfig,
     SandboxPythonConfig, SignalPolicy, TokenParamKind, ToolApprovalMode, ToolApprovalPolicy,
     ToolOptions,
 };
@@ -55,6 +57,28 @@ pub(crate) struct ProviderConfigFile {
     pub openai_extra_body: Option<BTreeMap<String, Value>>,
     /// provider HTTP 请求总超时（秒，`0` = 不设总超时）。
     pub http_timeout_secs: Option<u64>,
+    /// Explicit image-input capability: "on" | "off". Overrides the backend
+    /// declaration (v7 §3.1).
+    pub image_input: Option<String>,
+    /// Model ids declared image-capable. When set, this replaces the built-in
+    /// vision model list (empty list disables image capture entirely).
+    pub vision_models: Option<Vec<String>>,
+    /// `[provider.image]` — per-field image limit overrides applied on top
+    /// of the resolved capability (never enables an Unsupported session).
+    pub image: ImageConfigFile,
+}
+
+/// `[provider.image]` TOML section (all fields optional). Byte/pixel values
+/// accept plain integers or K/M/G suffixes (e.g. "32M").
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct ImageConfigFile {
+    pub detail: Option<String>,
+    pub max_images_per_request: Option<usize>,
+    pub max_image_bytes_per_request: Option<String>,
+    pub max_image_bytes: Option<String>,
+    pub max_dimension: Option<u32>,
+    pub max_pixels: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -163,6 +187,9 @@ pub(crate) struct AgentConfig {
     pub model_aliases: BTreeMap<String, String>,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
+    pub image_input: Option<ImageInputCapability>,
+    pub vision_models: Option<Vec<String>>,
+    pub image_limits: Option<ImageLimitsOverrides>,
     pub openai_reasoning_effort: Option<String>,
     pub openai_include_usage: Option<bool>,
     pub openai_token_param: Option<TokenParamKind>,
@@ -240,6 +267,15 @@ pub(crate) fn merge(base: AgentConfig, over: AgentConfig) -> AgentConfig {
     fn pick<T>(base: Option<T>, over: Option<T>) -> Option<T> {
         over.or(base)
     }
+    // `[provider.image]` merges per field across layers (the higher layer
+    // wins); absent fields keep the base layer, like the CLI.
+    let mut image_limits = base.image_limits;
+    if let Some(over) = over.image_limits {
+        match &mut image_limits {
+            Some(existing) => existing.merge(over),
+            None => image_limits = Some(over),
+        }
+    }
     AgentConfig {
         model: pick(base.model, over.model),
         model_aliases: {
@@ -249,6 +285,9 @@ pub(crate) fn merge(base: AgentConfig, over: AgentConfig) -> AgentConfig {
         },
         api_key: pick(base.api_key, over.api_key),
         base_url: pick(base.base_url, over.base_url),
+        image_input: pick(base.image_input, over.image_input),
+        vision_models: pick(base.vision_models, over.vision_models),
+        image_limits,
         openai_reasoning_effort: pick(base.openai_reasoning_effort, over.openai_reasoning_effort),
         openai_include_usage: pick(base.openai_include_usage, over.openai_include_usage),
         openai_token_param: pick(base.openai_token_param, over.openai_token_param),
@@ -358,6 +397,24 @@ pub(crate) fn apply_env_overrides(cfg: &mut AgentConfig) {
     {
         cfg.base_url = Some(url);
     }
+    if let Ok(value) = std::env::var("MINK_IMAGE_INPUT") {
+        match parse_image_input(&value) {
+            Ok(capability) => cfg.image_input = Some(capability),
+            Err(error) => {
+                eprintln!("[mink-server] Warning: ignoring MINK_IMAGE_INPUT={value:?}: {error}")
+            }
+        }
+    }
+    if let Ok(value) = std::env::var("MINK_VISION_MODELS") {
+        cfg.vision_models = Some(
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(str::to_string)
+                .collect(),
+        );
+    }
     if let Ok(policy) = std::env::var("MINK_SIGNAL_POLICY")
         && let Ok(policy) = SignalPolicy::parse(&policy)
     {
@@ -399,6 +456,27 @@ fn from_file(file: &MinkConfigFile) -> AgentConfig {
     }
     if let Some(http_timeout_secs) = provider.http_timeout_secs {
         cfg.http_timeout_secs = Some(http_timeout_secs);
+    }
+    if let Some(value) = &provider.image_input {
+        match parse_image_input(value) {
+            Ok(capability) => cfg.image_input = Some(capability),
+            Err(error) => {
+                eprintln!("[mink-server] Warning: ignoring image_input={value:?}: {error}")
+            }
+        }
+    }
+    if let Some(models) = &provider.vision_models {
+        cfg.vision_models = Some(models.clone());
+    }
+    // `[provider.image]` overrides: higher layers win per field; an invalid
+    // section is warned and ignored entirely (same stance as the CLI).
+    match parse_image_limits(&provider.image) {
+        Ok(Some(overrides)) => match &mut cfg.image_limits {
+            Some(existing) => existing.merge(overrides),
+            None => cfg.image_limits = Some(overrides),
+        },
+        Ok(None) => {}
+        Err(error) => eprintln!("[mink-server] Warning: ignoring [provider.image]: {error}"),
     }
     cfg.max_tokens = positive(file.generation.max_tokens, "max_tokens");
     cfg.max_turns = positive(file.generation.max_turns, "max_turns");
@@ -491,6 +569,58 @@ fn parse_size_bytes(raw: &str) -> anyhow::Result<usize> {
         (lower.as_str(), 1usize)
     };
     Ok(num.parse::<usize>()? * m)
+}
+
+/// Parse `image_input = "on" | "off"` from TOML/env into the explicit
+/// capability override (CLI-identical semantics).
+fn parse_image_input(value: &str) -> anyhow::Result<ImageInputCapability> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" => Ok(ImageInputCapability::OpenAiChatImageUrl(
+            OpenAiChatImageUrlLimits::default(),
+        )),
+        "off" | "false" | "0" => Ok(ImageInputCapability::Unsupported),
+        other => anyhow::bail!("invalid image_input {other:?}: expected \"on\" or \"off\""),
+    }
+}
+
+/// Parse the `[provider.image]` TOML section into per-field overrides.
+/// `Ok(None)` for an all-empty section; any invalid field fails the whole
+/// section (callers warn and ignore).
+fn parse_image_limits(file: &ImageConfigFile) -> anyhow::Result<Option<ImageLimitsOverrides>> {
+    let detail = match file.detail.as_deref() {
+        None => None,
+        Some(value) => Some(match value.trim().to_ascii_lowercase().as_str() {
+            "high" => ImageDetail::High,
+            "low" => ImageDetail::Low,
+            other => anyhow::bail!("invalid image.detail {other:?}: expected \"high\" or \"low\""),
+        }),
+    };
+    let parse_u64 = |name: &str, value: &str| -> anyhow::Result<u64> {
+        parse_size_bytes(value)
+            .map(|n| n as u64)
+            .map_err(|_| anyhow::anyhow!("invalid image.{name} {value:?}: expected a byte count"))
+    };
+    let max_image_bytes_per_request = match file.max_image_bytes_per_request.as_deref() {
+        None => None,
+        Some(value) => Some(parse_u64("max_image_bytes_per_request", value)?),
+    };
+    let max_image_bytes = match file.max_image_bytes.as_deref() {
+        None => None,
+        Some(value) => Some(parse_u64("max_image_bytes", value)?),
+    };
+    let max_pixels = match file.max_pixels.as_deref() {
+        None => None,
+        Some(value) => Some(parse_u64("max_pixels", value)?),
+    };
+    let overrides = ImageLimitsOverrides {
+        detail,
+        max_images_per_request: file.max_images_per_request,
+        max_image_bytes_per_request,
+        max_image_bytes,
+        max_dimension: file.max_dimension,
+        max_pixels,
+    };
+    Ok((!overrides.is_empty()).then_some(overrides))
 }
 
 /// Apply the merged agent config to runtime options — mirrors the CLI's
@@ -637,6 +767,21 @@ pub(crate) fn apply_to(mut options: AgentOptions, cfg: &AgentConfig) -> AgentOpt
     }
     options = apply_sandbox(options, &cfg.sandbox);
     options = apply_sandbox_python(options, &cfg.sandbox_python);
+    // Image capability wiring (v7 §3.1), mirroring the CLI's
+    // `assemble_runtime_options`: an explicit override beats the backend
+    // declaration; an explicit vision-model list replaces the built-in
+    // default list; limit overrides only adjust an already-supported
+    // capability. Without this mapping the server freezes a text-only
+    // capability and fails to reopen sessions created by the TUI/CLI.
+    if let Some(capability) = cfg.image_input.clone() {
+        options = options.with_image_input(capability);
+    }
+    if let Some(limits) = &cfg.image_limits {
+        options = options.with_image_limits(limits.clone());
+    }
+    if let Some(models) = &cfg.vision_models {
+        options = options.with_vision_models(models.clone());
+    }
     options
 }
 
@@ -847,6 +992,110 @@ timeout = 60
         let layer = parse_layer("model = \"pro\"\n", "test");
         assert_eq!(layer.model, None, "flat top-level keys must be rejected");
         assert_eq!(layer.api_key, None);
+    }
+
+    #[test]
+    fn provider_image_keys_do_not_reject_the_whole_file() {
+        // Regression: the multimodal `[provider]` keys were missing from this
+        // replica, so `deny_unknown_fields` rejected every `.minkrc` that used
+        // them as a whole and the server silently fell back to defaults.
+        let layer = parse_layer(
+            r#"
+[provider]
+model = "pro"
+image_input = "on"
+vision_models = ["custom-vision"]
+
+[provider.image]
+detail = "low"
+max_images_per_request = 3
+"#,
+            "test",
+        );
+        assert_eq!(layer.model.as_deref(), Some("pro"));
+        assert!(matches!(
+            layer.image_input,
+            Some(ImageInputCapability::OpenAiChatImageUrl(_))
+        ));
+        assert_eq!(
+            layer.vision_models.as_deref(),
+            Some(&["custom-vision".to_string()][..])
+        );
+        assert_eq!(
+            layer.image_limits.as_ref().and_then(|limits| limits.detail),
+            Some(ImageDetail::Low)
+        );
+    }
+
+    #[test]
+    fn image_config_parses_sizes_and_warns_off_invalid_values() {
+        let layer = parse_layer(
+            r#"
+[provider.image]
+max_image_bytes_per_request = "32M"
+max_image_bytes = "8M"
+max_dimension = 4096
+max_pixels = "4M"
+"#,
+            "test",
+        );
+        let limits = layer.image_limits.expect("image limits");
+        assert_eq!(limits.max_image_bytes_per_request, Some(32_000_000));
+        assert_eq!(limits.max_image_bytes, Some(8_000_000));
+        assert_eq!(limits.max_dimension, Some(4096));
+        assert_eq!(limits.max_pixels, Some(4_000_000));
+        assert_eq!(limits.max_images_per_request, None);
+
+        // Invalid values warn and drop only the affected item; the rest of
+        // the file keeps loading (same stance as the CLI).
+        let layer = parse_layer(
+            "[provider]\nmodel = \"pro\"\nimage_input = \"maybe\"\n\n[provider.image]\ndetail = \"ultra\"\n",
+            "test",
+        );
+        assert_eq!(layer.model.as_deref(), Some("pro"));
+        assert_eq!(layer.image_input, None);
+        assert_eq!(layer.image_limits, None);
+
+        let layer = parse_layer("[provider]\nimage_input = \"off\"\n", "test");
+        assert_eq!(layer.image_input, Some(ImageInputCapability::Unsupported));
+    }
+
+    #[test]
+    fn image_sections_merge_like_the_cli() {
+        // `image_input` / `vision_models` are whole-value overrides; the
+        // `[provider.image]` table merges per field across layers.
+        let user = parse_layer(
+            "[provider]\nimage_input = \"on\"\n\n[provider.image]\nmax_images_per_request = 10\n",
+            "user",
+        );
+        let project = parse_layer(
+            "[provider]\nimage_input = \"off\"\n\n[provider.image]\ndetail = \"low\"\n",
+            "project",
+        );
+        let merged = merge(user, project);
+        assert_eq!(merged.image_input, Some(ImageInputCapability::Unsupported));
+        let limits = merged.image_limits.expect("merged image limits");
+        assert_eq!(limits.max_images_per_request, Some(10));
+        assert_eq!(limits.detail, Some(ImageDetail::Low));
+    }
+
+    #[test]
+    fn image_env_overrides_are_applied_on_top() {
+        let _guard = crate::session::TEST_ENV_LOCK.blocking_lock();
+        let mut cfg = parse_layer("[provider]\nimage_input = \"off\"\n", "test");
+        unsafe { std::env::set_var("MINK_IMAGE_INPUT", "on") };
+        unsafe { std::env::set_var("MINK_VISION_MODELS", "a, b ,") };
+        apply_env_overrides(&mut cfg);
+        unsafe { std::env::remove_var("MINK_IMAGE_INPUT") };
+        unsafe { std::env::remove_var("MINK_VISION_MODELS") };
+        assert!(matches!(
+            cfg.image_input,
+            Some(ImageInputCapability::OpenAiChatImageUrl(_))
+        ));
+        assert_eq!(
+            cfg.vision_models.as_deref(),
+            Some(&["a".to_string(), "b".to_string()][..])
+        );
     }
 
     #[test]

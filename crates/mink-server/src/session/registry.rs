@@ -1217,6 +1217,106 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[tokio::test]
+    async fn build_options_freezes_the_configured_image_capability() {
+        let _guard = crate::session::TEST_ENV_LOCK.lock().await;
+        // Env outranks the file layers (documented server precedence): start
+        // from a clean environment so the project `.minkrc` is what is read.
+        let saved_image = std::env::var("MINK_IMAGE_INPUT").ok();
+        let saved_models = std::env::var("MINK_VISION_MODELS").ok();
+        unsafe { std::env::remove_var("MINK_IMAGE_INPUT") };
+        unsafe { std::env::remove_var("MINK_VISION_MODELS") };
+
+        struct NoopBackend;
+
+        #[async_trait::async_trait]
+        impl mink::runtime::LlmBackend for NoopBackend {
+            fn name(&self) -> &str {
+                "server-image-capture"
+            }
+
+            async fn stream(
+                &self,
+                _request: mink::runtime::LlmRequest,
+            ) -> anyhow::Result<mink::runtime::LlmResponseStream> {
+                unreachable!("this test never runs a turn")
+            }
+        }
+
+        #[derive(serde::Deserialize)]
+        struct Snapshot {
+            image_input: mink::runtime::ImageInputCapability,
+        }
+
+        fn read_snapshot(session_path: &str) -> Snapshot {
+            let raw = std::fs::read_to_string(
+                std::path::Path::new(session_path).join("model-capabilities.json"),
+            )
+            .expect("model-capabilities.json");
+            serde_json::from_str(&raw).expect("snapshot parses")
+        }
+
+        let root = unique_temp_dir("image-caps");
+        let home = root.join("home");
+        let cwd = root.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(
+            cwd.join(".minkrc"),
+            "[provider]\nmodel = \"flash\"\nimage_input = \"on\"\n",
+        )
+        .unwrap();
+        let mut registry = Registry::new(home, "flash".to_string(), 4);
+        registry.llm_backend = Some(Arc::new(NoopBackend));
+
+        // `image_input = "on"` must freeze the same image capability the
+        // CLI/TUI freezes, or sessions stop being openable across frontends.
+        let created = registry.create("vision-cfg", &cwd).await.unwrap();
+        match read_snapshot(&created.path).image_input {
+            mink::runtime::ImageInputCapability::OpenAiChatImageUrl(limits) => {
+                let default = mink::runtime::OpenAiChatImageUrlLimits::default();
+                assert_eq!(limits.detail, default.detail);
+                assert_eq!(
+                    limits.max_images_per_request,
+                    default.max_images_per_request
+                );
+            }
+            mink::runtime::ImageInputCapability::Unsupported => {
+                panic!("image_input = \"on\" must freeze an image-capable session snapshot")
+            }
+        }
+
+        // `[provider.image]` overrides apply on top of the explicit override.
+        let override_cwd = root.join("project-override");
+        std::fs::create_dir_all(&override_cwd).unwrap();
+        std::fs::write(
+            override_cwd.join(".minkrc"),
+            "[provider]\nimage_input = \"on\"\n\n[provider.image]\nmax_images_per_request = 3\n",
+        )
+        .unwrap();
+        let created = registry
+            .create("vision-override", &override_cwd)
+            .await
+            .unwrap();
+        match read_snapshot(&created.path).image_input {
+            mink::runtime::ImageInputCapability::OpenAiChatImageUrl(limits) => {
+                assert_eq!(limits.max_images_per_request, 3);
+            }
+            mink::runtime::ImageInputCapability::Unsupported => {
+                panic!("[provider.image] must apply on top of image_input = \"on\"")
+            }
+        }
+
+        match saved_image {
+            Some(value) => unsafe { std::env::set_var("MINK_IMAGE_INPUT", value) },
+            None => unsafe { std::env::remove_var("MINK_IMAGE_INPUT") },
+        }
+        match saved_models {
+            Some(value) => unsafe { std::env::set_var("MINK_VISION_MODELS", value) },
+            None => unsafe { std::env::remove_var("MINK_VISION_MODELS") },
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 #[cfg(test)]
