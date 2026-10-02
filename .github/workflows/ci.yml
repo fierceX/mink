@@ -34,6 +34,33 @@ jobs:
       # R10：真实 Linux 进程树回收验证（bwrap 缺失或命名空间受限则失败）。
       - name: Install bubblewrap for Linux sandbox integration
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      # Ubuntu24.04+ 默认用 AppArmor 限制非特权 user namespace：bwrap 会在创建
+      # 沙箱前以 `setting up uid map: Permission denied` 失败。集成测试要求沙箱
+      # 真实可用，这里显式放开，并把“仍不可用”转成带诊断的失败。
+      - name: Enable unprivileged user namespaces for bubblewrap
+        run: |
+          set -euo pipefail
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          fi
+          if [ -e /proc/sys/kernel/unprivileged_userns_clone ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+          fi
+          probe() {
+            bwrap --ro-bind / / --unshare-pid --die-with-parent -- /bin/true
+          }
+          if ! probe && [ -f /etc/apparmor.d/bwrap ]; then
+            # 兜底：加载 Ubuntu 为 bwrap 提供的 AppArmor profile（若镜像内存在）
+            sudo apparmor_parser -r /etc/apparmor.d/bwrap || true
+          fi
+          if ! probe; then
+            echo "::error::bubblewrap cannot create unprivileged user namespaces"
+            echo "apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo n/a)"
+            echo "unprivileged_userns_clone=$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo n/a)"
+            bwrap --version || true
+            exit 1
+          fi
+          echo "bubblewrap userns probe: OK"
       - name: Linux sandbox process-tree integration
         run: |
           MINK_REQUIRE_SANDBOX=1 cargo test -p mink-core --test sandbox_linux -- --nocapture

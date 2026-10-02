@@ -86,7 +86,12 @@ fn require_sandbox() -> bool {
 
 fn skip_or_panic(reason: &str) {
     if require_sandbox() {
-        panic!("MINK_REQUIRE_SANDBOX is set but the sandbox is unusable: {reason}");
+        panic!(
+            "MINK_REQUIRE_SANDBOX is set but the sandbox is unusable: {reason}\n\
+             hint: Ubuntu24.04+ restricts unprivileged user namespaces via AppArmor \
+             (`kernel.apparmor_restrict_unprivileged_userns`); allow them or run on a \
+             runner without the restriction"
+        );
     }
     eprintln!("skip: {reason}");
 }
