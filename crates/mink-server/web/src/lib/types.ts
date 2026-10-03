@@ -84,6 +84,12 @@ export interface SessionState {
   workState: string;
   /** 缓存命中 tokens（usage 事件累计）与当前上下文估计 */
   cacheReadTokens: number;
+  cacheCreationTokens: number | null;
+  turnCount: number | null;
+  requestCount: number | null;
+  contextLimitKnown: boolean;
+  waitElapsedSecs: number | null;
+  activeSubAgents: string[];
   contextTokens: number;
   maxContextTokens: number;
   items: TranscriptItem[];
@@ -92,7 +98,7 @@ export interface SessionState {
 export function emptySession(sessionId: string, title: string): SessionState {
   return {
     sessionId, title, running: false, desynced: false, lastSeq: 0, seenTurnEvents: [], model: "",
-    tokensIn: 0, tokensOut: 0, belief: 0, workState: "idle", cacheReadTokens: 0, contextTokens: 0, maxContextTokens: 0, items: [],
+    tokensIn: 0, tokensOut: 0, belief: 0, workState: "idle", cacheReadTokens: 0, cacheCreationTokens: null, turnCount: null, requestCount: null, contextLimitKnown: false, waitElapsedSecs: null, activeSubAgents: [], contextTokens: 0, maxContextTokens: 0, items: [],
   };
 }
 

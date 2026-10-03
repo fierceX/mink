@@ -14,6 +14,24 @@
 
 `mink-server` 继续复用 Axum、Registry lease 与 `AgentRuntime`，Vue/Vite 产物嵌入二进制。Web 数据流为 REST/SSE → SessionController / CatalogController → 会话模型 → 纯轮次投影 → 展示组件。`workbench.ts` 单独保存按 `(project_key, session_id)` 隔离的草稿、附件引用、展开选择和阅读锚点；异步操作捕获原会话身份，过期响应不能写入当前视图。
 
+`catalogFilter.ts` 是已发现目录的纯匹配投影：按项目名称、会话标题/别名/ID、完整工作目录分别匹配；SessionSidebar 持有关键词与范围，不改 CatalogController 的稳定顺序或当前会话身份。
+
+App 以 URL 的 `session` / `project` 作为刷新目标；根地址直接显示首页，不恢复旧的 localStorage 会话选择。启动时记录 SessionController 导航 revision，目录响应不得覆盖中途明确导航；指定会话在目录读取期间显示中性加载界面。当前视图通过 replaceState 同步完整 URL 身份，离开时清除会话参数。
+
+`SettingsDialog.vue` 使用原生模态 dialog，设置由顶栏菜单按需打开；菜单先恢复触发器焦点，模态面板随后捕获焦点。设置与会话生命周期分离，偏好仍由 `workbench.ts` 持久化。
+
+Web 的 `ActionMenu.vue` 和 `IconButton.vue` 分别封装 Reka UI DropdownMenu / Tooltip，使用 Lucide 图标；组件库负责菜单定位、碰撞避让、方向键、外部点击和焦点交接。输入区将草稿、附件与操作收进单一容器，轮次跳转浮于对话内；`useOverlay.ts` 维护响应式媒体条件与移动覆盖层焦点范围。可视窗口 resize 只更新布局高度，不触发会话命令。详情请求以会话身份和加载 revision 丢弃过期结果，目录与文件正文互斥显示。
+
+`clipboard.ts` 为对话和文件路径提供统一文本复制：优先 Clipboard API，不可用或拒绝时使用用户点击中的选区复制兼容路径；完成后恢复输入焦点、光标与文本选区，只有真实复制成功才显示成功。
+
+`ToolInput.vue` 按工具语义展示命令、脚本、文件内容、子任务与参数字段，`EditCall.vue` 同时处理 Replace 和 Hashline；原始参数仅在独立折叠入口查看。Plan/Todo 结果优先读取类型化 presentation，普通文本结果与对话共用 Markdown 渲染，PythonSandbox 归入命令视图。调用与结果分别展示，不以结果覆盖调用参数，不改工具执行与输出保护。
+
+`ActionMenu` 的轮次变体使用单列弹层，宽度不超过 300px、高度不超过 260px/40dvh 和可用空间；条目保留独立行、截断长标题并支持键盘滚动定位。
+
+阅读区与过程组使用 `minmax(0,1fr)` 和明确的最小/最大宽度约束；`preferences.wrapText` 持久保存并发布 `data-wrap`，代码/工具/文件正文和 Markdown 表格的换行只改变 CSS，不改源文本。换行切换保留消息阅读锚点。
+
+手机阅读模式由 App 的临时 UI 状态驱动：Transcript 在外层用户滚动达到方向阈值后请求隐藏，布局/流式滚动与内层卡片滚动不参与；顶栏和输入卡片使用 `v-show` 保留组件，输入区发布锁定状态。焦点输入、附件、待处理/失败输入和恢复操作优先保持可见，阅读锚点在控件高度变化时恢复。
+
 Registry 的扫描入口统一排除目录名或 metadata.id 带 `sub_`/`replan_` 前缀、或 metadata.parent 存在的子代理；列表与会话查找复用同一规则，旧子代理元数据缺失、损坏或继承父身份时仍按目录排除。
 
 Core 的 `session/input.rs` 拥有 session 唯一 `InputInbox`。`AgentRuntimeHandle::stream_input(HumanInput)` 为新任务返回 `(InputReceipt, Some(AgentEventStream))`，为目标 turn 的引导或重复提交返回回执与 `None`；`resume_input(id, revision)` 明确续发未应用输入。旧 Rust `stream_turn` 保持原执行契约，server 的旧 `/turn` 转入持久输入路径。HTTP handler 不直接追加 conversation；TurnExecutor 在已接受响应、完整工具交换之后、下一请求的压缩检查之前消费 Inbox。
@@ -22,7 +40,7 @@ Core 的 `session/input.rs` 拥有 session 唯一 `InputInbox`。`AgentRuntimeHa
 
 Full/Inline TUI 通过 `TuiRuntime` 调用同一 `stream_input`；引导准入不经过等待当前 turn 的 broker 工作队列。新任务返回的 stream 交给 broker 可靠消费，正式引导提交转成 `GuidanceApplied`，权威 outcome 转成 `TurnFinished`，共用 TuiState reducer。输入上方只读映射 Inbox 状态；`/inputs`、`/resume ID`、`/withdraw ID` 调用公开接口。含引导的历史窗口经公开 SessionReader 读取完整正式轮次后走相同 reducer，保留引导顺序和工具元数据。
 
-server `Projection` 是可重建只读镜像：启动经公开 `SessionReader` 读取历史、Plan、Todo、Artifact；运行中消费可靠 `AgentEventStream` 更新。快照与广播订阅在同一 mirror 发布锁下建立，不使用 best-effort EventSink 作为事实来源。新版 SSE 使用 runtime generation 与传输水位；正式消息接管暂态文本，Plan/Todo presentation 增量合并，终态由 `turn_final` 决定。
+server `Projection` 是可重建只读镜像：启动经公开 `SessionReader` 读取历史、Plan、Todo、Artifact；运行中消费可靠 `AgentEventStream` 更新。快照与广播订阅在同一 mirror 发布锁下建立，不使用 best-effort EventSink 作为事实来源。`diagnostics.ts` 按 TUI `StatsSnapshot` 口径展示完整状态栏指标；镜像单独保持可靠 activity（工作阶段和等待秒数），快照重连不必依赖历史文本猜测正在执行的动作。新版 SSE 使用 runtime generation 与传输水位；正式消息接管暂态文本，Plan/Todo presentation 增量合并，终态由 `turn_final` 决定。
 
 `session/attachments.rs` 是 CLI/TUI/Web 共享的内容寻址存储。Web 上传保存原始字节到 session `attachments/`，校验真实格式、完整解码、尺寸、能力、大小、权限和校验和。附件预览是 session 限定接口；输入只携带绝对路径，模型图片仍由 `Read` 捕获。
 

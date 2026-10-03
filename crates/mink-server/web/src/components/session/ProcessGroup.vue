@@ -27,3 +27,6 @@ const toggle = () => { viewFor().expanded[`process:${props.groupKey}`] = !open.v
 <style scoped>
 .process-group { border:1px solid var(--line); border-radius:8px; background:var(--bg-elevated); font-size:12px; }summary { display:flex; align-items:center; gap:8px; list-style:none; cursor:pointer; padding:9px 12px; color:var(--text-soft); overflow-wrap:anywhere; }summary small { margin-left:auto; white-space:nowrap; color:var(--text-dim); }.process-content { padding:4px 10px 10px; display:grid; gap:6px; max-height:440px; overflow:auto; overscroll-behavior:contain; }.process-content p { font-size:12px; color:var(--text-dim); overflow-wrap:anywhere; }pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; }
 </style>
+<style scoped>
+.process-group { min-width:0; max-width:100%; }.process-content { grid-template-columns:minmax(0,1fr); }.process-content>div { min-width:0; max-width:100%; }
+</style>

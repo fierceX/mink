@@ -12,7 +12,8 @@ const lines = computed(() => props.content.split("\n").map((line) => ({ text: li
 </template>
 
 <style scoped>
-.t-diff { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.55; overflow-x: auto; background: #f8fafb; border: 1px solid var(--line-soft); border-radius: var(--radius-sm); padding: 10px 12px; max-height: 340px; overflow-y: auto; }
+.t-diff { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.55; overflow-x: auto; background: var(--panel-2); border: 1px solid var(--line-soft); border-radius: var(--radius-sm); padding: 10px 12px; max-height: 340px; overflow-y: auto; }
+.t-diff>span { display:block; }
 .d-add { color: var(--green); }
 .d-del { color: var(--red); }
 .d-head { color: var(--blue); font-weight: 600; }

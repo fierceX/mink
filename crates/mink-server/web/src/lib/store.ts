@@ -10,6 +10,7 @@ import type { SseClient } from "./sse";
 
 export const uiState = reactive({
   newOpen: false,
+  settingsOpen: false,
   ctxOpen: false,
   ctxTab: "plan" as string,
   fileOpen: false,
@@ -25,9 +26,7 @@ export const appState = reactive({
 
 export const sseClient = ref<SseClient | null>(null);
 
-const SESSION_KEY = "mink.currentSession";
-
-/** 会话打开/切换：重建状态 + 持久化当前会话（重开浏览器自动恢复并重连 SSE） */
+/** 会话打开/切换：重建运行模型。刷新目标由当前 URL 决定。 */
 export function attachSession(summary: SessionSummary) {
   appState.currentSessionId = summary.id;
   appState.currentProjectKey = summary.project_key;
@@ -39,15 +38,6 @@ export function attachSession(summary: SessionSummary) {
   // 当前上下文 = 最近一次请求的上下文（服务端 usage.jsonl 最后记录）；无记录时回退输入合计
   st.contextTokens = summary.last_context_tokens ?? st.tokensIn;
   appState.sessionState = st;
-  try { localStorage.setItem(SESSION_KEY, `${summary.project_key}\n${summary.id}`); } catch { /* 隐私模式等忽略 */ }
-}
-
-export function savedSessionId(): string | null {
-  try { return localStorage.getItem(SESSION_KEY); } catch { return null; }
-}
-
-export function clearSavedSession() {
-  try { localStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
 }
 
 export function detachSession() {

@@ -7,9 +7,9 @@ import { appState, attachSession } from '../../lib/store';
 import { identity, viewFor, preferences, handoffCommittedView, handoffSnapshotView } from '../../lib/workbench';
 import { api } from '../../lib/api';
 const summary=(id:string)=>({project_key:'p',id,title:id,alias:null,cwd:'/tmp',corrupt:false,created_at:'',updated_at:'',modified_secs:0,status:'free' as const,path:''});
-function attach(id:string) { attachSession(summary(id)); appState.sessionState!.generation='g'; appState.sessionState!.phase='idle'; const view=viewFor(); view.draft=''; view.failures=[]; view.uploads=[]; view.busy=false; view.expanded={}; }
+function attach(id:string) { attachSession(summary(id)); appState.sessionState!.generation='g'; appState.sessionState!.phase='idle'; const view=viewFor(); view.draft=''; view.failures=[]; view.uploads=[]; view.busy=false; view.expanded={}; view.detailTab='task'; view.detailPath=''; view.detailScroll=0; }
 let pending: (value:any)=>void;
-beforeEach(()=>{ vi.restoreAllMocks(); vi.stubGlobal('matchMedia',()=>({matches:false})); attach('a'); });
+beforeEach(()=>{ vi.restoreAllMocks(); vi.stubGlobal('matchMedia',()=>({matches:false,addEventListener:vi.fn(),removeEventListener:vi.fn()})); attach('a'); });
 describe('session-owned workbench interactions',()=>{
   it('late failure preserves new drafts and belongs only to its originating session',async()=>{
     vi.spyOn(api,'submitInput').mockImplementation(()=>new Promise(resolve=>{pending=resolve}));
@@ -59,4 +59,77 @@ describe('session-owned workbench interactions',()=>{
     expect(view.expanded['thinking:message:3:0']).toBe(true);
   });
 
+  it('stop locks submission immediately and a late acknowledgement does not overwrite the final phase',async()=>{
+    vi.spyOn(api,'interrupt').mockImplementation(()=>new Promise(resolve=>{pending=resolve}));
+    appState.sessionState!.running=true; appState.sessionState!.currentTurn='turn';
+    const wrapper=mount(InputBar); await wrapper.find('textarea').setValue('draft');
+    await wrapper.find('.danger').trigger('click');
+    expect(wrapper.find('.danger').attributes('disabled')).toBeDefined();
+    expect(wrapper.find('.primary').attributes('disabled')).toBeDefined();
+    appState.sessionState!.running=false; appState.sessionState!.phase='idle';
+    pending({code:200,message:'',data:null}); await flushPromises();
+    expect(appState.sessionState!.phase).toBe('idle'); expect(viewFor().draft).toBe('draft'); wrapper.unmount();
+  });
+  it('receipt actions lock repeated clicks and a late edit cannot replace applied history',async()=>{
+    const receipt={input_id:'guide',revision:1,status:'pending',input:{text:'guide'}} as any;
+    appState.sessionState!.inputs=[receipt];
+    const edit=vi.spyOn(api,'editInput').mockImplementation(()=>new Promise(resolve=>{pending=resolve}));
+    const wrapper=mount(InputBar);
+    await wrapper.find('.pending-input button').trigger('click');
+    await wrapper.find('[aria-label="编辑待处理输入"]').setValue('updated');
+    const save=wrapper.findAll('.pending-input button').find(button=>button.text()==='保存')!;
+    await save.trigger('click'); await save.trigger('click'); expect(edit).toHaveBeenCalledTimes(1);
+    appState.sessionState!.inputs=[{...receipt,status:'applied',revision:3}];
+    pending({code:200,message:'',data:{...receipt,revision:2,input:{text:'updated'}}}); await flushPromises();
+    expect(appState.sessionState!.inputs[0].status).toBe('applied'); expect(wrapper.find('.pending-input').exists()).toBe(false); wrapper.unmount();
+  });
+  it('programmatic draft recovery resizes the composer and clearing it restores its height',async()=>{
+    const wrapper=mount(InputBar); const textarea=wrapper.find('.input-bar textarea').element as HTMLTextAreaElement;
+    Object.defineProperty(textarea,'scrollHeight',{get:()=>viewFor().draft.includes('\n')?130:48});
+    viewFor().draft='recovered\nmultiline\ndraft'; await flushPromises(); expect(textarea.style.height).toBe('130px');
+    viewFor().draft=''; await flushPromises(); expect(textarea.style.height).toBe('48px'); wrapper.unmount();
+  });
+  it('details drop stale directory rows, return to the containing directory and expose loading feedback',async()=>{
+    viewFor().detailTab='files';
+    vi.spyOn(api,'files').mockImplementation(async(_id,path)=>({code:200,message:'',data:path==='src/main.ts'?{content:'hello'}:{items:[{name:path?'main.ts':'src',dir:!path}]}} as any));
+    const wrapper=mount(DetailPanel); await flushPromises();
+    await wrapper.find('.file-tree button').trigger('click'); await flushPromises(); expect(wrapper.find('.directory-path').text()).toBe('src/');
+    await wrapper.find('.file-tree button').trigger('click'); await flushPromises();
+    expect(wrapper.find('.file-tree').exists()).toBe(false); expect(wrapper.find('h4').text()).toBe('src/main.ts');
+    await wrapper.findAll('.file-ops button').find(button=>button.text()==='返回目录')!.trigger('click'); await flushPromises();
+    expect(viewFor().detailPath).toBe('src/'); expect(wrapper.find('.file-tree').text()).toContain('main.ts');
+    vi.spyOn(api,'files').mockImplementation(()=>new Promise(resolve=>{pending=resolve}));
+    await wrapper.findAll('.file-ops button').find(button=>button.text()==='刷新')!.trigger('click');
+    expect(wrapper.find('[role="status"]').text()).toContain('正在加载');
+    pending({code:200,message:'',data:{items:[]}}); await flushPromises(); expect(wrapper.text()).toContain('此目录为空'); wrapper.unmount();
+  });
+
+  it('a stop response from an earlier generation cannot cancel a newly opened running turn',async()=>{
+    vi.spyOn(api,'interrupt').mockImplementation(()=>new Promise(resolve=>{pending=resolve}));
+    appState.sessionState!.running=true; appState.sessionState!.currentTurn='old-turn';
+    const wrapper=mount(InputBar); await wrapper.find('.danger').trigger('click');
+    appState.sessionState!.generation='new-generation'; appState.sessionState!.currentTurn='new-turn'; appState.sessionState!.phase='running';
+    pending({code:200,message:'',data:null}); await flushPromises();
+    expect(appState.sessionState!.running).toBe(true); expect(appState.sessionState!.phase).toBe('running'); wrapper.unmount();
+  });
+
+});
+
+describe('collapsed mobile composer',()=>{
+  it('keeps the draft mounted and restores focus without losing content',async()=>{
+    viewFor().draft='retained mobile draft';const wrapper=mount(InputBar,{attachTo:document.body,props:{collapsed:true}});
+    expect(wrapper.classes()).toContain('collapsed');expect(wrapper.find('textarea').element.value).toBe('retained mobile draft');
+    await wrapper.get('[aria-label="显示输入框"]').trigger('click');expect(wrapper.emitted('showComposer')).toHaveLength(1);
+    await wrapper.setProps({collapsed:false});await flushPromises();expect(wrapper.find('textarea').element.value).toBe('retained mobile draft');wrapper.unmount();
+  });
+  it('reveals waiting inputs, failed submissions and uploads even when the parent requests collapse',async()=>{
+    const wrapper=mount(InputBar,{props:{collapsed:true}});expect(wrapper.classes()).toContain('collapsed');
+    appState.sessionState!.inputs=[{input_id:'guide',revision:1,status:'unapplied',input:{text:'keep visible'}} as any];await flushPromises();expect(wrapper.classes()).not.toContain('collapsed');expect(wrapper.emitted('readingLock')?.at(-1)).toEqual([true]);
+    appState.sessionState!.inputs=[];viewFor().uploads=[{key:'upload',name:'image',bytes:1,preview:'',status:'uploading'}];await flushPromises();expect(wrapper.classes()).not.toContain('collapsed');
+    viewFor().uploads=[];viewFor().failures=[{id:'failure',text:'task',attachments:[],error:'failed'}];await flushPromises();expect(wrapper.find('[role="alert"]').text()).toContain('failed');expect(wrapper.classes()).not.toContain('collapsed');wrapper.unmount();
+  });
+  it('retains an actionable Stop in reading mode',async()=>{
+    appState.sessionState!.running=true;appState.sessionState!.currentTurn='turn';const interrupt=vi.spyOn(api,'interrupt').mockResolvedValue({code:200,data:null,message:''});
+    const wrapper=mount(InputBar,{props:{collapsed:true}});await wrapper.find('.composer-reading-actions [aria-label="停止"]').trigger('click');await flushPromises();expect(interrupt).toHaveBeenCalledWith('a','p');expect(appState.sessionState!.phase).toBe('cancelling');expect(wrapper.classes()).not.toContain('collapsed');wrapper.unmount();
+  });
 });

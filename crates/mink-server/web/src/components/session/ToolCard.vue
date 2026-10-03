@@ -1,6 +1,8 @@
 <script setup lang="ts">
 // ToolCard：容器（着色/头部/折叠）+ 按 view 分发结果组件
 import { computed } from "vue";
+import type { ToolItem } from "../../lib/types";
+import { decodeToolInput } from "../../lib/toolInput";
 import { viewFor, openDetail } from "../../lib/workbench";
 import CommandResult from "./results/CommandResult.vue";
 import FileResult from "./results/FileResult.vue";
@@ -9,15 +11,26 @@ import TodoResult from "./results/TodoResult.vue";
 import PlanResult from "./results/PlanResult.vue";
 import DiffResult from "./results/DiffResult.vue";
 import TextResult from "./results/TextResult.vue";
+import ToolInput from "./results/ToolInput.vue";
 import EditCall from "./results/EditCall.vue";
-const props = defineProps<{ item: any }>();
+const props = defineProps<{ item: ToolItem }>();
 // 工具卡片始终折叠（头部 summary 展示核心参数），仅手动点击展开详情
 const open = computed(() => viewFor().expanded[`tool:${String(props.item.key ?? props.item.id)}`] ?? false);
 const onToggle = () => { viewFor().expanded[`tool:${String(props.item.key ?? props.item.id)}`] = !open.value; };
 const openArtifact = () => { if (props.item.artifact) openDetail("outputs", props.item.artifact); };
-const openFile = () => {
-  try { const input = JSON.parse(props.item.input); const path = input.path ?? (input.input ?? input.patch)?.match(/^\[(.*?)(?:#|\])/m)?.[1]; if (path) { const match = String(path).match(/^(.*?)(?::(\d+)(?:[-+].*)?)?$/); if (match) openDetail("files", match[1], Number(match[2] ?? 1)); } } catch { /* no verified path in legacy inputs */ }
-};
+const args = computed(() => decodeToolInput(props.item.input));
+const planShownInResult = computed(() => {
+  const presentation = props.item.presentation as { kind?:string;data?:{transition?:string;content?:unknown} } | undefined;
+  return props.item.name === 'PlanDraft' && props.item.result !== undefined && presentation?.kind === 'plan'
+    && ['draft_saved','confirmed'].includes(presentation.data?.transition ?? '')
+    && typeof presentation.data?.content === 'string' && presentation.data.content === args.value?.content;
+});
+const resultSummary = computed(() => props.item.view === 'command' && ['command','script','script_file'].some(key => typeof args.value?.[key] === 'string') ? undefined : props.item.summary);
+const filePath = computed(() => {
+  const patch=args.value?.input ?? args.value?.patch;
+  return typeof args.value?.path === 'string' ? args.value.path : typeof patch === 'string' ? patch.match(/^\[(.*?)(?:#|\])/m)?.[1] : undefined;
+});
+const openFile = () => { const match=filePath.value?.match(/^(.*?)(?::(\d+)(?:[-+].*)?)?$/); if(match) openDetail("files",match[1],Number(match[2] ?? 1)); };
 
 const resultComp = computed(() => {
   const v = props.item.view;
@@ -39,22 +52,24 @@ const resultComp = computed(() => {
       <span v-if="item.resultKind" class="t-kind">{{ item.resultKind }}</span>
     </summary>
     <div class="t-body">
-      <button v-if="['Read','Write','Edit'].includes(item.name)" @click="openFile">查看当前文件</button>
-      <!-- Edit/diff：结构化 patch 优先（input 解析 hunk + path/tag），result 作为执行结果附后 -->
+      <button v-if="filePath && ['Read','Write','Edit'].includes(item.name)" @click="openFile">查看当前文件</button>
+      <!-- Edit：Replace 旧/新文本或 Hashline 指令；执行结果独立附后 -->
       <template v-if="item.view === 'diff'">
         <EditCall :input="item.input" />
-        <div v-if="item.result !== undefined" class="t-result" :class="{ ok: !item.failed, err: item.failed }">
+        <div v-if="item.result !== undefined" class="t-result" :class="{ ok: item.success === true, err: item.failed }">
           <component :is="resultComp" :content="item.result" :exit-code="item.exitCode" :summary="item.summary" :presentation="item.presentation" />
           <button v-if="item.artifact" class="t-artifact" @click="openArtifact">artifact://{{ item.artifact }}</button>
         </div>
       </template>
-      <template v-else-if="item.result !== undefined">
-        <div class="t-result" :class="{ ok: !item.failed, err: item.failed }">
-          <component :is="resultComp" :content="item.result" :exit-code="item.exitCode" :summary="item.summary" :presentation="item.presentation" />
+      <template v-else>
+        <ToolInput :name="item.name" :input="item.input" :show-body="!planShownInResult" />
+        <template v-if="item.result !== undefined"><h4 class="result-label">执行结果</h4>
+        <div class="t-result" :class="{ ok: item.success === true, err: item.failed }">
+          <component :is="resultComp" :content="item.result" :exit-code="item.exitCode" :summary="resultSummary" :presentation="item.presentation" />
           <button v-if="item.artifact" class="t-artifact" @click="openArtifact">artifact://{{ item.artifact }}</button>
         </div>
+        </template>
       </template>
-      <pre v-else class="t-call">{{ item.input }}</pre>
     </div>
   </details>
 </template>
@@ -101,7 +116,7 @@ const resultComp = computed(() => {
 .t-kind { font-size: 9px; letter-spacing: 0.08em; background: var(--panel-3); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; color: var(--text-dim); flex-shrink: 0; }
 .t-body { border-top: 1px solid var(--line); padding: 10px 14px; }
 .t-call { color: var(--text-soft); white-space: pre-wrap; font-family: var(--mono); font-size: 12px; margin: 0; }
-.t-result { font-size: 12.5px; }
+.result-label { color:var(--text-dim); font-size:11px; font-weight:500; margin:12px 0 6px; }.t-result { font-size: 12.5px; }
 .t-result.ok { border-left: 3px solid rgba(23, 154, 97, 0.5); padding-left: 11px; }
 .t-result.err { border-left: 3px solid rgba(214, 69, 93, 0.6); padding-left: 11px; color: var(--red); }
 .t-artifact { margin-top: 8px; background: none; border: none; color: var(--blue); font-family: var(--mono); font-size: 12px; padding: 0; }
@@ -109,4 +124,5 @@ const resultComp = computed(() => {
 
 <style scoped>
 .tool-card { border:0; border-left:0; box-shadow:none; background:transparent; border-radius:4px; }.t-head { padding:6px 8px; font-size:11px; }.t-body { max-height:320px; overflow:auto; }.t-status { margin-left:auto; font-size:10px; color:var(--text-dim); white-space:nowrap; }
+.tool-card,.t-body { min-width:0; max-width:100%; }.t-summary { min-width:0; }.t-name { max-width:45%; flex-shrink:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 </style>

@@ -2,7 +2,7 @@
 
 import { api } from "./api";
 import type { SessionSummary } from "./api";
-import { appState, attachSession, detachSession, sseClient } from "./store";
+import { appState, attachSession, detachSession, sseClient, uiState } from "./store";
 import { identity, handoffCommittedView, handoffSnapshotView } from "./workbench";
 import { reduceWorkbench } from "./workbenchReducer";
 import { reduceEvent } from "./reducer";
@@ -301,6 +301,8 @@ function scheduleReconcile(summary: SessionSummary, token: number): void {
   });
 }
 
+export function navigationRevision(): number { return openToken; }
+
 export function closeSessionView(): void {
   ++openToken;
   abortRecoveryRequests();
@@ -311,4 +313,5 @@ export function closeSessionView(): void {
   activeAttempt = null;
   recoveryFinal = null;
   detachSession();
+  uiState.ctxOpen = false;
 }

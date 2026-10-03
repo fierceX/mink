@@ -97,6 +97,7 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
     items: state.items,
   };
 
+  if (["thinking","text","tool_call","tool_result","turn_started","turn_final","retry","sub_agent_status","sub_agent_output","context_compact","compact"].includes(raw.type)) next.waitElapsedSecs = null;
   switch (raw.type) {
     case "user_input":
       next.items = [...next.items, withKey({ kind: "user", text: String(raw.content ?? ""), inputId: raw.input_id as string | undefined, turnId: raw.turn_id as string | undefined, guidance: raw.guidance === true, attachmentIds: raw.attachment_ids as string[] | undefined }, raw)];
@@ -144,6 +145,7 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
     }
 
     case "tool_result": {
+      next.workState = "waiting";
       // Realtime AgentEvent always carries tool_use_id. Only legacy conversation
       // replay may omit it and fall back to the nearest pending tool.
       const liveRequired = ["tool_use_id", "tool_name", "presentation", "artifacts", "status", "exit_code", "result_kind"];
@@ -175,6 +177,7 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
     }
 
     case "turn_started":
+      next.activeSubAgents = [];
       next.workState = "waiting";
       next.running = true;
       break;
@@ -186,8 +189,11 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
       if (typeof stats.total_input_tokens === "number") next.tokensIn = stats.total_input_tokens;
       if (typeof stats.total_output_tokens === "number") next.tokensOut = stats.total_output_tokens;
       if (typeof stats.total_cache_read_tokens === "number") next.cacheReadTokens = stats.total_cache_read_tokens;
+      if (typeof stats.total_cache_creation_tokens === "number") next.cacheCreationTokens = stats.total_cache_creation_tokens;
+      if (typeof stats.current_turn_count === "number") next.turnCount = stats.current_turn_count;
+      if (typeof stats.agent_request_count === "number") next.requestCount = stats.agent_request_count;
       if (typeof stats.current_context_tokens === "number") next.contextTokens = stats.current_context_tokens;
-      if (typeof stats.max_context_tokens === "number") next.maxContextTokens = stats.max_context_tokens;
+      if (typeof stats.max_context_tokens === "number") { next.maxContextTokens = stats.max_context_tokens; next.contextLimitKnown = true; }
       if (typeof stats.belief === "number") next.belief = stats.belief;
       break;
     }
@@ -207,10 +213,11 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
     case "turn_final": {
       const outcome = (raw.outcome ?? {}) as Record<string, unknown>;
       const error = typeof outcome.error === "string" ? outcome.error : undefined;
+      next.activeSubAgents = [];
       next.workState = "idle";
       next.running = false;
       if (error) {
-        next.workState = "error";
+        next.workState = outcome.status === "interrupted" ? "idle" : "error";
         next.items = [...next.items, withKey({ kind: "error", text: error }, raw)];
       }
       break;
@@ -228,27 +235,39 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
     case "usage":
       next.tokensIn += Number(raw.input_tokens ?? 0);
       next.tokensOut += Number(raw.output_tokens ?? 0);
-      next.cacheReadTokens += Number(raw.cache_read_input_tokens ?? 0) + Number(raw.cache_creation_input_tokens ?? 0);
+      next.cacheReadTokens += Number(raw.cache_read_input_tokens ?? 0);
+      if (raw.cache_creation_input_tokens != null) next.cacheCreationTokens = (next.cacheCreationTokens ?? 0) + Number(raw.cache_creation_input_tokens);
       if (raw.context_tokens != null) next.contextTokens = Number(raw.context_tokens);
-      if (raw.max_context != null) next.maxContextTokens = Number(raw.max_context);
+      if (raw.max_context != null) { next.maxContextTokens = Number(raw.max_context); next.contextLimitKnown = true; }
       break;
 
     case "signal":
       next.items = [...next.items, withKey({ kind: "signal", text: formatSignal(raw) }, raw)];
       break;
 
+    case "info": {
+      const message = String(raw.message ?? "");
+      const heartbeat = message.startsWith("Waiting for model response...") ? message.match(/elapsed=(\d+)/) : null;
+      if (heartbeat) next.waitElapsedSecs = Number(heartbeat[1]);
+      else if (message === "Compressing...") { next.workState = "compacting"; next.waitElapsedSecs = null; }
+      break;
+    }
+    case "context_compact":
     case "compact":
       next.workState = "compacting";
       next.items = [...next.items, withKey({ kind: "system", text: "上下文压缩" }, raw)];
       break;
 
     case "retry":
+      next.workState = "waiting";
       next.items = [...next.items, withKey({ kind: "system", text: "重试中…", separator: true }, raw)];
       break;
 
     case "sub_agent_status": {
-      next.workState = "sub-agent";
       const sessionId = String(raw.session_id ?? "");
+      if (["launched","running"].includes(String(raw.status))) next.activeSubAgents = [...new Set([...state.activeSubAgents,sessionId])];
+      else if (["ok","failed","timed_out","cancelled","channel_closed"].includes(String(raw.status))) next.activeSubAgents = state.activeSubAgents.filter(id => id !== sessionId);
+      next.workState = next.activeSubAgents.length ? "sub-agent" : "waiting";
       const idx = next.items.findIndex((item) => item.kind === "sub_agent" && item.sessionId === sessionId);
       const status = String(raw.status ?? "");
       const inTokens = Number(raw.in_tokens ?? 0);
@@ -276,8 +295,9 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
     }
 
     case "sub_agent_output": {
-      next.workState = "sub-agent";
       const sessionId = String(raw.session_id ?? "");
+      next.activeSubAgents = state.activeSubAgents.filter(id => id !== sessionId);
+      next.workState = next.activeSubAgents.length ? "sub-agent" : "waiting";
       const idx = next.items.findIndex((item) => item.kind === "sub_agent" && item.sessionId === sessionId);
       const item = withKey({
         kind: "sub_agent" as const,

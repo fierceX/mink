@@ -19,8 +19,10 @@ export function toolSummary(name: string | undefined, input: unknown): string {
   const raw = (input ?? {}) as Record<string, unknown>;
   switch (name) {
     case "Bash":
-    case "Python":
       return truncate(String(raw.command ?? ""), 80);
+    case "Python":
+    case "PythonSandbox":
+      return truncate(String(raw.script_file ?? raw.script ?? "").split("\n")[0], 80);
     case "Read":
       return [raw.path, raw.selector].filter(Boolean).join(" ");
     case "Write":
@@ -58,7 +60,7 @@ export function toolSummary(name: string | undefined, input: unknown): string {
     case "SubAgent":
       return String(raw.prompt ?? "").slice(0, 80);
     default:
-      return JSON.stringify(input).slice(0, 120);
+      return JSON.stringify(input ?? {}).slice(0, 120);
   }
 }
 
@@ -133,7 +135,7 @@ export function parseChanges(presentation: unknown): ChangeSummary {
   if (!Array.isArray(changes)) return zero;
   const out = { ...zero };
   for (const c of changes) {
-    const kind = c.change;
+    const kind = c?.change;
     if (kind === "added") out.added++;
     else if (kind === "removed") out.removed++;
     else if (kind === "completed") out.completed++;
@@ -162,6 +164,7 @@ export function resultViewKind(name: string | undefined): ResultView {
   switch (name) {
     case "Bash":
     case "Python":
+    case "PythonSandbox":
       return "command";
     case "Read":
     case "Write":

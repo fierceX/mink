@@ -16,7 +16,7 @@ single-shot 协议）与 Mink 集成。终端交互与配置见 [使用手册](U
 
 详见 [server.md](server.md)。所有 session 路由接受 `?project=`。`POST /api/sessions/{id}/inputs` 接受 `{request_id, text, attachment_ids:[], target_turn_id:null|string}`，返回带 input_id、revision、turn_id、status 和 guidance 的持久回执。相同 request ID 与相同原始内容幂等，内容不同冲突；网络结果不确定时先 GET inputs?request_id=... 对账，不自动重复执行。PATCH / DELETE 使用 revision，resume 必须由用户明确触发。旧 `/turn` 保留并转入同一执行路径。
 
-`GET /stream?snapshot=true` 首帧是 `session_snapshot`：generation、stream_sequence、conversation（物理行号 seq）、progress、current_turn、phase、running、inputs、capabilities、resources（Plan/完整 Todo/Artifact）及 diagnostics / last_final。快照与订阅在同一发布边界建立。后续 `conversation_committed`、`inputs_updated`、`phase_updated` 和既有事件携带 generation 与 stream_sequence；旧 generation/重复水位丢弃，gap 后重取 snapshot，无需等待运行 turn 空闲。`after_conversation_seq` 定位暂态诊断的历史相邻位置。
+`GET /stream?snapshot=true` 首帧是 `session_snapshot`：generation、stream_sequence、conversation（物理行号 seq）、progress、current_turn、phase、running、inputs、capabilities、resources（Plan/完整 Todo/Artifact）及 diagnostics / activity / last_final。可选 `activity:{work_state,wait_elapsed_secs:null|number,active_sub_agents:[]}` 保留可靠事件推导的工作状态和模型等待时间；diagnostics 的完整 `title_update.stats` 保留轮次/请求数和互斥的未缓存输入、缓存读取、缓存创建分区。快照与订阅在同一发布边界建立。后续 `conversation_committed`、`inputs_updated`、`phase_updated` 和既有事件携带 generation 与 stream_sequence；旧 generation/重复水位丢弃，gap 后重取 snapshot，无需等待运行 turn 空闲。`after_conversation_seq` 定位暂态诊断的历史相邻位置。
 
 Core 的新增 `AgentEventKind::ConversationCommitted {conversation_seq,message}` 经可靠 runtime 流发出，不能与实时候选文本混同。Web stable key 为 `message:{seq}:{block_index}` 或 `input:{input_id}`，正式历史接管 `live:{generation}:{stream_sequence}`（旧流兼容无 generation 的 key）。既有 SSE 模式不发送新增输入/提交/阶段控制事件；CLI 展示忽略 commit 通知，避免重复正文。
 

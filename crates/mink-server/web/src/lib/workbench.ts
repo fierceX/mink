@@ -1,4 +1,4 @@
-import { reactive, watch } from "vue";
+import { reactive, shallowRef, watch } from "vue";
 import type { Attachment, TranscriptItem, RawEvent } from "./types";
 import { appState, uiState } from "./store";
 export interface Upload { key: string; name: string; bytes: number; preview: string; status: "uploading" | "ready" | "failed"; attachment?: Attachment; error?: string }
@@ -22,11 +22,18 @@ export function viewFor(key = identity()): ViewState {
 }
 watch(views, () => { for (const [key, view] of Object.entries(views)) { try { localStorage.setItem(`mink.draft:${key}`, view.draft); localStorage.setItem(`mink.view:${key}`, JSON.stringify({ uploads: view.uploads, failures: view.failures, expanded: view.expanded, follow: view.follow, anchor: view.anchor, detailTab: view.detailTab, detailPath: view.detailPath, detailLine: view.detailLine, detailScroll: view.detailScroll, innerScroll: view.innerScroll, detailTurn: view.detailTurn })); } catch { /* storage optional */ } } }, { deep: true });
 const saved = (name: string, fallback: string) => { try { return localStorage.getItem(name) ?? fallback; } catch { return fallback; } };
-export const preferences = reactive({ theme: saved("mink.theme", "light"), process: saved("mink.process", "standard"), navWidth: Number(saved("mink.navWidth", "260")), detailWidth: Number(saved("mink.detailWidth", "360")) });
+export const preferences = reactive({ theme: saved("mink.theme", "light"), process: saved("mink.process", "standard"), wrapText: saved("mink.wrapText", "true") !== "false", navWidth: Number(saved("mink.navWidth", "260")), detailWidth: Number(saved("mink.detailWidth", "360")) });
 watch(preferences, () => {
   document.documentElement.dataset.theme = preferences.theme;
+  document.documentElement.dataset.wrap = preferences.wrapText ? 'on' : 'off';
   for (const [key, value] of Object.entries(preferences)) { try { localStorage.setItem(`mink.${key}`, String(value)); } catch { /* storage optional */ } }
 }, { immediate: true });
+export const settingsOpener = shallowRef<HTMLElement | null>(null);
+export function showSettings(event: Event) {
+  const menu = event.currentTarget instanceof Element ? event.currentTarget.closest('[role="menu"]') : null;
+  settingsOpener.value = document.getElementById(menu?.getAttribute('aria-labelledby') ?? '');
+  uiState.settingsOpen = true;
+}
 export const feedback = reactive({ message: "" });
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 export function flash(message: string) { feedback.message = message; clearTimeout(toastTimer); toastTimer = setTimeout(() => feedback.message = "", 4500); }

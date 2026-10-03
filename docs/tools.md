@@ -16,6 +16,26 @@ Web 的任务、引导和图片上传属于 runtime 人类输入协议，不是�
 
 Full/Inline TUI 也使用此 Inbox 协议，运行中 Enter 提交引导，`/inputs`、`/resume ID`、`/withdraw ID` 是本地人类输入管理命令，不进入模型 tool surface。图片仍随绝对路径请求交给 `Read`，没有第二套图片入口。
 
+Web 文件详情的加载、返回目录与上一级属于只读预览交互，不发起模型工具调用；当前磁盘正文与历史工具输出分别展示，失败保留明确错误。输入区图片/发送图标、轮次跳转和 Reka UI 菜单均属于客户端控件，不改变工具执行协议。
+
+诊断展示直接读取 runtime `StatsSnapshot` 和可靠事件 activity，不从工具正文反向解析；缓存创建不计入缓存命中，Plan/Todo 仅显示权威资源快照，统计与任务详情均不增加模型工具。
+
+对话和路径的复制仅使用客户端剪贴板，不调用模型工具或 server；优先 Clipboard API，失败后使用选区复制兼容路径，实际成功后才确认。
+
+工具卡片解码的是实际调用参数：Python/PythonSandbox 使用 `script`/`script_file`，Replace 使用 `edits[].old_text/new_text/all`；Plan/Todo 结果优先使用 `ToolPresentation` 的正式结构。原始参数/结果保留折叠入口，文件和命令的正文不做通用 JSON 解码，Artifact 输出保护不变。
+
+轮次选择是客户端限高纵向菜单，键盘或点击只改变阅读位置，不创建模型请求或改变工具执行顺序。
+
+自动换行只改变客户端的代码、工具输出和文件预览排版；完整原始文本及换行、工具参数、`conv_content`、Artifact 保护和复制内容均不改写。
+
+目录筛选只匹配已发现的项目/会话元数据，不调用 Grep、Read 或模型工具，也不改变当前会话。
+
+首页导航只断开当前视图订阅并清除会话地址参数，后台执行与工具状态不变。
+
+顶栏菜单的设置面板只修改浏览器展示偏好，不发起模型工具调用，不重启或停止任务。
+
+手机阅读模式只隐藏客户端操作栏，不调用 interrupt/close、不卸载会话或丢弃草稿；运行中保留停止控件，待处理/失败输入和附件优先显示。内层工具输出滚动不得触发外层操作栏隐藏。
+
 SubAgent 的执行记录仍在父会话工具结果中展示；其独立 session（含恢复子代理）不进入 Web 用户会话目录。
 
 正式工具结果 `_mink` 保留 `status`、`tool_name`、`result_kind`、`exit_code`、`presentation`、`artifacts` 及既有状态元数据，供 Web 历史与实时展示统一。正式用户消息 `_mink` 包含 input_id / turn_id / guidance / attachment_ids。所有 `_mink` 在模型请求转换时剥离；`format_tool_result()` 与 conversation 的 conv_content 优先规则保持不变。旧历史缺少 ToolStatus 时界面显示“状态未记录”，不从正文推测成功。

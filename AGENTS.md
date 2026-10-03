@@ -98,6 +98,17 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - `InputInbox` 是 session 唯一持久输入准入边界；request ID 绑定原始内容，编辑/撤回比较 revision，仅 pending/unapplied 可修改。applying 先发布，正式历史以 `_mink.input_id` 接管，追加不确定或历史已写但回执发布失败必须闩锁；恢复核对完整预期消息，禁止重复追加。
 - 引导绑定父 turn，在已接受工具交换完整持久化后、下一请求压缩检查前顺序消费；Stop 与准入共享锁。取消/故障/恢复耗尽/轮次上限优先，引导不重置格式窗口、账单 turn 或请求期限，不自动传给子代理；未应用项仅由用户明确续发。
 - Web mirror 经公开 Reader 初始化、可靠 runtime 事件更新，快照与订阅位置在同一发布锁建立；generation/水位拒绝旧事件。离开视图只断订阅，不调用 close。草稿/附件/展开/阅读锚点按完整会话身份隔离，迟到响应不得污染当前视图。
+- Web 会话筛选只搜索已发现目录，项目名称（路径末段）与完整项目路径必须区分；会话范围包含标题、别名和 ID，切换范围保留关键词，不改变当前执行或会话排序。
+- Web 根地址默认首页，会话刷新目标来自完整 URL 身份，不回退旧的本地选择；启动请求不得覆盖期间的明确导航，返回首页只断订阅。
+- Web 设置使用按需打开的模态面板，菜单焦点交接完成后再捕获焦点；关闭须恢复入口，偏好修改不得重启任务或重置阅读状态。
+- Web 菜单与移动覆盖层必须支持键盘关闭和焦点恢复；请求在途禁用重复操作，不以加载或 HTTP 回执覆盖更晚终态、runtime generation 或正式已应用输入。文件预览加载结果与滚动恢复均受完整身份及请求 revision 约束。
+- Web 诊断必须与 TUI StatsSnapshot 口径一致：缓存命中只计 read、分母含 input/read/creation；缺失旧统计显示未知。完整 stats 与 activity 同镜像发布边界恢复，正式历史提交不得清除等待计时。
+- Web 图标控件使用场景尺寸（32px/触控 36px、会话行 44px），禁止统一放大所有按钮；Reka UI 菜单优先处理方向键/Esc，手机覆盖层不得抢走菜单键盘事件或因响应式切换自动遮挡输入。
+- Web 文本复制共用 Clipboard API/选区兼容路径，清理临时控件并恢复焦点、光标与选区；两条路径均失败不得显示成功。
+- Web 工具卡片按实际参数与 ToolPresentation 展示，Replace/Hashline 均须支持；JSON 参数保留手动核对入口，正文不通用解码为参数，旧未知状态不得渲染为成功，Artifact 入口不得丢失。
+- Web 轮次选择须为限高纵向列表，标题不得撑宽弹层；支持菜单内滚动、方向键/Home/End、选择关闭与焦点恢复。
+- Web 正文/过程组须限制在可用列宽；自动换行只改展示并保存偏好，不改复制/发送/文件/工具结果的原始字节；关闭换行后的横向滚动只属于内部内容块。
+- 手机操作栏仅由外层明确用户滚动隐藏，内层/布局/流式滚动不得触发；保留恢复入口、运行中停止、草稿与阅读锚点，输入焦点/附件/待处理或失败回执/恢复状态优先可见，隐藏不调用 close/interrupt。
 - Web 会话扫描与查找共用子代理过滤：目录名或 metadata.id 为 sub_/replan_ 前缀、或 metadata.parent 存在时排除；不能因缺失、损坏或继承 metadata 将旧子代理展示为用户会话。
 - CLI/TUI/Web 共用 core AttachmentStore：上传仅保存 session attachments 原始字节与绝对路径，图片上下文唯一入口仍为 Read。会话限定预览不得扩大工作目录文件访问范围。
 - Full/Inline TUI 任务与运行中 Enter 引导均走 stream_input，准入不排到下一轮；仅正式 ConversationCommitted 才回显引导，Final 才结束轮次。尚未应用输入由 Inbox 保留，/resume ID 明确续发，/withdraw ID 按 revision 撤回；拒绝提交保留草稿及图片，不封口当前流。

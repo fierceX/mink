@@ -10,6 +10,9 @@ import { dirname, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
+import { E2E_CARDS_ID, toolCardsFixture } from "./tool-cards-fixture";
+import { E2E_MOBILE_ID, LONG_FILE, mobileFixture } from "./mobile-fixture";
+
 const BACKEND_PORT = 18821;
 export const E2E_SESSION_ID = "e2e-session";
 export const E2E_HOME = join(tmpdir(), "mink-e2e-home");
@@ -42,6 +45,17 @@ export default async function globalSetup() {
     }),
   );
   mkdirSync(join(sessDir, "artifacts"), { recursive: true });
+
+  const cardsDir = join(E2E_HOME, ".mink", "projects", projectKey, E2E_CARDS_ID);
+  mkdirSync(cardsDir, { recursive: true });
+  writeFileSync(join(cardsDir, "session.json"), JSON.stringify({id:E2E_CARDS_ID,title:"工具卡片验证",alias:null,cwd:E2E_CWD,created_at:"",updated_at:"",parent:null}));
+  writeFileSync(join(cardsDir, "conversation.jsonl"), toolCardsFixture());
+
+  const mobileDir = join(E2E_HOME, ".mink", "projects", projectKey, E2E_MOBILE_ID);
+  mkdirSync(mobileDir, { recursive:true });
+  writeFileSync(join(mobileDir,"session.json"),JSON.stringify({id:E2E_MOBILE_ID,title:"手机阅读验证",alias:null,cwd:E2E_CWD,created_at:"",updated_at:"",parent:null}));
+  writeFileSync(join(mobileDir,"conversation.jsonl"),mobileFixture());
+  writeFileSync(join(E2E_CWD,"long-lines.txt"),LONG_FILE);
 
   // 创建 cwd 与测试文件（文件预览面板 E2E：md 渲染 + 代码着色）
   writeFileSync(join(E2E_CWD, "README.md"), "# e2e project\n\n**Mink** 测试项目。\n\n```bash\nmake test && echo \"done\"\n```\n");

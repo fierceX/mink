@@ -26,5 +26,6 @@ createServer(async (request, response) => {
     emit({ content: `Completed: ${text.includes('guidance') ? 'guidance applied' : 'fixture response'}` });
     emit({}, 'stop');
   }
+  response.write(`data: ${JSON.stringify({choices:[],usage:{prompt_tokens:100,completion_tokens:20,prompt_tokens_details:{cached_tokens:60,cache_creation:10}}})}\n\n`);
   response.write('data: [DONE]\n\n'); response.end();
 }).listen(18822, '127.0.0.1');

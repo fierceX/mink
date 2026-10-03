@@ -2,8 +2,8 @@
 import { computed } from "vue";
 import { renderMarkdown } from "../../../lib/markdown";
 
-const props = defineProps<{ item: { text: string } }>();
-const html = computed(() => renderMarkdown(props.item?.text ?? ""));
+const props = defineProps<{ item?: { text: string }; content?: string }>();
+const html = computed(() => renderMarkdown(props.item?.text ?? props.content ?? ""));
 </script>
 
 <template>

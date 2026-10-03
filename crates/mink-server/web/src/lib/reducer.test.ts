@@ -112,8 +112,8 @@ describe("reduceEvent", () => {
 
   it("title_update 严格读取嵌套 stats", () => {
     let s = emptySession("s1", "t");
-    s = reduceEvent(s, ev("title_update", { model: "pro", stats: { total_input_tokens: 7, total_output_tokens: 3, total_cache_read_tokens: 5, current_context_tokens: 12, max_context_tokens: 100, belief: 0.8 } }));
-    expect(s).toMatchObject({ model: "pro", tokensIn: 7, tokensOut: 3, cacheReadTokens: 5, contextTokens: 12, maxContextTokens: 100, belief: 0.8 });
+    s = reduceEvent(s, ev("title_update", { model: "pro", stats: { total_input_tokens: 7, total_output_tokens: 3, total_cache_read_tokens: 5, total_cache_creation_tokens: 2, current_turn_count: 4, agent_request_count: 9, current_context_tokens: 12, max_context_tokens: 100, belief: 0.8 } }));
+    expect(s).toMatchObject({ model: "pro", tokensIn: 7, tokensOut: 3, cacheReadTokens: 5, cacheCreationTokens: 2, turnCount: 4, requestCount: 9, contextLimitKnown: true, contextTokens: 12, maxContextTokens: 100, belief: 0.8 });
   });
 
   it("stop 插入唯一结束标记，turn_final 只提交权威状态", () => {
@@ -303,12 +303,14 @@ describe("usage 事件 → 缓存命中与上下文", () => {
       cache_read_input_tokens: 80, cache_creation_input_tokens: 10,
       context_tokens: 8123, max_context: 65536,
     }));
-    expect(s.cacheReadTokens).toBe(90);
+    expect(s.cacheReadTokens).toBe(80);
+    expect(s.cacheCreationTokens).toBe(10);
     expect(s.contextTokens).toBe(8123);
     expect(s.maxContextTokens).toBe(65536);
     // 二次事件继续累计缓存
     s = reduceEvent(s, ev("usage", { input_tokens: 50, cache_read_input_tokens: 10 }));
-    expect(s.cacheReadTokens).toBe(100);
+    expect(s.cacheReadTokens).toBe(90);
+    expect(s.cacheCreationTokens).toBe(10);
   });
 
   it("缺失 cache/context 字段时保持原值", () => {

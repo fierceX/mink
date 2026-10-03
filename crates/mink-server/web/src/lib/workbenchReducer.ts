@@ -9,7 +9,7 @@ export function projectMessages(state: SessionState, messages: Record<string, un
     for (const event of conversationToEvents(row)) output = reduceEvent(output, event);
   }
   for (const event of overlays) output = reduceEvent(output, event);
-  return { ...output, running: state.running, workState: state.workState, lastSeq: state.lastSeq, seenTurnEvents: state.seenTurnEvents, lastTurnId: state.lastTurnId };
+  return { ...output, running: state.running, workState: state.workState, waitElapsedSecs: state.waitElapsedSecs, activeSubAgents: state.activeSubAgents, lastSeq: state.lastSeq, seenTurnEvents: state.seenTurnEvents, lastTurnId: state.lastTurnId };
 }
 export function mergeTodo(previous: TodoResource, data: TodoResource & { changes?: Record<string, unknown>[] }): TodoResource {
   if ((data.revision ?? 0) <= (previous.revision ?? 0)) return previous;
@@ -43,6 +43,10 @@ export function reduceWorkbench(state: SessionState, event: RawEvent): SessionSt
     for (const progress of (event.progress as RawEvent[] ?? [])) if (["text","thinking"].includes(progress.type)) next = reduceEvent(next, progress);
     if (event.diagnostics) next = reduceEvent(next,event.diagnostics as RawEvent);
     if (event.last_final && !event.running) next = recordOutcome(reduceEvent(next,event.last_final as RawEvent),event.last_final as RawEvent);
+    const activity = event.activity as { work_state?: string; wait_elapsed_secs?: number | null; active_sub_agents?: string[] } | undefined;
+    if (activity?.work_state) next.workState = activity.work_state;
+    next.waitElapsedSecs = activity?.wait_elapsed_secs ?? null;
+    next.activeSubAgents = activity?.active_sub_agents ?? [];
     return next;
   }
   if (event.generation !== state.generation || Number(event.stream_sequence) <= state.lastSeq) return state;
@@ -83,7 +87,7 @@ export function reduceWorkbench(state: SessionState, event: RawEvent): SessionSt
   }
   if (event.type === "phase_updated") return {...state,phase:String(event.phase),desynced:event.phase === "closed" || state.desynced,lastSeq:Number(event.stream_sequence)};
   // Tool records are already in the formal history; live tool events only update activity.
-  if (event.type === "tool_call" || event.type === "tool_result") return { ...state, workState: "tool", lastSeq: Number(event.stream_sequence) };
+  if (event.type === "tool_call" || event.type === "tool_result") return { ...state, workState: event.type === "tool_call" ? "tool" : "waiting", waitElapsedSecs: null, lastSeq: Number(event.stream_sequence) };
   const next = event.type === "turn_final" ? recordOutcome(reduceEvent(state,event),event) : reduceEvent(state,event);
   if (["error","signal","sub_agent_status","sub_agent_output","retry","compact","stop","turn_error","turn_final"].includes(event.type)) next.overlays = [...state.overlays ?? [], event];
   if (event.type === "turn_started") { next.currentTurn = String(event.turn_id); next.phase = "running"; }

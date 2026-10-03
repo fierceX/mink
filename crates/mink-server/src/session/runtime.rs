@@ -56,6 +56,7 @@ struct Projection {
     last_final: Option<serde_json::Value>,
     resources: serde_json::Value,
     diagnostics: serde_json::Value,
+    activity: serde_json::Value,
 }
 impl Projection {
     fn trim(&mut self) {
@@ -133,6 +134,7 @@ impl SessionRuntime {
             last_final: None,
             resources,
             diagnostics: serde_json::json!({"type":"title_update","model":model,"stats":stats}),
+            activity: serde_json::json!({"work_state":"idle","wait_elapsed_secs":null,"active_sub_agents":[]}),
         };
         projection.trim();
         let inbox = runtime.handle().input_inbox().clone();
@@ -195,7 +197,7 @@ impl SessionRuntime {
         let p = self.projection.lock().unwrap_or_else(|e| e.into_inner());
         let rx = self.event_tx.subscribe();
         (
-            serde_json::json!({"type":"session_snapshot","generation":p.generation,"stream_sequence":p.watermark,"conversation":p.rows,"progress":p.progress,"current_turn":p.current_turn,"phase":p.phase,"running":matches!(p.phase,"running"|"cancelling"|"closing"),"inputs":self.inbox.outstanding(),"capabilities":{"image_input":self.image_input},"last_final":p.last_final,"resources":p.resources,"diagnostics":p.diagnostics}),
+            serde_json::json!({"type":"session_snapshot","generation":p.generation,"stream_sequence":p.watermark,"conversation":p.rows,"progress":p.progress,"current_turn":p.current_turn,"phase":p.phase,"running":matches!(p.phase,"running"|"cancelling"|"closing"),"inputs":self.inbox.outstanding(),"capabilities":{"image_input":self.image_input},"last_final":p.last_final,"resources":p.resources,"diagnostics":p.diagnostics,"activity":p.activity}),
             rx,
         )
     }
@@ -562,6 +564,7 @@ fn publish(
         .and_then(|row| row.get("seq"))
         .cloned()
         .unwrap_or(serde_json::json!(0));
+    update_activity(&mut p.activity, &value);
     match value["type"].as_str().unwrap_or_default() {
         "title_update" => {
             p.diagnostics = value.clone();
@@ -635,6 +638,66 @@ fn publish(
         _ => {}
     }
     let _ = tx.send(value.to_string());
+}
+
+fn update_activity(activity: &mut serde_json::Value, event: &serde_json::Value) {
+    if matches!(event["type"].as_str(), Some("turn_started" | "turn_final")) {
+        activity["active_sub_agents"] = serde_json::json!([]);
+    }
+    let work = match event["type"].as_str().unwrap_or_default() {
+        "turn_started" | "retry" | "tool_result" => Some("waiting"),
+        "thinking" => Some("thinking"),
+        "text" => Some("generating"),
+        "tool_call" => Some("tool"),
+        "sub_agent_status" | "sub_agent_output" => {
+            if !activity["active_sub_agents"].is_array() {
+                activity["active_sub_agents"] = serde_json::json!([]);
+            }
+            let agents = activity["active_sub_agents"].as_array_mut().unwrap();
+            let id = &event["session_id"];
+            if matches!(event["status"].as_str(), Some("launched" | "running")) {
+                if id.is_string() && !agents.contains(id) {
+                    agents.push(id.clone());
+                }
+            } else if event["type"] == "sub_agent_output"
+                || matches!(
+                    event["status"].as_str(),
+                    Some("ok" | "failed" | "timed_out" | "cancelled" | "channel_closed")
+                )
+            {
+                agents.retain(|agent| agent != id);
+            }
+            Some(if agents.is_empty() {
+                "waiting"
+            } else {
+                "sub-agent"
+            })
+        }
+        "context_compact" => Some("compacting"),
+        "turn_final" => Some(
+            if event["outcome"]["status"] != "interrupted"
+                && event
+                    .pointer("/outcome/error")
+                    .is_some_and(serde_json::Value::is_string)
+            {
+                "error"
+            } else {
+                "idle"
+            },
+        ),
+        "info" => {
+            let message = event["message"].as_str().unwrap_or_default();
+            if let Some(elapsed) = mink::runtime::parse_llm_wait_heartbeat_elapsed(message) {
+                activity["wait_elapsed_secs"] = elapsed.into();
+            }
+            (message == "Compressing...").then_some("compacting")
+        }
+        _ => None,
+    };
+    if let Some(work) = work {
+        activity["work_state"] = work.into();
+        activity["wait_elapsed_secs"] = serde_json::Value::Null;
+    }
 }
 
 fn apply_presentation(resources: &mut serde_json::Value, presentation: &serde_json::Value) {
@@ -838,6 +901,77 @@ fn publish_forced_timeout_final(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_tracks_reliable_progress_and_clears_wait_at_boundaries() {
+        let mut activity = serde_json::json!({"work_state":"idle","wait_elapsed_secs":null});
+        update_activity(&mut activity, &serde_json::json!({"type":"turn_started"}));
+        update_activity(
+            &mut activity,
+            &serde_json::json!({"type":"info","message":"Waiting for model response... elapsed=23s idle=5s"}),
+        );
+        assert_eq!(activity["work_state"], "waiting");
+        assert_eq!(activity["wait_elapsed_secs"], 23);
+        // Formal history commits and stats must not erase current activity.
+        update_activity(
+            &mut activity,
+            &serde_json::json!({"type":"conversation_committed"}),
+        );
+        assert_eq!(activity["wait_elapsed_secs"], 23);
+        for (event, work) in [
+            (serde_json::json!({"type":"thinking"}), "thinking"),
+            (serde_json::json!({"type":"text"}), "generating"),
+            (serde_json::json!({"type":"tool_call"}), "tool"),
+            (serde_json::json!({"type":"tool_result"}), "waiting"),
+            (
+                serde_json::json!({"type":"sub_agent_status","session_id":"child","status":"running"}),
+                "sub-agent",
+            ),
+            (
+                serde_json::json!({"type":"sub_agent_output","session_id":"child"}),
+                "waiting",
+            ),
+            (
+                serde_json::json!({"type":"info","message":"Compressing..."}),
+                "compacting",
+            ),
+            (
+                serde_json::json!({"type":"turn_final","outcome":{"error":"cancelled"}}),
+                "error",
+            ),
+            (
+                serde_json::json!({"type":"turn_final","outcome":{"error":null}}),
+                "idle",
+            ),
+        ] {
+            update_activity(&mut activity, &event);
+            assert_eq!(activity["work_state"], work);
+            assert!(activity["wait_elapsed_secs"].is_null());
+        }
+    }
+
+    #[test]
+    fn activity_keeps_remaining_children_running_and_interruption_idle() {
+        let mut activity = serde_json::json!({"work_state":"idle","wait_elapsed_secs":null});
+        for id in ["first", "second"] {
+            update_activity(
+                &mut activity,
+                &serde_json::json!({"type":"sub_agent_status","session_id":id,"status":"launched"}),
+            );
+        }
+        update_activity(
+            &mut activity,
+            &serde_json::json!({"type":"sub_agent_output","session_id":"first","status":"ok"}),
+        );
+        assert_eq!(activity["work_state"], "sub-agent");
+        assert_eq!(activity["active_sub_agents"], serde_json::json!(["second"]));
+        update_activity(
+            &mut activity,
+            &serde_json::json!({"type":"turn_final","outcome":{"status":"interrupted","error":"interrupted"}}),
+        );
+        assert_eq!(activity["work_state"], "idle");
+        assert_eq!(activity["active_sub_agents"], serde_json::json!([]));
+    }
 
     fn session_info() -> SessionInfo {
         let path = std::path::PathBuf::from("/tmp/mink-server-runtime-test");

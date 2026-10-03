@@ -137,15 +137,27 @@ MINK_SERVER_PORT=9000 ./target/debug/mink-server
 
 ### 新版原子快照订阅
 
-`GET /stream?snapshot=true` 首帧 `session_snapshot` 与订阅位置在同一 mirror 发布锁下建立，包含 generation、stream_sequence、conversation（最近 20 个真实用户轮次）、progress、current_turn、phase、running、inputs、capabilities、resources（Plan、完整 Todo、Artifact）、diagnostics 与 last_final。打开时镜像经公开 SessionReader 重建，运行中消费可靠 runtime 事件；best-effort EventSink 不用于权威恢复。
+`GET /stream?snapshot=true` 首帧 `session_snapshot` 与订阅位置在同一 mirror 发布锁下建立，包含 generation、stream_sequence、conversation（最近 20 个真实用户轮次）、progress、current_turn、phase、running、inputs、capabilities、resources（Plan、完整 Todo、Artifact）、diagnostics、activity 与 last_final。activity 为 `{work_state,wait_elapsed_secs:null|number,active_sub_agents:[]}`，由可靠事件更新并与快照同时发布；active_sub_agents 是未结束子代理 ID 列表，单个子任务结束不抹掉其他活动任务，主动中断后工作状态回到 idle。旧客户端可忽略。diagnostics 保留完整 `title_update.stats`，包括轮次、请求数和独立缓存读取/创建计数。打开时镜像经公开 SessionReader 重建，运行中消费可靠 runtime 事件；best-effort EventSink 不用于权威恢复。
 
 后续新增 `conversation_committed {conversation_seq,message}`、`inputs_updated {inputs}`、`phase_updated {phase}`，与既有 AgentEvent 均携带 generation、stream_sequence 和 after_conversation_seq。正式历史接管暂态 text/thinking，稳定身份为物理 `(seq,block_index)` 或 input_id；诊断保持相邻时序。旧 generation 与重复水位丢弃，gap 后立即重取 snapshot，无需等待 turn 空闲。旧 SSE 模式过滤新增输入/commit/phase 控制事件，仍转发原有协议。运行态、成功与失败由 turn_final/outcome 决定，stop 与 HTTP 成功均不提前完成任务。
 
+Web 诊断按 TUI 口径展示缓存命中率 `floor(read × 100 / (input + read + creation))`，输入栏为 `input + read`；空输入或缺失完整分区时显示未知。上下文占比、信念、Plan/Todo、工作阶段与等待时间同样保留，刷新不丢当前 activity。
+
 ### Web 交互
 
-项目导航常驻桌面，右侧详情按需打开；1024–1279px 打开详情时隐藏导航，768–1023px 侧栏覆盖，手机详情为全屏，使用 100dvh/safe-area，body 不承担对话滚动。轮次中思考/工具组成紧凑过程组，回复、重试、错误与引导有独立边界；支持简洁/标准/详细模式与手动展开优先。
+项目导航常驻桌面，右侧详情按需打开；1024–1279px 打开详情时隐藏导航，768–1023px 侧栏覆盖，手机详情为全屏，使用 100dvh/safe-area，body 不承担对话滚动。轮次中思考/工具组成紧凑过程组，回复、重试、错误与引导有独立边界；支持简洁/标准/详细模式与手动展开优先。输入区使用一体容器，轮次跳转浮于对话内；图标按钮 32px/触控 36px、手机会话行 44px，进入窄屏收起桌面导航。菜单/提示使用 Reka UI，键盘、碰撞定位与焦点恢复由组件库处理。
 
 草稿、附件、失败提交、展开、消息锚点、内层/详情滚动按完整会话身份持久保留。切换、返回首页、关闭浏览器只停止正文订阅，不调用 close、不停止任务。断线/停止中禁用提交但仍可编辑；明确发送与“返回最新内容”恢复外层跟随。任务详情只读，文件是当前磁盘内容，工具/Artifact 是当时记录。
+
+对话与文件路径复制共用客户端 Clipboard API/选区兼容路径，适配未提供 Clipboard API 的普通 HTTP 页面；浏览器拒绝两条路径时显示失败，不能伪造成功，不新增 REST 接口。
+
+工具卡片按真实参数显示命令、脚本、写入内容与子任务；Replace/Hashline 分别展示当次编辑指令，Plan/Todo 使用正式 presentation。完整 JSON 参数保留在折叠入口，调用参数不会随结果到达消失；历史刷新与实时结果使用相同渲染器，保留旧记录兼容与 Artifact 入口。
+
+轮次选择弹层使用纵向限高列表（300px 宽、260px/40dvh 高及可用空间的交集），长标题截断；点击与键盘均可定位已加载轮次。
+
+正文列宽受当前可用空间约束，代码/工具输出/文件和表格默认自动换行；导航与轮次菜单可关闭并持久保存偏好。关闭后横向滚动限于内部内容块，不撑宽页面；不改变 REST 文本和工具输出原始字节。
+
+手机外层上滑达到 48px 时可隐藏操作栏，下滑、轻点正文、恢复入口或 Esc 重新显示；保留草稿和消息锚点，运行中停止始终可达。待处理/失败输入、附件和断线/停止/恢复状态禁用隐藏；该 UI 状态不改变 SSE 订阅和 runtime 生命周期。
 
 页面可见且有运行任务时目录每 2s 对账，否则每 15s；隐藏停止轮询，恢复可见立即刷新，只当前会话保持正文 SSE。新建任务在应用内填写 server 工作目录并生成唯一 alias；删除失败留在原位报告。
 

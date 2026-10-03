@@ -1,10 +1,10 @@
 <script setup lang="ts">
 // 空状态工作台：无会话时展示（hero + 最近会话卡片网格 + 统计条）
-import { computed, onMounted, onUnmounted } from "vue";
+import { computed } from "vue";
 import { fmtK } from "../lib/fmt";
 import { appState, uiState, workspaces } from "../lib/store";
 import { openSession } from "../lib/sessionController";
-import { api } from "../lib/api";
+import { flash } from "../lib/workbench";
 import type { SessionSummary } from "../lib/api";
 
 const emit = defineEmits<{ browse: [] }>();
@@ -23,6 +23,7 @@ const baseName = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
 
 function fmtTime(iso: string): string {
   const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "时间未记录";
   const now = new Date();
   if (d.toDateString() === now.toDateString()) return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
   const y = new Date(now); y.setDate(now.getDate() - 1);
@@ -36,14 +37,15 @@ function statusCls(s: SessionSummary): string {
   return `st-${s.status}`;
 }
 
-// 运行中统计实时化：列表 status 由服务端 registry 提供，但前端只加载一次——
-// 首页轮询刷新（10s），使"运行中"计数与真实执行状态一致
 const onNew = () => { uiState.newOpen = true; };
-const open = (s: SessionSummary) => openSession(s).catch(() => {});
+const open = (s: SessionSummary) => {
+  appState.currentWorkspace = s.cwd;
+  void openSession(s).catch(error => flash(String(error)));
+};
 </script>
 
 <template>
-  <div class="empty">
+  <div class="empty" aria-label="首页">
     <div class="e">
       <div class="hero"><span class="hm">M</span></div>
       <h1>继续工作</h1>
@@ -55,10 +57,10 @@ const open = (s: SessionSummary) => openSession(s).catch(() => {});
       <div class="rc">
         <div class="rc-head">
           <h6>最近会话 · {{ curProj ? baseName(curProj.cwd) : "—" }}</h6>
-          <span class="all" @click="emit('browse')">查看全部 →</span>
+          <button class="all" @click="emit('browse')">查看全部 →</button>
         </div>
         <div class="rc-grid">
-          <div v-for="s in recent" :key="s.id" class="rrow" @click="open(s)">
+          <button v-for="s in recent" :key="JSON.stringify([s.project_key,s.id])" class="rrow" @click="open(s)">
             <div class="top">
               <span class="ico">💬</span>
               <span class="st" :class="statusCls(s)">{{ statusLabel(s) }}</span>
@@ -68,7 +70,7 @@ const open = (s: SessionSummary) => openSession(s).catch(() => {});
               <div class="s">{{ s.path.split("/").pop() }}</div>
             </div>
             <span class="tm">{{ fmtTime(s.updated_at) }} · {{ baseName(s.cwd) }}<template v-if="(s.tokens_in ?? 0) > 0"> · {{ fmtK(s.tokens_in! + s.tokens_out!) }} tok</template></span>
-          </div>
+          </button>
           <div v-if="recent.length === 0" class="no-sess">该项目暂无会话，点击"＋ 新建会话"开始。</div>
         </div>
       </div>
@@ -83,13 +85,13 @@ const open = (s: SessionSummary) => openSession(s).catch(() => {});
 
 <style scoped>
 .empty {
-  flex: 1; display: flex; align-items: center; justify-content: center;
+  flex:1; min-height:0; display:flex; flex-direction:column; align-items:center;
   overflow-y: auto; position: relative;
   background:
     radial-gradient(560px 260px at 18% 0%, rgba(79, 140, 255, 0.07), transparent 65%),
     radial-gradient(520px 240px at 85% 18%, rgba(124, 92, 255, 0.06), transparent 60%);
 }
-.e { max-width: 640px; width: 100%; text-align: center; padding: 46px 28px 40px; }
+.e { margin-block:auto; flex-shrink:0; max-width: 640px; width: 100%; text-align: center; padding: 46px 28px 40px; }
 .hero {
   width: 64px; height: 64px; margin: 0 auto 18px; border-radius: 18px; position: relative;
   background: linear-gradient(135deg, #4f8cff, #7c5cff);
@@ -112,7 +114,7 @@ p { color: var(--text-dim); font-size: 13.5px; margin-bottom: 24px; max-width: 4
 .btn-primary:hover { background: linear-gradient(180deg, #5a8aff, #3b6ef6); }
 .btn-secondary {
   padding: 9px 16px; border: 1px solid var(--line); border-radius: 9px;
-  font-weight: 550; color: var(--text-soft); background: #fff; cursor: pointer; font-size: 13px;
+  font-weight: 550; color: var(--text-soft); background: var(--bg-elevated); cursor: pointer; font-size: 13px;
 }
 .btn-secondary:hover { border-color: var(--blue); color: var(--blue); }
 .rc { text-align: left; margin-top: 34px; }
@@ -121,13 +123,13 @@ p { color: var(--text-dim); font-size: 13.5px; margin-bottom: 24px; max-width: 4
   font-size: 10px; font-family: var(--mono); letter-spacing: 0.14em;
   color: var(--text-dim); text-transform: uppercase; flex: 1;
 }
-.rc-head .all { font-size: 11.5px; color: var(--blue); cursor: pointer; padding: 2px 8px; border-radius: 6px; }
+.rc-head .all { border:0; background:transparent; padding:0; font-size: 11.5px; color: var(--blue); cursor: pointer; padding: 2px 8px; border-radius: 6px; }
 .rc-head .all:hover { background: rgba(47, 111, 237, 0.08); }
 .rc-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; min-width: 0; }
-.rrow { min-width: 0;
+.rrow { text-align:left; color:var(--text); min-width:0;
   display: flex; flex-direction: column; gap: 8px;
   padding: 14px 15px; border: 1px solid var(--line); border-radius: 13px;
-  cursor: pointer; transition: 0.16s; background: #fff;
+  cursor: pointer; transition: 0.16s; background: var(--bg-elevated);
 }
 .rrow:hover { border-color: var(--blue); box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 8px 24px rgba(16, 24, 40, 0.06); transform: translateY(-2px); }
 .rrow .top { display: flex; align-items: center; gap: 10px; min-width: 0; }
