@@ -303,8 +303,9 @@ pub(crate) fn handle_ctrl_c(
         return true;
     }
 
-    if state.work_state.is_working() {
+    if state.active_turn_id.is_some() || state.work_state.is_working() {
         let _ = orch_tx.send(RuntimeCmd::Interrupt);
+        state.stopping = state.active_turn_id.is_some();
         state.last_interrupt = Some(now);
         return false;
     }
@@ -538,6 +539,40 @@ fn handle_enter(
     orch_tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
 ) -> bool {
     state.input.clamp_cursor();
+    let parsed = parse_slash_command(&state.input.buf);
+    if state.runtime.is_some() {
+        if matches!(parsed, Ok(None)) {
+            if let Err(error) = state.submit_human_input(orch_tx) {
+                // Admission failures must not finalize the current stream or
+                // erase the draft; notices wait for its accepted boundary.
+                state.input_rejected(format!("Input rejected: {error}"));
+            }
+            return false;
+        }
+        if let Ok(Some(
+            command @ (SlashCommand::Inputs | SlashCommand::Resume(_) | SlashCommand::Withdraw(_)),
+        )) = &parsed
+        {
+            if let Err(error) = state.inbox_command(command, orch_tx) {
+                state.input_rejected(error.to_string());
+            }
+            return false;
+        }
+        if state.active_turn_id.is_some()
+            && matches!(
+                parsed,
+                Ok(Some(
+                    SlashCommand::Compact
+                        | SlashCommand::Flash
+                        | SlashCommand::Pro
+                        | SlashCommand::Model(_)
+                ))
+            )
+        {
+            state.input_rejected("Control command unavailable during a turn; draft kept.".into());
+            return false;
+        }
+    }
     let typed = std::mem::take(&mut state.input.buf);
     let images = std::mem::take(&mut state.input.pending_images);
     state.input.cursor = 0;
@@ -592,6 +627,12 @@ fn handle_enter(
                 SlashCommand::Skills => state.show_skills(),
                 SlashCommand::Plan => state.view = View::Plan { scroll: 0 },
                 SlashCommand::Todos => state.view = View::Todos { scroll: 0 },
+                SlashCommand::Inputs | SlashCommand::Resume(_) | SlashCommand::Withdraw(_) => {
+                    state.push_line(TranscriptItem::new(
+                        "TUI runtime unavailable.".into(),
+                        TranscriptKind::Error,
+                    ));
+                }
                 SlashCommand::SubAgent(session_id) => {
                     state.view = View::SubAgentDetail {
                         session_id,

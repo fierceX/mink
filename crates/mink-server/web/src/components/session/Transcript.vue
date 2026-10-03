@@ -1,246 +1,109 @@
 <script setup lang="ts">
-// Transcript：conversation 轮次驱动渲染 + 滚动 + 懒加载（轮次为单位）
-import { ref, watch, nextTick, computed } from "vue";
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { appState, prependOlder } from "../../lib/store";
-import { api } from "../../lib/api";
+import { api, sessionUrl } from "../../lib/api";
 import { conversationToEvents } from "../../lib/toolFormat";
-import ThinkingBlock from "./ThinkingBlock.vue";
-import ToolCard from "./ToolCard.vue";
+import { identity, viewFor, flash, openDetail } from "../../lib/workbench";
+import { projectTurns } from "../../lib/transcriptProjection";
+import { projectMessages } from "../../lib/workbenchReducer";
+import type { RawEvent } from "../../lib/types";
+import ProcessGroup from "./ProcessGroup.vue";
 import TextOutput from "./results/TextResult.vue";
-
-const scrollEl = ref<HTMLElement | null>(null);
+const scrollEl = ref<HTMLElement | null>(null); const body = ref<HTMLElement | null>(null);
 const items = computed(() => appState.sessionState?.items ?? []);
-
-// divider：会话时间 · 项目（对话流顶部锚点）
-const divider = computed(() => {
-  const state = appState.sessionState;
-  if (!state || items.value.length === 0) return null;
-  const summary = appState.sessions.find((s) => s.id === state.sessionId && s.project_key === appState.currentProjectKey);
-  if (!summary) return null;
-  const d = new Date(summary.updated_at);
-  const now = new Date();
-  const time = Number.isNaN(d.getTime())
-    ? "—"
-    : d.toDateString() === now.toDateString()
-      ? `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
-      : `${d.getMonth() + 1}月${d.getDate()}日`;
-  const proj = (appState.currentWorkspace ?? summary.cwd).split("/").filter(Boolean).pop() ?? "";
-  return `${time} · ${proj}`;
-});
-
-// 新 turn 开始（发送消息/重连）：重置跟随状态并滚到底——
-// 用户发送后总是聚焦最新输出（ChatGPT 行为），历史滚动不再抑制
-watch(
-  () => appState.sessionState?.running ?? false,
-  (running, prev) => {
-    if (running && !prev) {
-      userScrolled = false;
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight;
-        });
-      });
-    }
-  },
-);
-
-// 思考面板内滚动：非贴底（上滑阅读）→ 停止主跟随；贴底 → 恢复跟随
-const onThinkingScroll = (atBottom: boolean) => {
-  userScrolled = !atBottom;
-};
-
-// 复制消息文本（仅正常消息：user / agent text）
+const turns = computed(() => projectTurns(items.value));
+const following = ref(viewFor().follow); const loading = ref(false); const hasOlder = ref(true);
+const loadedKey = identity(); let observer: ResizeObserver | undefined; let raf = 0;
 const copied = ref("");
-const copyText = async (text: string) => {
-  try {
-    await navigator.clipboard.writeText(text);
-    copied.value = text; // 完整文本匹配，避免多条消息同时显示 ✓
-    setTimeout(() => (copied.value = ""), 1200);
-  } catch { /* clipboard 不可用时静默 */ }
-};
-const loadingOlder = ref(false);
-const hasOlder = ref(true);
-const showTopHint = ref(false);
-/** 用户是否主动滚动过（wheel/touch/scrollbar）：主动后停止自动跟随，
- * 滚回底部附近时恢复跟随 */
-let userScrolled = false;
-// 恢复跟随条件：贴底（用户明确"重新滑到最下面则恢复跟随"）
-const NEAR_BOTTOM_PX = 4;
-
-// 新内容/流式更新滚到底；懒加载前插不滚动。
-// 短路判定用「最后一项对象引用」：reducer 全 immutable——
-// 实时追加/合并（text 增长、tool_result 更新）都会产生新对象 → 不短路 → 滚动；
-// 懒加载前插最后一项保持原引用 → 短路 → 不滚动。字段比较（key/text/result）会
-// 遗漏"key 无 seq / 工具卡无 text / result 时机"等场景，引用比较无死角。
-let prevLastItem: unknown;
-watch(
-  () => [items.value.length, items.value[items.value.length - 1]],
-  async () => {
-    const last = items.value[items.value.length - 1];
-    if (last === prevLastItem) return; // 前插：最后一项引用未变
-    prevLastItem = last;
-    await nextTick();
-    // 双 rAF：等 DOM patch 与浏览器布局/动画起始稳定后再计算滚动——
-    // 工具卡（details/动画/懒布局）在 nextTick 时 scrollHeight 可能未包含，
-    // 直接赋值会滚到旧底部（文字能滚、卡片不滚的根因）。
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        const el = scrollEl.value;
-        if (!el) return;
-        if (userScrolled) {
-          if (el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX) userScrolled = false;
-        } else {
-          el.scrollTop = el.scrollHeight;
-        }
-      });
-    });
-  },
-);
-
-// 上拉懒加载：滚动到顶加载更早的 20 轮（conversation 分页，轮次为单位）
-const loadOlder = async () => {
-  if (loadingOlder.value || !hasOlder.value) return;
-  const state = appState.sessionState;
-  if (!state || state.items.length === 0) return;
-  const firstKey = state.items[0].key ?? 0;
-  if (typeof firstKey !== "number") { hasOlder.value = false; return; }
-  const firstRow = Math.floor(firstKey / 100); // conversation 行号（key=行号*100+子序号）
-  if (firstRow <= 1) { hasOlder.value = false; showTopHint.value = true; return; }
-  loadingOlder.value = true;
-  const before = scrollEl.value?.scrollHeight ?? 0;
-  try {
-    const resp = await api.conversation(state.sessionId, { limit: 20, beforeSeq: firstRow, project: appState.currentProjectKey ?? undefined });
-    if (resp.code === 200 && Array.isArray(resp.data) && resp.data.length > 0) {
-      const converted = (resp.data as Record<string, unknown>[]).flatMap(conversationToEvents);
-      prependOlder(converted as never);
-      await nextTick();
-      if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight - before;
-    } else {
-      hasOlder.value = false;
-      showTopHint.value = true;
-    }
-  } catch {
-    hasOlder.value = false;
-  } finally {
-    loadingOlder.value = false;
+async function copy(text: string) { try { await navigator.clipboard.writeText(text); copied.value = text; setTimeout(() => copied.value = "",1500); } catch(e) { flash(`复制失败：${String(e)}`); } }
+function capture() {
+  const el=scrollEl.value; if (!el) return;
+  const top=el.getBoundingClientRect().top;
+  const first=[...el.querySelectorAll<HTMLElement>("[data-item-key]")].find(node => node.getBoundingClientRect().bottom > top + 1);
+  if (first) viewFor(loadedKey).anchor={key:first.dataset.itemKey!,offset:first.getBoundingClientRect().top-top};
+}
+function innerKey(el: HTMLElement) {
+  const item = el.closest<HTMLElement>("[data-item-key]");
+  return item ? JSON.stringify([item.dataset.itemKey,el.className]) : null;
+}
+function innerScroll(event: Event) {
+  const target = event.target as HTMLElement; if (target === scrollEl.value) return;
+  const key = innerKey(target); if (key) viewFor(loadedKey).innerScroll[key] = target.scrollTop;
+}
+function restore() {
+  const el=scrollEl.value; if (!el) return;
+  const view=viewFor(loadedKey); following.value=view.follow;
+  for (const target of el.querySelectorAll<HTMLElement>(".process-content,.t-body,.tp-body,.artifact-content")) {
+    const key=innerKey(target); if (key && view.innerScroll[key] !== undefined) target.scrollTop=view.innerScroll[key];
   }
-};
-
-const onScroll = (e: Event) => {
-  const el = scrollEl.value;
-  if (!el) return;
-  // 用户主动滚动：标记（懒加载的自动 scrollTop 赋值也触发 scroll 事件，
-  // 但程序赋值时 userScrolled 语义由 watch 管理——这里只标记用户手势）
-  if (!(e as WheelEvent).isTrusted) return;
-  userScrolled = true;
-  if (el.scrollTop < 80) loadOlder();
-};
+  if (view.follow) { el.scrollTop=el.scrollHeight; return; }
+  const anchor=view.anchor; if (!anchor) return;
+  const node=[...el.querySelectorAll<HTMLElement>("[data-item-key]")].find(node=>node.dataset.itemKey===anchor.key);
+  if (node) el.scrollTop+=node.getBoundingClientRect().top-el.getBoundingClientRect().top-anchor.offset;
+}
+function scheduleRestore() { cancelAnimationFrame(raf); raf=requestAnimationFrame(restore); }
+function onScroll() { capture(); }
+function intent(event?: Event) { if (event && (event.target as HTMLElement).closest(".process-content,.tp-body,.t-body,.file-content")) return; viewFor(loadedKey).follow=false; following.value=false; }
+function latest() { viewFor(loadedKey).follow=true; following.value=true; scheduleRestore(); }
+function onFollow(event: Event) { if ((event as CustomEvent).detail===loadedKey) latest(); }
+async function loadOlder() {
+  if (loading.value || !hasOlder.value) return;
+  const state=appState.sessionState; const project=appState.currentProjectKey!; if (!state) return;
+  const firstRow=state.messages?.[0]?.seq ?? items.value.map(item=>String(item.key).match(/^message:(\d+):/)).find(Boolean)?.[1];
+  if (!firstRow || Number(firstRow)<=1) { hasOlder.value=false; return; }
+  capture(); loading.value=true;
+  try {
+    const response=await api.conversation(state.sessionId,{limit:20,beforeSeq:Number(firstRow),project});
+    if (identity()!==loadedKey || state.generation!==appState.sessionState?.generation) return;
+    if (response.code!==200) throw new Error(response.message);
+    if (!response.data.length) hasOlder.value=false;
+    else if (appState.sessionState?.messages) {
+      const current=appState.sessionState;
+      const live=current.items.filter(item=>String(item.key).startsWith('live:') && ['text','thinking'].includes(item.kind));
+      appState.sessionState=projectMessages(current,[...(response.data as Record<string,unknown>[]),...current.messages!]);
+      appState.sessionState.items.push(...live);
+    } else prependOlder(response.data.flatMap(row=>conversationToEvents(row as Record<string,unknown>)) as RawEvent[]);
+    await nextTick(); restore();
+  } catch(error) { flash(String(error)); } finally { loading.value=false; }
+}
+function reference(event: MouseEvent) {
+  const anchor=(event.target as HTMLElement).closest('a'); if (!anchor) return;
+  const href=anchor.getAttribute('href'); if (!href || /^(https?:|mailto:|#)/.test(href)) return;
+  if (href.startsWith('artifact://')) { event.preventDefault(); openDetail('outputs',href.slice(11)); return; }
+  if (/^[a-z]+:/i.test(href) && !/^\/.+/.test(href)) return;
+  event.preventDefault(); const match=href.match(/^(.*?)(?::(\d+)|#L(\d+))?$/);
+  if (match) openDetail('files',decodeURIComponent(match[1]),Number(match[2]??match[3]??1));
+}
+function showProcess(turn: typeof turns.value[number]) { for (const segment of turn.segments) if (segment.kind === "process") viewFor(loadedKey).expanded[`process:${segment.key}`] = true; }
+function showUsage(turn: typeof turns.value[number]) { openDetail("diagnostics"); viewFor(loadedKey).detailTurn = turn.user?.kind === "user" ? turn.user.turnId ?? `legacy:${turn.key}` : `legacy:${turn.key}`; }
+function jump(key: string) { intent(); const node=[...scrollEl.value?.querySelectorAll<HTMLElement>('[data-turn-key]') ?? []].find(node=>node.dataset.turnKey===key); node?.scrollIntoView({block:'start'}); capture(); }
+watch(() => [items.value.length,items.value.at(-1)], async () => { await nextTick(); scheduleRestore(); });
+onMounted(() => { observer=new ResizeObserver(scheduleRestore); if (body.value) observer.observe(body.value); window.addEventListener('mink-follow',onFollow); scheduleRestore(); });
+onBeforeUnmount(() => { capture(); observer?.disconnect(); cancelAnimationFrame(raf); window.removeEventListener('mink-follow',onFollow); });
+const attachmentUrl = (id:string) => sessionUrl(appState.currentSessionId!,`/attachments/${id}`,appState.currentProjectKey!);
 </script>
-
 <template>
-  <div class="transcript" ref="scrollEl" @scroll.passive="onScroll">
-    <div v-if="loadingOlder" class="load-hint">加载更早…</div>
-    <div v-else-if="showTopHint && items.length > 0" class="load-hint">— 已到最早 —</div>
-    <div v-if="divider" class="divider">{{ divider }}</div>
-    <!-- 单 v-for 按事件顺序渲染（不能按 kind 分组——否则顺序错乱） -->
-    <template v-for="(item, i) in items" :key="(item as any).key || `i${i}`">
-      <ThinkingBlock v-if="item.kind === 'thinking' && (item as any).text?.trim()" :item="item" @inner-scroll="onThinkingScroll" />
-      <ToolCard v-else-if="item.kind === 'tool'" :item="item" />
-      <div v-else-if="item.kind === 'sub_agent'" class="msg system sub-agent">
-        子代理 {{ item.sessionId.slice(0, 8) }} · {{ item.status }} · I {{ item.inTokens }} / O {{ item.outTokens }}
-        <span v-if="item.text"> — {{ item.text }}</span>
+  <div class="transcript-shell">
+    <div class="transcript" ref="scrollEl" @scroll.self.passive="onScroll" @scroll.capture.passive="innerScroll" @wheel.passive="intent" @touchmove.passive="intent" @pointerdown.self="intent" @click="reference">
+      <div class="transcript-body" ref="body">
+        <button v-if="hasOlder && items.length" class="load-older" :disabled="loading" @click="loadOlder">{{ loading ? '加载更早…' : '加载更早的轮次' }}</button>
+        <section v-for="(turn,index) in turns" :key="turn.key" :data-turn-key="turn.key" class="turn">
+          <div v-if="turn.user && turn.user.kind === 'user'" class="msg user" :data-item-key="turn.user.key"><span class="bubble">{{ turn.user.text }}</span><div class="history-images"><img v-for="id in turn.user.attachmentIds" :key="id" :src="attachmentUrl(id)" alt="已提交图片" loading="lazy" @load="scheduleRestore" /></div><button class="copy-btn" @click="copy(turn.user.text)">{{ copied === turn.user.text ? '已复制' : '复制' }}</button></div>
+          <template v-for="(segment,segmentIndex) in turn.segments" :key="segment.key">
+            <ProcessGroup v-if="segment.kind === 'process'" :data-item-key="segment.key" :items="segment.items" :group-key="segment.key" :active="!!appState.sessionState?.running && index===turns.length-1 && segmentIndex===turn.segments.length-1" />
+            <div v-else-if="segment.item.kind === 'text'" class="msg agent" :data-item-key="segment.item.key"><TextOutput :item="segment.item" /><button class="copy-btn" @click="copy(segment.item.text)">{{ copied === segment.item.text ? '已复制' : '复制' }}</button></div>
+            <div v-else-if="segment.item.kind === 'user'" class="msg guidance" :data-item-key="segment.item.key"><small>已加入本轮上下文</small><p>{{ segment.item.text }}</p><div class="history-images"><img v-for="id in segment.item.attachmentIds" :key="id" :src="attachmentUrl(id)" alt="补充图片" loading="lazy" @load="scheduleRestore" /></div></div>
+            <div v-else-if="'text' in segment.item" class="msg" :class="segment.item.kind" :data-item-key="segment.item.key">{{ segment.item.text }}</div>
+          </template>
+          <footer class="turn-actions"><button @click="showProcess(turn)">查看过程</button><button @click="showUsage(turn)">本轮用量</button></footer>
+        </section>
       </div>
-      <div v-else-if="item.kind === 'text'" class="msg agent">
-        <span class="av">M</span>
-        <div class="msg-content">
-          <div class="mbody"><TextOutput :item="item" /></div>
-          <button v-if="(item as any).text" class="copy-btn" :class="{ done: copied === (item as any).text }" :title="copied === (item as any).text ? '已复制' : '复制'" @click="copyText((item as any).text ?? '')">
-            <svg v-if="copied !== (item as any).text" class="ico" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
-            <span v-else class="ok">✓</span>
-          </button>
-        </div>
-      </div>
-      <div v-else-if="item.kind === 'user'" class="msg user">
-        <div class="msg-content">
-          <span class="bubble">{{ item.text }}</span>
-          <button v-if="(item as any).text" class="copy-btn" :class="{ done: copied === (item as any).text }" :title="copied === (item as any).text ? '已复制' : '复制'" @click="copyText((item as any).text ?? '')">
-            <svg v-if="copied !== (item as any).text" class="ico" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
-            <span v-else class="ok">✓</span>
-          </button>
-        </div>
-        <span class="av">👤</span>
-      </div>
-      <div v-else-if="item.kind === 'error'" class="msg error">{{ item.text }}</div>
-      <div v-else-if="item.kind === 'signal'" class="signal" :title="item.text">{{ item.text }}</div>
-      <div v-else class="msg system">{{ item.text }}</div>
-    </template>
+    </div>
+    <div class="reading-ops"><select v-if="turns.length>1" aria-label="跳转已加载轮次" @change="jump(($event.target as HTMLSelectElement).value)"><option value="">跳转轮次</option><option v-for="(turn,index) in turns" :key="turn.key" :value="turn.key">{{ index+1 }} · {{ turn.user && 'text' in turn.user ? turn.user.text.slice(0,28) : '历史过程' }}</option></select><button v-if="!following" class="latest" @click="latest">↓ 返回最新内容</button></div>
   </div>
 </template>
-
 <style scoped>
-.transcript {
-  flex: 1; min-height: 0; overflow-y: auto;
-  padding: 18px 24px;
-  padding-left: max(24px, calc((100% - 840px) / 2));
-  padding-right: max(24px, calc((100% - 840px) / 2));
-  display: flex; flex-direction: column; gap: 13px;
-}
-/* 关键：flex 容器内容超出时不压缩子项（否则 details 被压到 2px——
- * summary 溢出被 overflow:hidden 裁剪，卡片视觉消失） */
-.transcript > * { flex-shrink: 0; }
-.divider {
-  display: flex; align-items: center; gap: 14px;
-  color: var(--text-dim); font-size: 11px; font-family: var(--mono);
-  margin: 2px 0 4px; white-space: nowrap;
-}
-.divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
-/* 消息内容容器：框住文本框与复制按钮（按钮流内位于文本下方，不盖文本） */
-.msg-content { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.msg.agent .msg-content { flex: 1; align-items: flex-start; }
-.msg.user .msg-content { align-self: flex-end; align-items: flex-end; }
-.msg.user .msg-content .copy-btn { align-self: flex-start; } /* 气泡左下 */
-.copy-btn {
-  border: none; background: none; padding: 1px 3px;
-  cursor: pointer; color: var(--text-dim);
-  line-height: 1;
-}
-.copy-btn .ico { font-size: 13px; line-height: 1; }
-.copy-btn .ok { font-size: 13px; font-weight: 700; }
-.copy-btn:hover { color: var(--blue); }
-.copy-btn.done { color: var(--green); }
-.load-hint { align-self: center; color: var(--text-dim); font-size: 11px; font-family: var(--mono); letter-spacing: 0.05em; padding: 2px 0; }
-.msg.error { align-self: stretch; color: var(--red); background: rgba(214, 69, 93, 0.06); border: 1px solid rgba(214, 69, 93, 0.22); font-family: var(--mono); font-size: 12px; white-space: pre-wrap; border-radius: var(--radius); padding: 9px 14px; }
-.msg { display: flex; gap: 10px; align-items: flex-start; animation: rise-in 0.14s ease; }
-.msg .av {
-  width: 30px; height: 30px; border-radius: 9px; flex-shrink: 0;
-  display: grid; place-items: center; font-size: 13px;
-  line-height: 1;
-}
-.msg.user .av { background: var(--panel-3); font-size: 14px; margin-top: 7px; } /* 单行输入：头像中心与气泡中心对齐 */
-.msg.agent .av {
-  background: linear-gradient(135deg, #4f8cff, #7c5cff); color: #fff;
-  font-weight: 700; font-size: 12px; box-shadow: 0 3px 10px rgba(84, 106, 255, 0.25);
-  /* 视觉中心对齐第一行文字（方块 30px vs 行高约 20px） */
-  margin-top: -5px;
-}
-.msg .mbody { min-width: 0; flex: 1; }
-.msg.user { align-self: flex-end; justify-content: flex-end; max-width: 80%; }
-.msg.user .bubble {
-  background: var(--blue-soft); border: 1px solid rgba(47, 111, 237, 0.2);
-  border-radius: var(--radius); padding: 9px 14px; white-space: pre-wrap;
-}
-.msg.agent { align-self: flex-start; max-width: 96%; }
-.msg.system { align-self: flex-start; text-align: left; color: var(--text-dim); font-size: 11px; font-family: var(--mono); padding: 2px 4px; }
-.signal {
-  align-self: flex-start;
-  color: var(--yellow);
-  background: rgba(181, 122, 28, 0.08);
-  border: 1px solid rgba(181, 122, 28, 0.2);
-  border-radius: 6px;
-  font-size: 11px;
-  font-family: var(--mono);
-  padding: 3px 10px;
-  max-width: 90%;
-  word-break: break-all;
-}
+.transcript-shell { flex:1; min-height:0; position:relative; display:flex; flex-direction:column; }.transcript { flex:1; min-height:0; overflow:auto; overscroll-behavior:contain; overflow-anchor:none; }.transcript-body { padding:24px max(16px,calc((100% - 840px)/2)); }.turn-actions { display:flex; gap:12px; }.turn-actions button { padding:2px 0; border:0; font-size:11px; color:var(--text-dim); background:none; }
+.turn { display:grid; gap:13px; margin-bottom:28px; }.msg { min-width:0; overflow-wrap:anywhere; }.user { justify-self:end; max-width:85%; }.bubble { display:block; background:var(--blue-soft); border:1px solid var(--line); padding:10px 14px; border-radius:10px; white-space:pre-wrap; }.agent { line-height:1.8; }.copy-btn { font-size:10px; border:0; background:none; color:var(--text-dim); padding:3px 0; }.guidance { border-left:2px solid var(--blue); padding:8px 12px; background:var(--blue-soft); font-size:12px; white-space:pre-wrap; }.guidance small { color:var(--blue); }.error { color:var(--red); background:var(--panel); padding:10px; border:1px solid var(--red); border-radius:8px; white-space:pre-wrap; }.signal { font-size:11px; color:var(--yellow); }.history-images { display:flex; flex-wrap:wrap; gap:6px; }.history-images img { width:96px; height:96px; object-fit:contain; margin-top:8px; border:1px solid var(--line); border-radius:6px; }.load-older { display:block; margin:0 auto 20px; font-size:11px; border:0; color:var(--text-dim); }.reading-ops { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:0 16px 6px; pointer-events:none; }.reading-ops>* { pointer-events:auto; font-size:11px; }.reading-ops select { max-width:180px; padding:2px 6px; }.latest { margin-left:auto; background:var(--bg-elevated); }
+@media(max-width:767px) { .transcript-body { padding:16px 12px; }.user { max-width:92%; } }
 </style>

@@ -1,102 +1,60 @@
 <script setup lang="ts">
-// App：单栏对话优先 + 左侧会话抽屉；桌面/移动端统一抽屉交互（⌘B 切换）
-import { onMounted, onUnmounted, ref } from "vue";
+import { onMounted, onUnmounted, ref, watch } from "vue";
 import TopBar from "./components/TopBar.vue";
 import SessionSidebar from "./components/SessionSidebar.vue";
 import SessionView from "./components/session/SessionView.vue";
 import EmptyState from "./components/EmptyState.vue";
-import { appState, savedSessionId } from "./lib/store";
+import NewTaskDialog from "./components/NewTaskDialog.vue";
+import { appState, savedSessionId, uiState } from "./lib/store";
 import { openSession } from "./lib/sessionController";
-import { api } from "./lib/api";
-
-const mobileSidebar = ref(false);
-const toggleDrawer = () => { mobileSidebar.value = !mobileSidebar.value; };
-const closeDrawer = () => { mobileSidebar.value = false; };
-
-// ⌘B / Ctrl+B 切换会话抽屉
-const onKey = (e: KeyboardEvent) => {
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "b") {
-    e.preventDefault();
-    toggleDrawer();
-  }
+import { startCatalog, refreshCatalog } from "./lib/catalogController";
+import { preferences, feedback, flash } from "./lib/workbench";
+const sidebar = ref(window.innerWidth >= 1024);
+let stopCatalog: (() => void) | undefined;
+const onKey = (event: KeyboardEvent) => {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "b") { event.preventDefault(); sidebar.value = !sidebar.value; }
+  if (event.key === "Escape" && !event.isComposing && !uiState.newOpen) { if (uiState.ctxOpen) uiState.ctxOpen = false; else if (window.innerWidth < 1024) sidebar.value = false; }
 };
-onMounted(() => window.addEventListener("keydown", onKey));
-onUnmounted(() => window.removeEventListener("keydown", onKey));
+watch(() => appState.currentSessionId, () => { if (window.innerWidth < 1024) sidebar.value = false; });
 onMounted(async () => {
-  const resp = await api.listSessions();
-  if (resp.code === 200 && Array.isArray(resp.data)) {
-    appState.sessions = resp.data;
-  }
-  // 恢复会话：?session=<id> 优先（E2E/分享链接），否则读取上次会话（重开浏览器自动重连）
-  const params = new URLSearchParams(location.search);
-  const stored = savedSessionId();
-  const [storedProject, storedId] = stored?.includes("\n") ? stored.split("\n", 2) : [undefined, stored];
-  const targetId = params.get("session") ?? storedId;
-  const targetProject = params.get("project") ?? storedProject;
-  if (targetId) {
-    const found = appState.sessions.find((s) => s.id === targetId && (!targetProject || s.project_key === targetProject));
-    if (found) {
-      appState.currentWorkspace = found.cwd;
-      openSession(found).catch((e) => { console.error("[App] restore session failed:", e); });
-    }
-  }
+  window.addEventListener("keydown", onKey);
+  try {
+    await refreshCatalog(); stopCatalog = startCatalog();
+    const params = new URLSearchParams(location.search);
+    const stored = savedSessionId();
+    const [project, id] = stored?.includes("\n") ? stored.split("\n", 2) : [undefined, stored];
+    const targetId = params.get("session") ?? id;
+    const targetProject = params.get("project") ?? project;
+    const found = appState.sessions.find(row => row.id === targetId && (!targetProject || row.project_key === targetProject));
+    if (found) { appState.currentWorkspace = found.cwd; await openSession(found); }
+  } catch (error) { flash(String(error)); }
 });
+onUnmounted(() => { window.removeEventListener("keydown", onKey); stopCatalog?.(); });
 </script>
-
 <template>
-  <div class="app-shell">
-    <TopBar @toggle-sidebar="mobileSidebar = !mobileSidebar" />
+  <div class="app-shell" :class="{ 'nav-open': sidebar, 'detail-open': uiState.ctxOpen }" :style="{ '--nav-width': preferences.navWidth + 'px', '--detail-width': preferences.detailWidth + 'px' }">
+    <aside class="navigation"><SessionSidebar /></aside>
+    <div v-if="sidebar" class="nav-mask" @click="sidebar = false"></div>
     <main class="content">
-      <SessionView v-if="appState.currentSessionId" />
-      <EmptyState v-else @browse="mobileSidebar = true" />
+      <TopBar @toggle-sidebar="sidebar = !sidebar" />
+      <SessionView v-if="appState.currentSessionId" :key="`${appState.currentProjectKey}:${appState.currentSessionId}`" />
+      <EmptyState v-else @browse="sidebar = true" />
     </main>
-    <!-- 左侧会话抽屉（桌面/移动端一致） -->
-    <div class="side-drawer" :class="{ open: mobileSidebar }">
-      <SessionSidebar class="sess-panel" />
-    </div>
-    <div v-if="mobileSidebar" class="drawer-mask" @click="closeDrawer"></div>
+    <NewTaskDialog />
+    <div v-if="feedback.message" class="app-toast" role="status">{{ feedback.message }}</div>
   </div>
 </template>
-
 <style scoped>
-.app-shell { display: flex; flex-direction: column; height: 100%; }
-.content {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0; /* flex 收缩关键：输入框常驻底部 */
-  background: var(--bg);
-}
-.placeholder {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-dim);
-  font-size: 13.5px;
-  text-align: center;
-  padding: 0 24px;
-}
-/* 侧栏抽屉（fixed 浮层，桌面/移动端一致） */
-.side-drawer {
-  position: fixed;
-  top: 0; left: 0; bottom: 0;
-  width: min(320px, 86vw);
-  z-index: 60;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-elevated);
-  border-right: 1px solid var(--line);
-  box-shadow: 12px 0 40px rgba(16, 24, 40, 0.25);
-  transform: translateX(-102%);
-  transition: transform 0.22s ease;
-  overflow-y: auto;
-  padding-top: var(--topbar-h);
-}
-.side-drawer.open { transform: translateX(0); }
-.drawer-mask {
-  position: fixed; inset: 0; z-index: 55;
-  background: rgba(16, 24, 40, 0.35);
+.app-shell { display:flex; height:100dvh; overflow:hidden; }
+.navigation { width:0; flex-shrink:0; overflow:hidden; background:var(--bg-elevated); border-right:1px solid var(--line); }
+.nav-open .navigation { width:var(--nav-width); }
+.content { flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; }
+.nav-mask { display:none; }
+.app-toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); padding:10px 18px; border:1px solid var(--line); border-radius:10px; background:var(--bg-elevated); box-shadow:var(--shadow); z-index:100; max-width:90vw; }
+@media (min-width:1024px) and (max-width:1279px) { .detail-open .navigation { width:0; } }
+@media (max-width:1023px) {
+  .navigation { position:fixed; z-index:65; inset:0 auto 0 0; width:min(var(--nav-width),86vw); transform:translateX(-101%); }
+  .nav-open .navigation { transform:none; }
+  .nav-open .nav-mask { display:block; position:fixed; inset:0; background:#0005; z-index:60; }
 }
 </style>

@@ -6,7 +6,6 @@ import { emptySession } from "./types";
 import {
   extractArtifact,
   formatSignal,
-  isFailed,
   kindBadge,
   resultViewKind,
   stripAnsi,
@@ -23,7 +22,7 @@ function appendStream(
   seq?: unknown,
 ): TranscriptItem[] {
   const last = items[items.length - 1];
-  if (last && last.kind === kind) {
+  if (last && last.kind === kind && !String(last.key).startsWith("message:") && !String(seq).startsWith("message:")) {
     const updated = { ...last, text: last.text + content };
     return [...items.slice(0, -1), updated];
   }
@@ -54,9 +53,10 @@ function withKey<T extends object>(item: T, raw: RawEvent): T & { key: Transcrip
 }
 
 function eventKey(raw: RawEvent): TranscriptKey {
+  if (typeof raw.key === "string") return raw.key as TranscriptKey;
   return raw.stream_sequence == null
     ? Number(raw.seq ?? 0)
-    : `live:${Number(raw.stream_sequence)}`;
+    : (raw.generation ? `live:${raw.generation}:${Number(raw.stream_sequence)}` : `live:${Number(raw.stream_sequence)}`) as TranscriptKey;
 }
 
 function eventSequence(raw: RawEvent): number {
@@ -99,7 +99,11 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
 
   switch (raw.type) {
     case "user_input":
-      next.items = [...next.items, withKey({ kind: "user", text: String(raw.content ?? "") }, raw)];
+      next.items = [...next.items, withKey({ kind: "user", text: String(raw.content ?? ""), inputId: raw.input_id as string | undefined, turnId: raw.turn_id as string | undefined, guidance: raw.guidance === true, attachmentIds: raw.attachment_ids as string[] | undefined }, raw)];
+      break;
+
+    case "internal_message":
+      next.items = [...next.items, withKey({ kind: "system", text: String(raw.content ?? "") }, raw)];
       break;
 
     case "thinking":
@@ -152,17 +156,17 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
       const toolName = raw.tool_name == null ? item.name : String(raw.tool_name);
       const content = stripAnsi(String(raw.content ?? ""));
       const status = raw.status as Record<string, unknown> | undefined;
-      const succeeded = status?.state === "succeeded";
+      const succeeded = status ? status.state === "succeeded" : typeof raw.success === "boolean" ? raw.success : undefined;
       const updated: ToolItem = {
         ...item,
         name: toolName,
         result: content,
         resultKind: kindBadge(String(raw.result_kind ?? ""), toolName),
         rawResultKind: raw.result_kind == null ? undefined : String(raw.result_kind),
-        success: status == null ? undefined : succeeded,
+        success: succeeded,
         exitCode: typeof raw.exit_code === "number" ? raw.exit_code : raw.exit_code === null ? null : undefined,
         artifact: extractArtifact(content),
-        failed: isFailed(status == null ? undefined : succeeded, content),
+        failed: succeeded === false,
         presentation: raw.presentation,
         artifacts: Array.isArray(raw.artifacts) ? raw.artifacts : undefined,
       };
@@ -194,6 +198,7 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
         ...next.items,
         withKey({
           kind: "system",
+          separator: true,
           text: raw.reason === "interrupted" ? "— 已中断 —" : "— turn 结束 —",
         }, raw),
       ];
@@ -238,7 +243,7 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
       break;
 
     case "retry":
-      next.items = [...next.items, withKey({ kind: "system", text: "重试中…" }, raw)];
+      next.items = [...next.items, withKey({ kind: "system", text: "重试中…", separator: true }, raw)];
       break;
 
     case "sub_agent_status": {

@@ -145,6 +145,15 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
     )
     .await?;
 
+    let commit_display = event_display.clone();
+    ctx.store
+        .observe_commits(Arc::new(move |conversation_seq, message| {
+            commit_display.emit(crate::runtime::AgentEventKind::ConversationCommitted {
+                conversation_seq,
+                message,
+            });
+        }))
+        .await?;
     let (orchestrator, cmd_tx) = new_orchestrator(ctx.clone());
     let orch_display = display.clone();
     let orch_handle = tokio::spawn(async move {
@@ -167,6 +176,8 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
 
     let session_info = SessionInfo::new(sid, session_ref, new_session, home, cwd, &spaths);
     let handle = crate::runtime::AgentRuntimeHandle {
+        input_inbox: ctx.input_inbox.clone(),
+        image_input: ctx.model_capabilities.image_input.clone(),
         cmd_tx,
         session: session_info,
         event_display: event_display.clone(),

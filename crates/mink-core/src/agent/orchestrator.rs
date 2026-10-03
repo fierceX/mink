@@ -381,6 +381,11 @@ impl OrchActor {
             Err(e) => self.handle_turn_error(e, &executor, &model).await,
         };
 
+        let mut result = result;
+        if let Err(error) = self.ctx.input_inbox.finish() {
+            result.status = TurnStatus::Failed;
+            result.error = Some(format!("{error:#}"));
+        }
         let result = self.finish_usage(result, &billing_turn_id);
         self.refresh_title().await;
         self.log_turn_final(&result, started_at.elapsed().as_millis() as u64)

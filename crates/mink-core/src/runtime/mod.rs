@@ -36,8 +36,13 @@ pub use crate::resources::ResourceHandler;
 pub use crate::runtime::extensions::{PostInitContext, PostInitHook, PrefixSource};
 /// 同目录临时文件 + rename 的原子替换（session 状态文件共用实现）。
 pub use crate::session::atomic_file::atomic_replace;
+pub use crate::session::attachments::{
+    AttachmentDescriptor, AttachmentStore, restrict_private_dir,
+};
+pub use crate::session::input::{HumanInput, InputInbox, InputReceipt, InputStatus};
 pub use crate::session::paths::SessionLayout;
 pub use crate::tools::image::ImageFormat;
+pub use crate::tools::image::probe as probe_image;
 pub use crate::tools::metadata::{
     ApprovalTier, ToolBlocker, ToolFailureKind, ToolResultKind, ToolStatus,
 };

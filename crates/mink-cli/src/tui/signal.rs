@@ -8,6 +8,14 @@ use std::sync::mpsc;
 
 #[derive(Debug, Clone, Default)]
 pub enum TuiSignal {
+    GuidanceApplied {
+        input_id: String,
+        text: String,
+    },
+    TurnFinished {
+        turn_id: String,
+        status: crate::runtime::TurnStatus,
+    },
     Thinking(String),
     Text(String),
     ToolCall {
@@ -56,6 +64,50 @@ pub enum TuiSignal {
 impl TuiState {
     pub(crate) fn apply(&mut self, sig: &TuiSignal) {
         match sig {
+            TuiSignal::GuidanceApplied { input_id, text } => {
+                if self.applied_inputs.insert(input_id.clone()) {
+                    self.finalize_stream();
+                    self.push_line(TranscriptItem::new(
+                        format!(
+                            "> [Added to context] {}",
+                            crate::tui::state::compact_user_input_for_display(text)
+                        ),
+                        TranscriptKind::Info,
+                    ));
+                    self.inputs.retain(|i| &i.input_id != input_id);
+                    self.work_state = WorkState::WaitingModel;
+                }
+            }
+            TuiSignal::TurnFinished { turn_id, status } => {
+                if self.active_turn_id.as_ref() == Some(turn_id) {
+                    self.finalize_stream();
+                    self.seal_incomplete_transcript("Result unavailable: turn ended.");
+                    self.active_turn_id = None;
+                    self.stopping = false;
+                    self.refresh_inputs();
+                    let ok = *status == crate::runtime::TurnStatus::Ok;
+                    self.work_state = if ok || *status == crate::runtime::TurnStatus::Interrupted {
+                        WorkState::Idle
+                    } else {
+                        WorkState::Error
+                    };
+                    if *status == crate::runtime::TurnStatus::Interrupted {
+                        self.push_line(TranscriptItem::new(
+                            "Turn interrupted; unapplied inputs remain in /inputs.".into(),
+                            TranscriptKind::Info,
+                        ));
+                    }
+                    self.finish_task_notification(
+                        if *status == crate::runtime::TurnStatus::Interrupted {
+                            TaskNotificationKind::Interrupted
+                        } else if ok {
+                            TaskNotificationKind::Completed
+                        } else {
+                            TaskNotificationKind::Failed
+                        },
+                    );
+                }
+            }
             TuiSignal::Thinking(c) => {
                 let c = sanitize_tui_text(c);
                 self.stream_status = None;
@@ -88,8 +140,10 @@ impl TuiState {
             TuiSignal::Stop => {
                 self.finalize_stream();
                 self.seal_incomplete_transcript("Result unavailable: turn stopped.");
-                self.work_state = WorkState::Idle;
-                self.finish_task_notification(TaskNotificationKind::Completed);
+                if self.active_turn_id.is_none() {
+                    self.work_state = WorkState::Idle;
+                    self.finish_task_notification(TaskNotificationKind::Completed);
+                }
             }
             TuiSignal::Retry => {
                 self.finalize_stream();
@@ -180,7 +234,9 @@ impl TuiState {
                     format!("Error: {m}"),
                     TranscriptKind::Error,
                 ));
-                self.finish_task_notification(TaskNotificationKind::Failed);
+                if self.active_turn_id.is_none() {
+                    self.finish_task_notification(TaskNotificationKind::Failed);
+                }
             }
             TuiSignal::TitleUpdate(m, s) => {
                 self.model = m.clone();

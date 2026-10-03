@@ -173,16 +173,22 @@ impl Registry {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default()
             });
-            // 防御性过滤：子代理会话不单独展示（sub_ 前缀 / parent 字段）。
-            // 实际子代理在 <session>/subagents/sub_xxx/ 深层目录，一层扫描本就不含。
-            if id.starts_with("sub_") || metadata.as_ref().and_then(|m| m.parent.as_ref()).is_some()
-            {
-                continue;
-            }
             let locator = locator_from_dir(&dir, &id);
             let status = active_status.get(&locator).copied();
             let mut summary = summary_from_metadata(metadata, modified, &dir, usage);
             summary.status = status.unwrap_or("free");
+            if let Ok(Some(runtime)) = self.active_runtime(&summary.id, Some(&summary.project_key))
+            {
+                summary.last_final = runtime
+                    .detail()
+                    .get("last_final")
+                    .filter(|v| !v.is_null())
+                    .cloned();
+                summary.phase = runtime.detail()["phase"]
+                    .as_str()
+                    .unwrap_or("closed")
+                    .into();
+            }
             out.push(summary);
         }
         out.sort_by(|a, b| {
@@ -449,6 +455,40 @@ impl Registry {
             .map_err(|error| RegistryError::Busy(error.to_string()))
     }
 
+    pub fn submit_input(
+        &self,
+        id: &str,
+        project: Option<&str>,
+        input: mink::runtime::HumanInput,
+        resume: Option<(&str, u64)>,
+    ) -> RegistryResult<mink::runtime::InputReceipt> {
+        let locator = self.required_active_locator(id, project)?;
+        let active = self.lock_active_state()?;
+        let session = active
+            .get(&locator)
+            .ok_or_else(|| RegistryError::NotFound("session is not open".into()))?;
+        let existing = if resume.is_none() {
+            session
+                .runtime
+                .inbox()
+                .existing(&input)
+                .map_err(|e| RegistryError::Busy(e.to_string()))?
+        } else {
+            None
+        };
+        if let Some(receipt) = existing {
+            return Ok(receipt);
+        }
+        if input.target_turn_id.is_none()
+            && active.values().filter(|s| s.runtime.running()).count() >= self.max_running
+        {
+            return Err(RegistryError::Capacity("too many running sessions".into()));
+        }
+        session
+            .runtime
+            .submit(input, resume)
+            .map_err(|e| RegistryError::Busy(e.to_string()))
+    }
     pub fn interrupt(&self, id: &str, project: Option<&str>) -> RegistryResult<()> {
         self.interrupt_inner(id, project)
     }
@@ -768,6 +808,24 @@ fn summary_from_metadata(
             .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map(|d| d.as_secs()),
         status: "free",
+        phase: "closed".into(),
+        last_final: None,
+        pending_input_count: mink::runtime::session::SessionReader::new(dir)
+            .inputs()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|e| {
+                        matches!(
+                            e.status,
+                            mink::runtime::InputStatus::Pending
+                                | mink::runtime::InputStatus::Applying
+                                | mink::runtime::InputStatus::Unapplied
+                        )
+                    })
+                    .count()
+            })
+            .unwrap_or(0),
         path: dir.display().to_string(),
         tokens_in,
         tokens_out,
@@ -834,11 +892,23 @@ fn scan_all_sessions(home: &Path) -> Result<Vec<ScannedSession>> {
             if !dir.is_dir() {
                 continue;
             }
+            // Legacy children can live beside user sessions, with missing or
+            // inherited metadata. Their directory identity remains authoritative.
+            let is_child_id = |id: &str| id.starts_with("sub_") || id.starts_with("replan_");
+            if is_child_id(&session.file_name().to_string_lossy()) {
+                continue;
+            }
             let metadata = match std::fs::read_to_string(dir.join("session.json")) {
                 Ok(text) => serde_json::from_str::<SessionMetadata>(&text).ok(),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) => return Err(error.into()),
             };
+            if metadata
+                .as_ref()
+                .is_some_and(|m| is_child_id(&m.id) || m.parent.is_some())
+            {
+                continue;
+            }
             // 活动时间：events.jsonl mtime（更精确），回退到目录 mtime
             let modified = std::fs::metadata(dir.join("events.jsonl"))
                 .ok()
@@ -1045,6 +1115,77 @@ mod tests {
             .unwrap();
         assert!(!session_dir.exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn catalog_and_resolution_exclude_child_sessions_by_directory_and_metadata() {
+        let root = unique_temp_dir("child-catalog");
+        let home = root.join("home");
+        let project = home.join(".mink/projects/project-key");
+        let fixtures = [
+            ("user", Some("user"), None),
+            ("sub_missing", None, None),
+            ("sub_corrupt", None, None),
+            ("sub_inherited", Some("inherited-id"), None),
+            ("replan_legacy", Some("recovery-id"), None),
+            ("renamed-sub", Some("sub_metadata"), None),
+            ("renamed-replan", Some("replan_metadata"), None),
+            ("custom-child", Some("custom-child"), Some("user")),
+            ("broken-user", None, None),
+        ];
+        for (directory, id, parent) in fixtures {
+            let dir = project.join(directory);
+            std::fs::create_dir_all(&dir).unwrap();
+            if let Some(id) = id {
+                let metadata = SessionMetadata {
+                    id: id.into(),
+                    parent: parent.map(str::to_owned),
+                    // A user alias is not an internal session identity.
+                    alias: Some("sub_user_alias".into()),
+                    ..Default::default()
+                };
+                std::fs::write(
+                    dir.join("session.json"),
+                    serde_json::to_vec(&metadata).unwrap(),
+                )
+                .unwrap();
+            } else if directory.contains("corrupt") || directory == "broken-user" {
+                std::fs::write(dir.join("session.json"), "{not-json").unwrap();
+            }
+        }
+        std::fs::create_dir_all(project.join("user/subagents/sub_nested")).unwrap();
+
+        let registry = Registry::new(home, "flash".into(), 1);
+        let mut ids = registry
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, ["broken-user", "user"]);
+        assert_eq!(
+            registry
+                .session_dir("user", Some("project-key"))
+                .await
+                .unwrap(),
+            project.join("user")
+        );
+        for (_, id, _) in fixtures.into_iter().skip(1).take(7) {
+            if let Some(id) = id {
+                assert!(matches!(
+                    registry.session_dir(id, Some("project-key")).await,
+                    Err(RegistryError::NotFound(_))
+                ));
+            }
+        }
+        assert!(project.join("sub_missing").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(project.join("sub_corrupt/session.json")).unwrap(),
+            "{not-json"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

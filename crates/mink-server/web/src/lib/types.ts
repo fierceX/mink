@@ -10,17 +10,17 @@ export interface RawEvent {
   [key: string]: unknown;
 }
 
-export type TranscriptKey = number | `live:${number}`;
+export type TranscriptKey = number | `live:${number}` | `live:${string}:${number}` | `message:${number}:${number}` | `input:${string}`;
 
 export type ToolColor = "exec" | "file" | "search" | "todo" | "plan" | "delegate" | "tool";
 export type ResultView = "command" | "file" | "search" | "todo" | "plan" | "diff" | "text";
 
 export interface ThinkingItem { key?: TranscriptKey; kind: "thinking"; text: string; }
 export interface TextItem { key?: TranscriptKey; kind: "text"; text: string; }
-export interface UserItem { key?: TranscriptKey; kind: "user"; text: string; }
+export interface UserItem { key?: TranscriptKey; kind: "user"; text: string; inputId?: string; turnId?: string; guidance?: boolean; attachmentIds?: string[]; }
 export interface ErrorItem { key?: TranscriptKey; kind: "error"; text: string; }
 export interface SignalItem { key?: TranscriptKey; kind: "signal"; text: string; }
-export interface SystemItem { key?: TranscriptKey; kind: "system"; text: string; }
+export interface SystemItem { key?: TranscriptKey; kind: "system"; text: string; separator?: boolean; }
 
 export interface ToolItem {
   key?: TranscriptKey;
@@ -57,6 +57,15 @@ export type TranscriptItem = ThinkingItem | TextItem | UserItem | ToolItem | Sub
 
 export interface SessionState {
   sessionId: string;
+  generation?: string;
+  currentTurn?: string | null;
+  phase?: string;
+  messages?: Record<string, unknown>[];
+  overlays?: RawEvent[];
+  outcomes?: Record<string,Record<string,unknown>>;
+  resources?: { plan: { plan: string | null; draft: string | null }; todo: TodoResource; artifacts?: {id:string;tool?:string}[] };
+  inputs?: InputReceipt[];
+  imageLimits?: ImageLimits | null;
   title: string;
   running: boolean;
   /** Live stream may have missed events; input stays disabled until reload succeeds. */
@@ -86,3 +95,10 @@ export function emptySession(sessionId: string, title: string): SessionState {
     tokensIn: 0, tokensOut: 0, belief: 0, workState: "idle", cacheReadTokens: 0, contextTokens: 0, maxContextTokens: 0, items: [],
   };
 }
+
+export interface HumanInput { request_id: string; text: string; target_turn_id: string | null; attachment_ids: string[] }
+export interface InputReceipt { input_id: string; revision: number; turn_id: string; status: "pending" | "applying" | "applied" | "unapplied" | "withdrawn"; guidance: boolean; input: HumanInput }
+export interface Attachment { id: string; mime: string; width: number; height: number; bytes: number }
+export interface ImageLimits { kind: string; allowed_mime: string[]; max_image_bytes: number; max_image_bytes_per_request: number; max_images_per_request: number }
+
+export interface TodoResource { revision?: number; items?: { id: string; status: string; content: string }[] }

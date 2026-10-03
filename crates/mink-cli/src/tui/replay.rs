@@ -9,6 +9,19 @@ use std::io::BufRead;
 use std::path::Path;
 
 pub(crate) fn load_session(events_path: &Path) -> Vec<TranscriptItem> {
+    // Guidance is authoritative conversation history, not a new user turn in
+    // events.jsonl. Use complete formal turns when that window contains it.
+    if let Some(directory) = events_path.parent()
+        && let Ok(rows) = crate::runtime::session::SessionReader::new(directory).conversation_turns(
+            1,
+            crate::replay::REPLAY_TURNS,
+            true,
+            None,
+        )
+        && rows.iter().any(|row| row["_mink"]["guidance"] == true)
+    {
+        return build_lines_from_events(&conversation_events(&rows));
+    }
     if !events_path.exists() {
         return Vec::new();
     }
@@ -22,6 +35,49 @@ pub(crate) fn load_session(events_path: &Path) -> Vec<TranscriptItem> {
     }
 
     build_lines_from_events(&events)
+}
+
+fn conversation_events(rows: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let mut events = Vec::new();
+    for row in rows {
+        if row["role"] == "user"
+            && row["internal"] != true
+            && let Some(text) = row["content"].as_str()
+        {
+            let content = if row["_mink"]["guidance"] == true {
+                format!("[Added to context] {text}")
+            } else {
+                text.to_string()
+            };
+            events.push(json!({"type":"user_input","content":content}));
+        }
+        if let Some(blocks) = row["content"].as_array() {
+            for block in blocks {
+                let mut event = block.clone();
+                match block["type"].as_str() {
+                    Some("thinking") if row["role"] == "assistant" => {
+                        event["content"] = block["thinking"].clone();
+                    }
+                    Some("text") if row["role"] == "assistant" => {
+                        event["content"] = block["text"].clone();
+                    }
+                    Some("tool_use") if row["role"] == "assistant" => {
+                        event["type"] = "tool_call".into();
+                    }
+                    Some("tool_result") => {
+                        if let Some(metadata) = block["_mink"].as_object() {
+                            event.as_object_mut().unwrap().extend(metadata.clone());
+                            event["name"] = block["_mink"]["tool_name"].clone();
+                        }
+                    }
+                    _ => continue,
+                }
+                events.push(event);
+            }
+        }
+    }
+    events
 }
 
 fn load_recent_turn_events(file: std::fs::File) -> Vec<serde_json::Value> {

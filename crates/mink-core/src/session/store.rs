@@ -5,12 +5,19 @@ use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, RwLock};
 
+type CommitCallback = std::sync::Arc<dyn Fn(usize, Value) + Send + Sync>;
+struct CommitObserver {
+    callback: CommitCallback,
+    sequence: usize,
+}
+
 /// ConversationStore provides async JSONL conversation persistence.
 pub struct ConversationStore {
     path: PathBuf,
     /// Parsed active suffix. Complete history remains authoritative on disk.
     cache: RwLock<Option<CachedLines>>,
     write_lock: Mutex<()>,
+    observer: std::sync::Mutex<Option<CommitObserver>>,
 }
 
 #[derive(Debug, Clone)]
@@ -25,9 +32,25 @@ impl ConversationStore {
             path,
             cache: RwLock::new(None),
             write_lock: Mutex::new(()),
+            observer: std::sync::Mutex::new(None),
         }
     }
 
+    pub(crate) async fn observe_commits(&self, callback: CommitCallback) -> Result<()> {
+        let _guard = self.write_lock.lock().await;
+        let path = self.path.clone();
+        let sequence = tokio::task::spawn_blocking(move || -> Result<usize> {
+            crate::session::jsonl::repair_unterminated_tail(&path)?;
+            Ok(std::fs::read(path)?
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count())
+        })
+        .await??;
+        *self.observer.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(CommitObserver { callback, sequence });
+        Ok(())
+    }
     pub async fn ensure(&self) -> Result<()> {
         if !self.path.exists() {
             if let Some(parent) = self.path.parent() {
@@ -89,9 +112,18 @@ impl ConversationStore {
                 };
                 let mut blocks =
                     vec![json!({"type":"tool_result","tool_use_id":r.tool_use_id,"content":conv})];
-                if let Some(metadata) = &r.state_metadata {
-                    blocks[0]["_mink"] = metadata.clone();
-                }
+                let mut metadata = r.state_metadata.clone().unwrap_or_else(|| json!({}));
+                metadata["status"] =
+                    serde_json::to_value(r.status).expect("serializable tool status");
+                metadata["tool_name"] = r.tool_name.clone().into();
+                metadata["result_kind"] =
+                    serde_json::to_value(r.result_kind).expect("serializable result kind");
+                metadata["exit_code"] = r.exit_code.into();
+                metadata["presentation"] =
+                    serde_json::to_value(&r.presentation).expect("serializable presentation");
+                metadata["artifacts"] =
+                    serde_json::to_value(&r.artifacts).expect("serializable artifacts");
+                blocks[0]["_mink"] = metadata;
                 // Image capture: append an interleaved label + attachment
                 // block so the model can associate each image with its call
                 // (v7 §8.1). The block carries budget metadata but never a
@@ -306,6 +338,12 @@ impl ConversationStore {
         let mut cache = self.cache.write().await;
         if let Some(cache) = cache.as_mut() {
             cache.lines.push(value.clone());
+        }
+        drop(cache);
+        let mut observer = self.observer.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(observer) = observer.as_mut() {
+            observer.sequence += 1;
+            (observer.callback)(observer.sequence, value.clone());
         }
         Ok(())
     }

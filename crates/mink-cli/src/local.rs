@@ -23,6 +23,10 @@ pub(crate) const REPL_EXIT_HELP: &[&str] = &[
 
 #[cfg(feature = "tui")]
 pub(crate) const TUI_EXTRA_HELP: &[&str] = &[
+    "  Enter           Send task / submit guidance while running",
+    "  /inputs         Show pending and unapplied inputs",
+    "  /resume ID      Explicitly use an unapplied input for a new turn",
+    "  /withdraw ID    Withdraw a pending or unapplied input",
     "  /plan           Open current plan detail",
     "  /todos          Open current todo detail",
     "  /artifact ID    Open a bounded artifact preview",

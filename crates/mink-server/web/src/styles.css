@@ -74,7 +74,7 @@ button {
   transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease,
     transform 0.1s ease, box-shadow 0.15s ease;
 }
-button:hover { border-color: var(--blue); color: var(--text); background: #fff; }
+button:hover { border-color: var(--blue); color: var(--text); background: var(--bg-elevated); }
 button:active { transform: translateY(0.5px); }
 button:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
 button.primary {
@@ -92,7 +92,7 @@ button.ghost:hover { color: var(--text); border-color: var(--line); background: 
 input, textarea {
   font-family: var(--sans);
   font-size: 13.5px;
-  background: #fff;
+  background: var(--bg-elevated);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   color: var(--text);
@@ -141,7 +141,7 @@ input:focus, textarea:focus {
   color: #9a5b13;
 }
 .md-body pre {
-  background: #f3f5f8; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
   padding: 13px 15px; overflow-x: auto; margin: 11px 0;
 }
 .md-body pre code { background: none; padding: 0; color: var(--text-soft); font-size: 12px; line-height: 1.6; display: block; }
@@ -190,3 +190,17 @@ input:focus, textarea:focus {
 .file-tree .f-back:hover { color: var(--text); background: var(--panel-2); }
 .file-path { font-size: 11px; font-family: var(--mono); color: var(--text-dim); margin-bottom: 9px; }
 .empty { color: var(--text-dim); text-align: center; padding: 30px 0; font-size: 12.5px; }
+
+:root[data-theme="dark"] {
+  color-scheme:dark;
+  --bg:#15181e; --bg-elevated:#1b1f26; --panel:#20252e; --panel-2:#262c36; --panel-3:#303846;
+  --line:#343c49; --line-soft:#343c4970; --text:#e4e8ef; --text-soft:#b4bfd0; --text-dim:#8896aa;
+  --blue:#78a6ff; --blue-soft:#78a6ff15; --green:#58bd91; --red:#f17c8f; --yellow:#d4aa5f;
+  --shadow:0 4px 18px #0003;
+}
+html,body,#app { height:100dvh; overflow:hidden; }
+button,input,textarea,select { color:var(--text); background:var(--bg-elevated); }
+button:focus-visible,a:focus-visible,summary:focus-visible { outline:2px solid var(--blue); outline-offset:3px; }
+button:disabled { opacity:.45; cursor:not-allowed; }
+.md-body { overflow-wrap:anywhere; min-width:0; }.md-body img { max-width:100%; }.md-body pre { max-width:100%; overflow:auto; }.md-body table { display:block; max-width:100%; overflow:auto; }
+@media(prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none!important; transition:none!important; } }

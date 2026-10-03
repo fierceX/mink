@@ -273,6 +273,7 @@ fn display_tool_path(cwd: &Path, path: &Path) -> String {
 
 /// AgentSharedContext holds all shared resources accessible by every component.
 pub struct AgentSharedContext {
+    pub input_inbox: Arc<crate::session::input::InputInbox>,
     pub config: Config,
     pub cwd: PathBuf,
     pub home: PathBuf,

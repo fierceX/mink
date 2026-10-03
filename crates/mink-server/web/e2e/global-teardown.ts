@@ -14,5 +14,7 @@ export default async function globalTeardown() {
   try {
     rmSync(join(tmpdir(), "mink-e2e-server.pid"), { force: true });
   } catch { /* ignore */ }
+  try { const pid = readFileSync(join(tmpdir(), "mink-e2e-provider.pid"), "utf-8").trim(); if (pid) process.kill(Number(pid), "SIGKILL"); } catch { /* already stopped */ }
+  rmSync(join(tmpdir(), "mink-e2e-provider.pid"), { force: true });
   rmSync(E2E_HOME, { recursive: true, force: true });
 }

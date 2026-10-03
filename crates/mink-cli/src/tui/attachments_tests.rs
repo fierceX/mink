@@ -1,4 +1,5 @@
 use super::*;
+use std::path::PathBuf;
 
 fn unique_dir(name: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()

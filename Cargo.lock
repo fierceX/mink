@@ -2061,6 +2061,7 @@ version = "0.6.6"
 dependencies = [
  "anyhow",
  "crossterm",
+ "futures",
  "ignore",
  "mink-core",
  "ratatui",

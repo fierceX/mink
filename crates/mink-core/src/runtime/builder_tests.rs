@@ -4044,3 +4044,333 @@ async fn builtin_http_retry_uses_exactly_three_requests() {
     let _ = tokio::fs::remove_dir_all(home).await;
     let _ = tokio::fs::remove_dir_all(cwd).await;
 }
+
+struct GuidanceBoundaryBackend {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    requests: Arc<Mutex<Vec<Vec<serde_json::Value>>>>,
+}
+#[async_trait::async_trait]
+impl crate::llm::client::LlmBackend for GuidanceBoundaryBackend {
+    fn name(&self) -> &str {
+        "guidance-boundary-test"
+    }
+    async fn stream(
+        &self,
+        request: crate::llm::client::LlmRequest,
+    ) -> anyhow::Result<crate::llm::client::LlmResponseStream> {
+        let first = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(request.messages);
+            requests.len() == 1
+        };
+        if first {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(crate::llm::client::LlmResponseStream {
+            attempt_count: 1,
+            events: Box::pin(futures::stream::iter(vec![
+                Ok(crate::llm::client::LlmEvent::Text(
+                    crate::llm::client::LlmTextEvent {
+                        content: if first {
+                            "first answer"
+                        } else {
+                            "guided answer"
+                        }
+                        .into(),
+                    },
+                )),
+                Ok(crate::llm::client::LlmEvent::Stop(
+                    crate::llm::client::LlmStopEvent {
+                        reason: "end_turn".into(),
+                    },
+                )),
+            ])),
+        })
+    }
+}
+#[tokio::test]
+async fn guidance_waits_for_accepted_response_and_continues_same_turn() {
+    let home = unique_temp_dir("guidance-home");
+    let cwd = unique_temp_dir("guidance-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let backend = Arc::new(GuidanceBoundaryBackend {
+        entered: entered.clone(),
+        release: release.clone(),
+        requests: requests.clone(),
+    });
+    let runtime = build_runtime(runtime_config_with_backend(&home, &cwd, backend, |_| {}))
+        .await
+        .unwrap();
+    let handle = runtime.handle();
+    let input = crate::runtime::HumanInput {
+        request_id: "task".into(),
+        text: "first task".into(),
+        target_turn_id: None,
+        attachment_ids: vec![],
+    };
+    let (receipt, stream) = handle.stream_input(input).unwrap();
+    let mut stream = stream.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    let guide = crate::runtime::HumanInput {
+        request_id: "guide".into(),
+        text: "keep the public API".into(),
+        target_turn_id: Some(receipt.turn_id.clone()),
+        attachment_ids: vec![],
+    };
+    let (received, none) = handle.stream_input(guide.clone()).unwrap();
+    assert!(none.is_none());
+    assert_eq!(received.status, crate::runtime::InputStatus::Pending);
+    assert_eq!(
+        handle.stream_input(guide).unwrap().0.revision,
+        received.revision
+    );
+    assert_eq!(
+        runtime.ctx.store.lines().await.unwrap().len(),
+        1,
+        "guidance must not mutate an in-flight request"
+    );
+    release.notify_one();
+    while stream.recv().await.is_some() {}
+    let outcome = stream.outcome().await.unwrap();
+    assert_eq!(outcome.status, crate::runtime::TurnStatus::Ok);
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    assert!(
+        requests.lock().unwrap()[1]
+            .iter()
+            .any(|message| message["content"] == "keep the public API")
+    );
+    let history = runtime.ctx.store.lines().await.unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .filter(
+                |message| message.pointer("/_mink/input_id") == Some(&serde_json::json!("guide"))
+            )
+            .count(),
+        1
+    );
+    assert_eq!(
+        handle
+            .input_inbox()
+            .entries()
+            .iter()
+            .filter(|entry| entry.status == crate::runtime::InputStatus::Applied)
+            .count(),
+        2
+    );
+    assert!(
+        handle
+            .stream_input(crate::runtime::HumanInput {
+                request_id: "late".into(),
+                text: "late".into(),
+                target_turn_id: Some(receipt.turn_id),
+                attachment_ids: vec![]
+            })
+            .is_err()
+    );
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+#[tokio::test]
+async fn interrupted_guidance_remains_unapplied_and_explicitly_resumable() {
+    let home = unique_temp_dir("guidance-stop-home");
+    let cwd = unique_temp_dir("guidance-stop-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let runtime = build_runtime(runtime_config_with_backend(
+        &home,
+        &cwd,
+        Arc::new(GuidanceBoundaryBackend {
+            entered: entered.clone(),
+            release,
+            requests: requests.clone(),
+        }),
+        |_| {},
+    ))
+    .await
+    .unwrap();
+    let handle = runtime.handle();
+    let (receipt, stream) = handle
+        .stream_input(crate::runtime::HumanInput {
+            request_id: "task".into(),
+            text: "task".into(),
+            target_turn_id: None,
+            attachment_ids: vec![],
+        })
+        .unwrap();
+    let mut stream = stream.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    handle
+        .stream_input(crate::runtime::HumanInput {
+            request_id: "guide".into(),
+            text: "pending guidance".into(),
+            target_turn_id: Some(receipt.turn_id),
+            attachment_ids: vec![],
+        })
+        .unwrap();
+    stream.cancel();
+    while stream.recv().await.is_some() {}
+    assert_eq!(
+        stream.outcome().await.unwrap().status,
+        crate::runtime::TurnStatus::Interrupted
+    );
+    let guide = handle
+        .input_inbox()
+        .entries()
+        .into_iter()
+        .find(|e| e.input_id == "guide")
+        .unwrap();
+    assert_eq!(guide.status, crate::runtime::InputStatus::Unapplied);
+    let (_, stream) = handle.resume_input("guide", guide.revision).unwrap();
+    let mut stream = stream.unwrap();
+    while stream.recv().await.is_some() {}
+    assert_eq!(
+        stream.outcome().await.unwrap().status,
+        crate::runtime::TurnStatus::Ok
+    );
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+struct BoundaryTool {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+#[async_trait::async_trait]
+impl AgentTool for BoundaryTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "BoundaryTool",
+            "Wait for test release",
+            serde_json::json!({"type":"object","additionalProperties":false}),
+        )
+    }
+    async fn execute(
+        &self,
+        _: serde_json::Value,
+        _: ToolExecutionContext,
+    ) -> Result<ToolOutput, ToolError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(ToolOutput::text("complete tool result"))
+    }
+}
+#[tokio::test]
+async fn guidance_during_tool_execution_preserves_exchange_and_round_limit() {
+    use crate::protocol::{Event, StopEvent, TextEvent};
+    for max_turns in [1, 3] {
+        let home = unique_temp_dir("guidance-tool-home");
+        let cwd = unique_temp_dir("guidance-tool-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let backend = crate::llm::mock::MockLlmBackend::new(
+            "mock",
+            vec![
+                vec![
+                    Ok(Event::ToolCall(tool_call_event(
+                        "BoundaryTool",
+                        "boundary",
+                        serde_json::json!({}),
+                    ))),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "tool_use".into(),
+                    })),
+                ],
+                vec![
+                    Ok(Event::Text(TextEvent {
+                        content: "after guide".into(),
+                    })),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "end_turn".into(),
+                    })),
+                ],
+            ],
+        );
+        let mut config = runtime_config_with_mock(&home, &cwd, backend);
+        config.config.max_turns = max_turns;
+        config.custom_tools.push(Arc::new(BoundaryTool {
+            entered: entered.clone(),
+            release: release.clone(),
+        }));
+        let runtime = build_runtime(config).await.unwrap();
+        let handle = runtime.handle();
+        let (task, stream) = handle
+            .stream_input(crate::runtime::HumanInput {
+                request_id: "task".into(),
+                text: "task".into(),
+                target_turn_id: None,
+                attachment_ids: vec![],
+            })
+            .unwrap();
+        let mut stream = stream.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        handle
+            .stream_input(crate::runtime::HumanInput {
+                request_id: "guide".into(),
+                text: "keep API".into(),
+                target_turn_id: Some(task.turn_id),
+                attachment_ids: vec![],
+            })
+            .unwrap();
+        assert!(
+            !runtime
+                .ctx
+                .store
+                .lines()
+                .await
+                .unwrap()
+                .iter()
+                .any(|row| row.pointer("/_mink/input_id") == Some(&serde_json::json!("guide")))
+        );
+        release.notify_one();
+        while stream.recv().await.is_some() {}
+        let outcome = stream.outcome().await.unwrap();
+        let history = runtime.ctx.store.lines().await.unwrap();
+        let tool = history
+            .iter()
+            .position(|row| {
+                row["content"]
+                    .as_array()
+                    .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "tool_result"))
+            })
+            .unwrap();
+        let receipt = handle
+            .input_inbox()
+            .entries()
+            .into_iter()
+            .find(|entry| entry.input_id == "guide")
+            .unwrap();
+        if max_turns == 1 {
+            assert_ne!(outcome.status, crate::runtime::TurnStatus::Ok);
+            assert_eq!(receipt.status, crate::runtime::InputStatus::Unapplied);
+        } else {
+            assert_eq!(outcome.status, crate::runtime::TurnStatus::Ok);
+            assert_eq!(receipt.status, crate::runtime::InputStatus::Applied);
+            let guide = history
+                .iter()
+                .position(|row| row.pointer("/_mink/input_id") == Some(&serde_json::json!("guide")))
+                .unwrap();
+            assert!(tool < guide);
+        }
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+}

@@ -51,7 +51,21 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState, mode: TuiMode) {
             } else {
                 usize::from(area.height.saturating_sub(5)).min(2)
             };
-            let chips = chip_lines(&state.input.pending_images, inner_w, chip_rows);
+            let mut chips = Vec::new();
+            if let Some(notice) = &state.input_notice {
+                chips.push(crate::util::truncate_visual(notice, inner_w));
+            }
+            if let Some(input) = state.inputs.first() {
+                let label = format!(
+                    "Inputs {} · {} · {} (/inputs)",
+                    state.inputs.len(),
+                    input.input_id,
+                    super::inbox::input_status(input.status)
+                );
+                chips.extend(split_at_visual_width(&label, inner_w));
+            }
+            chips.extend(chip_lines(&state.input.pending_images, inner_w, chip_rows));
+            chips.truncate(chip_rows);
             let chips_height = chips.len();
             // 输入框正文最大行数受视口高度约束：正文行 + 2 行边框之外，
             // 布局还需要至少 1 行内容区、chip 行和 1 行状态栏。主视图入口保证
@@ -101,7 +115,14 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState, mode: TuiMode) {
             if chips_height > 0 {
                 render_chips(f, chunks[1], &chips);
             }
-            render_input(f, input_area, &visible_input_lines);
+            let label = if state.stopping {
+                "Stopping · draft kept"
+            } else if state.active_turn_id.is_some() {
+                "Enter: submit guidance"
+            } else {
+                "Enter: send task"
+            };
+            render_input(f, input_area, &visible_input_lines, label);
             render_file_picker(f, input_area, state);
 
             let row = cursor_row.saturating_sub(state.input.scroll_row);

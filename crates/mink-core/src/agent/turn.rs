@@ -413,7 +413,16 @@ impl TurnExecutor {
 
         let mut messages = self.ctx.compaction.active_messages().await?;
         self.reconcile_todo_state(&mut messages).await?;
-        self.ctx.store.add_user(user_input).await?;
+        if self.ctx.input_inbox.active_turn().is_some() {
+            self.ctx
+                .input_inbox
+                .apply_pending(&self.ctx.store, || {
+                    self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst)
+                })
+                .await?;
+        } else {
+            self.ctx.store.add_user(user_input).await?;
+        }
         self.ctx.stats.record_turn().await;
         self.ctx.log_event(crate::events::EventLog::UserInput {
             version: None,
@@ -443,6 +452,25 @@ impl TurnExecutor {
         );
 
         while turn < max_turns {
+            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
+                self.ctx.display.render_stop("interrupted");
+                return Ok((TurnDecision::Interrupted, effects));
+            }
+            if self
+                .ctx
+                .input_inbox
+                .apply_pending(&self.ctx.store, || {
+                    self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst)
+                })
+                .await?
+                > 0
+            {
+                messages = self.ctx.compaction.active_messages().await?;
+            }
+            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
+                self.ctx.display.render_stop("interrupted");
+                return Ok((TurnDecision::Interrupted, effects));
+            }
             turn += 1;
             self.local.round = turn as u32;
 
@@ -789,6 +817,7 @@ impl TurnExecutor {
                     if let Some(decision) = self
                         .decide_next(&stop, belief.as_deref_mut(), turn >= max_turns)
                         .await?
+                        && (decision != TurnDecision::Stop || self.ctx.input_inbox.close_if_empty())
                     {
                         return Ok((decision, effects));
                     }

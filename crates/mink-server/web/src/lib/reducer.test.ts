@@ -158,7 +158,7 @@ describe("共享 Core/SSE 协议 fixture", () => {
     expect(tools[1]).toMatchObject({ id: "grep-1", artifact: "grep-0001", artifacts: [{ id: "grep-0001" }] });
     expect(s.items.find((item) => item.kind === "sub_agent")).toMatchObject({ status: "ok", text: "done" });
     expect(s.running).toBe(false);
-    expect(s.lastSeq).toBe(110);
+    expect(s.lastSeq).toBe(100 + protocolFixture.length - 1);
   });
 });
 
@@ -217,8 +217,8 @@ describe("conversationToEvents（完整轮次 → 事件）", () => {
       ],
     });
     expect(events.map((e) => e.type)).toEqual(["thinking", "text", "tool_call"]);
-    const keys = events.map((e) => e.seq);
-    expect(new Set(keys).size).toBe(3); // 1000,1001,1002 唯一
+    const keys = events.map((e) => e.key);
+    expect(new Set(keys).size).toBe(3); // explicit message and block identity
     expect(events[2]).toMatchObject({ name: "Bash", id: "c1" });
   });
 

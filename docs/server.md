@@ -1,6 +1,6 @@
 # mink-server：Server 与 Web 前端
 
-> 更新日期：2026-10-02
+> 更新日期：2026-10-03
 
 ---
 
@@ -68,15 +68,22 @@ MINK_SERVER_PORT=9000 ./target/debug/mink-server
 
 ## 4. REST API
 
+会话目录扫描与 ID 查找统一排除子代理：目录名或 metadata.id 带 `sub_`/`replan_` 前缀，或 metadata.parent 存在。目录判断在读取元数据之前执行，旧子代理缺失、损坏或继承元数据也不会出现在列表；正常用户会话的 alias 不参与过滤。
+
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/sessions` | 会话列表（含 tokens/context 汇总） |
+| GET | `/api/sessions` | 会话列表（含运行 phase、未处理输入数、最近活跃终态及 tokens/context 汇总） |
 | POST | `/api/sessions` | 创建会话 `{name, cwd?}`（对 active alias 幂等，不重复创建） |
-| GET | `/api/sessions/{id}` | 会话状态（open/running） |
+| GET | `/api/sessions/{id}` | 会话状态（open/running、runtime generation、当前 turn、能力、阶段与最近终态） |
 | DELETE | `/api/sessions/{id}` | 删除会话（先持有系统文件锁，阻止并发删除） |
 | POST | `/api/sessions/{id}/open` | 打开（建立 session lease） |
 | POST | `/api/sessions/{id}/close` | 关闭（中断当前 turn、释放 lease；关闭后由 idle reaper 兜底） |
-| POST | `/api/sessions/{id}/turn` | 发送消息执行 turn |
+| POST | `/api/sessions/{id}/turn` | 兼容发送消息，内部转持久输入执行路径 |
+| POST / GET | `/api/sessions/{id}/inputs` | 提交任务/引导 / 读取回执与未应用输入 |
+| PATCH / DELETE | `/api/sessions/{id}/inputs/{input_id}` | revision 编辑 / 撤回尚未消费输入 |
+| POST | `/api/sessions/{id}/inputs/{input_id}/resume` | revision 明确用于新轮次 |
+| POST | `/api/sessions/{id}/attachments` | 原始图片字节上传，返回 session 限定描述 |
+| GET | `/api/sessions/{id}/attachments/{attachment_id}` | session 限定的图片预览 |
 | POST | `/api/sessions/{id}/interrupt` | 中断当前 turn |
 | GET | `/api/sessions/{id}/events` | events.jsonl 分页（`from_seq`/`limit`/`tail`/`before_seq`） |
 | GET | `/api/sessions/{id}/conversation` | conversation.jsonl 轮次历史（同分页参数） |
@@ -87,6 +94,16 @@ MINK_SERVER_PORT=9000 ./target/debug/mink-server
 - **project 消歧**：所有 session 路由接受可选 `?project=`（0.4.0 起，用于跨项目同名 session）；不传时按 id 唯一匹配。
 - **分页约束**：`limit` 必须在 `1..=2000`，超出返回 400；`tail`/`before_seq` 取“最接近目标”的末尾段，`from_seq` 前向读取保留开头；响应注入真实行号 `seq` 作为稳定 key。
 - **错误映射**（typed `RegistryError`）：404 NotFound；409 Ambiguous / Locked / Busy；429 Capacity；500 Internal。
+
+### 持久输入与附件
+
+`inputs` POST 正文为 `{request_id,text,attachment_ids:[],target_turn_id:null|string}`。null 启动新任务；字符串必须匹配当前接受引导的 turn。每条文字（含图片路径）最多 128 KiB，未消费项最多 32 条。重复 request ID / 相同原始内容返回既有回执，不重启任务；相同 ID 不同内容返回 409。GET inputs 默认只返回未消费/未应用项，`?request_id=` 可查询任意既有回执（含 applied/withdrawn）。编辑正文为 `{revision,text}`，撤回与 resume 正文为 `{revision}`，stale revision 或 applying/applied 返回冲突。
+
+回执状态 `pending → applying → applied`，失败/停止/重启未消费转 `unapplied`，撤回为 `withdrawn`。应用前发布 applying，正式 user 消息携带 `_mink.input_id`，持久追加后发布 applied；不确定追加或发布失败闩锁 session。重启对账完整预期消息，禁止重复历史。引导在工具交换完整提交后的下一请求安全边界生效，不能改变当前请求/重试/子代理；终态准入共享锁，迟到引导明确拒绝。未应用输入只由用户明确 resume，不自动运行。
+
+附件 POST 是原始文件字节，无浏览器重新编码；能力/格式/完整解码/尺寸/字节/校验和/路径/权限均校验，返回 `{id,mime,width,height,bytes}`。PNG/JPEG/GIF/WebP 与会话能力取交集，数量最多 8，单图及总量各取 core 上限与 16 MiB 的较小值。仅保存 session attachments 传输副本，输入加入无歧义绝对路径，图片上下文仍由 Read 捕获。仅图片输入生成明确查看请求；移除 UI 卡片不删除已存文件。预览不扩大工作目录 files 权限。
+
+默认 conversation 仍按物理行分页。`turns=true` 改为完整真实用户轮次分页（internal 与 guidance 不建立新轮次），保留工具调用/result 与引导归属；Web 每次 20 轮。
 
 ## 5. SSE 事件
 
@@ -116,7 +133,21 @@ MINK_SERVER_PORT=9000 ./target/debug/mink-server
 - **协议一致性**：`crates/mink-server/protocol-fixtures/agent-events.json` 是 core 与
   server 共享的协议 fixture，mink-core 测试对其做反序列化 round-trip，保证两端口径一致。
 - 前端 reducer 以 `turn_final` 为权威状态；历史展示来自 `/conversation` 与 `/events`
-  （注入 `seq`），实时事件与历史通过 `seq` / `live:{stream_sequence}` 区分 key。
+  （注入 `seq`），实时事件与历史通过 `seq` / `live:{generation}:{stream_sequence}`（旧流兼容无 generation 的 key） 区分 key。
+
+### 新版原子快照订阅
+
+`GET /stream?snapshot=true` 首帧 `session_snapshot` 与订阅位置在同一 mirror 发布锁下建立，包含 generation、stream_sequence、conversation（最近 20 个真实用户轮次）、progress、current_turn、phase、running、inputs、capabilities、resources（Plan、完整 Todo、Artifact）、diagnostics 与 last_final。打开时镜像经公开 SessionReader 重建，运行中消费可靠 runtime 事件；best-effort EventSink 不用于权威恢复。
+
+后续新增 `conversation_committed {conversation_seq,message}`、`inputs_updated {inputs}`、`phase_updated {phase}`，与既有 AgentEvent 均携带 generation、stream_sequence 和 after_conversation_seq。正式历史接管暂态 text/thinking，稳定身份为物理 `(seq,block_index)` 或 input_id；诊断保持相邻时序。旧 generation 与重复水位丢弃，gap 后立即重取 snapshot，无需等待 turn 空闲。旧 SSE 模式过滤新增输入/commit/phase 控制事件，仍转发原有协议。运行态、成功与失败由 turn_final/outcome 决定，stop 与 HTTP 成功均不提前完成任务。
+
+### Web 交互
+
+项目导航常驻桌面，右侧详情按需打开；1024–1279px 打开详情时隐藏导航，768–1023px 侧栏覆盖，手机详情为全屏，使用 100dvh/safe-area，body 不承担对话滚动。轮次中思考/工具组成紧凑过程组，回复、重试、错误与引导有独立边界；支持简洁/标准/详细模式与手动展开优先。
+
+草稿、附件、失败提交、展开、消息锚点、内层/详情滚动按完整会话身份持久保留。切换、返回首页、关闭浏览器只停止正文订阅，不调用 close、不停止任务。断线/停止中禁用提交但仍可编辑；明确发送与“返回最新内容”恢复外层跟随。任务详情只读，文件是当前磁盘内容，工具/Artifact 是当时记录。
+
+页面可见且有运行任务时目录每 2s 对账，否则每 15s；隐藏停止轮询，恢复可见立即刷新，只当前会话保持正文 SSE。新建任务在应用内填写 server 工作目录并生成唯一 alias；删除失败留在原位报告。
 
 ## 6. 静态资源与嵌入
 
@@ -152,10 +183,11 @@ MINK_SERVER_PORT=9000 ./target/debug/mink-server
 
 ```bash
 cd crates/mink-server/web
-npx playwright test      # E2E 14 用例（真实浏览器 + 真实 server）
-npx vitest run           # 单元测试（reducer 39 / sessionController 7 / sse 1 / session 8）
-cargo test -p mink-server # 服务端测试（registry/lease/config/runtime/SSE envelope，36 用例）
+npm run e2e             # 真实浏览器 + 真实 server + 本地模拟模型
+npm run test            # reducer/controller/SSE/组件状态测试
+npm run typecheck && npm run build
+cargo test -p mink-core -p mink-cli -p mink-server
 ```
 
-E2E 通过 global-setup 构造隔离临时 home + 模板会话，serial 模式顺序执行，失败产出
+E2E 通过 global-setup 构造隔离临时 home + 模板会话与本地模拟 OpenAI-compatible provider，覆盖 1440/1024/768/390px、引导/续发/附件/分页锚点；失败产出
 trace/error-context 供 AI 自愈；测试产物（test-results/）已加入 .gitignore。

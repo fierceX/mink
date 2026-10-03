@@ -1,6 +1,6 @@
 # 架构说明
 
-> 更新日期：2026-09-08
+> 更新日期：2026-10-03
 
 本文描述 Mink 当前代码结构、模块职责和运行时数据流。终端用户命令、配置和工作流见
 [USAGE.md](USAGE.md)；Rust/Python 嵌入见 [EMBEDDING.md](EMBEDDING.md)；机器协议见
@@ -9,6 +9,23 @@
 [工具能力与提示词解耦设计文档](设计哲学-工具能力与提示词解耦.md)。
 
 [TOC]
+
+## 会话工作台与人类输入
+
+`mink-server` 继续复用 Axum、Registry lease 与 `AgentRuntime`，Vue/Vite 产物嵌入二进制。Web 数据流为 REST/SSE → SessionController / CatalogController → 会话模型 → 纯轮次投影 → 展示组件。`workbench.ts` 单独保存按 `(project_key, session_id)` 隔离的草稿、附件引用、展开选择和阅读锚点；异步操作捕获原会话身份，过期响应不能写入当前视图。
+
+Registry 的扫描入口统一排除目录名或 metadata.id 带 `sub_`/`replan_` 前缀、或 metadata.parent 存在的子代理；列表与会话查找复用同一规则，旧子代理元数据缺失、损坏或继承父身份时仍按目录排除。
+
+Core 的 `session/input.rs` 拥有 session 唯一 `InputInbox`。`AgentRuntimeHandle::stream_input(HumanInput)` 为新任务返回 `(InputReceipt, Some(AgentEventStream))`，为目标 turn 的引导或重复提交返回回执与 `None`；`resume_input(id, revision)` 明确续发未应用输入。旧 Rust `stream_turn` 保持原执行契约，server 的旧 `/turn` 转入持久输入路径。HTTP handler 不直接追加 conversation；TurnExecutor 在已接受响应、完整工具交换之后、下一请求的压缩检查之前消费 Inbox。
+
+`inputs.json` 经现有原子状态发布与 persistence fault 闩锁更新；`applying` 回执与正式消息的 `_mink.input_id` 构成可恢复交接。ConversationStore 的 commit observer 在追加完成后向可靠 runtime 事件流发出 `ConversationCommitted`，身份使用物理 JSONL 行号，初始化只扫描一次，追加增量计数，与历史分页一致。
+
+Full/Inline TUI 通过 `TuiRuntime` 调用同一 `stream_input`；引导准入不经过等待当前 turn 的 broker 工作队列。新任务返回的 stream 交给 broker 可靠消费，正式引导提交转成 `GuidanceApplied`，权威 outcome 转成 `TurnFinished`，共用 TuiState reducer。输入上方只读映射 Inbox 状态；`/inputs`、`/resume ID`、`/withdraw ID` 调用公开接口。含引导的历史窗口经公开 SessionReader 读取完整正式轮次后走相同 reducer，保留引导顺序和工具元数据。
+
+server `Projection` 是可重建只读镜像：启动经公开 `SessionReader` 读取历史、Plan、Todo、Artifact；运行中消费可靠 `AgentEventStream` 更新。快照与广播订阅在同一 mirror 发布锁下建立，不使用 best-effort EventSink 作为事实来源。新版 SSE 使用 runtime generation 与传输水位；正式消息接管暂态文本，Plan/Todo presentation 增量合并，终态由 `turn_final` 决定。
+
+`session/attachments.rs` 是 CLI/TUI/Web 共享的内容寻址存储。Web 上传保存原始字节到 session `attachments/`，校验真实格式、完整解码、尺寸、能力、大小、权限和校验和。附件预览是 session 限定接口；输入只携带绝对路径，模型图片仍由 `Read` 捕获。
+
 
 ## 项目定位
 

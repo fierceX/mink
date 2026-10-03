@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-09-30
+> 更新日期：2026-10-03
 
 ## 项目概览
 
@@ -92,6 +92,15 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - 每个 attempt 独立结算 usage（成功 reported、失败或取消 unreported，恰一笔）；只有最终接受且指纹/投影匹配的主请求可更新 provider prompt usage 校准；自定义 backend 的聚合 `attempt_count` 原样保留，外层不乘算。
 - 压缩摘要请求共用同一重试状态、错误分类与 attempt/deadline 语义；完整但不可用的摘要（空输出、工具调用、坏 stop 原因）在同一次压缩操作内追加用途纠正到临时请求尾部重试，不写父 conversation、不改公共缓存前缀、不推进主 agent 格式窗口。
 - 上游错误必须类型化：`LlmUpstreamError`（Recoverable / ProtocolDamaged / Permanent，带可选 status/code/source 与受限诊断）是唯一分类依据；永久拒绝与未知 provider 错误默认失败且不重试；未类型化的自定义错误保持既有失败行为。
+
+### 人类输入与 Web 工作台
+
+- `InputInbox` 是 session 唯一持久输入准入边界；request ID 绑定原始内容，编辑/撤回比较 revision，仅 pending/unapplied 可修改。applying 先发布，正式历史以 `_mink.input_id` 接管，追加不确定或历史已写但回执发布失败必须闩锁；恢复核对完整预期消息，禁止重复追加。
+- 引导绑定父 turn，在已接受工具交换完整持久化后、下一请求压缩检查前顺序消费；Stop 与准入共享锁。取消/故障/恢复耗尽/轮次上限优先，引导不重置格式窗口、账单 turn 或请求期限，不自动传给子代理；未应用项仅由用户明确续发。
+- Web mirror 经公开 Reader 初始化、可靠 runtime 事件更新，快照与订阅位置在同一发布锁建立；generation/水位拒绝旧事件。离开视图只断订阅，不调用 close。草稿/附件/展开/阅读锚点按完整会话身份隔离，迟到响应不得污染当前视图。
+- Web 会话扫描与查找共用子代理过滤：目录名或 metadata.id 为 sub_/replan_ 前缀、或 metadata.parent 存在时排除；不能因缺失、损坏或继承 metadata 将旧子代理展示为用户会话。
+- CLI/TUI/Web 共用 core AttachmentStore：上传仅保存 session attachments 原始字节与绝对路径，图片上下文唯一入口仍为 Read。会话限定预览不得扩大工作目录文件访问范围。
+- Full/Inline TUI 任务与运行中 Enter 引导均走 stream_input，准入不排到下一轮；仅正式 ConversationCommitted 才回显引导，Final 才结束轮次。尚未应用输入由 Inbox 保留，/resume ID 明确续发，/withdraw ID 按 revision 撤回；拒绝提交保留草稿及图片，不封口当前流。
 
 ### Plan 与 Todo
 

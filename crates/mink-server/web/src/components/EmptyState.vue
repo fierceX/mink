@@ -2,7 +2,7 @@
 // 空状态工作台：无会话时展示（hero + 最近会话卡片网格 + 统计条）
 import { computed, onMounted, onUnmounted } from "vue";
 import { fmtK } from "../lib/fmt";
-import { appState, workspaces } from "../lib/store";
+import { appState, uiState, workspaces } from "../lib/store";
 import { openSession } from "../lib/sessionController";
 import { api } from "../lib/api";
 import type { SessionSummary } from "../lib/api";
@@ -38,36 +38,7 @@ function statusCls(s: SessionSummary): string {
 
 // 运行中统计实时化：列表 status 由服务端 registry 提供，但前端只加载一次——
 // 首页轮询刷新（10s），使"运行中"计数与真实执行状态一致
-let refreshTimer: ReturnType<typeof setInterval> | null = null;
-const refreshSessions = async () => {
-  try {
-    const resp = await api.listSessions();
-    if (resp.code === 200 && Array.isArray(resp.data)) {
-      appState.sessions = resp.data;
-    }
-  } catch { /* 轮询失败静默，下轮重试 */ }
-};
-onMounted(() => {
-  refreshSessions();
-  refreshTimer = setInterval(refreshSessions, 10_000);
-});
-onUnmounted(() => {
-  if (refreshTimer) clearInterval(refreshTimer);
-});
-
-const onNew = async () => {
-  if (!curProj.value) return;
-  const name = prompt("会话名称（alias）", "untitled");
-  if (name == null) return;
-  try {
-    const resp = await api.createSession(name || "untitled", curProj.value.cwd);
-    if (resp.code === 200 && resp.data?.id) {
-      appState.sessions.unshift(resp.data);
-      appState.currentWorkspace = resp.data.cwd;
-      await openSession(resp.data);
-    }
-  } catch { /* openSession 内部提示 */ }
-};
+const onNew = () => { uiState.newOpen = true; };
 const open = (s: SessionSummary) => openSession(s).catch(() => {});
 </script>
 

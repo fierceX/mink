@@ -370,3 +370,67 @@ fn first_line_handles_newlines() {
     assert_eq!(first_line("single"), "single");
     assert_eq!(first_line(""), "");
 }
+
+#[tokio::test]
+async fn commit_identity_counts_physical_lines_and_repairs_torn_tail_once() {
+    let store = temp_store();
+    std::fs::write(
+        store.path(),
+        "{\"role\":\"user\",\"content\":\"old\"}\n\n{partial",
+    )
+    .unwrap();
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let output = observed.clone();
+    store
+        .observe_commits(std::sync::Arc::new(move |seq, _| {
+            output.lock().unwrap().push(seq)
+        }))
+        .await
+        .unwrap();
+    store.add_user("new").await.unwrap();
+    store.add_user("again").await.unwrap();
+    assert_eq!(*observed.lock().unwrap(), [3, 4]);
+    let rows = crate::runtime::session::SessionReader::new(store.path().parent().unwrap())
+        .conversation()
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["seq"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [1, 3, 4]
+    );
+}
+
+#[tokio::test]
+async fn whole_turn_pagination_keeps_guidance_and_tool_exchange_together() {
+    let store = temp_store();
+    store.ensure().await.unwrap();
+    for turn in 0..3 {
+        store.add_user(&format!("task {turn}")).await.unwrap();
+        store
+            .add_assistant("", "", &[tool_call_event("read")])
+            .await
+            .unwrap();
+        store
+            .add_tool_results(&[crate::tools::runner::ToolExecution::test_result(
+                "read", "Read", "result",
+            )])
+            .await
+            .unwrap();
+        store
+            .append_runtime_message_durable(
+                json!({"role":"user","content":"guide","_mink":{"guidance":true}}),
+            )
+            .await
+            .unwrap();
+    }
+    let reader = crate::runtime::session::SessionReader::new(store.path().parent().unwrap());
+    let last = reader.conversation_turns(0, 1, true, None).unwrap();
+    assert_eq!(last.len(), 4);
+    assert_eq!(last[0]["content"], "task 2");
+    let earlier = reader
+        .conversation_turns(0, 1, false, Some(last[0]["seq"].as_u64().unwrap()))
+        .unwrap();
+    assert_eq!(earlier.len(), 4);
+    assert_eq!(earlier[0]["content"], "task 1");
+}

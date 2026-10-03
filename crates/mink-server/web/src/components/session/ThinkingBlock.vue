@@ -1,46 +1,20 @@
 <script setup lang="ts">
-// 思考面板：折叠由 running 驱动（turn 中展开/结束折叠），用户手动可覆盖
-import { computed, ref, watch } from "vue";
-import { appState } from "../../lib/store";
+// 思考正文默认折叠，显式选择与内层阅读位置由会话 UI 状态保留。
+import { computed } from "vue";
+import { viewFor } from "../../lib/workbench";
 import { renderMarkdown } from "../../lib/markdown";
 import type { ThinkingItem } from "../../lib/types";
 
 const props = defineProps<{ item: ThinkingItem }>();
-const emit = defineEmits<{ (e: "inner-scroll", atBottom: boolean): void }>();
 const html = computed(() => renderMarkdown(props.item?.text ?? ""));
-// 初始值按当前 running：流式新块（running 中创建）默认展开。
-// @toggle 同步用户手动操作；watch(running) 在 running 变化时总是覆盖
-// （turn 结束自动折叠；turn 中用户手动展开/折叠保持）。
-const open = ref(appState.sessionState?.running ?? false);
-
-// running 变化（turn 结束）折叠
-watch(
-  () => appState.sessionState?.running,
-  (running) => { open.value = running ?? false; },
-);
-// "思考完毕"折叠：后续非 thinking 事件（text/tool 开始）到达时，
-// 本块不再是最后项 → 自动收起（流式推进中旧思考收拢）
-watch(
-  () => appState.sessionState?.items[appState.sessionState?.items.length - 1]?.kind,
-  (lastKind) => {
-    if (lastKind && lastKind !== "thinking") open.value = false;
-  },
-);
-const onToggle = (e: Event) => {
-  open.value = (e.target as HTMLDetailsElement).open;
-};
-// 面板内滚动：上滑（非贴底）→ 通知 Transcript 停止主跟随；贴底 → 恢复跟随
-const onBodyScroll = (e: Event) => {
-  const el = e.target as HTMLElement;
-  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 4;
-  emit("inner-scroll", atBottom);
-};
+const open = computed(() => viewFor().expanded[`thinking:${String(props.item.key)}`] ?? false);
+const onToggle = () => { viewFor().expanded[`thinking:${String(props.item.key)}`] = !open.value; };
 </script>
 
 <template>
-  <details class="thinking-panel" :open="open" @toggle="onToggle">
-    <summary>思考过程</summary>
-    <div class="tp-body md-body" v-html="html" @scroll="onBodyScroll"></div>
+  <details class="thinking-panel" :open="open" >
+    <summary @click.prevent="onToggle">思考过程</summary>
+    <div class="tp-body md-body" v-html="html"></div>
   </details>
 </template>
 

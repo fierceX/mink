@@ -132,6 +132,113 @@ impl SessionReader {
         })
     }
 
+    pub fn conversation(&self) -> Result<Vec<serde_json::Value>> {
+        let path = self.directory.join("conversation.jsonl");
+        let data = std::fs::read_to_string(&path)?;
+        let mut rows = Vec::new();
+        for (index, line) in data.split_inclusive('\n').enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<serde_json::Value>(line) {
+                Ok(mut value) => {
+                    value["seq"] = (index + 1).into();
+                    rows.push(value);
+                }
+                Err(_) if !line.ends_with('\n') => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(rows)
+    }
+    /// Whole user turns for workbench pagination, retaining internal messages,
+    /// guidance, and complete tool exchanges inside their original turn.
+    pub fn conversation_turns(
+        &self,
+        from: u64,
+        limit: usize,
+        tail: bool,
+        before: Option<u64>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let rows = self.conversation()?;
+        let mut starts: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                row["role"] == "user"
+                    && row["content"].is_string()
+                    && row["internal"] != true
+                    && row.pointer("/_mink/guidance") != Some(&serde_json::Value::Bool(true))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if starts.first() != Some(&0) && !rows.is_empty() {
+            starts.insert(0, 0);
+        }
+        let eligible: Vec<usize> = starts
+            .iter()
+            .copied()
+            .filter(|index| {
+                let seq = rows[*index]["seq"].as_u64().unwrap_or_default();
+                seq >= from && before.is_none_or(|boundary| seq < boundary)
+            })
+            .collect();
+        if eligible.is_empty() {
+            return Ok(vec![]);
+        }
+        let chosen: Vec<usize> = if tail || before.is_some() {
+            eligible
+                .iter()
+                .rev()
+                .take(limit)
+                .copied()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect()
+        } else {
+            eligible.into_iter().take(limit).collect()
+        };
+        let begin = chosen[0];
+        let last = *chosen.last().unwrap();
+        let end = starts
+            .iter()
+            .find(|index| **index > last)
+            .copied()
+            .unwrap_or(rows.len());
+        Ok(rows[begin..end].to_vec())
+    }
+    pub fn inputs(&self) -> Result<Vec<crate::runtime::InputReceipt>> {
+        crate::session::input::InputInbox::load(
+            self.directory.join("inputs.json"),
+            crate::session::persistence::PersistenceFault::default(),
+        )
+        .map(|i| i.entries())
+    }
+    pub fn artifacts(&self) -> Result<Vec<serde_json::Value>> {
+        let data = match std::fs::read_to_string(self.directory.join("artifacts/index.jsonl")) {
+            Ok(data) => data,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(crate::session::jsonl::parse_lossy_lines(
+            &self.directory.join("artifacts/index.jsonl"),
+            &data,
+            &mut |warning| eprintln!("{warning}"),
+        ))
+    }
+    pub fn plan(&self) -> Result<serde_json::Value> {
+        fn optional(path: &Path) -> Result<Option<String>> {
+            match std::fs::read_to_string(path) {
+                Ok(text) => Ok(Some(text)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        }
+        Ok(
+            serde_json::json!({"plan":optional(&self.directory.join("plan.md"))?,"draft":optional(&self.directory.join("plan.draft"))?}),
+        )
+    }
     pub fn todo(&self) -> Result<TodoSnapshot> {
         crate::session::todo::TodoStore::load(self.directory.join("todos.json"))
             .map(|store| store.snapshot())

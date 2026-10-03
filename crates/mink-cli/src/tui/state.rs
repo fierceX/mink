@@ -441,6 +441,12 @@ pub(crate) struct InlineSurfaceState {
 
 #[derive(Clone)]
 pub(crate) struct TuiState {
+    pub runtime: Option<crate::tui::TuiRuntime>,
+    pub active_turn_id: Option<String>,
+    pub stopping: bool,
+    pub inputs: Vec<crate::runtime::InputReceipt>,
+    pub applied_inputs: HashSet<String>,
+    pub input_notice: Option<String>,
     pub lines: Vec<TranscriptItem>,
     pub inline: InlineSurfaceState,
     pub stream_line: String,
@@ -514,6 +520,12 @@ pub(crate) enum ActiveOverlay {
 impl Default for TuiState {
     fn default() -> Self {
         Self {
+            runtime: None,
+            active_turn_id: None,
+            stopping: false,
+            inputs: Vec::new(),
+            applied_inputs: HashSet::new(),
+            input_notice: None,
             lines: Vec::new(),
             inline: InlineSurfaceState::default(),
             stream_line: String::new(),

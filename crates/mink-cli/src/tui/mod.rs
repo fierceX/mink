@@ -5,6 +5,9 @@ mod clipboard;
 mod command;
 mod display;
 mod file_picker;
+mod inbox;
+#[cfg(test)]
+mod inbox_tests;
 mod input;
 mod markdown;
 mod notify;
@@ -17,6 +20,12 @@ mod theme;
 
 pub use display::{TuiDisplay, TuiSubAgentStreamSink};
 pub use signal::TuiSignal;
+
+#[derive(Clone)]
+pub struct TuiRuntime {
+    pub handle: crate::runtime::AgentRuntimeHandle,
+    pub signals: std::sync::mpsc::Sender<TuiSignal>,
+}
 
 use crate::cli::RuntimeCmd;
 use crate::config::{SandboxConfig, TuiMode};
@@ -38,10 +47,13 @@ pub fn run_tui(
     session: &crate::runtime::SessionInfo,
     initial_model: &str,
     sandbox: &SandboxConfig,
+    runtime: TuiRuntime,
 ) -> anyhow::Result<()> {
     match mode {
-        TuiMode::Full => run_full_tui(sig_rx, orch_tx, session, initial_model, sandbox),
-        TuiMode::Inline => run_inline_tui(sig_rx, orch_tx, session, initial_model, sandbox),
+        TuiMode::Full => run_full_tui(sig_rx, orch_tx, session, initial_model, sandbox, runtime),
+        TuiMode::Inline => {
+            run_inline_tui(sig_rx, orch_tx, session, initial_model, sandbox, runtime)
+        }
         TuiMode::Off => anyhow::bail!("TUI mode is disabled"),
     }
 }
@@ -52,6 +64,7 @@ fn run_full_tui(
     session: &crate::runtime::SessionInfo,
     initial_model: &str,
     sandbox: &SandboxConfig,
+    runtime: TuiRuntime,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
     crossterm::execute!(
@@ -76,7 +89,7 @@ fn run_full_tui(
     tui_main_loop(
         &mut terminal,
         sig_rx,
-        orch_tx,
+        (orch_tx, runtime),
         TuiMode::Full,
         session,
         initial_model,
@@ -90,6 +103,7 @@ fn run_inline_tui(
     session: &crate::runtime::SessionInfo,
     initial_model: &str,
     sandbox: &SandboxConfig,
+    runtime: TuiRuntime,
 ) -> anyhow::Result<()> {
     let inline_height = preferred_inline_height();
     // ratatui 的 Inline viewport 初始化依赖光标位置查询（DSR `\x1b[6n`）。
@@ -126,7 +140,7 @@ fn run_inline_tui(
     tui_main_loop(
         &mut terminal,
         sig_rx,
-        orch_tx,
+        (orch_tx, runtime),
         effective_mode,
         session,
         initial_model,
@@ -137,12 +151,13 @@ fn run_inline_tui(
 fn tui_main_loop(
     terminal: &mut ratatui::DefaultTerminal,
     sig_rx: mpsc::Receiver<TuiSignal>,
-    orch_tx: tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
+    runtime: (tokio::sync::mpsc::UnboundedSender<RuntimeCmd>, TuiRuntime),
     mode: TuiMode,
     session: &crate::runtime::SessionInfo,
     initial_model: &str,
     sandbox: &SandboxConfig,
 ) -> anyhow::Result<()> {
+    let (orch_tx, runtime) = runtime;
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let (ui_tx, ui_rx) = mpsc::channel::<state::TuiUiEvent>();
     let mut state = TuiState {
@@ -154,6 +169,7 @@ fn tui_main_loop(
         ui_tx: Some(ui_tx),
         model: initial_model.to_string(),
         file_picker_policy: FilePickerPolicy::from_sandbox(cwd, sandbox),
+        runtime: Some(runtime),
         ..Default::default()
     };
     load_persisted_state(session, &mut state);
@@ -161,6 +177,7 @@ fn tui_main_loop(
     let mut saved_inline_terminal = None;
 
     loop {
+        state.refresh_inputs();
         if drain_signals(&mut sig_rx, &mut state, mode) {
             state.dirty = true;
         }

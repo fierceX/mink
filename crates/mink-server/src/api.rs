@@ -79,6 +79,23 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/api/sessions/{id}/open", post(open_session))
         .route("/api/sessions/{id}/close", post(close_session))
         .route("/api/sessions/{id}/turn", post(turn_session))
+        .route(
+            "/api/sessions/{id}/inputs",
+            get(list_inputs).post(submit_input),
+        )
+        .route(
+            "/api/sessions/{id}/inputs/{input_id}",
+            axum::routing::patch(edit_input).delete(withdraw_input),
+        )
+        .route(
+            "/api/sessions/{id}/inputs/{input_id}/resume",
+            post(resume_input),
+        )
+        .route("/api/sessions/{id}/attachments", post(upload_attachment))
+        .route(
+            "/api/sessions/{id}/attachments/{attachment_id}",
+            get(read_attachment),
+        )
         .route("/api/sessions/{id}/interrupt", post(interrupt_session))
         .route("/api/sessions/{id}/events", get(events_history))
         .route("/api/sessions/{id}/conversation", get(conversation_history))
@@ -89,6 +106,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/api/sessions/{id}/artifacts/{name}", get(get_artifact))
         .route("/api/sessions/{id}/files", get(get_files))
         .route("/health", get(health))
+        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
         .with_state(state)
 }
 
@@ -107,6 +125,8 @@ struct TurnReq {
 #[derive(Default, Deserialize)]
 struct ProjectQuery {
     project: Option<String>,
+    snapshot: Option<bool>,
+    request_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -120,6 +140,8 @@ struct HistoryQuery {
     tail: bool,
     #[serde(default)]
     before_seq: Option<u64>,
+    #[serde(default)]
+    turns: bool,
 }
 
 fn default_limit() -> usize {
@@ -197,7 +219,15 @@ async fn get_session(
                 .registry
                 .running(&id, query.project.as_deref())
                 .unwrap_or(false);
-            ApiResponse::ok(json!({ "id": id, "open": is_open, "running": running }))
+            let mut detail = json!({ "id": id, "open": is_open, "running": running });
+            if let Ok(Some(runtime)) = state.registry.active_runtime(&id, query.project.as_deref())
+                && let Some(fields) = runtime.detail().as_object()
+            {
+                for (key, value) in fields {
+                    detail[key] = value.clone();
+                }
+            }
+            ApiResponse::ok(detail)
         }
         Err(error) => registry_error(error),
     }
@@ -220,7 +250,7 @@ async fn open_session(
     Query(query): Query<ProjectQuery>,
 ) -> ApiResponse {
     match state.registry.open(&id, query.project.as_deref()).await {
-        Ok(_) => ApiResponse::ok(json!({ "id": id, "status": "active" })),
+        Ok(_) => ApiResponse::ok(json!({ "id": id, "status": "active", "snapshot": true })),
         Err(error) => registry_error(error),
     }
 }
@@ -255,6 +285,256 @@ async fn turn_session(
     {
         Ok(_) => ApiResponse::ok(json!({ "id": id, "status": "running" })),
         Err(error) => registry_error(error),
+    }
+}
+
+fn runtime_or_err(
+    state: &ApiState,
+    id: &str,
+    project: Option<&str>,
+) -> Result<Arc<crate::session::runtime::SessionRuntime>, ApiResponse> {
+    state
+        .registry
+        .active_runtime(id, project)
+        .map_err(registry_error)?
+        .filter(|runtime| !runtime.closed())
+        .ok_or_else(|| ApiResponse::err(409, "session is not open"))
+}
+fn input_query(
+    entries: Vec<mink::runtime::InputReceipt>,
+    request_id: Option<&str>,
+) -> Vec<mink::runtime::InputReceipt> {
+    entries
+        .into_iter()
+        .filter(|entry| {
+            request_id.map_or(
+                matches!(
+                    entry.status,
+                    mink::runtime::InputStatus::Pending
+                        | mink::runtime::InputStatus::Applying
+                        | mink::runtime::InputStatus::Unapplied
+                ),
+                |id| entry.input_id == id,
+            )
+        })
+        .collect()
+}
+async fn list_inputs(
+    State(state): State<Arc<ApiState>>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
+) -> ApiResponse {
+    if let Ok(runtime) = runtime_or_err(&state, &id, query.project.as_deref()) {
+        return ApiResponse::ok(json!(input_query(
+            runtime.inbox().entries(),
+            query.request_id.as_deref()
+        )));
+    }
+    let dir = match session_dir_or_err(&state, &id, query.project.as_deref()).await {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    match tokio::task::spawn_blocking(move || {
+        mink::runtime::session::SessionReader::new(dir).inputs()
+    })
+    .await
+    {
+        Ok(Ok(inputs)) => ApiResponse::ok(json!(input_query(inputs, query.request_id.as_deref()))),
+        result => ApiResponse::err(500, format!("cannot read inputs: {result:?}")),
+    }
+}
+async fn submit_input(
+    State(state): State<Arc<ApiState>>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
+    Json(mut input): Json<mink::runtime::HumanInput>,
+) -> ApiResponse {
+    let runtime = match runtime_or_err(&state, &id, query.project.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    if input.attachment_ids.len() > 8 {
+        return ApiResponse::err(400, "max 8 attachments");
+    }
+    if !input.attachment_ids.is_empty() {
+        let Some(limits) = runtime.image_input().limits() else {
+            return ApiResponse::err(400, "image input unavailable for this session");
+        };
+        let mut total = 0u64;
+        let mut paths = Vec::new();
+        for attachment in &input.attachment_ids {
+            match runtime
+                .attachments()
+                .read(attachment, limits.max_image_bytes)
+            {
+                Ok((path, bytes)) => {
+                    total += bytes.len() as u64;
+                    paths.push(path);
+                }
+                Err(e) => return ApiResponse::err(400, e.to_string()),
+            }
+        }
+        if input.attachment_ids.len() > limits.max_images_per_request
+            || total > limits.max_image_bytes_per_request.min(16 * 1024 * 1024)
+        {
+            return ApiResponse::err(413, "attachments exceed session limits");
+        }
+        if input.text.trim().is_empty() {
+            input.text =
+                "Please use Read to inspect the attached images and respond to their contents."
+                    .into();
+        }
+        for path in paths {
+            input
+                .text
+                .push_str(&format!("\n[Attached image: \"{}\"]", path.display()));
+        }
+    }
+    match state
+        .registry
+        .submit_input(&id, query.project.as_deref(), input, None)
+    {
+        Ok(receipt) => ApiResponse::ok(json!(receipt)),
+        Err(e) => registry_error(e),
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InputEdit {
+    revision: u64,
+    text: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Revision {
+    revision: u64,
+}
+async fn edit_input(
+    State(state): State<Arc<ApiState>>,
+    AxumPath((id, input_id)): AxumPath<(String, String)>,
+    Query(query): Query<ProjectQuery>,
+    Json(edit): Json<InputEdit>,
+) -> ApiResponse {
+    update_input(
+        &state,
+        &id,
+        &input_id,
+        query.project.as_deref(),
+        edit.revision,
+        Some(edit.text),
+    )
+}
+async fn withdraw_input(
+    State(state): State<Arc<ApiState>>,
+    AxumPath((id, input_id)): AxumPath<(String, String)>,
+    Query(query): Query<ProjectQuery>,
+    Json(edit): Json<Revision>,
+) -> ApiResponse {
+    update_input(
+        &state,
+        &id,
+        &input_id,
+        query.project.as_deref(),
+        edit.revision,
+        None,
+    )
+}
+fn update_input(
+    state: &ApiState,
+    id: &str,
+    input_id: &str,
+    project: Option<&str>,
+    revision: u64,
+    text: Option<String>,
+) -> ApiResponse {
+    let runtime = match runtime_or_err(state, id, project) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    match runtime.inbox().update(input_id, revision, text) {
+        Ok(receipt) => {
+            runtime.publish_inputs();
+            ApiResponse::ok(json!(receipt))
+        }
+        Err(e) => ApiResponse::err(409, e.to_string()),
+    }
+}
+async fn resume_input(
+    State(state): State<Arc<ApiState>>,
+    AxumPath((id, input_id)): AxumPath<(String, String)>,
+    Query(query): Query<ProjectQuery>,
+    Json(edit): Json<Revision>,
+) -> ApiResponse {
+    let runtime = match runtime_or_err(&state, &id, query.project.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let Some(receipt) = runtime
+        .inbox()
+        .entries()
+        .into_iter()
+        .find(|e| e.input_id == input_id)
+    else {
+        return ApiResponse::err(404, "input not found");
+    };
+    match state.registry.submit_input(
+        &id,
+        query.project.as_deref(),
+        receipt.input,
+        Some((&input_id, edit.revision)),
+    ) {
+        Ok(r) => ApiResponse::ok(json!(r)),
+        Err(e) => registry_error(e),
+    }
+}
+async fn upload_attachment(
+    State(state): State<Arc<ApiState>>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
+    bytes: axum::body::Bytes,
+) -> ApiResponse {
+    let runtime = match runtime_or_err(&state, &id, query.project.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let Some(limits) = runtime.image_input().limits().cloned() else {
+        return ApiResponse::err(400, "image input unavailable for this session");
+    };
+    let store = runtime.attachments().clone();
+    match tokio::task::spawn_blocking(move || store.upload(&bytes, &limits)).await {
+        Ok(Ok(a)) => ApiResponse::ok(json!(a)),
+        Ok(Err(e)) => ApiResponse::err(400, e.to_string()),
+        Err(e) => ApiResponse::err(500, e.to_string()),
+    }
+}
+async fn read_attachment(
+    State(state): State<Arc<ApiState>>,
+    AxumPath((id, attachment_id)): AxumPath<(String, String)>,
+    Query(query): Query<ProjectQuery>,
+) -> Response {
+    let dir = match session_dir_or_err(&state, &id, query.project.as_deref()).await {
+        Ok(d) => d,
+        Err(e) => return e.into_response(),
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let (_, bytes) = mink::runtime::AttachmentStore::new(dir.join("attachments"))
+            .read(&attachment_id, 16 * 1024 * 1024)?;
+        let info =
+            mink::runtime::probe_image(&bytes).ok_or_else(|| anyhow::anyhow!("invalid image"))?;
+        Ok::<_, anyhow::Error>((info.mime(), bytes))
+    })
+    .await;
+    match result {
+        Ok(Ok((mime, bytes))) => (
+            [
+                (axum::http::header::CONTENT_TYPE, mime),
+                (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                (axum::http::header::CACHE_CONTROL, "private, max-age=3600"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        _ => ApiResponse::err(404, "attachment unavailable").into_response(),
     }
 }
 
@@ -308,6 +588,22 @@ async fn history_endpoint(
         Ok(dir) => dir,
         Err(error) => return registry_error(error),
     };
+    if query.turns && matches!(kind, HistoryKind::Conversation) {
+        return match tokio::task::spawn_blocking(move || {
+            mink::runtime::session::SessionReader::new(dir).conversation_turns(
+                query.from_seq,
+                query.limit,
+                query.tail,
+                query.before_seq,
+            )
+        })
+        .await
+        {
+            Ok(Ok(rows)) => ApiResponse::ok(json!(rows)),
+            Ok(Err(error)) => ApiResponse::err(500, error.to_string()),
+            Err(error) => ApiResponse::err(500, error.to_string()),
+        };
+    }
     let path = dir.join(match kind {
         HistoryKind::Events => "events.jsonl",
         HistoryKind::Conversation => "conversation.jsonl",
@@ -342,9 +638,18 @@ async fn stream_events(
         Err(error) => return registry_error(error).into_response(),
         Ok(None) => return ApiResponse::err(404, format!("session {id} not open")).into_response(),
     };
-    let mut rx = session.event_receiver();
+    let snapshot_mode = query.snapshot == Some(true);
+    let (snapshot, mut rx) = if query.snapshot == Some(true) {
+        let (value, rx) = session.snapshot_subscription();
+        (Some(value), rx)
+    } else {
+        (None, session.event_receiver())
+    };
     let mut shutdown = state.shutdown.subscribe();
     let stream = async_stream::stream! {
+        if let Some(snapshot)=snapshot {
+            yield Ok::<http_body::Frame<axum::body::Bytes>, std::convert::Infallible>(http_body::Frame::data(axum::body::Bytes::from(format!("data: {snapshot}\n\n"))));
+        }
         // 心跳：30s 无事件时发 `: ping` 注释帧，防止中间代理按空闲超时断开
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
@@ -362,6 +667,7 @@ async fn stream_events(
                 recv = rx.recv() => {
                     match recv {
                         Ok(line) => {
+                            if !snapshot_mode && serde_json::from_str::<serde_json::Value>(&line).ok().is_some_and(|v| matches!(v["type"].as_str(), Some("inputs_updated" | "conversation_committed" | "phase_updated"))) { continue; }
                             let sse = format!("data: {line}\n\n");
                             yield Ok::<http_body::Frame<axum::body::Bytes>, std::convert::Infallible>(
                                 http_body::Frame::data(axum::body::Bytes::from(sse)),
@@ -961,6 +1267,135 @@ mod tests {
         .expect("SSE stream should close after the shutdown signal is sent");
 
         registry.close(&created.id, Some(&project)).await.unwrap();
+        let _ = std::fs::remove_dir_all(home);
+    }
+    #[tokio::test]
+    async fn input_receipts_snapshot_and_legacy_history_are_consistent() {
+        let home = std::env::temp_dir().join(format!(
+            "mink-input-api-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let registry = Arc::new(Registry::with_llm_backend(
+            home.clone(),
+            "mock".into(),
+            1,
+            Arc::new(MockRuntimeBackend),
+        ));
+        let created = registry.create("inputs", &cwd).await.unwrap();
+        let base = format!("/api/sessions/{}", created.id);
+        let project = created.project_key;
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let app = router(Arc::new(ApiState {
+            registry: registry.clone(),
+            cwd,
+            shutdown,
+        }));
+        assert_eq!(
+            req(
+                &app,
+                Method::POST,
+                &format!("{base}/open?project={project}")
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("{base}/stream?project={project}&snapshot=true"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut stream = response.into_body();
+        let initial = tokio::time::timeout(std::time::Duration::from_secs(3), stream.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap();
+        let initial = String::from_utf8(initial.to_vec()).unwrap();
+        let snapshot: serde_json::Value =
+            serde_json::from_str(initial.trim().strip_prefix("data: ").unwrap()).unwrap();
+        assert_eq!(snapshot["type"], "session_snapshot");
+        assert!(snapshot["resources"]["todo"]["items"].is_array());
+        assert!(snapshot["generation"].is_string());
+        let payload =
+            r#"{"request_id":"stable","text":"task","target_turn_id":null,"attachment_ids":[]}"#;
+        let submit = |payload: &str| {
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("{base}/inputs?project={project}"))
+                .header("content-type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap()
+        };
+        assert_eq!(
+            app.clone().oneshot(submit(payload)).await.unwrap().status(),
+            StatusCode::OK
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while let Some(frame) = stream.frame().await {
+                let data = frame.unwrap().into_data().unwrap();
+                let text = String::from_utf8(data.to_vec()).unwrap();
+                let Some(json) = text.trim().strip_prefix("data: ") else {
+                    continue;
+                };
+                let event: serde_json::Value = serde_json::from_str(json).unwrap();
+                assert_eq!(event["generation"], snapshot["generation"]);
+                if event["type"] == "turn_final" {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let (_, receipt) = req(
+            &app,
+            Method::GET,
+            &format!("{base}/inputs?project={project}&request_id=stable"),
+        )
+        .await;
+        assert_eq!(receipt["data"][0]["status"], "applied");
+        assert_eq!(
+            app.clone().oneshot(submit(payload)).await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(submit(&payload.replace("task", "different")))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        let (_, outstanding) = req(
+            &app,
+            Method::GET,
+            &format!("{base}/inputs?project={project}"),
+        )
+        .await;
+        assert_eq!(outstanding["data"], json!([]));
+        let (_, history) = req(
+            &app,
+            Method::GET,
+            &format!("{base}/conversation?project={project}&turns=true&limit=1"),
+        )
+        .await;
+        assert_eq!(history["data"][0]["_mink"]["input_id"], "stable");
+        assert_eq!(history["data"].as_array().unwrap().len(), 2);
+        drop(stream);
+        registry.shutdown_all().await.unwrap();
         let _ = std::fs::remove_dir_all(home);
     }
 }

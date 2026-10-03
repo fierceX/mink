@@ -379,49 +379,33 @@ export function parsePatch(patch: string): ParsedPatch | null {
   return { path, tag, lines };
 }
 
-/** ═══ conversation.jsonl → 伪事件转换 ═══
- * 一条 conversation 消息展开为多条事件（复用 reduceEvent 渲染）。
- * seq 用 行号*100+子序号 保证 key 唯一。
- */
+/** Formal message and block identities survive pagination and live handoff. */
 export function conversationToEvents(raw: Record<string, unknown>): RawEventLike[] {
   const seq = Number(raw.seq ?? 0);
   const role = String(raw.role ?? "");
   const content = raw.content;
+  const metadata = (raw._mink ?? {}) as Record<string, unknown>;
   const out: RawEventLike[] = [];
-  let i = 0;
-  const s = () => seq * 100 + i++;
-  if (role === "user") {
-    if (typeof content === "string") {
-      out.push({ type: "user_input", content, seq: s() });
-    } else if (Array.isArray(content)) {
-      for (const c of content) {
-        const cobj = c as Record<string, unknown>;
-        if (cobj.type === "tool_result") {
-          out.push({ type: "tool_result", tool_use_id: cobj.tool_use_id, content: cobj.content ?? "", seq: s() });
-        }
+  const emit = (block: number, event: Record<string, unknown>) => out.push({ ...event, type: String(event.type), seq, conversation_seq: seq, key: `message:${seq}:${block}` });
+  if (role === "user" && typeof content === "string") {
+    emit(0, { type: raw.internal === true ? "internal_message" : "user_input", content, input_id: metadata.input_id, turn_id: metadata.turn_id, guidance: metadata.guidance, attachment_ids: metadata.attachment_ids, ...(typeof metadata.input_id === "string" ? { key: `input:${metadata.input_id}` } : {}) });
+    if (typeof metadata.input_id === "string") out[0].key = `input:${metadata.input_id}`;
+  } else if (Array.isArray(content)) {
+    content.forEach((c, i) => {
+      const block = c as Record<string, unknown>;
+      if (role === "user" && block.type === "tool_result") {
+        const meta = (block._mink ?? {}) as Record<string, unknown>;
+        emit(i, { ...meta, type: "tool_result", tool_use_id: block.tool_use_id, content: block.content ?? "" });
+      } else if (role === "assistant") {
+        if (block.type === "thinking" && String(block.thinking ?? "").trim()) emit(i, { type: "thinking", content: block.thinking });
+        else if (block.type === "text" && String(block.text ?? "").trim()) emit(i, { type: "text", content: block.text });
+        else if (block.type === "tool_use") emit(i, { type: "tool_call", id: block.id, name: block.name, input: block.input ?? {} });
       }
-    }
-  } else if (role === "assistant") {
-    if (Array.isArray(content)) {
-      for (const c of content) {
-        const cobj = c as Record<string, unknown>;
-        if (cobj.type === "thinking") {
-          const text = String(cobj.thinking ?? cobj.content ?? "");
-          if (text.trim()) out.push({ type: "thinking", content: text, seq: s() });
-        }
-        else if (cobj.type === "text") out.push({ type: "text", content: cobj.text ?? cobj.content ?? "", seq: s() });
-        else if (cobj.type === "tool_use") out.push({ type: "tool_call", id: cobj.id, name: cobj.name, input: cobj.input ?? {}, seq: s() });
-      }
-    }
+    });
   }
   return out;
 }
-
-export interface RawEventLike {
-  type: string;
-  seq: number;
-  [k: string]: unknown;
-}
+export interface RawEventLike { type: string; seq: number; [k: string]: unknown }
 
 /** 剥离 ANSI 转义码（Bash/Edit 结果常含彩色转义，前端按行分类重新着色） */
 export function stripAnsi(text: string): string {

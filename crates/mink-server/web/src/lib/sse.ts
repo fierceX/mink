@@ -25,6 +25,7 @@ export class SseClient {
     onDisconnect: () => void,
     project?: string,
     onOpen: () => void = () => {},
+    private snapshotMode = false,
   ) {
     this.sessionId = sessionId;
     this.onEvent = onEvent;
@@ -37,7 +38,8 @@ export class SseClient {
     if (this.es || this.closed) return;
     this.clearRetryTimer();
     const base = `/api/sessions/${encodeURIComponent(this.sessionId)}/stream`;
-    const url = this.project ? `${base}?project=${encodeURIComponent(this.project)}` : base;
+    const legacyUrl = this.project ? `${base}?project=${encodeURIComponent(this.project)}` : base;
+    const url = this.snapshotMode ? `${legacyUrl}${this.project ? "&" : "?"}snapshot=true` : legacyUrl;
     const es = new EventSource(url);
     this.es = es;
 

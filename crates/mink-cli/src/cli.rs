@@ -27,6 +27,11 @@ pub(crate) enum RuntimeCmd {
         input: String,
         done: Option<oneshot::Sender<RuntimeResult<TurnOutcome>>>,
     },
+    #[cfg(feature = "tui")]
+    RenderTuiStream {
+        stream: crate::runtime::AgentEventStream,
+        signals: std::sync::mpsc::Sender<crate::tui::TuiSignal>,
+    },
     Compact,
     SetModel(String),
     Interrupt,
@@ -104,7 +109,9 @@ fn render_agent_event(display: &dyn Display, kind: AgentEventKind) {
         ),
         AgentEventKind::Prompt => display.render_prompt(),
         AgentEventKind::ClearLine => display.render_clear_line(),
-        AgentEventKind::TurnStarted | AgentEventKind::Final { .. } => {}
+        AgentEventKind::TurnStarted
+        | AgentEventKind::ConversationCommitted { .. }
+        | AgentEventKind::Final { .. } => {}
     }
 }
 
@@ -120,7 +127,46 @@ async fn run_turn_rendered(
     stream.outcome().await
 }
 
-fn start_runtime_broker(
+#[cfg(feature = "tui")]
+async fn render_tui_stream(
+    mut stream: crate::runtime::AgentEventStream,
+    display: &dyn Display,
+    signals: &std::sync::mpsc::Sender<crate::tui::TuiSignal>,
+) -> RuntimeResult<TurnOutcome> {
+    let turn_id = stream.turn_id().to_string();
+    while let Some(event) = stream.recv().await {
+        match event.kind {
+            AgentEventKind::ConversationCommitted { message, .. } => {
+                if message["role"] == "user"
+                    && message["_mink"]["guidance"] == true
+                    && let (Some(id), Some(text)) = (
+                        message["_mink"]["input_id"].as_str(),
+                        message["content"].as_str(),
+                    )
+                {
+                    let _ = signals.send(crate::tui::TuiSignal::GuidanceApplied {
+                        input_id: id.into(),
+                        text: text.into(),
+                    });
+                }
+            }
+            // Round stops do not determine the authoritative turn outcome.
+            AgentEventKind::Stop { .. } | AgentEventKind::Final { .. } => {}
+            kind => render_agent_event(display, kind),
+        }
+    }
+    let outcome = stream.outcome().await;
+    let _ = signals.send(crate::tui::TuiSignal::TurnFinished {
+        turn_id,
+        status: outcome
+            .as_ref()
+            .map(|o| o.status)
+            .unwrap_or(crate::runtime::TurnStatus::Failed),
+    });
+    outcome
+}
+
+pub(crate) fn start_runtime_broker(
     handle: AgentRuntimeHandle,
     display: Arc<dyn Display>,
 ) -> mpsc::UnboundedSender<RuntimeCmd> {
@@ -130,6 +176,12 @@ fn start_runtime_broker(
     tokio::spawn(async move {
         while let Some(command) = work_rx.recv().await {
             let result = match command {
+                #[cfg(feature = "tui")]
+                RuntimeCmd::RenderTuiStream { stream, signals } => {
+                    render_tui_stream(stream, display.as_ref(), &signals)
+                        .await
+                        .map(|_| ())
+                }
                 RuntimeCmd::Run { input, done } => {
                     let result = run_turn_rendered(&work_handle, input, display.as_ref()).await;
                     if let Err(error) = &result {
@@ -369,7 +421,7 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
             #[cfg(feature = "tui")]
             {
                 let cmd_tx = start_runtime_broker(runtime_handle.clone(), display.clone());
-                if let Some((_, signal_rx)) = tui_tx {
+                if let Some((signal_tx, signal_rx)) = tui_tx {
                     let model_label = crate::config::resolve_model_label(&cfg.model);
                     launch_tui_with(|| {
                         crate::tui::run_tui(
@@ -379,6 +431,10 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
                             &session,
                             &model_label,
                             &cfg.sandbox,
+                            crate::tui::TuiRuntime {
+                                handle: runtime_handle.clone(),
+                                signals: signal_tx,
+                            },
                         )
                     })?;
                 }

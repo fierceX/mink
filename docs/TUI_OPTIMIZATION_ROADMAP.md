@@ -1,6 +1,6 @@
 # TUI 实现说明与维护建议
 
-> 更新日期：2026-08-18
+> 更新日期：2026-10-03
 
 ## 定位
 
@@ -14,6 +14,8 @@ TUI 是 `AgentEventStream` 结构化事件的两种终端 surface：
 鼠标路由和最终输出方式。
 
 ## 数据流
+
+任务与中途引导通过 `TuiRuntime.handle.stream_input` 进入 session 唯一持久 Inbox；引导直接准入，不能等待 broker 的当前 stream 结束。输入区回执与 transcript 分离，正式 `ConversationCommitted` 才发出 `GuidanceApplied`，权威 outcome 才发出 `TurnFinished`。运行中 Enter 不封口文本、不新建计费 turn；停止期间保留草稿，`/inputs` 展示待处理输入，`/resume ID` 明确续发，`/withdraw ID` 按 revision 撤回。含引导的历史窗口从公开 Reader 的完整 conversation 轮次恢复，随后复用同一 reducer。
 
 ```text
 LLM / ToolRunner
@@ -113,10 +115,3 @@ cargo check --workspace --all-targets
 - Markdown 结尾换行不产生额外空白行。
 - UTF-8 输入、Ctrl+C、文件选择器、表格、diff、详情长行折行和滚动。
 
-## 维护建议
-
-1. 为 Full 模式增加可见 item 高度索引，避免长会话每次重建完整扁平行缓存。
-2. 为 Full 滚动增加事件合并和终端输出字节基准，控制 SSH 重绘成本。
-3. 为 Full/Inline 终端初始化与恢复增加伪终端集成测试。
-4. Inline 如扩展 Markdown 稳定边界，必须保证未闭合 table/fence 不会提前提交。
-5. Artifact 如需浏览后续区段，应扩展有界分页接口，不得绕过工具层限制一次性读取全文。

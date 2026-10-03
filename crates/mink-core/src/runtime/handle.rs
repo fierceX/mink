@@ -286,6 +286,8 @@ pub struct AgentRuntime {
 
 #[derive(Clone)]
 pub struct AgentRuntimeHandle {
+    pub(crate) input_inbox: Arc<crate::session::input::InputInbox>,
+    pub(crate) image_input: crate::runtime::ImageInputCapability,
     pub(crate) cmd_tx: mpsc::UnboundedSender<OrchCmd>,
     pub(crate) session: SessionInfo,
     pub(crate) event_display: Arc<EventDisplay>,
@@ -296,7 +298,14 @@ pub struct AgentRuntimeHandle {
 impl AgentRuntimeHandle {
     fn next_turn_id(&self) -> TurnId {
         let counter = self.turn_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        TurnId(format!("{}:{counter}", self.session.session_id))
+        TurnId(format!(
+            "{}:{}:{counter}",
+            self.session.session_id,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ))
     }
 
     pub async fn run_turn(&self, input: impl Into<String>) -> RuntimeResult<TurnOutcome> {
@@ -306,8 +315,90 @@ impl AgentRuntimeHandle {
     }
 
     pub fn stream_turn(&self, input: impl Into<String>) -> RuntimeResult<AgentEventStream> {
+        let input = crate::runtime::HumanInput {
+            request_id: format!(
+                "legacy-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ),
+            text: input.into(),
+            target_turn_id: None,
+            attachment_ids: vec![],
+        };
+        self.stream_input_inner(input, None, false)
+            .map(|(_, stream)| stream.expect("new legacy input"))
+    }
+
+    pub fn input_inbox(&self) -> &Arc<crate::runtime::InputInbox> {
+        &self.input_inbox
+    }
+    pub fn image_input(&self) -> &crate::runtime::ImageInputCapability {
+        &self.image_input
+    }
+
+    pub fn stream_input(
+        &self,
+        input: crate::runtime::HumanInput,
+    ) -> RuntimeResult<(crate::runtime::InputReceipt, Option<AgentEventStream>)> {
+        self.stream_input_inner(input, None, true)
+    }
+    pub fn resume_input(
+        &self,
+        id: &str,
+        revision: u64,
+    ) -> RuntimeResult<(crate::runtime::InputReceipt, Option<AgentEventStream>)> {
+        let receipt = self
+            .input_inbox
+            .entries()
+            .into_iter()
+            .find(|e| e.input_id == id)
+            .ok_or_else(|| RuntimeError::Command("input not found".into()))?;
+        self.stream_input_inner(receipt.input, Some((id, revision)), true)
+    }
+    fn stream_input_inner(
+        &self,
+        input: crate::runtime::HumanInput,
+        resume: Option<(&str, u64)>,
+        register: bool,
+    ) -> RuntimeResult<(crate::runtime::InputReceipt, Option<AgentEventStream>)> {
+        if register
+            && resume.is_none()
+            && let Some(receipt) = self
+                .input_inbox
+                .existing(&input)
+                .map_err(|e| RuntimeError::Command(e.to_string()))?
+        {
+            return Ok((receipt, None));
+        }
+        if input.target_turn_id.is_some() && resume.is_none() {
+            if self.turn_gate.interrupt.load(Ordering::SeqCst) {
+                return Err(RuntimeError::Command("turn is stopping".into()));
+            }
+            let receipt = self
+                .input_inbox
+                .accept(input, None)
+                .map_err(|e| RuntimeError::Command(e.to_string()))?;
+            return Ok((receipt, None));
+        }
         let turn_id = self.next_turn_id();
         let permit = self.turn_gate.acquire(turn_id.clone())?;
+        let receipt = if !register {
+            Ok(crate::runtime::InputReceipt::transient(
+                input.clone(),
+                turn_id.as_str(),
+            ))
+        } else {
+            match resume {
+                Some((id, revision)) => self.input_inbox.resume(id, revision, turn_id.as_str()),
+                None => self
+                    .input_inbox
+                    .accept(input.clone(), Some(turn_id.as_str())),
+            }
+        }
+        .map_err(|e| RuntimeError::Command(e.to_string()))?;
         let stream_turn_id = turn_id.clone();
         let (tx, rx) = mpsc::unbounded_channel();
         let progress_budget = crate::runtime::events::ProgressBudget::new(
@@ -320,12 +411,13 @@ impl AgentRuntimeHandle {
         self.event_display.begin_turn(emitter.clone());
         let (done_tx, done_rx) = oneshot::channel();
         if let Err(error) = self.cmd_tx.send(OrchCmd::UserInput {
-            input: input.into(),
+            input: input.text,
             turn_id: turn_id.clone(),
             emitter: emitter.clone(),
             done: done_tx,
         }) {
             self.event_display.end_turn(&turn_id);
+            let _ = self.input_inbox.finish();
             return Err(RuntimeError::Command(error.to_string()));
         }
         let session = self.session.clone();
@@ -345,14 +437,17 @@ impl AgentRuntimeHandle {
             event_display.end_turn(&turn_id);
             outcome
         });
-        Ok(AgentEventStream {
-            turn_id: stream_turn_id,
-            rx,
-            handle: Some(handle),
-            gate: self.turn_gate.clone(),
-            finished: false,
-            progress_budget,
-        })
+        Ok((
+            receipt,
+            Some(AgentEventStream {
+                turn_id: stream_turn_id,
+                rx,
+                handle: Some(handle),
+                gate: self.turn_gate.clone(),
+                finished: false,
+                progress_budget,
+            }),
+        ))
     }
 
     /// Run a manual compaction.
@@ -608,6 +703,14 @@ impl AgentRuntime {
         }
     }
 
+    /// Read the initial presentation without issuing a model request.
+    /// Live title events supersede this snapshot after model changes.
+    pub async fn presentation_snapshot(&self) -> (String, crate::ui::StatsSnapshot) {
+        (
+            self.ctx.model(),
+            crate::ui::title_snapshot(&self.ctx, 0.0).await,
+        )
+    }
     pub fn session_info(&self) -> &SessionInfo {
         self.handle.session_info()
     }

@@ -9,6 +9,7 @@ import type { SessionSummary } from "./api";
 import type { SseClient } from "./sse";
 
 export const uiState = reactive({
+  newOpen: false,
   ctxOpen: false,
   ctxTab: "plan" as string,
   fileOpen: false,

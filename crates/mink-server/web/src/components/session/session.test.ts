@@ -4,6 +4,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import ToolCard from "./ToolCard.vue";
 import ThinkingBlock from "./ThinkingBlock.vue";
+import { viewFor } from "../../lib/workbench";
 import { appState, attachSession } from "../../lib/store";
 import type { ToolItem, ThinkingItem } from "../../lib/types";
 
@@ -13,6 +14,7 @@ beforeEach(() => {
   appState.currentSessionId = null;
   appState.sessionState = null;
   vi.restoreAllMocks();
+  viewFor(JSON.stringify(["proj", "s1"])).expanded = {};
 });
 
 describe("ToolCard", () => {
@@ -85,32 +87,35 @@ describe("ToolCard", () => {
 });
 
 describe("ThinkingBlock 折叠策略", () => {
-  it("idle 折叠 / running 展开 / 结束折叠", async () => {
+  it("思考默认折叠；用户展开在运行和终态后保留", async () => {
     attachSession(session());
     const item: ThinkingItem = { kind: "thinking", text: "第一段" };
     const w = mount(ThinkingBlock, { props: { item } });
     expect(w.find("details").attributes("open")).toBeUndefined();
+    await w.find("summary").trigger("click");
     appState.sessionState!.running = true;
     await flushPromises();
     expect(w.find("details").attributes("open")).toBeDefined();
     appState.sessionState!.running = false;
     await flushPromises();
-    expect(w.find("details").attributes("open")).toBeUndefined();
+    expect(w.find("details").attributes("open")).toBeDefined();
   });
 
-  it("流式推进（后续 text 到达）自动折叠思考块", async () => {
+  it("流式推进（后续 text 到达）不会覆盖手动展开", async () => {
     attachSession(session());
     appState.sessionState!.running = true;
     const item: ThinkingItem = { kind: "thinking", text: "思考中", key: 1 };
     const w = mount(ThinkingBlock, { props: { item } });
-    expect(w.find("details").attributes("open")).toBeDefined(); // 展开
+    expect(w.find("details").attributes("open")).toBeUndefined();
+    await w.find("summary").trigger("click");
+    expect(w.find("details").attributes("open")).toBeDefined(); // 手动展开
     // 追加 text 事件 → 最后项不再是 thinking
     appState.sessionState!.items = [
       { kind: "thinking", text: "思考中", key: 1 },
       { kind: "text", text: "回答", key: 2 },
     ] as any;
     await flushPromises();
-    expect(w.find("details").attributes("open")).toBeUndefined(); // 已折叠
+    expect(w.find("details").attributes("open")).toBeDefined(); // 手动状态保留
   });
 
   it("markdown 渲染思考内容", () => {

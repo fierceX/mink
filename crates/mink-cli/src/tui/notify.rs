@@ -6,6 +6,7 @@ use std::thread;
 pub(crate) enum TaskNotificationKind {
     Completed,
     Failed,
+    Interrupted,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,10 +21,14 @@ impl TaskNotification {
         let title = match kind {
             TaskNotificationKind::Completed => "mink 任务完成",
             TaskNotificationKind::Failed => "mink 任务失败",
+            TaskNotificationKind::Interrupted => "mink 任务已停止",
         };
         let body = match kind {
             TaskNotificationKind::Completed => format!("模型 {model} 已完成当前 TUI 任务。"),
             TaskNotificationKind::Failed => format!("模型 {model} 的当前 TUI 任务已失败。"),
+            TaskNotificationKind::Interrupted => {
+                format!("模型 {model} 的当前 TUI 任务已停止，未应用引导仍保留。")
+            }
         };
         Self {
             kind,

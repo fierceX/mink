@@ -1,9 +1,7 @@
 <script setup lang="ts">
 // ToolCard：容器（着色/头部/折叠）+ 按 view 分发结果组件
-import { ref, watch, computed } from "vue";
-import { appState } from "../../lib/store";
-import { openModal } from "../modals/modalController";
-import ArtifactModal from "../modals/ArtifactModal.vue";
+import { computed } from "vue";
+import { viewFor, openDetail } from "../../lib/workbench";
 import CommandResult from "./results/CommandResult.vue";
 import FileResult from "./results/FileResult.vue";
 import SearchResult from "./results/SearchResult.vue";
@@ -14,17 +12,11 @@ import TextResult from "./results/TextResult.vue";
 import EditCall from "./results/EditCall.vue";
 const props = defineProps<{ item: any }>();
 // 工具卡片始终折叠（头部 summary 展示核心参数），仅手动点击展开详情
-const open = ref(false);
-const onToggle = (e: Event) => {
-  open.value = (e.target as HTMLDetailsElement).open;
-};
-
-
-
-const openArtifact = () => {
-  if (props.item.artifact && appState.sessionState) {
-    openModal(ArtifactModal, { sessionId: appState.sessionState.sessionId, artifactId: props.item.artifact }, `Artifact ${props.item.artifact}`);
-  }
+const open = computed(() => viewFor().expanded[`tool:${String(props.item.key ?? props.item.id)}`] ?? false);
+const onToggle = () => { viewFor().expanded[`tool:${String(props.item.key ?? props.item.id)}`] = !open.value; };
+const openArtifact = () => { if (props.item.artifact) openDetail("outputs", props.item.artifact); };
+const openFile = () => {
+  try { const input = JSON.parse(props.item.input); const path = input.path ?? (input.input ?? input.patch)?.match(/^\[(.*?)(?:#|\])/m)?.[1]; if (path) { const match = String(path).match(/^(.*?)(?::(\d+)(?:[-+].*)?)?$/); if (match) openDetail("files", match[1], Number(match[2] ?? 1)); } } catch { /* no verified path in legacy inputs */ }
 };
 
 const resultComp = computed(() => {
@@ -39,13 +31,15 @@ const resultComp = computed(() => {
 });
 </script>
 <template>
-  <details class="tool-card" :class="[`tc-${item.color}`, { 'tc-failed': item.failed }]" :open="open" @toggle="onToggle">
-    <summary class="t-head">
+  <details class="tool-card" :class="[`tc-${item.color}`, { 'tc-failed': item.failed }]" :open="open" >
+    <summary class="t-head" @click.prevent="onToggle">
       <span class="t-name">{{ item.name }}</span>
       <span v-if="item.summary" class="t-summary" :title="item.summary">{{ item.summary }}</span>
+      <span class="t-status">{{ item.result === undefined ? "执行中" : item.success === undefined ? "状态未记录" : item.success ? "完成" : "失败" }}</span>
       <span v-if="item.resultKind" class="t-kind">{{ item.resultKind }}</span>
     </summary>
     <div class="t-body">
+      <button v-if="['Read','Write','Edit'].includes(item.name)" @click="openFile">查看当前文件</button>
       <!-- Edit/diff：结构化 patch 优先（input 解析 hunk + path/tag），result 作为执行结果附后 -->
       <template v-if="item.view === 'diff'">
         <EditCall :input="item.input" />
@@ -111,4 +105,8 @@ const resultComp = computed(() => {
 .t-result.ok { border-left: 3px solid rgba(23, 154, 97, 0.5); padding-left: 11px; }
 .t-result.err { border-left: 3px solid rgba(214, 69, 93, 0.6); padding-left: 11px; color: var(--red); }
 .t-artifact { margin-top: 8px; background: none; border: none; color: var(--blue); font-family: var(--mono); font-size: 12px; padding: 0; }
+</style>
+
+<style scoped>
+.tool-card { border:0; border-left:0; box-shadow:none; background:transparent; border-radius:4px; }.t-head { padding:6px 8px; font-size:11px; }.t-body { max-height:320px; overflow:auto; }.t-status { margin-left:auto; font-size:10px; color:var(--text-dim); white-space:nowrap; }
 </style>

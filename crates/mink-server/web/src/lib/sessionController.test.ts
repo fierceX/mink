@@ -200,3 +200,19 @@ describe("session authoritative recovery", () => {
   });
 
 });
+
+describe('snapshot recovery',()=>{
+  beforeEach(()=>{vi.restoreAllMocks();FakeEventSource.instances=[];vi.stubGlobal('EventSource',FakeEventSource);});
+  afterEach(async()=>{(await import('./sessionController')).closeSessionView();vi.unstubAllGlobals();});
+  it('running snapshot becomes usable immediately and old navigation callbacks are ignored',async()=>{
+    vi.spyOn(api,'openSession').mockResolvedValue({code:200,message:'',data:{snapshot:true}});
+    const history=vi.spyOn(api,'conversation');
+    const controller=await import('./sessionController');
+    await controller.openSession(summary); const first=FakeEventSource.instances[0];first.open();
+    first.emit({type:'session_snapshot',generation:'g1',stream_sequence:4,conversation:[{seq:1,role:'user',content:'running task'}],progress:[],inputs:[],running:true,current_turn:'t',phase:'running'});
+    expect(appState.sessionState?.desynced).toBe(false);expect(appState.sessionState?.running).toBe(true);expect(history).not.toHaveBeenCalled();
+    await controller.openSession({...summary,id:'other'});
+    first.emit({type:'text',generation:'g1',stream_sequence:5,content:'late old response'});
+    expect(appState.sessionState?.items).toEqual([]);
+  });
+});

@@ -17,6 +17,9 @@ pub struct SessionSummary {
     /// Server-side runtime state: free (disk only) | active | running.
     pub status: &'static str,
     pub path: String,
+    pub pending_input_count: usize,
+    pub phase: String,
+    pub last_final: Option<serde_json::Value>,
     /// Usage 汇总（usage.jsonl）：会话累计 tokens，无记录时为 0。
     pub tokens_in: u64,
     pub tokens_out: u64,

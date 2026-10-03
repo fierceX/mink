@@ -91,6 +91,15 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
     );
     let todo_store =
         Arc::new(TodoStore::load(paths.todos.clone())?.with_fault(persistence_fault.clone()));
+    let input_inbox = Arc::new(crate::session::input::InputInbox::load(
+        paths
+            .conversation
+            .parent()
+            .expect("session directory")
+            .join("inputs.json"),
+        persistence_fault.clone(),
+    )?);
+    input_inbox.recover(&store).await?;
     let vfs_scope = VfsScope {
         resource_session_id: params.resource_session_id,
         agent_session_id: params.session_id.clone(),
@@ -153,6 +162,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
     let warned_image_ids = Arc::new(Mutex::new(std::collections::HashSet::new()));
 
     let ctx = Arc::new(AgentSharedContext {
+        input_inbox,
         config: config.clone(),
         cwd: params.cwd,
         home: params.home,

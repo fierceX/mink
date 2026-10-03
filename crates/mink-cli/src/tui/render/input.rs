@@ -6,9 +6,10 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-pub(super) fn render_input(f: &mut Frame, area: Rect, vis_lines: &[String]) {
+pub(super) fn render_input(f: &mut Frame, area: Rect, vis_lines: &[String], title: &str) {
     let block = Block::default()
         .borders(Borders::ALL)
+        .title(title)
         .border_style(theme::border());
 
     let inner = block.inner(area);

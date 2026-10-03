@@ -1,11 +1,13 @@
 pub mod artifacts;
 pub(crate) mod atomic_file;
+pub mod attachments;
 pub mod compaction;
 pub(crate) mod compaction_cut;
 pub mod compaction_input;
 pub(crate) mod event_log;
 pub mod image_cache;
 pub mod init;
+pub mod input;
 pub(crate) mod jsonl;
 pub mod metadata;
 pub mod paths;

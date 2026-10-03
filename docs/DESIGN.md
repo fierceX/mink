@@ -1,6 +1,6 @@
 # 设计文档
 
-> 更新日期：2026-09-08
+> 更新日期：2026-10-03
 
 本文记录 Mink 的设计取舍和关键不变式，不作为用户手册或工具协议参考。终端用户入口、
 配置和运行方式见 [USAGE.md](USAGE.md)；Rust/Python 嵌入见 [EMBEDDING.md](EMBEDDING.md)；
@@ -17,6 +17,23 @@
 [TOC]
 
 ---
+
+## 会话工作台：安全边界与可恢复输入
+
+导航只收集用户会话：普通及恢复子代理由 Registry 扫描入口按目录名、metadata.id 的 `sub_`/`replan_` 前缀或 parent 字段排除，列表与查找一致。目录身份可覆盖旧子代理元数据缺失或继承的情况；用户 alias 不作为子代理标记。
+
+引导属于正在运行的父 turn，不能打断当前请求、其重试或已接受工具批，也不重置格式窗口、轮次上限、账单 turn 或请求期限，不自动传给子代理。工具调用及结果完整持久化后，在下一请求准备与压缩检查之前顺序消费。正常 Stop 与引导准入共享 Inbox mutex：待处理输入先到则继续当前 turn，关闭准入先到则迟到引导明确失败。取消、永久失败、恢复耗尽、持久化 fault 与轮次上限始终优先结束。
+
+输入状态为 `pending → applying → applied`；停止、失败或重启后未消费的输入转 `unapplied`，只可由用户明确续发；撤回为 `withdrawn`。request ID 与原始内容绑定，重复相同提交只返回既有回执，内容不同冲突。编辑和撤回以 revision 比较，只有 pending/unapplied 可变更，applying 禁止竞争修改。单条文本最多 128 KiB，未消费项最多 32 条。
+
+应用前原子发布 applying，正式消息携带稳定 `_mink.input_id`、turn_id、guidance 与 attachment_ids，持久追加后发布 applied。追加不确定或历史已追加但回执无法发布时闩锁 session。重启检查完整正式历史及预期消息内容，已存在则补齐 applied，不存在则恢复 unapplied，重复或不一致 fail closed；不重复追加正式消息。
+
+界面“已接收”仅表示持久接收，“已加入本轮上下文”仅表示正式历史交接，不宣称模型已遵循。权威终态前所有模型文本均视为已接受的中间回复或暂态候选；废弃候选不转换为正式工具。轮次/过程组只改变展示，不重排事件；重试、错误和引导保留明确边界，最终回复始终可见。
+
+阅读意图按会话独立保存：外层消息身份 + 元素内偏移锚点，内层过程和详情滚动独立，分页前插与高度变化恢复锚点，明确提交或“返回最新内容”才恢复跟随。手动展开优先于展示模式、轮次终态和重连。离开视图或关闭浏览器只断订阅，任务继续；停止与释放 runtime 分别对应 interrupt 与 close。
+
+TUI 的运行中 Enter 直接以当前 turn 身份准入 Inbox，不能排成下一轮或封口当前文本流。回执先显示等待安全边界，正式提交才回显引导；只有匹配 turn 的 Final 结束任务并通知。停止期间保留可编辑草稿，未应用指令持久保留供明确续发或 revision 撤回。含引导的重放以完整正式 conversation 轮次为准，避免只读 events 丢掉引导。
+
 
 ## 主题一：Agent 主循环
 
@@ -64,8 +81,8 @@ SubAgent 由 `SubAgentCoordinator` 在 turn 内部启动、收集和注入结果
   ├── ToolSignalProcessor::reset()
   ├── DecisionEngine::reset()
   └── signal_recovery_guard = false
-步骤 1: store.add_user() + ensure_prefix()
-步骤 2: 自动压缩检查 + Preflight 紧急压缩
+步骤 1: legacy store.add_user() / Inbox 应用新任务 + ensure_prefix()
+步骤 2: 安全边界应用当前 turn 引导 → 自动压缩检查 + Preflight 紧急压缩
 步骤 3: LLM 流式请求（SSE 解析 → Event stream）
 步骤 4: Scavenge 回收（从 thinking/text 复原工具调用）
 步骤 5: 持久化 assistant 消息和 usage

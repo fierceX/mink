@@ -1,6 +1,6 @@
 # 内置工具
 
-> 更新日期：2026-09-08
+> 更新日期：2026-10-03
 
 本文是 Mink 内置工具的协议参考，面向需要理解工具参数、执行模型、结果通道、资源 URL、
 审批和构建裁剪的使用者与开发者。终端使用与配置见 [使用手册](USAGE.md)；Rust/Python
@@ -9,6 +9,17 @@
 [工具能力与提示词解耦设计文档](设计哲学-工具能力与提示词解耦.md)。
 
 [TOC]
+
+## Web 输入与展示元数据
+
+Web 的任务、引导和图片上传属于 runtime 人类输入协议，不是新增模型工具。Plan/Todo 仍只能经现有公开工具修改。引导在完整工具调用/result 交换之后加入正式历史；图片上传仅存 session 传输副本并附绝对路径，模型图片捕获仍走 `Read`。
+
+Full/Inline TUI 也使用此 Inbox 协议，运行中 Enter 提交引导，`/inputs`、`/resume ID`、`/withdraw ID` 是本地人类输入管理命令，不进入模型 tool surface。图片仍随绝对路径请求交给 `Read`，没有第二套图片入口。
+
+SubAgent 的执行记录仍在父会话工具结果中展示；其独立 session（含恢复子代理）不进入 Web 用户会话目录。
+
+正式工具结果 `_mink` 保留 `status`、`tool_name`、`result_kind`、`exit_code`、`presentation`、`artifacts` 及既有状态元数据，供 Web 历史与实时展示统一。正式用户消息 `_mink` 包含 input_id / turn_id / guidance / attachment_ids。所有 `_mink` 在模型请求转换时剥离；`format_tool_result()` 与 conversation 的 conv_content 优先规则保持不变。旧历史缺少 ToolStatus 时界面显示“状态未记录”，不从正文推测成功。
+
 
 ## 执行模型
 

@@ -32,6 +32,9 @@ tokio.workspace = true
 toml.workspace = true
 unicode-width.workspace = true
 
+[dev-dependencies]
+futures.workspace = true
+
 [features]
 default = ["full-cli"]
 runtime = ["mink/runtime"]

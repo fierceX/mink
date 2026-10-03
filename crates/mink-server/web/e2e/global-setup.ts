@@ -54,6 +54,9 @@ export default async function globalSetup() {
   execSync("npm run build", { cwd: WEB_DIR, stdio: "ignore" });
   execSync("cargo build -p mink-server", { cwd: REPO_DIR, stdio: "ignore" });
 
+  const provider = spawn(process.execPath, [join(WEB_DIR, "e2e/mock-provider.mjs")], { stdio: "ignore" });
+  writeFileSync(join(tmpdir(), "mink-e2e-provider.pid"), String(provider.pid));
+  await waitFor("http://127.0.0.1:18822");
   // 启动 server（临时 home + 非默认端口）
   const server = spawn(
     join(REPO_DIR, "target/debug/mink-server"),
@@ -61,12 +64,15 @@ export default async function globalSetup() {
     {
       env: {
         ...process.env,
-        DEEPSEEK_API_KEY: "sk-fake",
+        DEEPSEEK_API_KEY: "sk-local-fixture",
+        DEEPSEEK_BASE_URL: "http://127.0.0.1:18822/v1",
+        MINK_IMAGE_INPUT: "on",
+        NO_PROXY: "127.0.0.1,localhost",
         MINK_HOME: E2E_HOME,
         // E2E 始终服务磁盘 web/dist 最新产物（嵌入产物随 cargo build，前端改动后未重建会过期）
         MINK_SERVER_DEV_WEB: "1",
         MINK_SERVER_PORT: String(BACKEND_PORT),
-        // 短 turn 超时：sk-fake 请求外网 LLM 不可控——8s 超时兜底产生 turn_error（确定性）
+        // 本地模拟 provider 之外的意外挂起由短期限兜底
         MINK_SERVER_TURN_TIMEOUT: "8",
       },
       stdio: "ignore",
@@ -93,7 +99,7 @@ function minkProjectKey(cwd: string): string {
 
 function conversationFixture(): string {
   const rows: Record<string, unknown>[] = [];
-  for (let turn = 0; turn < 12; turn++) {
+  for (let turn = 0; turn < 45; turn++) {
     const toolId = `read-${turn}`;
     rows.push({ role: "user", content: `fixture question ${turn}` });
     rows.push({

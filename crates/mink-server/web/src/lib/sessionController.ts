@@ -3,6 +3,8 @@
 import { api } from "./api";
 import type { SessionSummary } from "./api";
 import { appState, attachSession, detachSession, sseClient } from "./store";
+import { identity, handoffCommittedView, handoffSnapshotView } from "./workbench";
+import { reduceWorkbench } from "./workbenchReducer";
 import { reduceEvent } from "./reducer";
 import { conversationToEvents } from "./toolFormat";
 import { emptySession, type RawEvent, type SessionState } from "./types";
@@ -137,16 +139,27 @@ export async function openSession(summary: SessionSummary): Promise<void> {
   }
   if (!isCurrent(summary, token)) return;
 
+  const usesSnapshot = (opened.data as { snapshot?: boolean } | null)?.snapshot === true;
+  let pendingProgress: RawEvent[] = [];
+  let progressFrame = 0;
+  let pendingBytes = 0;
+  const flushProgress = () => {
+    cancelAnimationFrame(progressFrame); progressFrame = 0;
+    if (isCurrent(summary,token) && appState.sessionState) for (const raw of pendingProgress) appState.sessionState = reduceWorkbench(appState.sessionState,raw);
+    pendingProgress = []; pendingBytes = 0;
+  };
   let client: SseClient;
   const reconnectNow = () => {
     if (!isCurrent(summary, token)) return;
     connected = false;
+    pendingProgress = []; pendingBytes = 0; cancelAnimationFrame(progressFrame); progressFrame = 0;
     invalidateRecovery(summary, token);
     client.reconnect();
   };
   const recover = async () => {
     if (!isCurrent(summary, token)) return;
     connected = false;
+    pendingProgress = []; pendingBytes = 0; cancelAnimationFrame(progressFrame); progressFrame = 0;
     invalidateRecovery(summary, token);
     const detail = await recoveryRequest((signal) =>
       api.getSession(summary.id, summary.project_key, signal));
@@ -164,7 +177,7 @@ export async function openSession(summary: SessionSummary): Promise<void> {
     if (!isCurrent(summary, token)) return;
     connected = true;
     invalidateRecovery(summary, token);
-    scheduleReload(summary, token);
+    if (!usesSnapshot) scheduleReload(summary, token);
   };
   client = new SseClient(
     summary.id,
@@ -172,6 +185,17 @@ export async function openSession(summary: SessionSummary): Promise<void> {
       if (!isCurrent(summary, token)) return;
       if (raw.type === "stream_gap") {
         reconnectNow();
+        return;
+      }
+      if (usesSnapshot && appState.sessionState) {
+        if (raw.type === "text" || raw.type === "thinking") {
+          pendingProgress.push(raw); pendingBytes += String(raw.content ?? "").length; if (document.hidden || pendingBytes >= 65536) { flushProgress(); return; } if (!progressFrame) progressFrame = requestAnimationFrame(flushProgress); return;
+        }
+        flushProgress();
+        const viewKey=identity(summary.project_key,summary.id);
+        if (raw.type === "session_snapshot") handoffSnapshotView(viewKey,appState.sessionState.items,raw.conversation as Record<string,unknown>[], Number(appState.sessionState.messages?.at(-1)?.seq ?? 0));
+        else handoffCommittedView(viewKey,appState.sessionState.items,raw);
+        appState.sessionState = reduceWorkbench(appState.sessionState, raw);
         return;
       }
       if (LIFECYCLE_EVENTS.has(raw.type)) liveGeneration++;
@@ -188,6 +212,7 @@ export async function openSession(summary: SessionSummary): Promise<void> {
     recover,
     summary.project_key,
     onOpen,
+    usesSnapshot,
   );
   sseClient.value = client;
   client.connect();
