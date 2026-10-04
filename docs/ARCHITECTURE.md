@@ -10,6 +10,31 @@
 
 [TOC]
 
+## 官网与文档站
+
+GitHub Pages 发布 `docs/` 静态产物；`docs/index.html` 提供官网与 Markdown 阅读器，
+`assets/home.css` 负责主页及共享视觉样式，`assets/vendor/` 保存解析/高亮资源及版本许可。
+官网围绕轻量可嵌入、长任务上下文、可靠编辑组织三个章节，以机制图说明能力。
+官网自身不启动 runtime；`assets/hero-replay.json` 来自独立实跑案例，包含同轮引导，
+`assets/cases/env-reader.md` 保存原始要求、测试结果与代码。输入动画由正式引导重建，
+长正文节选并加速播放；暂停/离开/隐藏保留位置，加载失败显示错误。
+
+`scripts/build_hero_replay.py` 从 conversation 导出来源行号与类型化工具状态，忽略 internal
+输入，HTML 转义、控制序列清洗与路径匿名化；旧未知状态不标成功。中途不填造统计，
+结束帧可用 `--stats` 读取最终快照；`--events` 按 usage 事件重建已结算计数，
+以调用 ID 或完整回复文本匹配正式消息，保留被废弃响应的真实用量，并与最终总量核对。
+该路径限定独立单轮、主 agent 案例，不匹配或不完整即拒绝导出；未记录信念值显示 —。`--case-title` / `--case-doc` / `--recorded-date` /
+`--mink-version` 指定公开案例身份，`--recording-root` 匿名化独立录制目录。
+导出结构化状态项（字段、文本、TUI 优先级）、状态事件行号与 workState；播放器按实际宽度逐项裁剪，
+resize 后恢复可容纳字段，模型与工作状态优先保留。Python 模块测试验证引导绑定、
+真实/未知状态、TUI 数字格式、输入 Token 口径及导出清洗。
+
+阅读器用 `#docs/<path>#<anchor>` 保存文档位置，fetch 的 generation 拒绝过期结果，
+主页入口使用 `#home`、`#features`、`#start`，三个章节各有 `#runtime` / `#context` /
+`#reliability`，引导案例为 `#guidance`。发布工作流将根目录 CHANGELOG 复制到
+站点；本地缺少该文件时显示源文件入口。`scripts/test-homepage.mjs` 复用现有 Web
+测试环境的 jsdom，CI 验证资源、版本、导航、键盘、复制与异步加载行为。
+
 ## 会话工作台与人类输入
 
 `mink-server` 继续复用 Axum、Registry lease 与 `AgentRuntime`，Vue/Vite 产物嵌入二进制。Web 数据流为 REST/SSE → SessionController / CatalogController → 会话模型 → 纯轮次投影 → 展示组件。`workbench.ts` 单独保存按 `(project_key, session_id)` 隔离的草稿、附件引用、展开选择和阅读锚点；异步操作捕获原会话身份，过期响应不能写入当前视图。
