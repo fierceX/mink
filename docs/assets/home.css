@@ -278,3 +278,45 @@ button { cursor: pointer; }
   .runtime-lifecycle { gap: 6px; font-size: 9px; }
   .edit-map-title { align-items: start; flex-direction: column; }
 }
+
+/* Documentation reader: bounded navigation and content scroll containers. */
+.docs-shell { overflow: visible; }
+.doc-content { max-width: 100%; overflow-wrap: anywhere; padding: 40px 36px 56px; }
+.docs-layout > * { min-width: 0; }
+.doc-sidebar { align-self: start; position: sticky; top: var(--nav-h); max-height: calc(100dvh - var(--nav-h)); overflow-y: auto; }
+.doc-tree summary { cursor: pointer; }
+.doc-tree + .doc-tree { margin-top: 22px; }
+.doc-nav-close { display: none; }
+.doc-table-scroll { max-width: 100%; overflow-x: auto; }
+.doc-table-scroll table { width: max-content; min-width: 100%; margin: 16px 0; }
+.code-frame, .doc-content pre { max-width: 100%; min-width: 0; }
+.doc-content pre { overflow-x: auto; }
+.doc-pager { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 20px; border-top: 1px solid var(--line); padding: 24px 36px; }
+.doc-pager a, .doc-catalogue a { color: var(--blue); overflow-wrap: anywhere; }
+.doc-catalogue { display: grid; gap: 14px; }
+#doc-nav-backdrop { position: fixed; inset: 0; background: #20231f70; z-index: 70; }
+#doc-nav-backdrop[hidden] { display: none; }
+@media (min-width: 821px) and (max-width: 1240px) {
+  #doc-toc-toggle { display: inline-flex; }
+  .doc-toc-panel.toc-open { display: block !important; grid-column: 2; grid-row: 1; border-bottom: 1px solid var(--line); }
+  .doc-toc-inner { position: static; max-height: 38dvh; }
+  .doc-main { grid-column: 2; }
+  .doc-sidebar { grid-column: 1; grid-row: 1 / span 2; }
+}
+@media (max-width: 820px) {
+  .doc-nav-open { overflow: hidden; }
+  .docs-topbar { padding: 16px; align-items: flex-start; flex-direction: column; }
+  .doc-content { padding: 28px 18px 40px; }
+  .doc-content h1 { font-size: 28px; }
+  .doc-content h2 { font-size: 22px; }
+  .doc-pager { padding: 20px 18px; }
+  .doc-sidebar { display: none; position: fixed; inset: 0 auto 0 0; width: min(320px, 90vw); max-height: 100dvh; z-index: 80; padding: 20px; background: var(--bg); }
+  .docs-shell.sidebar-open .doc-sidebar { display: block; }
+  .doc-nav-close { display: block; padding: 10px; margin-bottom: 20px; }
+  .doc-toc-panel.toc-open { display: block !important; grid-row: 1; padding: 18px; border-bottom: 1px solid var(--line); }
+  .doc-toc-inner { position: static; max-height: 35dvh; }
+  .doc-sidebar-toggle { display: inline-flex; }
+}
+
+.doc-tree summary.group::after { content: " +"; float: right; }
+.doc-tree[open] summary.group::after { content: " −"; }

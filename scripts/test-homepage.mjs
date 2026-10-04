@@ -14,6 +14,8 @@ const html = readFileSync(new URL("docs/index.html", root), "utf8");
 const source = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match => match[1]).join("\n");
 new Script(source);
 const marked = readFileSync(new URL("docs/assets/vendor/marked.min.js", root), "utf8");
+const shared = readFileSync(new URL("docs/assets/docs-shared.js", root), "utf8");
+const manifest = JSON.parse(readFileSync(new URL("docs/manifest.json", root), "utf8"));
 const replay = JSON.parse(readFileSync(new URL("docs/assets/hero-replay.json", root), "utf8"));
 const settle = () => new Promise(resolve => setTimeout(resolve, 20));
 
@@ -33,10 +35,12 @@ async function page(t, { hash = "", reduced = false, fetchDoc, fetchReplay, cloc
       w.HTMLElement.prototype.scrollIntoView = () => {};
       Object.defineProperty(w.HTMLElement.prototype, "innerText", { get() { return this.textContent; } });
       w.fetch = async path => {
+        if (path === "manifest.json") return { ok: true, json: async () => manifest };
         if (path === "assets/hero-replay.json") return fetchReplay ? fetchReplay() : { ok: true, json: async () => replay };
         return fetchDoc ? fetchDoc(path) : { ok: true, text: async () => `# ${path}\n\n正文\n\n## 下一步` };
       };
       w.eval(marked);
+      w.eval(shared);
     },
   });
   t.after(() => dom.window.close());
@@ -80,47 +84,49 @@ test("quickstart tabs support click, arrow keys and Home/End with a single keybo
 });
 
 test("documentation deep links restore on load and homepage navigation returns", async t => {
-  const w = await page(t, { hash: "#docs/server.md" });
+  const w = await page(t, { hash: "#docs/reference/http-api.md" });
   assert.ok(w.document.getElementById("page-docs").classList.contains("active"));
-  assert.ok(w.document.querySelector("#doc-main h1").textContent.includes("server.md"));
+  assert.ok(w.document.querySelector("#doc-main h1").textContent.includes("reference/http-api.md"));
   w.document.querySelector(".skip-link").click();
   assert.equal(w.document.activeElement.id, "doc-main");
-  assert.equal(w.location.hash, "#docs/server.md");
+  assert.equal(w.location.hash, "#docs/reference/http-api.md");
   w.document.querySelector(".brand").click();
   assert.ok(w.document.getElementById("page-home").classList.contains("active"));
   assert.equal(w.location.hash, "#home");
   w.history.back();
   await settle();
   assert.ok(w.document.getElementById("page-docs").classList.contains("active"));
-  assert.equal(w.document.getElementById("doc-current-path").textContent, "docs/server.md");
+  assert.equal(w.document.getElementById("doc-current-path").textContent, "docs/reference/http-api.md");
 });
 
 test("heading and table-of-contents links retain the document route and reduced-motion scrolling", async t => {
-  const w = await page(t, { hash: "#docs/USAGE.md", reduced: true,
+  const w = await page(t, { hash: "#docs/start/quickstart.md", reduced: true,
     fetchDoc: () => ({ ok: true, text: async () => "# Manual\n\n[TOC]\n\n## Details\n\nBody\n\n## Next" }) });
   const scrolls = [];
   w.HTMLElement.prototype.scrollIntoView = options => scrolls.push(options);
   w.document.querySelector("#details .heading-anchor").click();
-  assert.equal(w.location.hash, "#docs/USAGE.md#details");
+  assert.equal(w.location.hash, "#docs/start/quickstart.md#details");
   assert.equal(scrolls.at(-1).behavior, "auto");
   w.document.querySelector("#doc-toc-list li:last-child a").click();
-  assert.equal(w.location.hash, "#docs/USAGE.md#next");
+  assert.equal(w.location.hash, "#docs/start/quickstart.md#next");
   w.handleRoute();
   await settle();
   assert.ok(w.document.getElementById("page-docs").classList.contains("active"));
-  assert.equal(w.document.getElementById("doc-current-path").textContent, "docs/USAGE.md");
+  assert.equal(w.document.getElementById("doc-current-path").textContent, "docs/start/quickstart.md");
   assert.equal(scrolls.at(-1).behavior, "auto");
 });
 
 test("late document results do not replace a newer selection or scroll the homepage", async t => {
   let release;
-  const w = await page(t, { fetchDoc: path => path === "USAGE.md" ? new Promise(resolve => { release = resolve; }) : { ok: true, text: async () => `# ${path}` } });
-  const first = w.loadDoc("USAGE.md");
-  await w.loadDoc("EMBEDDING.md");
+  const w = await page(t, { fetchDoc: path => path === "guides/terminal.md" ? new Promise(resolve => { release = resolve; }) : { ok: true, text: async () => `# ${path}` } });
+  const first = w.loadDoc("guides/terminal.md");
+  await settle();
+  await w.loadDoc("integration/rust.md");
   release({ ok: true, text: async () => "# Old document" });
   await first;
-  assert.ok(w.document.querySelector("#doc-main h1").textContent.includes("EMBEDDING"));
-  const pending = w.loadDoc("USAGE.md");
+  assert.ok(w.document.querySelector("#doc-main h1").textContent.includes("integration/rust"));
+  const pending = w.loadDoc("guides/terminal.md");
+  await settle();
   w.showPage("home");
   release({ ok: true, text: async () => "# Late document" });
   await pending;
@@ -249,7 +255,7 @@ test("typed replay streams text, pauses without skipping, resumes after navigati
   clock.next();
   assert.ok(row.textContent.endsWith(Array.from(replay.steps[1].text).slice(0, 2).join("")));
   const position = row.textContent;
-  await w.loadDoc("USAGE.md");
+  await w.loadDoc("guides/terminal.md");
   assert.equal(clock.size, 0);
   w.showPage("home");
   clock.next();
@@ -289,4 +295,66 @@ test("failed replay loading reports an error instead of inventing a replacement 
   assert.ok(w.document.getElementById("hero-tui-transcript").textContent.includes("加载失败"));
   assert.ok(w.document.getElementById("demo-pause").disabled);
   assert.ok(w.document.getElementById("demo-restart").disabled);
+});
+
+test("manifest drives grouped navigation, catalogue, pager and rejects removed paths", async t => {
+  const w = await page(t, { hash: '#docs/start/overview.md' });
+  assert.equal(w.document.querySelectorAll('.doc-tree a').length, manifest.length);
+  assert.equal(w.document.querySelectorAll('.doc-catalogue a').length, manifest.length - 1);
+  assert.equal(w.document.querySelector('.doc-pager a').getAttribute('href'), '#docs/start/quickstart.md');
+  let fetched = false;
+  w.fetch = async () => { fetched = true; throw new Error('must not fetch unknown path'); };
+  await w.loadDoc('../private.md');
+  assert.equal(fetched, false);
+  assert.match(w.document.getElementById('doc-main').textContent, /文档不存在/);
+  assert.match(w.document.querySelector('#doc-main a').href, /start\/overview/);
+});
+
+test("nested links, source paths, Chinese duplicate headings and images resolve under Pages prefix", async t => {
+  const w = await page(t, { hash: '#docs/guides/images.md', fetchDoc: () => ({ok:true,text:async()=> '# 图片\n\n## 中文 标题\n\n## 中文 标题\n\n## 中文 标题-1\n\n[参考](../reference/tools.md#read) [源码](../../crates/mink-core/src/lib.rs) ![标志](../assets/mink-mark.svg)'} ) });
+  assert.ok(w.document.getElementById('中文-标题-1'));
+  assert.ok(w.document.getElementById('中文-标题-1-1'));
+  const headingIds = [...w.document.querySelectorAll('#doc-main h1, #doc-main h2')].map(el => el.id);
+  assert.equal(new Set(headingIds).size, headingIds.length);
+  assert.equal(w.document.querySelector('#doc-main a[href*="reference/tools"]').getAttribute('href'), '#docs/reference/tools.md#read');
+  assert.equal(w.document.querySelector('#doc-main a[href*="github.com"]').href, 'https://github.com/fierceX/mink/blob/main/crates/mink-core/src/lib.rs');
+  const entry = manifest.find(e => e.path === 'guides/images.md');
+  const resolved = w.MinkDocs.resolveLink(entry.source, '../assets/mink-mark.svg', manifest, 'https://example.test/mink/');
+  assert.equal(resolved.href, 'https://example.test/mink/assets/mink-mark.svg');
+});
+
+test("mobile navigation traps keyboard focus and restores its trigger; TOC is independent", async t => {
+  const w = await page(t, { hash: '#docs/start/overview.md' });
+  Object.defineProperty(w, 'innerWidth', {value:390, configurable:true});
+  const trigger = w.document.getElementById('doc-nav-toggle'); trigger.focus(); trigger.click();
+  const first = w.document.querySelector('#doc-sidebar button');
+  assert.equal(w.document.activeElement, first);
+  first.dispatchEvent(new w.KeyboardEvent('keydown', {key:'Tab',shiftKey:true,bubbles:true}));
+  assert.notEqual(w.document.activeElement, first);
+  w.document.activeElement.dispatchEvent(new w.KeyboardEvent('keydown', {key:'Tab',bubbles:true}));
+  assert.equal(w.document.activeElement, first);
+  first.dispatchEvent(new w.KeyboardEvent('keydown', {key:'Escape',bubbles:true}));
+  assert.equal(w.document.activeElement, trigger);
+  assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+  w.document.getElementById('doc-toc-toggle').click();
+  assert.ok(w.document.getElementById('doc-toc-panel').classList.contains('toc-open'));
+  assert.ok(!w.document.querySelector('.sidebar-open'));
+  trigger.focus(); trigger.click();
+  w.showPage('home', true);
+  assert.ok(!w.document.querySelector('.sidebar-open'));
+  assert.ok(w.document.getElementById('doc-nav-backdrop').hidden);
+  assert.equal(w.document.querySelector('.nav').inert, false);
+  assert.ok(!w.document.body.classList.contains('doc-nav-open'));
+});
+
+test("document code copying preserves tabs, spaces and final newlines; scrollspy uses viewport positions", async t => {
+  const w = await page(t, { hash:'#docs/guides/terminal.md', fetchDoc:()=>({ok:true,text:async()=> '# 操作\n\n## 一\n\n```text\n\t first  \nsecond\n```\n\n## 二'}) });
+  let copied;
+  Object.defineProperty(w.navigator,'clipboard',{value:{writeText:async text=>{copied=text;}}});
+  w.document.querySelector('.code-copy').click(); await settle();
+  assert.equal(copied, '\t first  \nsecond\n');
+  w.document.getElementById('一').getBoundingClientRect = ()=>({top:-100});
+  w.document.getElementById('二').getBoundingClientRect = ()=>({top:500});
+  w.updateScrollChrome();
+  assert.equal(w.document.querySelector('.doc-toc-list a.active').getAttribute('href'), '#%E4%B8%80');
 });

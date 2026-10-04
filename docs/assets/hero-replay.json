@@ -5,7 +5,7 @@
     "source": "Recorded Mink session; text excerpts, input animation and accelerated playback",
     "statsNote": "Settled usage reconstructed from recorded events; unrecorded values remain unknown; final totals reconciled with stats.json",
     "caseTitle": ".env 解析修复",
-    "caseDoc": "assets/cases/env-reader.md",
+    "caseDoc": "examples/guided-env-parser.md",
     "recordedDate": "2026-10-04",
     "version": "0.6.6",
     "guidanceCount": 1,

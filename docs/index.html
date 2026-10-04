@@ -11,6 +11,7 @@
 <meta property="og:type" content="website">
 <link rel="icon" type="image/svg+xml" href="assets/mink-mark.svg">
 <script src="assets/vendor/marked.min.js" defer></script>
+<script src="assets/docs-shared.js" defer></script>
 <link rel="stylesheet" href="assets/vendor/github.min.css">
 <script src="assets/vendor/highlight.min.js" defer></script>
 <style>.docs-wrap{
@@ -452,9 +453,9 @@
     </a>
     <div class="nav-links">
       <a id="nav-home" class="active" href="#features" onclick="openSection('features'); return false;">探索</a>
-      <a id="nav-docs" href="#docs/USAGE.md" onclick="showPage('docs'); return false;">文档</a>
+      <a id="nav-docs" href="#docs/start/overview.md" onclick="loadDoc('start/overview.md'); return false;">文档</a>
       <a class="nav-github" href="https://github.com/fierceX/mink" target="_blank" rel="noreferrer">GitHub ↗</a>
-      <a class="nav-start" href="#start" onclick="openSection('start'); return false;">开始使用 <span aria-hidden="true">↗</span></a>
+      <a class="nav-start" href="#docs/start/quickstart.md" onclick="loadDoc('start/quickstart.md'); return false;">开始使用 <span aria-hidden="true">↗</span></a>
     </div>
   </div>
 </nav>
@@ -492,21 +493,21 @@
 
     <section id="features" class="capabilities" aria-label="Mink 的核心特点">
       <article id="runtime" class="capability-row" aria-labelledby="runtime-title">
-        <div class="capability-copy"><div class="section-kicker">01 / 轻量与可嵌入</div><h2 id="runtime-title">一套 Rust 内核，<br>接入你的工作方式。</h2><p>终端里是单二进制的 coding agent。接入应用时，Rust 通过 <code>mink::runtime</code> 在进程内运行；Python SDK 与 Web 服务复用同一内核。</p><p class="capability-detail">模型后端可替换，工具范围可选择。会话、执行与恢复能力由 runtime 提供。</p><a class="text-link" href="#docs/EMBEDDING.md" onclick="loadDoc('EMBEDDING.md'); return false;">查看运行时与 SDK →</a></div>
+        <div class="capability-copy"><div class="section-kicker">01 / 轻量与可嵌入</div><h2 id="runtime-title">一套 Rust 内核，<br>接入你的工作方式。</h2><p>终端里是单二进制的 coding agent。接入应用时，Rust 通过 <code>mink::runtime</code> 在进程内运行；Python SDK 与 Web 服务复用同一内核。</p><p class="capability-detail">模型后端可替换，工具范围可选择。会话、执行与恢复能力由 runtime 提供。</p><a class="text-link" href="#docs/integration/rust.md" onclick="loadDoc('integration/rust.md'); return false;">查看运行时与 SDK →</a></div>
         <div class="runtime-map" aria-label="CLI/TUI、Web、Rust 与 Python 共用 AgentRuntime"><div class="entry-points"><span>CLI / TUI</span><span>Web</span><span>Rust 库</span><span>Python SDK</span></div><div class="runtime-bridge" aria-hidden="true"></div><div class="runtime-core"><span class="runtime-label">MINK CORE</span><strong>AgentRuntime</strong><p>会话 · 模型调用 · 工具执行 · 恢复</p></div><div class="runtime-lifecycle"><code>start()</code><span>→</span><code>stream_turn()</code><span>→</span><code>shutdown()</code></div><p class="diagram-note">Rust 同进程嵌入；Python 使用 wheel 内置的核心二进制。</p></div>
       </article>
       <article id="context" class="capability-row" aria-labelledby="context-title">
-        <div class="capability-copy"><div class="section-kicker">02 / 长任务与上下文</div><h2 id="context-title">任务继续，<br>上下文保持可控。</h2><p>完整会话持续保存，模型只读取当前的活跃上下文。压缩通过摘要推进上下文边界，保留原始历史；恢复会话后可以继续工作。</p><p class="capability-detail">Plan / Todo 保存任务状态，Artifact 保留超长输出。长任务的进度与材料都有明确的读取入口。</p><a class="text-link" href="#docs/DESIGN.md" onclick="loadDoc('DESIGN.md'); return false;">了解上下文与持久化 →</a></div>
+        <div class="capability-copy"><div class="section-kicker">02 / 长任务与上下文</div><h2 id="context-title">任务继续，<br>上下文保持可控。</h2><p>完整会话持续保存，模型只读取当前的活跃上下文。压缩通过摘要推进上下文边界，保留原始历史；恢复会话后可以继续工作。</p><p class="capability-detail">Plan / Todo 保存任务状态，Artifact 保留超长输出。长任务的进度与材料都有明确的读取入口。</p><a class="text-link" href="#docs/concepts/state-and-context.md" onclick="loadDoc('concepts/state-and-context.md'); return false;">了解上下文与持久化 →</a></div>
         <div class="context-map" aria-label="完整历史保留，活跃上下文由摘要、当前任务与近期交换组成"><div class="history-strip"><span class="diagram-label">完整会话历史</span><div class="history-blocks" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><small>只追加，保留原始记录</small></div><div class="context-transition"><span>摘要与投影</span><span aria-hidden="true">↓</span></div><div class="active-context"><span class="diagram-label">发送给模型的活跃上下文</span><div><span>摘要</span><span>当前任务</span><span>近期工具交换</span></div></div><div class="state-ledger"><span>Session 恢复</span><span>Plan / Todo</span><span>Artifact 回读</span></div></div>
       </article>
       <article id="reliability" class="capability-row" aria-labelledby="reliability-title">
-        <div class="capability-copy"><div class="section-kicker">03 / 可靠编辑与状态</div><h2 id="reliability-title">先读，再改。<br>有歧义，就明确返回。</h2><p>Hashline 用读取时的快照与锚点定位修改；Replace 用唯一的文本匹配定位。位置不确定时拒绝含糊修改，工具结果进入正式会话。</p><p class="capability-detail">计划与待办持久保存，待办变更比较 revision；输入有持久回执。执行错误保留真实状态，恢复时有记录可核对。</p><a class="text-link" href="#docs/tools.md" onclick="loadDoc('tools.md'); return false;">查看编辑与工具协议 →</a></div>
+        <div class="capability-copy"><div class="section-kicker">03 / 可靠编辑与状态</div><h2 id="reliability-title">先读，再改。<br>有歧义，就明确返回。</h2><p>Hashline 用读取时的快照与锚点定位修改；Replace 用唯一的文本匹配定位。位置不确定时拒绝含糊修改，工具结果进入正式会话。</p><p class="capability-detail">计划与待办持久保存，待办变更比较 revision；输入有持久回执。执行错误保留真实状态，恢复时有记录可核对。</p><a class="text-link" href="#docs/reference/tools.md" onclick="loadDoc('reference/tools.md'); return false;">查看编辑与工具协议 →</a></div>
         <div class="edit-map"><div class="edit-map-title"><span class="diagram-label">编辑边界</span><span>Read → Edit → Verify</span></div><div class="edit-path"><code>Hashline</code><p>读取快照 <span>→</span> 行锚点 <span>→</span> 校验后修改</p></div><div class="edit-path"><code>Replace</code><p>读取内容 <span>→</span> 唯一匹配 <span>→</span> 校验后修改</p></div><div class="edit-outcome"><span>遇到 stale 或多候选</span><strong>返回明确结果，重新读取后继续</strong></div><p class="diagram-note">模型负责提出修改；工具协议约束实际写入。</p></div>
       </article>
     </section>
 
     <section id="guidance" class="guidance-section" aria-labelledby="guidance-title">
-      <div class="guidance-copy"><div class="section-kicker">运行中引导 / 真实案例</div><h2 id="guidance-title">方向可以调整，<br>继续同一个任务。</h2><p>任务执行期间直接输入补充要求。引导持久接收，在当前工具交换完成后进入上下文，接下来的步骤采用新约束。</p><button class="text-link replay-guidance" type="button" onclick="playGuidanceExcerpt()">播放中途引导片段 ↗</button><a class="case-source text-link" href="#docs/assets/cases/env-reader.md" onclick="loadDoc('assets/cases/env-reader.md'); return false;">查看案例与验证记录 →</a></div>
+      <div class="guidance-copy"><div class="section-kicker">运行中引导 / 真实案例</div><h2 id="guidance-title">方向可以调整，<br>继续同一个任务。</h2><p>任务执行期间直接输入补充要求。引导持久接收，在当前工具交换完成后进入上下文，接下来的步骤采用新约束。</p><button class="text-link replay-guidance" type="button" onclick="playGuidanceExcerpt()">播放中途引导片段 ↗</button><a class="case-source text-link" href="#docs/examples/guided-env-parser.md" onclick="loadDoc('examples/guided-env-parser.md'); return false;">查看案例与验证记录 →</a></div>
       <div class="guidance-story"><div class="case-step"><span>任务</span><p id="case-task">修复 .env 解析器：保留值中的等号，支持单双引号。</p></div><div class="case-step guidance-turn"><span>中途引导</span><blockquote id="case-guidance">只去掉首尾配对引号，不展开变量；空值也要保留，禁止新增依赖。</blockquote></div><div class="case-step"><span>结果</span><p id="case-result">读取代码 → 收到新约束 → 修改与测试。以实际运行记录为准。</p></div></div>
     </section>
 
@@ -537,7 +538,7 @@ export DEEPSEEK_API_KEY="your-api-key"
 ./target/release/mink --tui=inline</code></pre></div>
         </div>
         <div id="tab-python" class="tab-panel" role="tabpanel" aria-labelledby="quick-tab-python" tabindex="0">
-          <div class="tab-copy"><h3>从 Python 调用运行时。</h3><p>通过 SDK 管理会话、运行任务和获取结果。Wheel 内置精简核心二进制，复用同一 Rust 内核。</p><ul><li>pip install mink-agent</li><li>显式配置模型与文件访问范围</li><li>支持会话生命周期与结构化结果</li></ul><a class="text-link" href="#docs/EMBEDDING.md" onclick="loadDoc('EMBEDDING.md'); return false;">阅读 SDK 文档 ↗</a></div>
+          <div class="tab-copy"><h3>从 Python 调用运行时。</h3><p>通过 SDK 管理会话、运行任务和获取结果。Wheel 内置精简核心二进制，复用同一 Rust 内核。</p><ul><li>pip install mink-agent</li><li>显式配置模型与文件访问范围</li><li>支持会话生命周期与结构化结果</li></ul><a class="text-link" href="#docs/integration/python.md" onclick="loadDoc('integration/python.md'); return false;">阅读 SDK 文档 ↗</a></div>
           <div class="quick-code"><div class="top"><span>python / quickstart</span><button class="copy-button" type="button" data-copy="code-python">复制代码 ⧉</button></div><pre><code id="code-python"><span class="c"># 先运行：pip install mink-agent</span>
 import os
 from mink_agent import AgentSession, SandboxConfig
@@ -553,7 +554,7 @@ finally:
     session.close()</code></pre></div>
         </div>
         <div id="tab-rust" class="tab-panel" role="tabpanel" aria-labelledby="quick-tab-rust" tabindex="0">
-          <div class="tab-copy"><h3>在 Rust 进程内运行。</h3><p>通过 mink::runtime 直接在 Rust 进程内运行 agent，管理启动、任务和关闭，无需启动 CLI 子进程。</p><ul><li>crate：mink-core · library：mink</li><li>等待结果，或订阅事件流</li><li>可注入自己的 LLM backend</li></ul><a class="text-link" href="#docs/EMBEDDING.md" onclick="loadDoc('EMBEDDING.md'); return false;">阅读 Rust 嵌入指南 ↗</a></div>
+          <div class="tab-copy"><h3>在 Rust 进程内运行。</h3><p>通过 mink::runtime 直接在 Rust 进程内运行 agent，管理启动、任务和关闭，无需启动 CLI 子进程。</p><ul><li>crate：mink-core · library：mink</li><li>等待结果，或订阅事件流</li><li>可注入自己的 LLM backend</li></ul><a class="text-link" href="#docs/integration/rust.md" onclick="loadDoc('integration/rust.md'); return false;">阅读 Rust 嵌入指南 ↗</a></div>
           <div class="quick-code"><div class="top"><span>rust / quickstart</span><button class="copy-button" type="button" data-copy="code-rust">复制代码 ⧉</button></div><pre><code id="code-rust"><span class="c">// Cargo.toml：还需添加 tokio 和 anyhow</span>
 <span class="c">// mink = { package = "mink-core", version = "0.6.6",</span>
 <span class="c">//   default-features = false, features = ["runtime"] }</span>
@@ -573,7 +574,7 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
 }</code></pre></div>
         </div>
         <div id="tab-server" class="tab-panel" role="tabpanel" aria-labelledby="quick-tab-server" tabindex="0">
-          <div class="tab-copy"><h3>在浏览器里继续工作。</h3><p>启动带有 Web 工作台的服务。终端与浏览器使用同一会话目录，查看任务、文件和运行状态。</p><ul><li>单二进制服务 · 前端构建产物内嵌</li><li>REST + SSE 实时事件</li><li>构建需要 Node.js / npm</li></ul><a class="text-link" href="#docs/server.md" onclick="loadDoc('server.md'); return false;">查看服务配置 ↗</a></div>
+          <div class="tab-copy"><h3>在浏览器里继续工作。</h3><p>启动带有 Web 工作台的服务。终端与浏览器使用同一会话目录，查看任务、文件和运行状态。</p><ul><li>单二进制服务 · 前端构建产物内嵌</li><li>REST + SSE 实时事件</li><li>构建需要 Node.js / npm</li></ul><a class="text-link" href="#docs/guides/web.md" onclick="loadDoc('guides/web.md'); return false;">查看服务配置 ↗</a></div>
           <div class="quick-code"><div class="top"><span>shell / server</span><button class="copy-button" type="button" data-copy="code-server">复制代码 ⧉</button></div><pre><code id="code-server"><span class="c"># 在源码目录构建，自动嵌入 Web 前端</span>
 cargo build --release -p mink-server
 
@@ -587,7 +588,7 @@ MINK_SERVER_PORT=9000 ./target/release/mink-server</code></pre></div>
         </div>
       </div>
     </section>
-    <section class="closing" aria-label="下一步"><div><h2>从终端开始，接入你的系统。</h2><p>先阅读使用手册，或直接查看 Rust 与 Python 嵌入接口。</p></div><div class="closing-actions"><a class="btn btn-primary" href="#docs/USAGE.md" onclick="loadDoc('USAGE.md'); return false;">阅读使用手册 →</a><a class="btn btn-secondary" href="https://github.com/fierceX/mink" target="_blank" rel="noreferrer">在 GitHub 上探索 ↗</a></div></section>
+    <section class="closing" aria-label="下一步"><div><h2>从终端开始，接入你的系统。</h2><p>先阅读使用手册，或直接查看 Rust 与 Python 嵌入接口。</p></div><div class="closing-actions"><a class="btn btn-primary" href="#docs/start/quickstart.md" onclick="loadDoc('start/quickstart.md'); return false;">阅读使用手册 →</a><a class="btn btn-secondary" href="https://github.com/fierceX/mink" target="_blank" rel="noreferrer">在 GitHub 上探索 ↗</a></div></section>
   </div>
 </main>
 <section id="page-docs" class="page-section">
@@ -596,34 +597,19 @@ MINK_SERVER_PORT=9000 ./target/release/mink-server</code></pre></div>
       <div class="docs-topbar">
         <div class="docs-topbar-meta">
           <h2 id="doc-current-title">Documentation</h2>
-          <div id="doc-current-path" class="docs-topbar-path">docs/USAGE.md</div>
+          <div id="doc-current-path" class="docs-topbar-path">docs/start/quickstart.md</div>
         </div>
         <div class="docs-topbar-actions">
-          <button class="doc-sidebar-toggle" type="button" onclick="toggleDocSidebar()">目录</button>
-          <a id="doc-source-link" class="doc-topbar-link" href="https://github.com/fierceX/mink/blob/main/docs/USAGE.md" target="_blank" rel="noreferrer">源文件</a>
+          <button id="doc-nav-toggle" class="doc-sidebar-toggle" type="button" aria-expanded="false" aria-controls="doc-sidebar" onclick="toggleDocSidebar()">文档导航</button>
+          <button id="doc-toc-toggle" class="doc-sidebar-toggle" type="button" aria-expanded="false" aria-controls="doc-toc-panel" onclick="toggleDocToc()">本文目录</button>
+          <a id="doc-source-link" class="doc-topbar-link" href="https://github.com/fierceX/mink/blob/main/docs/start/quickstart.md" target="_blank" rel="noreferrer">源文件</a>
         </div>
       </div>
       <div class="docs-layout">
-        <aside class="doc-sidebar">
-          <div class="doc-tree">
-            <span class="group">用户手册</span>
-            <a href="#docs/USAGE.md" onclick="loadDoc('USAGE.md'); return false;" data-path="USAGE.md">使用手册</a>
-            <a href="#docs/EMBEDDING.md" onclick="loadDoc('EMBEDDING.md'); return false;" data-path="EMBEDDING.md">嵌入与 SDK</a>
-            <a href="#docs/PROTOCOL.md" onclick="loadDoc('PROTOCOL.md'); return false;" data-path="PROTOCOL.md">机器协议</a>
-            <a href="#docs/tools.md" onclick="loadDoc('tools.md'); return false;" data-path="tools.md">工具参考</a>
-            <a href="#docs/server.md" onclick="loadDoc('server.md'); return false;" data-path="server.md">Server 与 Web</a>
-          </div>
-          <div class="doc-tree">
-            <span class="group">架构与设计</span>
-            <a href="#docs/ARCHITECTURE.md" onclick="loadDoc('ARCHITECTURE.md'); return false;" data-path="ARCHITECTURE.md">架构说明</a>
-            <a href="#docs/DESIGN.md" onclick="loadDoc('DESIGN.md'); return false;" data-path="DESIGN.md">设计文档</a>
-            <a href="#docs/设计哲学-工具能力与提示词解耦.md" onclick="loadDoc('设计哲学-工具能力与提示词解耦.md'); return false;" data-path="设计哲学-工具能力与提示词解耦.md">工具能力与提示词解耦</a>
-            <a href="#docs/设计哲学-信号系统.md" onclick="loadDoc('设计哲学-信号系统.md'); return false;" data-path="设计哲学-信号系统.md">信号系统</a>
-          </div>
-          <div class="doc-tree">
-            <span class="group">其它</span>
-            <a href="#docs/CHANGELOG.md" onclick="loadDoc('CHANGELOG.md'); return false;" data-path="CHANGELOG.md">变更日志</a>
-          </div>
+        <div id="doc-nav-backdrop" hidden onclick="toggleDocSidebar(false)"></div>
+        <aside class="doc-sidebar" id="doc-sidebar" aria-label="文档导航">
+          <button class="doc-nav-close" type="button" onclick="toggleDocSidebar(false)">关闭导航</button>
+          <nav id="doc-navigation"></nav>
         </aside>
 
         <main class="doc-main" id="doc-main">
@@ -650,18 +636,76 @@ MINK_SERVER_PORT=9000 ./target/release/mink-server</code></pre></div>
 <div class="reading-progress"><span id="reading-progress-bar"></span></div>
 <button class="back-to-top" id="back-to-top" type="button" aria-label="返回顶部">↑</button>
 <div class="toast" id="copy-toast" role="status" aria-live="polite" hidden></div>
-<noscript><div class="shell" style="padding:24px 0">交互演示和文档阅读器需要 JavaScript。也可直接查看 <a href="https://github.com/fierceX/mink/blob/main/docs/USAGE.md">GitHub 使用手册</a>。</div></noscript>
+<noscript><div class="shell" style="padding:24px 0">交互演示和文档阅读器需要 JavaScript。也可直接查看 <a href="https://github.com/fierceX/mink/blob/main/docs/start/quickstart.md">GitHub 使用手册</a>。</div></noscript>
 <script>
 
 let currentDocPath = null;
 let currentDocAnchor = null;
 
 // 站内可加载文档白名单：文档互链命中时站内切换，其余（crates/*、AGENTS 等）跳 GitHub
-const SITE_DOCS = new Set([
-  "USAGE.md", "EMBEDDING.md", "PROTOCOL.md", "tools.md",
-  "ARCHITECTURE.md", "DESIGN.md", "server.md", "CHANGELOG.md",
-  "设计哲学-工具能力与提示词解耦.md", "设计哲学-信号系统.md", "assets/cases/env-reader.md",
-]);
+const SITE_DOCS = new Set();
+let docManifest = [];
+let manifestPromise;
+async function ensureDocManifest() {
+  if (!manifestPromise) manifestPromise = fetch("manifest.json").then(async response => {
+    if (!response.ok) throw new Error("文档清单加载失败");
+    docManifest = await response.json();
+    docManifest.forEach(entry => SITE_DOCS.add(entry.path));
+    renderDocNavigation();
+  }).catch(error => { manifestPromise = null; throw error; });
+  return manifestPromise;
+}
+function renderDocNavigation() {
+  const nav = document.getElementById("doc-navigation");
+  nav.replaceChildren();
+  for (const group of [...new Set(docManifest.map(entry => entry.group))]) {
+    const tree = document.createElement("details");
+    tree.className = "doc-tree";
+    tree.open = group === docManifest.find(entry => entry.path === currentDocPath)?.group;
+    const title = document.createElement("summary");
+    title.className = "group";
+    title.textContent = group;
+    tree.append(title);
+    for (const entry of docManifest.filter(entry => entry.group === group)) {
+      const a = document.createElement("a");
+      a.textContent = entry.title;
+      a.href = `#docs/${encodeURI(entry.path)}`;
+      a.dataset.path = entry.path;
+      a.classList.toggle("active", entry.path === currentDocPath);
+      if (entry.path === currentDocPath) a.setAttribute("aria-current", "page");
+      a.addEventListener("click", event => { event.preventDefault(); loadDoc(entry.path); });
+      tree.append(a);
+    }
+    nav.append(tree);
+  }
+}
+function appendDocCatalogue(container) {
+  const list = document.createElement("div");
+  list.className = "doc-catalogue";
+  for (const entry of docManifest.filter(entry => entry.path !== currentDocPath)) {
+    const a = document.createElement("a");
+    a.href = `#docs/${encodeURI(entry.path)}`;
+    a.textContent = `${entry.group} · ${entry.title} — ${entry.description}`;
+    a.addEventListener("click", event => { event.preventDefault(); loadDoc(entry.path); });
+    list.append(a);
+  }
+  container.append(list);
+}
+function appendDocPager(main, path) {
+  const index = docManifest.findIndex(entry => entry.path === path);
+  const nav = document.createElement("nav");
+  nav.className = "doc-pager";
+  nav.setAttribute("aria-label", "上一篇与下一篇");
+  for (const [entry, label] of [[docManifest[index - 1], "上一篇"], [docManifest[index + 1], "下一篇"]]) {
+    if (!entry) continue;
+    const a = document.createElement("a");
+    a.href = `#docs/${encodeURI(entry.path)}`;
+    a.textContent = `${label} · ${entry.title}`;
+    a.addEventListener("click", event => { event.preventDefault(); loadDoc(entry.path); });
+    nav.append(a);
+  }
+  main.append(nav);
+}
 let heroTerminalTimer = null;
 let heroTuiReplay = [];
 let heroTuiMeta = {
@@ -669,57 +713,80 @@ let heroTuiMeta = {
 };
 
 function prettyDocTitle(path) {
-  const name = path.split("/").pop()?.replace(/\.md$/i, "") || "Documentation";
-  const map = {
-    "USAGE": "使用手册",
-    "EMBEDDING": "嵌入与 SDK",
-    "PROTOCOL": "机器协议",
-    "tools": "工具参考",
-    "ARCHITECTURE": "架构说明",
-    "DESIGN": "设计文档",
-    "CHANGELOG": "变更日志",
-    "设计哲学-工具能力与提示词解耦": "工具能力与提示词解耦",
-    "设计哲学-信号系统": "信号系统",
-  };
-  return map[name] || name;
+  return docManifest.find(entry => entry.path === path)?.title || "文档不存在";
 }
-
 function githubDocUrl(path) {
-  const githubPath = path === "CHANGELOG.md" ? path : path.startsWith("../") ? path.slice(3) : `docs/${path}`;
-  return `https://github.com/fierceX/mink/blob/main/${githubPath}`;
+  const source = docManifest.find(entry => entry.path === path)?.source || "docs/start/overview.md";
+  return `https://github.com/fierceX/mink/blob/main/${source}`;
 }
-
 function updateDocChrome(path) {
   const title = document.getElementById("doc-current-title");
   const currentPath = document.getElementById("doc-current-path");
   const sourceLink = document.getElementById("doc-source-link");
   if (title) title.textContent = prettyDocTitle(path);
-  if (currentPath) currentPath.textContent = `docs/${path}`;
+  if (currentPath) currentPath.textContent = docManifest.find(entry => entry.path === path)?.source || `docs/${path}`;
   if (sourceLink) sourceLink.href = githubDocUrl(path);
 }
 
+let navReturnFocus = null;
 function toggleDocSidebar(force) {
   const shell = document.querySelector(".docs-shell");
-  if (!shell) return;
+  const sidebar = document.getElementById("doc-sidebar");
   const open = typeof force === "boolean" ? force : !shell.classList.contains("sidebar-open");
+  if (open && window.innerWidth > 820) return;
+  if (open) navReturnFocus = document.activeElement;
+  const wasOpen = shell.classList.contains("sidebar-open");
   shell.classList.toggle("sidebar-open", open);
+  document.getElementById("doc-nav-toggle").setAttribute("aria-expanded", String(open));
+  document.getElementById("doc-nav-backdrop").hidden = !open;
+  sidebar.toggleAttribute("aria-modal", open);
+  if (open) sidebar.setAttribute("role", "dialog"); else sidebar.removeAttribute("role");
+  for (const selector of [".nav", ".docs-topbar", "#doc-main", "#doc-toc-panel", ".footer"]) {
+    document.querySelector(selector).inert = open;
+  }
+  document.body.classList.toggle("doc-nav-open", open);
+  if (open) sidebar.querySelector("button").focus();
+  else if (wasOpen) navReturnFocus?.focus({ preventScroll: true });
 }
-
-function slugifyHeading(text) {
-  return text
-    .trim()
-    .toLowerCase()
-    .replace(/[^\p{Letter}\p{Number}\s-]/gu, "")
-    .replace(/\s+/g, "-");
+function toggleDocToc() {
+  const panel = document.getElementById("doc-toc-panel");
+  const open = !panel.classList.contains("toc-open");
+  panel.classList.toggle("toc-open", open);
+  document.getElementById("doc-toc-toggle").setAttribute("aria-expanded", String(open));
 }
-
+document.addEventListener("keydown", event => {
+  if (!document.querySelector(".sidebar-open")) return;
+  if (event.key === "Escape") { event.preventDefault(); toggleDocSidebar(false); }
+  if (event.key === "Tab") {
+    const items = [...document.querySelectorAll('#doc-sidebar button, #doc-sidebar summary, #doc-sidebar details[open] a')];
+    const first = items[0], last = items.at(-1);
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  }
+});
+window.addEventListener("resize", () => {
+  if (window.innerWidth > 820) toggleDocSidebar(false);
+  updateScrollChrome();
+});
+function slugifyHeading(text) { return MinkDocs.slugifyHeading(text); }
+function resolveDocLinks(container) {
+  const source = docManifest.find(entry => entry.path === currentDocPath).source;
+  const siteBase = new URL("./", location.href);
+  for (const el of container.querySelectorAll("a[href], img[src]")) {
+    const attr = el.tagName === "IMG" ? "src" : "href";
+    const href = el.getAttribute(attr);
+    if (href.startsWith("#")) continue;
+    const resolved = MinkDocs.resolveLink(source, href, docManifest, siteBase);
+    el.setAttribute(attr, resolved.href);
+    if (resolved.kind === "doc" && attr === "href") {
+      el.addEventListener("click", event => { event.preventDefault(); loadDoc(resolved.path, resolved.anchor); });
+    }
+  }
+}
 function decorateDocContent(container) {
-  const used = new Map();
+  resolveDocLinks(container);
+  MinkDocs.assignHeadingIds(container.querySelectorAll("h1, h2, h3, h4, h5, h6"));
   container.querySelectorAll("h1, h2, h3, h4, h5, h6").forEach((heading) => {
-    const base = slugifyHeading(heading.textContent || "") || "section";
-    const count = used.get(base) || 0;
-    used.set(base, count + 1);
-    heading.id = count === 0 ? base : `${base}-${count}`;
     const anchor = document.createElement("a");
     anchor.className = "heading-anchor";
     anchor.href = `#${encodeURIComponent(heading.id)}`;
@@ -743,16 +810,12 @@ function decorateDocContent(container) {
     });
   });
 
-  // 站内文档互链：命中白名单的 .md 链接站内切换（支持跨文档锚点）
-  container.querySelectorAll("a.site-doc-link").forEach((a) => {
-    a.addEventListener("click", (event) => {
-      event.preventDefault();
-      const href = a.getAttribute("href") || "";
-      const [docPath, docAnchor] = href.split("#");
-      loadDoc(docPath, docAnchor || null);
-    });
+  container.querySelectorAll("table").forEach(table => {
+    const frame = document.createElement("div");
+    frame.className = "doc-table-scroll";
+    table.before(frame);
+    frame.append(table);
   });
-
   renderDocToc(container);
   decorateCodeBlocks(container);
 }
@@ -809,25 +872,25 @@ function renderDocToc(container) {
 function updateScrollChrome() {
   const bar = document.getElementById("reading-progress-bar");
   const btn = document.getElementById("back-to-top");
-  const max = document.documentElement.scrollHeight - window.innerHeight;
+  const content = document.querySelector("#doc-main .doc-content");
+  const docsActive = document.getElementById("page-docs").classList.contains("active");
   if (bar) {
-    bar.style.width = max > 0 ? `${Math.min(100, (window.scrollY / max) * 100)}%` : "0%";
+    const rect = content?.getBoundingClientRect();
+    const start = rect ? rect.top + window.scrollY - 96 : 0;
+    const range = rect ? rect.height - window.innerHeight + 96 : 0;
+    const progress = range > 0 ? Math.max(0, Math.min(100, (window.scrollY - start) / range * 100)) : 0;
+    bar.style.width = docsActive ? `${progress}%` : "0%";
   }
   if (btn) btn.classList.toggle("show", window.scrollY > 420);
-
-  // 右侧目录 scrollspy：高亮当前章节
-  const tocLinks = document.querySelectorAll(".doc-toc-list a");
-  if (tocLinks.length && currentTocEntries.length) {
-    let current = null;
-    const probe = window.scrollY + 96;
-    for (let i = 0; i < currentTocEntries.length; i++) {
-      const el = document.getElementById(currentTocEntries[i].id);
-      if (el && el.offsetTop <= probe) current = i;
-    }
-    tocLinks.forEach((link, i) => {
-      link.classList.toggle("active", i === current);
-    });
-  }
+  let current = currentTocEntries.length ? 0 : -1;
+  currentTocEntries.forEach((entry, index) => {
+    const el = document.getElementById(entry.id);
+    if (el && el.getBoundingClientRect().top <= 100) current = index;
+  });
+  document.querySelectorAll(".doc-toc-list a").forEach((link, index) => {
+    link.classList.toggle("active", index === current);
+    if (index === current) link.setAttribute("aria-current", "location"); else link.removeAttribute("aria-current");
+  });
 }
 
 function initScrollChrome() {
@@ -851,6 +914,7 @@ function initScrollChrome() {
 }
 function decorateCodeBlocks(container) {
   container.querySelectorAll("pre > code").forEach((codeEl) => {
+    const rawCode = codeEl.textContent;
     const pre = codeEl.parentElement;
     if (pre.closest(".code-frame")) return;
     let language = "";
@@ -883,7 +947,7 @@ function decorateCodeBlocks(container) {
     copy.className = "code-copy";
     copy.type = "button";
     copy.textContent = "复制";
-    copy.addEventListener("click", () => copyText(codeEl.innerText, copy));
+    copy.addEventListener("click", () => copyText(rawCode, copy));
     head.appendChild(lang);
     head.appendChild(copy);
     pre.parentElement.insertBefore(frame, pre);
@@ -909,15 +973,23 @@ async function loadDoc(path, anchor, fromRoute = false) {
   currentDocPath = path;
   currentDocAnchor = anchor || null;
   updateDocChrome(path);
-  document.querySelectorAll(".doc-tree a").forEach((el) => el.classList.remove("active"));
-  const link = document.querySelector(`.doc-tree a[data-path="${path}"]`);
-  if (link) link.classList.add("active");
-  if (window.innerWidth <= 820) toggleDocSidebar(false);
+  toggleDocSidebar(false);
+  document.getElementById("doc-toc-panel").classList.remove("toc-open", "has-toc");
+  document.getElementById("doc-toc-toggle").setAttribute("aria-expanded", "false");
+  currentTocEntries = [];
 
   const main = document.getElementById("doc-main");
   main.innerHTML = '<div class="doc-content"><div class="loading">加载中…</div></div>';
 
   try {
+    await ensureDocManifest();
+    if (generation !== docLoadGeneration) return;
+    updateDocChrome(path);
+    renderDocNavigation();
+    if (!SITE_DOCS.has(path)) {
+      main.innerHTML = `<div class="doc-content"><h1>文档不存在</h1><p>此地址不在公开文档清单中。</p><a href="#docs/start/overview.md" onclick="loadDoc('start/overview.md'); return false;">返回文档总览</a></div>`;
+      return;
+    }
     const resp = await fetch(path);
     if (!resp.ok) {
       throw new Error(`HTTP ${resp.status}`);
@@ -926,39 +998,15 @@ async function loadDoc(path, anchor, fromRoute = false) {
     if (generation !== docLoadGeneration) return;
     if (typeof marked === "undefined") throw new Error("marked not loaded");
 
-    const baseDir = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
-    const normalizePath = (input) => {
-      const parts = `${baseDir}${input}`.split("/");
-      const normalized = [];
-      for (const part of parts) {
-        if (!part || part === ".") continue;
-        if (part === "..") {
-          normalized.pop();
-        } else {
-          normalized.push(part);
-        }
-      }
-      return normalized.join("/");
-    };
-
-    const html = marked.parse(md, { breaks: true });
-    const fixed = html.replace(
-      /href="(?!https?:\/\/|#)([^"]+\.md[^"]*)"/gi,
-      (m, p) => {
-        const [docPath, docAnchor] = p.split("#");
-        const resolved = normalizePath(docPath);
-        if (SITE_DOCS.has(resolved)) {
-          const anchorPart = docAnchor ? `#${docAnchor}` : "";
-          return `href="${resolved}${anchorPart}" class="site-doc-link"`;
-        }
-        const anchorPart = docAnchor ? `#${docAnchor}` : "";
-        return `href="https://github.com/fierceX/mink/blob/main/${resolved}${anchorPart}"`;
-      }
-    );
-
-    main.innerHTML = `<div class="doc-content">${fixed}</div>`;
+    main.innerHTML = `<div class="doc-content">${marked.parse(md, { breaks: true })}</div>`;
     const content = main.querySelector(".doc-content");
-    if (content) decorateDocContent(content);
+    if (content) {
+      if (path === "start/overview.md") appendDocCatalogue(content);
+      decorateDocContent(content);
+    }
+    appendDocPager(main, path);
+    document.title = `${prettyDocTitle(path)} · Mink 文档`;
+    updateScrollChrome();
 
     if (currentDocAnchor) {
       const target =
@@ -994,12 +1042,13 @@ function setRoute(hash) {
 function showPage(name, fromRoute = false) {
   const page = document.getElementById(`page-${name}`);
   if (!page) return;
+  if (name === "home") toggleDocSidebar(false);
   document.querySelectorAll(".page-section").forEach(el => el.classList.toggle("active", el === page));
   setNavActive(name);
   document.title = name === "home" ? "Mink — 轻量、可嵌入的 AI agent runtime" : "Mink 文档";
   clearTimeout(heroTerminalTimer);
   if (name === "docs") {
-    if (!fromRoute) loadDoc(currentDocPath || "USAGE.md");
+    if (!fromRoute) loadDoc("start/overview.md");
   } else {
     docLoadGeneration += 1;
     if (!fromRoute) {
@@ -1029,10 +1078,8 @@ function handleRoute() {
   if (hash.startsWith("#docs/")) {
     try {
       const [path, anchor] = hash.slice(6).split("#").map(decodeURIComponent);
-      if (SITE_DOCS.has(path)) {
-        loadDoc(path, anchor, true);
-        return;
-      }
+      loadDoc(path, anchor, true);
+      return;
     } catch (_) { /* Invalid hash falls back to the homepage. */ }
   }
   showPage("home", true);
