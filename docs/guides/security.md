@@ -41,6 +41,8 @@ timeout_secs = 600
 | memory/pids 资源限制 | ✅ cgroup | ❌ 不执行 | ❌ 不执行 |
 | 后台自动启用 | ✅ | ✅ | ✅（写入限制） |
 
+macOS 写入白名单同时包含所声明目录与可解析的真实路径，临时目录和会话存储同样处理；例如 `/var/folders` 的真实路径可能位于 `/private/var/folders`。目录尚不存在时尝试解析已有父目录，避免符号链接别名使允许的写入返回 `EPERM`。
+
 ### 启动机制
 
 Mink 检测 `[sandbox] enabled = true` 后自动通过 `exec()` 装入沙箱，设置 `MINK_SANDBOXED=1` 防无限递归。

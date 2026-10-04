@@ -68,13 +68,18 @@ fn build_sb_profile_with_env(
         // Punch holes for user-specified write dirs
         for d in &config.write_dirs {
             let resolved = resolve_dir(d, cwd);
-            lines.push(format!("(allow file-write* (subpath \"{}\"))", resolved));
+            for variant in sandbox_path_variants(Path::new(&resolved)) {
+                lines.push(format!("(allow file-write* (subpath \"{variant}\"))"));
+            }
         }
 
-        // Always allow system temp directory (TMPDIR for Edit's unified_diff_color)
-        let tmpdir = std::env::temp_dir();
-        let tmpdir_str = tmpdir.display().to_string();
-        lines.push(format!("(allow file-write* (subpath \"{tmpdir_str}\"))"));
+        // Always allow system temp directory (TMPDIR for Edit's unified_diff_color).
+        // Emit both the lexical and the resolved path: on macOS TMPDIR is often
+        // `/var/folders/...`, a symlink to `/private/var/folders/...`, and
+        // sandbox-exec matches the canonical path only.
+        for variant in sandbox_path_variants(&std::env::temp_dir()) {
+            lines.push(format!("(allow file-write* (subpath \"{variant}\"))"));
+        }
         // Also allow /tmp and /private/tmp (common temp locations)
         lines.push("(allow file-write* (subpath \"/tmp\"))".into());
         lines.push("(allow file-write* (subpath \"/private/tmp\"))".into());
@@ -84,7 +89,9 @@ fn build_sb_profile_with_env(
         // MINK_HOME/<session_id>. If MINK_HOME is unset or equals HOME, keep
         // the narrower historical HOME/.mink permission.
         for dir in session_storage_write_dirs(home, mink_home, cwd) {
-            lines.push(format!("(allow file-write* (subpath \"{dir}\"))"));
+            for variant in sandbox_path_variants(Path::new(&dir)) {
+                lines.push(format!("(allow file-write* (subpath \"{variant}\"))"));
+            }
         }
     }
 
@@ -136,6 +143,30 @@ fn resolve_dir(dir: &str, cwd: &Path) -> String {
         cwd.join(p)
     };
     normalize_sandbox_path(&abs).display().to_string()
+}
+
+/// Lexical and resolved variants of a path for `sandbox-exec` subpath rules.
+///
+/// Deny/allow rules are evaluated against the kernel-canonical path, while
+/// configuration usually carries symlinked forms (`/var/folders/...`,
+/// `/tmp/...`, a symlinked HOME). Emitting both forms keeps the rules working
+/// regardless of which side of the symlink the caller used.
+fn sandbox_path_variants(path: &Path) -> Vec<String> {
+    let mut variants = vec![normalize_sandbox_path(path).display().to_string()];
+    let canonical = std::fs::canonicalize(path).ok().or_else(|| {
+        let parent = path.parent()?;
+        let name = path.file_name()?;
+        std::fs::canonicalize(parent)
+            .ok()
+            .map(|resolved| resolved.join(name))
+    });
+    if let Some(resolved) = canonical {
+        let resolved = resolved.display().to_string();
+        if !variants.contains(&resolved) {
+            variants.push(resolved);
+        }
+    }
+    variants
 }
 
 fn normalize_sandbox_path(path: &Path) -> PathBuf {

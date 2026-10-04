@@ -137,6 +137,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 ### 工具面与执行
 
 - approval 在构建 `ModelToolSurface` 时解析；`ToolRunner::execute_all()` 在 StormBreaker 前校验调用属于同一 resolved surface，真实执行只接受 surface 内工具（disable flag 与沙箱策略不属于运行时合同）；只并发连续只读工具，写入/执行/控制/SubAgent 工具按调用顺序串行执行。
+- macOS sandbox-exec 写入白名单须覆盖声明目录、临时目录和会话存储的字面路径与可解析真实路径，避免符号链接别名使已允许写入失败；不据此扩大读取边界。
 - `enabled_tools` 是唯一工具启用输入：`None` 用 catalog 默认集、空列表禁用全部、显式列表精确选择；`PythonSandbox` explicit-only，仅显式列出时进入 surface。
 - 子代理终态由内部 `SubAgentStatus` 表达（Interrupted/TimedOut 不得映射为成功）；未完成子代理只在 `SubAgentBatch.pending`，每个任务只有一个结果发送点，`Drop` 必须 cancel+abort；fork 在 runtime 初始化前以目录级克隆继承父 session 状态，子代理复用父 `LlmBackend` 与当前活动模型。
 - `TurnExecutor::new/new_for_model` 是模型与 backend 的唯一装配路径；禁止第二 backend 字段或构造后覆盖模型；`SubAgentCoordinator` 不持有 Config；默认 approval mode 为 `yolo`，`prompt` 无交互式 UI 时 fail closed。

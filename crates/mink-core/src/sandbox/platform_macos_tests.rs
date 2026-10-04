@@ -45,6 +45,49 @@ fn sandbox_profile_normalizes_write_dir_subpaths() {
 }
 
 #[test]
+fn sandbox_profile_includes_canonical_write_dir_variant() {
+    // `/tmp` is a symlink to `/private/tmp` on macOS; sandbox-exec matches the
+    // canonical path, so the resolved variant must be present as well.
+    let config = SandboxConfig {
+        write_dirs: vec!["/tmp/bench-workspace".into()],
+        ..SandboxConfig::default()
+    };
+    let cwd = Path::new("/tmp/mink-work");
+
+    let profile = build_sb_profile(&config, Path::new("/bin/echo"), cwd);
+
+    let canonical = std::fs::canonicalize("/tmp")
+        .map(|path| path.join("bench-workspace"))
+        .unwrap_or_else(|_| PathBuf::from("/private/tmp/bench-workspace"));
+    assert!(
+        profile.contains(&format!(
+            "(allow file-write* (subpath \"{}\"))",
+            canonical.display()
+        )),
+        "{profile}"
+    );
+}
+
+#[test]
+fn sandbox_profile_includes_canonical_temp_dir_variant() {
+    let config = SandboxConfig {
+        write_dirs: vec!["/tmp/workspace".into()],
+        ..SandboxConfig::default()
+    };
+    let profile = build_sb_profile(&config, Path::new("/bin/echo"), Path::new("/tmp/mink-work"));
+
+    if let Ok(canonical) = std::fs::canonicalize(std::env::temp_dir()) {
+        assert!(
+            profile.contains(&format!(
+                "(allow file-write* (subpath \"{}\"))",
+                canonical.display()
+            )),
+            "{profile}"
+        );
+    }
+}
+
+#[test]
 fn sandbox_profile_allows_custom_mink_home_root() {
     let config = SandboxConfig {
         write_dirs: vec!["/tmp/workspace".into()],

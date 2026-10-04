@@ -604,6 +604,8 @@ MINK_SDK_FEATURES="sdk-bin python-sandbox" python scripts/build_wheel.py
 
 ### `[sandbox]`
 
+macOS `write_dirs`、临时目录和会话存储的写入规则包含字面路径及可解析真实路径；平台边界与操作见[安全指南](../guides/security.md#平台差异)。
+
 | 字段 | Rust 解析类型 |
 |---|---|
 | `enabled` | `Option<bool>` |
