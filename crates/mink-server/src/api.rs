@@ -1006,6 +1006,178 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_guidance_obeys_capacity_and_live_guidance_remains_idempotent() {
+        struct WaitingBackend;
+        #[async_trait::async_trait]
+        impl mink::runtime::LlmBackend for WaitingBackend {
+            fn name(&self) -> &str {
+                "capacity-test"
+            }
+            async fn stream(
+                &self,
+                _request: mink::runtime::LlmRequest,
+            ) -> anyhow::Result<mink::runtime::LlmResponseStream> {
+                Ok(mink::runtime::LlmResponseStream {
+                    events: Box::pin(futures::stream::pending()),
+                    attempt_count: 1,
+                })
+            }
+        }
+        async fn post(
+            app: &Router,
+            uri: &str,
+            data: serde_json::Value,
+        ) -> (StatusCode, serde_json::Value) {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(data.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        }
+        let home = std::env::temp_dir().join(format!(
+            "mink-capacity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let registry = Arc::new(Registry::with_llm_backend(
+            home.clone(),
+            "mock".into(),
+            1,
+            Arc::new(WaitingBackend),
+        ));
+        let a = registry.create("a", &cwd).await.unwrap();
+        let b = registry.create("b", &cwd).await.unwrap();
+        registry.open(&a.id, Some(&a.project_key)).await.unwrap();
+        registry.open(&b.id, Some(&b.project_key)).await.unwrap();
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let app = router(Arc::new(ApiState {
+            registry: registry.clone(),
+            cwd,
+            shutdown,
+        }));
+        let a_base = format!("/api/sessions/{}", a.id);
+        let a_inputs = format!("{a_base}/inputs?project={}", a.project_key);
+        let b_inputs = format!("/api/sessions/{}/inputs?project={}", b.id, b.project_key);
+        let task = json!({"request_id":"first", "text":"wait", "target_turn_id":null});
+        let (status, first) = post(&app, &a_inputs, task.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        // A retry of an already admitted request must not consume another slot.
+        let (status, duplicate) = post(&app, &a_inputs, task).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["data"]["input_id"], duplicate["data"]["input_id"]);
+        let guidance = json!({"request_id":"guide", "text":"extra constraint", "target_turn_id":first["data"]["turn_id"]});
+        let (status, guide) = post(&app, &a_inputs, guidance.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "live guidance is allowed at capacity"
+        );
+        assert_eq!(post(&app, &a_inputs, guidance).await.0, StatusCode::OK);
+        registry.interrupt(&a.id, Some(&a.project_key)).unwrap();
+        let runtime = registry
+            .active_runtime(&a.id, Some(&a.project_key))
+            .unwrap()
+            .unwrap();
+        let guide_id = guide["data"]["input_id"].as_str().unwrap();
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if !runtime.running()
+                    && let Some(receipt) = runtime.inbox().entries().into_iter().find(|r| {
+                        r.input_id == guide_id && r.status == mink::runtime::InputStatus::Unapplied
+                    })
+                {
+                    break receipt;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // Reopen to exercise durable input restoration and finish old cleanup.
+        registry.close(&a.id, Some(&a.project_key)).await.unwrap();
+        registry.open(&a.id, Some(&a.project_key)).await.unwrap();
+        assert_eq!(
+            post(
+                &app,
+                &b_inputs,
+                json!({"request_id":"second", "text":"wait"})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            post(
+                &app,
+                &a_inputs,
+                json!({"request_id":"third", "text":"new task"})
+            )
+            .await
+            .0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        let resume_uri = format!(
+            "{a_base}/inputs/{guide_id}/resume?project={}",
+            a.project_key
+        );
+        assert_eq!(
+            post(&app, &resume_uri, json!({"revision":receipt.revision}))
+                .await
+                .0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert!(
+            !registry
+                .active_runtime(&a.id, Some(&a.project_key))
+                .unwrap()
+                .unwrap()
+                .running()
+        );
+        // A normal input resume must also be capacity checked.
+        let root_resume = format!(
+            "{a_base}/inputs/{}/resume?project={}",
+            first["data"]["input_id"].as_str().unwrap(),
+            a.project_key
+        );
+        assert_eq!(
+            post(
+                &app,
+                &root_resume,
+                json!({"revision":first["data"]["revision"]})
+            )
+            .await
+            .0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        registry.close(&b.id, Some(&b.project_key)).await.unwrap();
+        let (status, resumed) = post(&app, &resume_uri, json!({"revision":receipt.revision})).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "resume succeeds after capacity is released: {resumed}"
+        );
+        assert_eq!(resumed["data"]["guidance"], false);
+        assert_ne!(resumed["data"]["turn_id"], guide["data"]["turn_id"]);
+        registry.shutdown_all().await.unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[tokio::test]
     async fn conversation_pagination_and_seq() {
         let app = test_router();
         // tail：返回最后 2 行，注入行号 seq

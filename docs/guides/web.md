@@ -1,6 +1,6 @@
 # Web 工作台
 
-> 更新日期：2026-10-04
+> 更新日期：2026-10-05
 
 启动服务，浏览会话、文件与执行状态。
 
@@ -71,6 +71,8 @@ cargo build -p mink-server
 MINK_SERVER_PORT=9000 ./target/debug/mink-server
 ./target/debug/mink-server path/to/mink-server.toml
 ```
+
+配置文件是唯一可选位置参数；文件不存在或内容非法时启动失败，未知选项与多余参数也会被拒绝。全局 `max_running` 限制所有新 turn，包括续发未应用引导；同一运行 turn 的引导与重复 request ID 回执不占用新的名额。
 
 打开 `http://localhost:8765` 即可使用 Web 界面。
 

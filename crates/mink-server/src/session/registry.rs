@@ -479,7 +479,10 @@ impl Registry {
         if let Some(receipt) = existing {
             return Ok(receipt);
         }
-        if input.target_turn_id.is_none()
+        // Resuming an unapplied input starts a new turn even when its original
+        // input was guidance targeting an older turn. Only live guidance can
+        // share an already admitted running session's slot.
+        if (resume.is_some() || input.target_turn_id.is_none())
             && active.values().filter(|s| s.runtime.running()).count() >= self.max_running
         {
             return Err(RegistryError::Capacity("too many running sessions".into()));

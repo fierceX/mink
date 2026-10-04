@@ -7,6 +7,7 @@
 use crate::session::config::{ServerConfig, validate_runtime_config};
 use crate::session::registry::Registry;
 use anyhow::Result;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -19,19 +20,17 @@ mod web_assets;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        Some("-V") | Some("--version") => {
+    let config_path = match parse_args(std::env::args_os().skip(1))? {
+        ServerArgs::Version => {
             println!("{}", version_line());
             return Ok(());
         }
-        Some("-h") | Some("--help") => {
+        ServerArgs::Help => {
             print_usage();
             return Ok(());
         }
-        _ => {}
-    }
-    let config_path = args.next().map(PathBuf::from);
+        ServerArgs::Serve(path) => path,
+    };
     let cfg = ServerConfig::load(config_path.as_deref())?;
     validate_runtime_config(&cfg)?;
 
@@ -93,6 +92,27 @@ async fn main() -> Result<()> {
     let shutdown_result = registry.shutdown_all().await;
     serve_result?;
     shutdown_result
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ServerArgs {
+    Help,
+    Version,
+    Serve(Option<PathBuf>),
+}
+
+fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<ServerArgs> {
+    let mut args = args.into_iter();
+    let first = args.next();
+    if args.next().is_some() {
+        anyhow::bail!("expected at most one configuration path; see --help");
+    }
+    match first.as_deref().and_then(|arg| arg.to_str()) {
+        Some("-V" | "--version") => Ok(ServerArgs::Version),
+        Some("-h" | "--help") => Ok(ServerArgs::Help),
+        Some(arg) if arg.starts_with('-') => anyhow::bail!("unknown option: {arg}"),
+        _ => Ok(ServerArgs::Serve(first.map(PathBuf::from))),
+    }
 }
 
 fn version_line() -> String {
