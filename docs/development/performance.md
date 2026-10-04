@@ -1,6 +1,55 @@
-# TUI 性能与回归验证记录
+# 性能与验证
 
 > 更新日期：2026-10-04
+
+仅供仓库维护，不进入官网发布产物。
+
+## 性能基准
+
+本节保留任务开始前工作区已有的 benchmark 文档；本轮只迁移其说明，未重跑性能矩阵。以下密度数字是原记录，不能视为本轮验证结果。
+
+运行时性能与资源占用由 `crates/mink-core/benches/runtime_bench.rs` 测量，
+所有 LLM 流量使用可注入的 mock backend，因此数字反映 mink 自身开销（不含模型延迟）。
+
+```bash
+cargo bench -p mink-core --bench runtime_bench              # 全量矩阵
+cargo bench -p mink-core --bench runtime_bench -- --quick    # 缩减矩阵
+cargo bench -p mink-core --bench runtime_bench -- --list     # 列出用例
+./scripts/bench-runtime.sh                                   # 记录机器/OS/commit/rustc 并留存报告
+make bench-quick                                             # 同上，缩减矩阵
+```
+
+用例矩阵：
+
+| 用例 | 回答的问题 |
+|------|-----------|
+| `process_start` / `process_start_cli` | 二进制/运行时基础开销（spawn 到退出） |
+| `runtime_start` / `session_create` | 已有 session 重启 / 全新 session 成本 |
+| `idle_1/100/1000` | 服务化 session 密度（RSS、线程数、创建/关闭耗时） |
+| `mock_turn_no_tool` / `mock_turn_1_tool` | Agent Loop 固定开销 / 工具派发开销 |
+| `sse_1k/10k` | 流式事件记账（events/s、pending backlog） |
+| `replay_1k/10k/100k` | 会话恢复（读盘 + 首请求投影） |
+| `turns_500/2000` | 长会话内存曲线 |
+| `compact_10/100` | 压缩成本与内存 |
+| `concurrent_32/64/128` | 调度/锁扩展性（吞吐、峰值 RSS） |
+| `subagent_fanout_2/4/8` | 子代理扇出调度 |
+| `sandbox_start` | 隔离 worker 成本（sandbox re-exec + runtime + 回合） |
+
+指标口径（记录在 JSON `meta`）：
+
+- 延迟为重复集合的 P50/P95/min/max/mean，单位 `ms`；重复次数由 `--reps` 覆盖。
+- 内存：Linux 用 `/proc/self/status` 的 `VmRSS`/`VmHWM`；macOS 用 `ps -o rss=`（当前值）
+  加 20ms 采样峰值。macOS 的 RSS 会高估真实 footprint（分配器保留），容量评估建议
+  结合 `vmmap` 复核。
+- 用例在同一进程内顺序执行，内存为进程累计值；每个用例的 `extra` 记录各自基线
+  （`rss_before_kb`）与峰值，长会话用 `rss_curve` 观察趋势。
+
+`scripts/bench-runtime.sh` 把机器、OS、commit（dirty 标注）、rustc/cargo 版本、RSS 口径
+与 fd limit 写入报告头，并在 `target/bench/` 留存同名 JSON（结构化）与 txt（人类可读）。
+
+密度参考（实测）：每个空闲 session 约 1 个线程 + 1 个 fd、约 200KB RSS；macOS 默认
+软 fd limit（256）会把 idle 密度截断在 ~245，脚本会自动尝试提高到 8192 并在报告中
+记录生效值。
 
 ## 测量范围
 
@@ -41,7 +90,7 @@ release 基准通过 Cargo JSON 定位测试可执行文件，随后单独用 `/
 长代码块处理保留前文，不以截掉前 64 KiB 以外内容换取速度。RSS 是测试进程峰值，不能
 视为真实会话的稳态内存或 Inline 释放量；后者由提交后正文/缓存为空的回归断言验证。
 本轮新增大表格/段落，峰值与上一轮较小套件的 34.9 MiB 不可直接比较，也不能据此断言
-内存回归。本组样本没有独立记录复杂结构的临时布局分配及真实会话稳态内存。
+内存回归。下一轮应单独测量复杂结构的临时布局分配及真实会话稳态内存。
 事件积压样本测量合成进度流的转发和 reducer，未加入真实模型/磁盘/SSH 网络延迟。
 
 ## 剩余可变尾部瓶颈
@@ -55,8 +104,8 @@ release 基准通过 Cargo JSON 定位测试可执行文件，随后单独用 `/
 | 增长表格 | 7.226ms | 28.671ms |
 
 普通暖缓存输入帧满足 16ms 目标；不能推广为所有运行态帧都低于 16ms。1 MiB 结构更新
-会占用事件循环；本组样本未同时测量重输出期间的输入延迟或单独记录布局分配量。
-稳定输出边界仍须完整保留表格与正文，不能用提前提交表格或任意截尾规避成本。
+会占用事件循环，重输出期间的输入延迟还需联测。下一项应增量缓存段落/表格单元内容，
+将表格列宽协商与视口构造分开，同时记录分配量。不能用提前提交表格或任意截尾规避成本。
 
 ## 终端交互
 

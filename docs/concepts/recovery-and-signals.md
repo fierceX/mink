@@ -1,12 +1,122 @@
-# 信号系统设计文档
+# 恢复与信号
 
-> 更新日期：2026-08-18
+> 更新日期：2026-10-04
 
----
+有界格式恢复、请求重试和信念反馈。
 
-[TOC]
+## 维修流水线
 
----
+维修机制分布在流式协议归一化、turn 级回收和工具执行门禁三个边界：
+
+```text
+SSE tool-call 候选组装与严格校验
+→ Turn 级 Scavenge 回收与结构化校验
+→ resolved ModelToolSurface gate
+→ StormBreaker
+→ ToolExec dispatch
+```
+
+### 步骤 1：候选组装与严格校验
+
+SSE 按 index 合并 name、id 和 arguments。`build_tool_call_event()` 只接受完整 JSON object；不可解析的参数生成带 parse error 与原始参数摘要的降级候选，让模型下一 round 重发。非字符串 arguments 的错误在流内保持粘性，合法后续片段不能抹掉它。`length` / `max_tokens` 响应整体废弃；身份缺失或重复的调用批不持久化、不执行。
+
+### 步骤 2：Scavenge（回收）
+
+LLM 流式响应结束后，`crates/mink-core/src/agent/turn.rs` 从 `thinking`
+（reasoning_content）和 `text`（普通文本）两个渠道回收遗漏的工具调用，补充到标准
+tool-call 列表中。每个候选调用都通过 `build_tool_call_event()` 转为结构化事件；解析失败的
+候选保留为降级候选进入同一有界纠错分支。去重使用 `(tool name, input_json)`，因此同名但参数不同的调用可以保留。
+
+回收尝试顺序（`scavenge_tool_calls`）：
+
+1. **DSML invoke** — `<|DSML|invoke name="Read">` DeepSeek 专用标记语言，不经过标准 tool_calls 字段
+2. **XML 包装** — `<tool_call>{...}</tool_call>`
+3. **Bracket 包装** — `[TOOL_CALL]{...}[/TOOL_CALL]`
+4. **裸 JSON** — 扫描自由文本中的 `{name, arguments}` 形状
+5. **OpenAI style** — `{"type":"function","function":{"name","arguments"}}`
+6. **R1 variant** — `{"tool_name":"Bash","tool_args":{...}}`
+
+这些格式是“容器协议”兼容层，不代表旧参数重新成为模型协议。回收层只把内容规整成
+`{name, arguments}`，之后仍由当前 `tools.json` schema、`ToolExec` 参数反序列化和工具实现校验。
+例如 XML/Bracket/R1 中可以恢复 `Read {"path":"src/lib.rs:40-80"}` 或
+`Edit {"path":"src/lib.rs","patch":"@src/lib.rs#TAG\nreplace 40:\n+..."}`。`Read` 的行范围仍写在
+`path` 选择器里；外部框架习惯的读参（`limit`/`offset`/`selector` 等）以及 `Grep`/`Python` 的
+同类字段只被接受并忽略，真正未知的字段仍会在模型与执行层被拒绝；`Edit old_string/new_string`
+会被拒绝。
+
+### 步骤 3：Surface Gate 与 StormBreaker（重复抑制）
+
+`enabled_tools` 是唯一工具启用输入：`None` 使用 catalog 默认集合，空列表禁用全部，显式列表精确选择；`PythonSandbox` 是 explicit-only 工具。`ModelToolSurface` 再结合 approval、角色、文件系统后端、编译 feature 和硬依赖完成一次解析。默认 `yolo` 允许全部 tier；`write` 自动允许 Read/Write、阻止 Exec；`always-ask` 自动允许 Read、阻止 Write/Exec。单工具 `allow/deny/prompt` 可覆盖模式。当前没有交互式 prompt，`prompt` 会 fail closed。
+
+resolved `ModelToolSurface` 是唯一工具边界：`PrefixManager` 从它生成 tools schema 和能力工作流，`ToolRunner` 在真实执行前检查同一个 surface。这样即使恢复会话、模型异常输出或自定义 backend 产生未暴露的调用，也只会写入错误 tool result，不会执行。运行时直接消费 resolved surface；disable flag、sandbox `allow_*` 和独立的 runner approval 判定不属于执行合同。
+
+`ToolRunner` 先校验调用属于 resolved `ModelToolSurface`，再把每个工具调用的
+`(name, args_json)` 放入滑动窗口。检测到同一对 `(name, args)` 在同类窗口中计数 >3 次（窗口 6），
+则抑制该调用，返回抑制说明：
+
+```rust
+StormDecision::Suppress(reason) => {
+    results.push(ToolExecution {
+        status: ToolStatus::Blocked(ToolBlocker::StormBreaker),
+        content: format!("Error: {reason}"),
+        ...
+    });
+}
+```
+
+**Mutating 清空规则**：当 metadata 标记为 mutating 的工具被调用时，清空窗口中的 read-only
+条目。这允许 edit→re-read 模式正常执行。
+
+**StormExempt**：SubAgent、PlanDraft、PlanClear、PlanConfirm、TodoWrite、TodoAdvance
+跳过风暴检测。TodoRead 是普通只读工具；TodoWrite 只负责结构更新，TodoAdvance 只负责
+进度转换，两者都是 revision 驱动的 session 状态变更并通过 `TodoStore` 原子提交。
+
+## 信号驱动的信念系统
+
+> 实现收敛：`ToolSignalProcessor` 不再累计完整信号副本（原 `signals`/`collected_signals` 已删除）；事实来源是 `ToolExecution.signals` 与 events.jsonl 的 `type=signal` 事件。
+
+信号系统是 Mink 的反馈回路：工具执行质量被采集为信号，合并为单一信念度 `B`，
+低信念时向 LLM 注入修正提示（或中止），构成闭环。完整设计（设计思想、信号采集、
+信念计算、决策干预、边界情况、组件接口、展示协议）见
+[信号采集与决策](#三信号采集)。
+
+### 关键不变式
+
+- 信号采集：`ToolFailed`（退出码/`Error:` 前缀）、`ToolError`（regex 启发式）、
+  `EditLoop`（滑动窗口序列检测）三类；一次调用多条信号取 `max(severity)`，不叠加
+- 信念计算：Beta-Binomial 拉普拉斯平滑，先验 `α=3, β=1`（无观测时 `B=0.75`），
+  滑动窗口 W=16，跨输入按 `Config.signal.decay_per_input`（默认 0.6）衰减替代硬重置
+- 分层响应：`B ≥ remind` 不干预（单次软信号只记录）；提醒区注入轨迹证据；警告区叠加
+  快照回滚与恢复首步守卫（拦截喂回信念）；`B < abort` 用户接管；档位由 `SignalPolicy`
+  配置，阈值/超参为内部策略常量
+- 注入协议：以独立 User 消息（`[trajectory]`/`[detector]` 事实帧）写入 conversation，
+  不污染 system prefix；`RecoveryPolicy` 按 resolved capabilities 校验恢复首步
+- `MINK_SIGNAL_POLICY=off`：不生成 `<belief-awareness>` prompt 段，不采集、不注入、
+  不回滚、不接管、不启用恢复守卫
+- 错误分类（`errors.rs` 的 `ErrorCategory`：Network/Auth/RateLimit/Parse/Tool/Internal）
+  仅用于日志与用户提示，不驱动任何决策
+
+## LLM 有界自愈
+
+设计目标是“有限故障下继续推进”，不是通用恢复框架：只增加两个小型状态对象（turn 内格式窗口、logical request 内的重试计数/退避状态），复用现有 `LlmBackend`、`TurnExecutor`、工具失败结果、`Retry` 事件与 usage 记录。
+
+### 四种处置
+
+- 接受：完整响应或确定性兼容（合法调用配 `stop`、旧式 `function_call`、已支持的 `data:` 拼写/缺 DONE 但有 finish_reason）。
+- 反馈并继续：工具参数/调用格式错误与不可用输出——失败工具结果或一次受限内部诊断，下一 round 纠正；模型可见的错误包括 `invalid tool arguments`（serde 规则未放宽）、`<tool-call-format-error>`（整批身份不可配对）、`<output-truncated>`（length 候选整体废弃）、`<incomplete-response>`（空正文/未知 stop）。
+- 重试当前请求：502/429/连接重置/首事件与 idle 超时（不占格式窗口）与 SSE 损坏/异常 EOF（占一个格式错）；固定投影重试、恰发一次 Retry、可取消退避、`Retry-After` 为最早重试时间。
+- 结束：永久拒绝、恢复耗尽、取消、本地不可恢复故障；稳定错误前缀 `format_recovery_exhausted` / `request_retry_exhausted` / `request_timeout`，绝不空成功。
+
+### 关键取舍
+
+- 所有可继续的 round 共用同一个尾部：先结算窗口一次，再执行分支决策（todo 提醒、`[trajectory]` 证据注入），最后重载已提交历史——刷新必须在本轮所有追加之后；反馈诊断、工具结果与注入状态必须出现在下一次请求中。
+- scavenge 的候选解析必须区分“无候选”与“明确候选解析失败”：先识别包装标签再解析内部（闭合/未闭合 × JSON 合法/非法 × 名字正常/缺失 全部归入降级候选），DSML invoke 同样（头部/块/参数截断均降级且切片安全；参数头完整匹配含 `>` 的分隔符后才读取值，声明为 JSON 的参数解码失败不得回退为字符串）；`function.arguments` 字段缺失（默认空对象）与类型错误（保留原始 payload 与 parse error）必须区分；普通 JSON 示例仍不误判。
+- SSE 流式 `arguments` 类型错误是粘性的（不在流内纠正，模型下一 round 重发）；首事件/idle 期限只由真实进度推进，Retry 不延长 idle；失败 attempt 在重试前先取消自身子 token。
+- 格式窗口按 round 计（不是按工具、不是按 attempt）：一个 round 内多个坏参数调用、多次损坏流只占一个 `true`；预判（`would_exceed`）不改变窗口，提交只在唯一 round 结束点发生，且在所有真实工具结果持久化之后。
+- 参数错与请求重试严格分离：参数错不能归入“原样重试同请求”，502 不能靠给模型追加提示恢复；已知格式调用不消耗恢复守卫，也不触发 belief/回滚/重启。所有模型可见内置工具的模型参数解码经共享 helper（不完整迁移会造成真实失败信号与格式额度的错配）。
+- 不确定的词法修复不再执行：截断 JSON 只带 parse error 与原始参数摘要交给模型重发；正文中已识别的工具调用同样如此（降级候选进入纠错分支），普通 JSON 示例仍不会被当成格式错误。
+- 可选总期限是整次逻辑请求的上限：建流、流消费与退避等待共用同一个 deadline；到点时停止等待/消费并保留已收到的 usage，重试不会延长它（主请求与压缩摘要请求共用该语义）。
+- 内置 backend 一次调用 = 一次物理请求，重试责任收敛到 runtime attempt 循环，避免嵌套重试相乘；自定义 backend 内部的多次物理请求只按既有聚合 `attempt_count` 记录（不拆明细、不外层乘算）。
 
 ## 一、概述
 
@@ -45,8 +155,6 @@ DecisionEngine.decide_with_signals(B, errors, hard_signals)
 拦截反馈。
 
 三个组件职责清晰、零外部依赖（仅 BeliefTracker 引用 Signal 类型），可独立修改和替换。
-
----
 
 ## 二、设计思想
 
@@ -100,8 +208,6 @@ DecisionEngine.decide_with_signals(B, errors, hard_signals)
 传统控制系统的反馈信号通常是一个直接测量的物理量（温度、位置、电压）。这里没有直接可测的"agent 可靠性"——我们只有间接信号（工具输出文本、退出码）。贝叶斯推断将这些杂散的间接信号合成为一个稳定的统计量 B，这个 B 再作为控制器的输入。用概率论为控制器提供干净的测量值，是这套系统的核心创新。
 
 滑动窗口（W=16）则是从控制论角度的补充：它是一个**有限记忆的遗忘因子**。Beta 分布天然是累积的（所有历史观测都计入 α 和 β），但在 agent 场景下，旧错误不应永久拖累信念——agent 可能已经修正了问题。滑动窗口截断记忆，等价于控制论中的"有限带宽"：系统只对最近 N 次工具调用的质量敏感，超过窗口的历史不再影响当前控制决策。
-
----
 
 ## 三、信号采集
 
@@ -167,8 +273,6 @@ Edit↔Diff 交替检测还要求窗口内完全无 Bash/Grep/Read 操作——�
 - **与守卫/Storm 的优先级**：已知格式调用（parse_error 或历史上相同参数已确认 ModelFormat）不消耗恢复守卫——守卫保持激活等待下一次有效调用；重复坏参数被 StormBreaker 抑制时仍保留 ModelFormat 来源，不能转成硬 `ToolFailed`。同一轮混有真实执行失败时，真实失败照常参与决策。
 - **参数身份**：storm 比较键对不可解析输入使用原始参数摘要（合法 JSON 用序列化参数），不同的坏 payload 不会因共享占位 `{}` 被合并为一个调用。
 
----
-
 ## 四、信念度计算
 
 ### 4.1 从信号到观测
@@ -223,8 +327,6 @@ BeliefTracker 维护 `VecDeque<Observation>`，窗口 W=16。每次 `observe()`�
 ```
 
 旧错误自然滑出窗口后，信念逐步回升。
-
----
 
 ## 五、决策与干预
 
@@ -288,7 +390,7 @@ capabilities 校验首个调用（拦截反馈喂回信念，连续拦截达 `gu
 强制证据注入）。
 
 provider bindings 和动态工具引用的完整设计见
-[工具能力与提示词解耦设计文档](设计哲学-工具能力与提示词解耦.md)。
+[工具能力与提示词解耦设计文档](tools-and-capabilities.md)。
 
 ### 5.4 冷却机制
 
@@ -355,8 +457,6 @@ or inspect the failing commands before further edits.
 Recovery 首步资格与普通 Bash 安全/误用策略是两套合同。前者只决定信号恢复后的首个调用能否
 解除守卫，不改变普通 Bash 的危险命令检查和误用提示。
 
----
-
 ## 六、信号链路完整路径
 
 ```
@@ -405,8 +505,6 @@ Recovery 首步资格与普通 Bash 安全/误用策略是两套合同。前者�
 └────────────────────────────────────────────────────────────┘
 ```
 
----
-
 ## 七、边界情况
 
 ### 7.1 exit_code = 0
@@ -433,8 +531,6 @@ Bash 命令成功退出（code 0）不产生 ToolFailed 信号。
 ### 7.6 冷却与信念恢复的时间关系
 
 单次严重错误需约 2 次 clean call 恢复至 0.70。冷却期 3 次，比恢复多 1 拍。如果第 2 次 clean call 后信念已达标，冷却期结束后不会多余注入。
-
----
 
 ## 八、组件接口
 
@@ -475,8 +571,6 @@ decision_engine: DecisionEngine,
 | `crates/mink-core/src/agent/turn.rs` | 证据注入、快照回滚、策略重启与用户接管 |
 | `crates/mink-core/src/config.rs` | 解析 `SignalPolicy`；数值策略保持内部固定 |
 | `crates/mink-core/src/prompt/core.rs` | policy 非 `off` 时生成不含具体工具名的 `<belief-awareness>` core |
-
----
 
 ## 九、信念度实时展示
 
@@ -521,8 +615,6 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%)
 2. **Phase 4 决策前**——标题栏刷新最新信念度
 3. **本轮结束后**——最终信念度持久显示
 
----
-
 ## 十、当前限制
 
 - 冷却轮数来自内部 `SignalConfig`，没有公开配置入口。
@@ -534,5 +626,5 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%)
 | 文档 | 内容 |
 |------|------|
 | `AGENTS.md` | 操作手册、快速参考 |
-| `docs/ARCHITECTURE.md` | 运行时分层、信号链路图 |
-| `docs/DESIGN.md` | 信号驱动的信念系统（主题五） |
+| `docs/concepts/architecture.md` | 运行时分层、信号链路图 |
+| `docs/concepts/runtime.md` | 信号驱动的信念系统（主题五） |

@@ -49,3 +49,14 @@ docs/QUALITY_CONVERGENCE_PLAN-*.md
 docs/QUALITY_DEEP_AUDIT-*.md
 docs/LLM_RECOVERY_IMPLEMENTATION_PLAN-*.md
 docs/LLM_RECOVERY_AUDIT-*.md
+
+# Local review records and implementation plans
+/docs/local/
+/docs/**/*PLAN*.md
+/docs/**/*AUDIT*.md
+/docs/**/*REVIEW*.md
+/docs/**/*ROADMAP*.md
+/docs/**/*implementation-plan*.md
+/docs/**/*action-plan*.md
+/docs/**/release-audit-*.md
+/docs/**/*实施计划*.md

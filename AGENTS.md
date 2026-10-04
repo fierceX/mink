@@ -37,13 +37,15 @@ Mink 是用 Rust 实现的轻量 AI coding agent，面向 DeepSeek/OpenAI-compat
 
 ### 架构与文档纪律
 
+- **文档范围**：正式文档只描述已实现行为、设计约束、验证方法与测量证据；实施计划、临时审计及评审报告仅本地保留，不入库。
 - **契约必守**：「关键不变式」不可逾越；确需变更协议时先更新本文件与 `docs/` 对应章节，并保持全仓一致。
-- **同步文档**：架构/行为变更同步 `docs/ARCHITECTURE.md`、`docs/DESIGN.md`、`docs/USAGE.md`、`docs/tools.md` 及本文件（含更新日期）；用户可见变更记入 `CHANGELOG.md` Unreleased。
+- **同步文档**：架构/行为变更更新 `docs/concepts/` 的对应机制、`docs/guides/` 的操作说明及 `docs/reference/` 的唯一权威定义；集成契约更新 `docs/integration/`，新增公开页登记 `docs/manifest.json`。同步本文件（含更新日期）；用户可见变更记入 `CHANGELOG.md` Unreleased。维护记录放 `docs/development/`，不发布。
 - **测试锚定**：新增行为必有测试；不变式守护优先落在 `tests/invariants.rs` 或模块级回归测试。
 - **官网展示**：`docs/index.html` 是静态官网，与 server 工作台分离；以轻量可嵌入、长任务上下文、可靠编辑为主线。回放使用公开记录或独立实跑，标注节选/重建与来源，不编造结果或统计；终端示例的字号、行高、状态字段及窄屏优先级对照真实 TUI；中间统计须有事件来源并与最终总量核对，未记录值显示未知；安装示例核对公开 API，本地资源保留许可。改动运行 `node scripts/test-homepage.mjs`、`python3 -m unittest discover -s scripts -p 'test_hero_replay.py'` 并检查桌面/窄屏渲染。
 
 ### 提交纪律
 
+- **说明范围**：提交说明与代码注释描述行为、原因和约束，不包含实施计划中的阶段编号或审计优先级标记。
 - **卫生**：不提交敏感数据（模型轨迹、密钥、用户目录、内网地址）与实验性未跟踪产物；拿不准先问。
 - **message**：一个主题一个提交，完整概括 what + why + 影响面；「版本号 + 文档同步」这类准备性改动可单独成提交。
 
@@ -61,13 +63,13 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
   5. 持久化 tool results → Display 输出 → 信号采集 → belief → decision
 ```
 
-分层：LLM 层（`llm/client.rs` 流式客户端与重试、`llm/transport.rs` 请求构造、`sse/*` 解析）、工具层（`tools/runner.rs` 注册与分发、`tools/file.rs` Read/Write/Edit、`tools/{bash,python,todo,plan}.rs`）、资源与能力层（`resources/router.rs`、`capabilities/*`）、信号层（`guard/*`、`agent/{belief,decision}.rs`）、持久化层（`session/{store,compaction,plan,todo,prefix,artifacts}.rs`）、UI 层（`crates/mink-cli/{ui,tui}/*`）。完整模块职责见 `docs/ARCHITECTURE.md`，REPL/TUI 细节见 `docs/DESIGN.md` 与 `docs/TUI_OPTIMIZATION_ROADMAP.md`。
+分层：LLM 层（`llm/client.rs` 流式客户端与重试、`llm/transport.rs` 请求构造、`sse/*` 解析）、工具层（`tools/runner.rs` 注册与分发、`tools/file.rs` Read/Write/Edit、`tools/{bash,python,todo,plan}.rs`）、资源与能力层（`resources/router.rs`、`capabilities/*`）、信号层（`guard/*`、`agent/{belief,decision}.rs`）、持久化层（`session/{store,compaction,plan,todo,prefix,artifacts}.rs`）、UI 层（`crates/mink-cli/{ui,tui}/*`）。完整模块职责见 `docs/concepts/architecture.md`，REPL/TUI 细节见 `docs/concepts/runtime.md` 与 `docs/development/tui.md`。
 
 ---
 
 ## 关键不变式
 
-以下契约均由代码或测试钉住，改动相关代码时必须保持；动机与设计依据见 `docs/DESIGN.md`。
+以下契约均由代码或测试钉住，改动相关代码时必须保持；动机与设计依据见 `docs/concepts/runtime.md`。
 
 ### 压缩与持久化
 
@@ -188,7 +190,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 3. 在 `crates/mink-core/src/assets/tools.json` 添加 schema（字段与 serde 一致）。
 4. 在 `metadata()` 声明 approval tier、结果类型、副作用（mutating）、spawns_sub_agent、storm_exempt。
 5. 需要压缩给 LLM 的内容时设置 `ToolOutcome.conversation_content`。
-6. 补充单元测试：schema/registry 一致性、approval、错误路径、截断、artifact、信号与安全边界；协议变更同步 `docs/tools.md`。
+6. 补充单元测试：schema/registry 一致性、approval、错误路径、截断、artifact、信号与安全边界；协议变更同步 `docs/reference/tools.md`。
 
 ---
 
@@ -216,15 +218,10 @@ grep '"prefix_snapshot"' events.jsonl | jq '{version, fingerprint, dependency_fi
 
 ## 文档索引
 
-| 文档 | 说明 |
-|------|------|
-| `docs/ARCHITECTURE.md` | 运行时分层、模块职责、核心数据流（模块查找首选） |
-| `docs/DESIGN.md` | 设计取舍与不变式详述 |
-| `docs/USAGE.md` | CLI 参数、配置、会话管理、工具参考 |
-| `docs/EMBEDDING.md` | Rust 库 / Python SDK 嵌入、Token 用量 |
-| `docs/PROTOCOL.md` | `--print` stream-json 与 `--agent-jsonl` 协议 |
-| `docs/server.md` | mink-server REST/SSE API、生命周期与并发语义 |
-| `docs/tools.md` | 内置工具参数与行为（Read/Edit 协议细节） |
-| `docs/设计哲学-工具能力与提示词解耦.md` | 工具 surface、语义能力、prompt 所有权 |
-| `docs/设计哲学-信号系统.md` | 信号系统完整设计 |
-| `docs/TUI_OPTIMIZATION_ROADMAP.md` | TUI 当前实现和维护建议 |
+- `docs/start/overview.md`：三条阅读路径与完整清单。
+- `docs/concepts/architecture.md`：模块查找首选；运行契约见 `runtime.md`、`state-and-context.md`、`tools-and-capabilities.md`、`recovery-and-signals.md`、`images.md`。
+- `docs/guides/`：终端、Web、会话与引导、Plan/Todo、上下文、图片、定制、安全和排查。
+- `docs/integration/`：Rust、Python、扩展契约。
+- `docs/reference/`：配置、工具、机器协议、HTTP API 和用量的唯一完整定义。
+- `docs/development/`：TUI、性能、Web 与官网维护；`docs/migration.md` 为迁移对照。
+- `make docs-check` / `make docs-site`：统一校验与组装，产物 `target/docs-site`。

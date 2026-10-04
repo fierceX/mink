@@ -1,126 +1,8 @@
-# 架构说明
+# 架构与模块
 
 > 更新日期：2026-10-04
 
-本文描述 Mink 当前代码结构、模块职责和运行时数据流。终端用户命令、配置和工作流见
-[USAGE.md](USAGE.md)；Rust/Python 嵌入见 [EMBEDDING.md](EMBEDDING.md)；机器协议见
-[PROTOCOL.md](PROTOCOL.md)；完整工具协议见 [tools.md](tools.md)；设计取舍和不变式见
-[DESIGN.md](DESIGN.md)。工具 surface、语义能力、自由组合和前向求值算法见
-[工具能力与提示词解耦设计文档](设计哲学-工具能力与提示词解耦.md)。
-
-[TOC]
-
-## 官网与文档站
-
-GitHub Pages 发布 `docs/` 静态产物；`docs/index.html` 提供官网与 Markdown 阅读器，
-`assets/home.css` 负责主页及共享视觉样式，`assets/vendor/` 保存解析/高亮资源及版本许可。
-官网围绕轻量可嵌入、长任务上下文、可靠编辑组织三个章节，以机制图说明能力。
-官网自身不启动 runtime；`assets/hero-replay.json` 来自独立实跑案例，包含同轮引导，
-`assets/cases/env-reader.md` 保存原始要求、测试结果与代码。输入动画由正式引导重建，
-长正文节选并加速播放；暂停/离开/隐藏保留位置，加载失败显示错误。
-
-`scripts/build_hero_replay.py` 从 conversation 导出来源行号与类型化工具状态，忽略 internal
-输入，HTML 转义、控制序列清洗与路径匿名化；旧未知状态不标成功。中途不填造统计，
-结束帧可用 `--stats` 读取最终快照；`--events` 按 usage 事件重建已结算计数，
-以调用 ID 或完整回复文本匹配正式消息，保留被废弃响应的真实用量，并与最终总量核对。
-该路径限定独立单轮、主 agent 案例，不匹配或不完整即拒绝导出；未记录信念值显示 —。`--case-title` / `--case-doc` / `--recorded-date` /
-`--mink-version` 指定公开案例身份，`--recording-root` 匿名化独立录制目录。
-导出结构化状态项（字段、文本、TUI 优先级）、状态事件行号与 workState；播放器按实际宽度逐项裁剪，
-resize 后恢复可容纳字段，模型与工作状态优先保留。Python 模块测试验证引导绑定、
-真实/未知状态、TUI 数字格式、输入 Token 口径及导出清洗。
-
-阅读器用 `#docs/<path>#<anchor>` 保存文档位置，fetch 的 generation 拒绝过期结果，
-主页入口使用 `#home`、`#features`、`#start`，三个章节各有 `#runtime` / `#context` /
-`#reliability`，引导案例为 `#guidance`。发布工作流将根目录 CHANGELOG 复制到
-站点；本地缺少该文件时显示源文件入口。`scripts/test-homepage.mjs` 复用现有 Web
-测试环境的 jsdom，CI 验证资源、版本、导航、键盘、复制与异步加载行为。
-
-## 会话工作台与人类输入
-
-`mink-server` 继续复用 Axum、Registry lease 与 `AgentRuntime`，Vue/Vite 产物嵌入二进制。Web 数据流为 REST/SSE → SessionController / CatalogController → 会话模型 → 纯轮次投影 → 展示组件。`workbench.ts` 单独保存按 `(project_key, session_id)` 隔离的草稿、附件引用、展开选择和阅读锚点；异步操作捕获原会话身份，过期响应不能写入当前视图。
-
-`catalogFilter.ts` 是已发现目录的纯匹配投影：按项目名称、会话标题/别名/ID、完整工作目录分别匹配；SessionSidebar 持有关键词与范围，不改 CatalogController 的稳定顺序或当前会话身份。
-
-App 以 URL 的 `session` / `project` 作为刷新目标；根地址直接显示首页，不恢复旧的 localStorage 会话选择。启动时记录 SessionController 导航 revision，目录响应不得覆盖中途明确导航；指定会话在目录读取期间显示中性加载界面。当前视图通过 replaceState 同步完整 URL 身份，离开时清除会话参数。
-
-`SettingsDialog.vue` 使用原生模态 dialog，设置由顶栏菜单按需打开；菜单先恢复触发器焦点，模态面板随后捕获焦点。设置与会话生命周期分离，偏好仍由 `workbench.ts` 持久化。
-
-Web 的 `ActionMenu.vue` 和 `IconButton.vue` 分别封装 Reka UI DropdownMenu / Tooltip，使用 Lucide 图标；组件库负责菜单定位、碰撞避让、方向键、外部点击和焦点交接。输入区将草稿、附件与操作收进单一容器，轮次跳转浮于对话内；`useOverlay.ts` 维护响应式媒体条件与移动覆盖层焦点范围。可视窗口 resize 只更新布局高度，不触发会话命令。详情请求以会话身份和加载 revision 丢弃过期结果，目录与文件正文互斥显示。
-
-`clipboard.ts` 为对话和文件路径提供统一文本复制：优先 Clipboard API，不可用或拒绝时使用用户点击中的选区复制兼容路径；完成后恢复输入焦点、光标与文本选区，只有真实复制成功才显示成功。
-
-`ToolInput.vue` 按工具语义展示命令、脚本、文件内容、子任务与参数字段，`EditCall.vue` 同时处理 Replace 和 Hashline；原始参数仅在独立折叠入口查看。Plan/Todo 结果优先读取类型化 presentation，普通文本结果与对话共用 Markdown 渲染，PythonSandbox 归入命令视图。调用与结果分别展示，不以结果覆盖调用参数，不改工具执行与输出保护。
-
-`ActionMenu` 的轮次变体使用单列弹层，宽度不超过 300px、高度不超过 260px/40dvh 和可用空间；条目保留独立行、截断长标题并支持键盘滚动定位。
-
-阅读区与过程组使用 `minmax(0,1fr)` 和明确的最小/最大宽度约束；`preferences.wrapText` 持久保存并发布 `data-wrap`，代码/工具/文件正文和 Markdown 表格的换行只改变 CSS，不改源文本。换行切换保留消息阅读锚点。
-
-手机阅读模式由 App 的临时 UI 状态驱动：Transcript 在外层用户滚动达到方向阈值后请求隐藏，布局/流式滚动与内层卡片滚动不参与；顶栏和输入卡片使用 `v-show` 保留组件，输入区发布锁定状态。焦点输入、附件、待处理/失败输入和恢复操作优先保持可见，阅读锚点在控件高度变化时恢复。
-
-Registry 的扫描入口统一排除目录名或 metadata.id 带 `sub_`/`replan_` 前缀、或 metadata.parent 存在的子代理；列表与会话查找复用同一规则，旧子代理元数据缺失、损坏或继承父身份时仍按目录排除。
-
-Core 的 `session/input.rs` 拥有 session 唯一 `InputInbox`。`AgentRuntimeHandle::stream_input(HumanInput)` 为新任务返回 `(InputReceipt, Some(AgentEventStream))`，为目标 turn 的引导或重复提交返回回执与 `None`；`resume_input(id, revision)` 明确续发未应用输入。旧 Rust `stream_turn` 保持原执行契约，server 的旧 `/turn` 转入持久输入路径。HTTP handler 不直接追加 conversation；TurnExecutor 在已接受响应、完整工具交换之后、下一请求的压缩检查之前消费 Inbox。
-
-`inputs.json` 经现有原子状态发布与 persistence fault 闩锁更新；`applying` 回执与正式消息的 `_mink.input_id` 构成可恢复交接。ConversationStore 的 commit observer 在追加完成后向可靠 runtime 事件流发出 `ConversationCommitted`，身份使用物理 JSONL 行号，初始化只扫描一次，追加增量计数，与历史分页一致。
-
-Full/Inline TUI 通过 `TuiRuntime` 调用同一 `stream_input`；引导准入不经过等待当前 turn 的 broker 工作队列。新任务返回的 stream 交给 broker 可靠消费，正式引导提交转成 `GuidanceApplied`，权威 outcome 转成 `TurnFinished`，共用 TuiState reducer。输入上方只读映射 Inbox 状态；`/inputs`、`/resume ID`、`/withdraw ID` 调用公开接口。含引导的历史窗口经公开 SessionReader 读取完整正式轮次后走相同 reducer，保留引导顺序和工具元数据。
-
-server `Projection` 是可重建只读镜像：启动经公开 `SessionReader` 读取历史、Plan、Todo、Artifact；运行中消费可靠 `AgentEventStream` 更新。快照与广播订阅在同一 mirror 发布锁下建立，不使用 best-effort EventSink 作为事实来源。`diagnostics.ts` 按 TUI `StatsSnapshot` 口径展示完整状态栏指标；镜像单独保持可靠 activity（工作阶段和等待秒数），快照重连不必依赖历史文本猜测正在执行的动作。新版 SSE 使用 runtime generation 与传输水位；正式消息接管暂态文本，Plan/Todo presentation 增量合并，终态由 `turn_final` 决定。
-
-`session/attachments.rs` 是 CLI/TUI/Web 共享的内容寻址存储。Web 上传保存原始字节到 session `attachments/`，校验真实格式、完整解码、尺寸、能力、大小、权限和校验和。附件预览是 session 限定接口；输入只携带绝对路径，模型图片仍由 `Read` 捕获。
-
-
-## TUI 调度与布局
-
-Full 仍为默认模式；Full/Inline 共用 reducer、结构化工具状态和 Markdown。主循环以
-Crossterm EventStream、runtime signal、后台结果、Inbox watch 和绘制期限做异步选择；文本
-按 33ms 合并，键盘、停止与终态立即请求绘制，空闲不绘制。signal 批次最多 512 项/4ms，
-Inline 每批最多插入 256 行，批次之间让出执行。同步 Display 通道通过有界异步转发唤醒。
-文件选择器、历史恢复、Artifact、子代理详情与持久 Inbox 操作在后台执行；查询结果带
-operation generation，准入回执捕获草稿 revision，迟到结果不能清理新草稿。撤回/续发
-已有 Inbox 项不消耗未发送草稿和图片；编辑只消耗对应文本，新图片仅由新提交消耗。
-
-`TranscriptItem` 保存稳定 ID、revision 与按宽度缓存的行；Fenwick 高度索引定位可见消息，
-Full 只复制视口行并构建可见点击区域，不保留完整历史的展平副本。追加/结果/折叠只标脏
-对应 item；宽度变化每次最多布局 2048 项/4ms。详情按资源身份、revision、宽度缓存折行
-结果，滚动只切片，其他子代理更新不使当前 Artifact 失效。输入布局独立按草稿版本与宽度
-缓存，编辑按 grapheme 处理。
-
-流式 Markdown 增量检查完整行，匹配围栏字符和长度，列表、引用、表格及缩进结构不确定
-时保留可变尾部；不再按任意字节裁掉前文。长未闭合代码块复用已折行完整行，闭合围栏
-必须收到完整换行后才停止增量代码布局，防止后续字符改变该行语义。阅读状态为
-跟随最新或消息 ID/内容偏移锚点，封口、追加、折叠与 resize 保留阅读意图。
-Inline 插入成功才推进 item/行位置，释放已提交正文、presentation 与行缓存，保留轻量
-身份/Artifact ledger；完成子代理详情经公开 Reader 按需恢复。写入失败退出，不重试可能
-部分成功的 scrollback。详情返回继续使用原 Inline Terminal，初始化前建立恢复 guard。
-
-macOS 通知模块优先发送单条终端原生 OSC 9，由终端保留点击与 surface 的关联。
-Ghostty/iTerm2/WezTerm 不另发平台通知；Terminal.app 或其他已提供 bundle 身份的终端
-可通过可选 `terminal-notifier -activate <bundle>` 激活应用，外部命令输出隔离。禁止
-AppleScript 通知回退，其通知属于脚本编辑器；外部工具缺失时保留 OSC 与铃声。
-
-性能数据与验证脚本见 [TUI 性能记录](TUI_PERFORMANCE-2026-10-04.md)。
-
-## 项目定位
-
-Mink 是一个 Rust 实现的轻量 AI coding agent，默认面向 DeepSeek / OpenAI-compatible API，优先服务终端中的编码工作流；作为 Rust 库嵌入时也可注入自定义 LLM backend。
-
-核心目标：
-
-- 单二进制分发，终端优先，REPL / TUI / stream-json / Agent JSONL 四种使用形态
-- 可作为 Rust 库嵌入：Rust 发布包名为 `mink-core`，库 crate 名为 `mink`，`mink::runtime` / `mink::prelude` 提供同进程调用
-- LLM backend 可注入：默认 OpenAI-compatible streaming backend 支持兼容端点扩展请求字段，宿主也可替换为私有模型、内网网关或厂商 SDK
-- Session 是一等公民，使用 JSONL 追加持久化，支持恢复、重放和压缩
-- LLM 流式输出、工具执行、信号检测、决策恢复构成闭环
-- 工具边界明确：超时、输出大小、写入大小、副作用和模型工具 surface 都可控
-- 工具有统一 metadata 和 approval tier，支持基础审批策略
-- 超长工具输出落 session artifact，可通过 `Read artifact://<id>` 恢复
-- `Read` 当前是内置轻量资源 provider，支持本地文件、artifact、skill、rule 和 session introspection；资源协议所有权属于 `ResourceRouter`
-- registered resource 与 capability snapshot 分离：资源读取走 `ResourceRouter`，prompt/skill/rule/context 能力视图走 `CapabilitySnapshot`
-- `Edit` 在 runtime 启动时解析为互斥的 Hashline 或 Replace schema、提示词和 executor
-- 上下文预算是硬约束，通过摘要压缩和 immutable prefix 尽量保留 prefix cache 命中
-
----
+分层、职责与关键不变式。
 
 ## 核心原则
 
@@ -132,8 +14,6 @@ Mink 是一个 Rust 实现的轻量 AI coding agent，默认面向 DeepSeek / Op
 - **工具结果双通道**：LLM conversation 使用工具结果或工具自定义 `conv_content`，UI 通过
   `PresentedToolResultDisplay` 展示基础内容、成功状态、结果类型和结构化 presentation。
 - **信号驱动干预**：工具失败、错误模式、编辑循环会降低 belief，并触发注入或中止。
-
----
 
 ## 运行时分层
 
@@ -152,7 +32,7 @@ OrchActor (agent/orchestrator.rs)
   ▼
 TurnExecutor (agent/turn.rs)
   │  单轮执行器：压缩 -> LLM stream（固定投影 + attempt 重试）-> scavenge ->
-  │  格式窗口提交 -> 工具 -> 信号 -> 决策
+  │  候选接受 -> 工具 -> 信号 -> 格式窗口结算 -> 决策 -> 历史刷新
   │  组合 PrefixManager / TurnCompactor / ToolSignalProcessor /
   │  SubAgentCoordinator（模型与 backend 在构造时一次确定）
   ▼
@@ -218,90 +98,6 @@ TurnExecutor (agent/turn.rs)
 │ crates/mink-cli/src/tui/         │ ratatui Full / Inline 双 TUI surface
 └───────────────────────┘
 ```
-
----
-
-## 核心数据流
-
-### 单轮执行
-
-```text
-用户输入
-  │
-  ▼
-OrchActor.handle_user_input()
-  ├── belief.decay(config.signal.decay_per_input)
-  ├── ctx.interrupt = false
-  ├── resolve_active_model()
-  └── TurnExecutor::execute()
-       │
-       ├── tools.reset_storm()
-       ├── compactor.reset()
-       ├── signal_processor.reset()
-       ├── decision_engine.reset()
-       ├── store.add_user(input)
-       ├── ensure_prefix()
-       │
-       └── while turn < max_turns:
-          ├── auto compact + preflight compact
-          ├── 固定本 round 请求投影（含图片物化，只构建一次）
-          ├── attempt 循环：建流 → 消费流 → 故障分类（共享同一可选总期限）
-          │    ├── 可重试（502/429/连接重置/首事件与 idle 超时）：废弃候选，退避后重试（恰发一次 Retry）
-          │    ├── 协议损坏：废弃候选，计本 round 一个格式错，预判窗口后重试
-          │    ├── 永久/取消/耗尽：request_retry_exhausted / request_timeout / Interrupted
-          │    └── 每次 attempt 独立结算 usage（MeteredStream → usage.jsonl）
-          ├── scavenge thinking/text 中遗漏的工具调用（已识别但参数不可解析或 DSML 参数头不完整的调用作为降级候选呈现）
-          ├── §6.3 结束判定：拒绝/截断/调用身份/可配对调用/完成/不可确认
-          ├── store.add_assistant()（仅接受后的候选；ToolCall 展示与事件同点后移）
-          ├── ToolRunner::execute_all()（模型格式失败标 ModelFormat，不执行坏参数调用）
-          ├── 工具阶段原地完成 Plan 交接（PlanCommand → effect / append-only transition）
-          ├── SubAgentCoordinator 启动/收集子代理
-          ├── ToolRunner 统一定稿并保护延迟结果大小
-          ├── ToolSignalProcessor 基于最终结果更新 belief（ModelFormat 仅单独计数）
-          ├── store.add_tool_results()
-          ├── 发射 AgentEventKind::ToolResult
-          ├── 唯一的 round 结束点：格式窗口提交 true/false；超限→format_recovery_exhausted
-          ├── Plan 压缩请求交给 TurnCompactor
-          └── 循环结束 → OrchActor::finish_usage() 汇总 billing_turn_id → TurnOutcome
-```
-
-### 工具结果进入 LLM 与 UI
-
-```text
-ToolExec::execute()
-  -> ToolOutcome { content, conversation_content, exit_code, ... }
-  -> format_dispatched_result() -> ToolExecution
-       普通结果立即执行大小保护、bash noise filter、Read/Write summary 和 Edit conv content
-       Plan/SubAgent 结果保留待定稿标记
-  -> SubAgentCoordinator 完成延迟工作（Plan 交接在工具阶段原地完成）
-  -> finalize_deferred_results()
-       对最终延迟结果执行大小保护，超限时写 artifact 并追加 artifact://<id>
-  -> ToolSignalProcessor 采集最终结果
-  -> ConversationStore::add_tool_results()
-       使用 conv_content（若非空）否则使用 content
-  -> AgentEventKind::ToolResult
-```
-`content` 受 `tool_result_max_bytes` 保护；`content_preview` 用于简短终端展示，presentation
-携带 Plan/Todo 结构化状态。LLM conversation 由 `ConversationStore::add_tool_results()` 写入，
-不依赖 UI preview。
-
-### 信号系统
-
-信号系统位于工具执行之后、下一轮 LLM 调用之前。`ToolSignalProcessor` 使用 `SignalCollector` 从工具结果中采集失败、错误模式和编辑循环信号，写入 `BeliefTracker`，再由 `DecisionEngine` 判断是否继续、注入恢复提示或中止当前 turn。
-
-```text
-ToolExecution
-  -> SignalCollector
-  -> BeliefTracker
-  -> DecisionEngine
-  -> None / Inject / Abort
-```
-
-每个用户输入开始时，belief 按 `Config.signal.decay_per_input`（默认 0.6）衰减；
-ToolSignalProcessor、decision cooldown 和 StormBreaker 窗口重置。`MINK_SIGNAL_POLICY=off`
-时，信号采集、belief 更新、注入和中止逻辑都关闭。
-
----
 
 ## 模块职责
 
@@ -545,86 +341,6 @@ VFS 只接管普通路径。`artifact://`、`skill://`、`rule://` 和 `session:
 | `crates/mink-cli/src/tui/markdown/*` | normalize、block、inline、table、diff、types、util |
 | `crates/mink-cli/src/tui/replay.rs` | TUI replay（粘贴 marker 回放时压成 `[image]`） |
 
----
-
-## Runtime 事件接口
-
-`mink-core` 只公开 `AgentEventStream` 与 `EventSink`。工具结果事件直接携带原始
-`tool_name` / `tool_use_id`、`ToolStatus`、`ToolFailureKind`、presentation 和 artifact 元数据。
-REPL/TUI 在 `mink-cli` 内把同一事件流投影为终端输出或 `TuiSignal`；实时路径与 replay 共用 reducer，
-不从展示文本反推 Todo、artifact 或工具状态。
-
-### 事件交付契约（可靠流 vs 尽力 observer）
-
-- **turn 可靠流**（`AgentEventStream`）：`stream_turn` 返回的每 turn 事件流是可靠交付通道，宿主必须消费 `recv()` 直到结束或用 `outcome()` 等待结果；内部为 unbounded 队列。边界策略：可靠事件由结构约束（工具结果受 `format_tool_result` 上限），`Text`/`Thinking` 进度受 1 MiB pending 预算（含每事件 128B 结构最小值），`outcome()` 主动排空；上游 SSE 生产者队列有界（1024）并 async 背压。
-- **EventLog 两级提交**：契约关键事件（`prefix_snapshot`、signal rollback/replan/handover）经 `log_critical_event` 异步、有期限，并同时响应 runtime cancel 与当前轮 interrupt（健康 writer 有宽限期（500ms/测试 150ms）快速成功），等待 writer 单次写入应答（入队≠写入），失败向调用方传播，并保持 stream-json stdout 输出；`flush` 的 ack 等待同样有期限；诊断事件走 `send_best_effort`（可见丢弃 + 丢失报告）。SSE 队列有界仅指事件个数，单事件字节/解析缓冲与 runtime 可靠事件仍不在预算内。
-- **尽力 observer**（`EventSink` + `EventDispatcher`）：有界队列（容量 1024），溢出时丢弃最新事件并告警一次，适合遥测，不承担 UI 完整性；**observer 投递独立于 stream 进度预算**（慢 stream 消费者不会连带饿死 observer）。
-- **延期项（队列预算/慢消费者）**：合并增量、字节预算、落盘溢出或明确中止等策略尚未实现，在实现前不得宣称事件流已有内存边界。后续验收占位：`outcome`-only 消费、满队列行为、长流式输出下的积压字节与 RSS 压力测试。
-
-### 事件词汇职责与转换边界
-
-- 三套词汇职责不同，**不要求互相派生**：`EventLog` 服务审计/持久化/信号证据（含 `prefix_snapshot`、`user_input`、压缩检查等领域专属事件，直接落盘）；`AgentEventKind` 服务 turn 内运行时流（含 `Prompt`/`ClearLine` 等展示事件）；`TuiSignal` 服务 UI。
-- 重叠转换只有两条边界，且都由 trait 强制穷尽：`Display` trait → `EventDisplay` → `AgentEventKind`；`Display` trait → `TuiDisplay` → `TuiSignal`。新增 `Display` 方法会在编译期要求所有前端实现；新增 `AgentEventKind` 变体会要求 `EventDisplay`/消费者处理。
-- 字段保真由 `runtime::events_tests::event_display_preserves_overlapping_event_fields` 与 `tui::tests::tui_display_preserves_tool_call_and_title_fields` 钉住；领域专属事件不经 `AgentEvent` 派生，TUI 信号不反向喂给 `EventLog`；不建通用消息总线。
-
----
-
-## Session 结构
-
-- **子代理所有权**：批次未完成事实只在 `SubAgentBatch.pending`；每个任务只有一个 channel 发送点；收集循环监听 cancel/绝对 deadline/10ms interrupt tick；`Drop` 负责 cancel+abort。终态由 `SubAgentStatus` 表达，Interrupted 不再映射为成功。
-- **turn 装配**：`TurnExecutor::new/new_for_model` 是唯一构造路径，模型、`sub_agent_config` 与 coordinator 一次确定；主请求、压缩与子代理共用 `ctx.llm_backend`。
-- **Plan 所有权与交接**：`AgentSharedContext.plan_store` 是 session 生命周期唯一实例；工具阶段原地 take `plan_command` 完成交接，不存在 handler/中转 Vec；启动期 `session/init.rs` 的恢复实例一次性使用后丢弃。
-- **信号事实**：生产不在 processor 内累计完整信号副本；测试通过 `result.signals` 或 events.jsonl 的 `type=signal` 事件观察。
-
-- **EventLog 所有权**：文件句柄、当前故障与已处理损失由 writer 线程独占（`WriterState`，无锁）；发送侧只持有队列、`send_lost` 原子与 init 错误锁；已报告损失水位在 `EventLogWriter.reported` 异步锁下推进。
-
-
-
-Session 目录保存 conversation、events、metadata、summary、stats 和 artifacts，并按实际功能
-生成 compaction、plan、todo 和 usage 状态文件。session 根目录由 `home`、`cwd`、`session_id`
-和以下四种 layout 共同决定：
-
-| Layout | `home` 含义 | session 目录 |
-|--------|-------------|--------------|
-| `project` / `ProjectScoped` | 用户或服务根目录 | `home/.mink/projects/<project_key(cwd)>/<session_id>/` |
-| `home` / `HomeScoped` | 用户或服务根目录 | `home/.mink/sessions/<session_id>/` |
-| `direct` / `Direct` | Mink session 集合根目录 | `home/<session_id>/` |
-| `isolated` / `Isolated` | 当前 session 根目录 | `home/` |
-
-默认入口：
-
-- `mink` 和裸 `mink-core --agent-jsonl` 使用 `project`，保持历史 CLI 行为。
-- Python SDK 默认使用 `home`，适合同一个 SDK home 下管理多个 session。
-- Rust 嵌入式 `AgentOptions` 默认使用 `isolated`，适合外层服务已经按任务/session 创建独立目录。
-- `direct` 适合服务持有一个共享 Mink 根目录，但仍希望 Mink 按 `session_id` 分目录。
-
-以 `project` layout 为例：
-
-```text
-~/.mink/projects/<project_key>/<session_id>/
-├── conversation.jsonl
-├── events.jsonl
-├── session.json
-├── summary.txt
-├── stats.json
-├── context-state.json     # 首次提交压缩状态后生成
-├── plan.md                # 确认计划存在时生成
-├── plan.draft             # 未确认草稿存在时生成
-├── plan-transaction.json  # 计划文件变更与 conversation 追加的事务 journal（事务期间存在，结束后移除）
-├── todos.json             # 首次成功 Todo 变更后生成
-├── usage.jsonl            # 首次记录 LLM 请求后生成
-├── attachments/           # TUI Ctrl+V 粘贴图片的暂存副本（内容寻址 PNG，随 session 保留）
-└── artifacts/
-    ├── index.jsonl
-    └── <tool>-0001.txt
-```
-
-`MINK_HOME` 可覆盖 CLI/SDK 的 home 根。`session_id` 是稳定内部 ID；除 `isolated` 外，它通常也是最终目录名。
-`isolated` 中 `home` 自身就是 session 目录，`session_id` 仍写入 `session.json` 并用于事件、SDK final 和恢复引用。
-`session.json` 保存用户可读的 alias、title、cwd 和时间戳。`--session NAME` 会按 alias、完整 id、id 前缀和 title解析已有 session，匹配不到时创建新的时间戳 session 并把 NAME 规范化为安全 alias。列表和解析路径对损坏的 `session.json` 采用 legacy fallback，不让单个坏 metadata 阻断恢复。`--continue` 会选择当前 layout 下最近修改的 session。
-
----
-
 ## 决策与拒绝的替代方案
 
 - **无依赖注入框架**：组装只在 `runtime/context_build.rs` 一个显式函数完成；测试经同一路径构建。拒绝全局服务定位器与 builder 框架。
@@ -659,7 +375,7 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 - 压缩阈值、响应预留、热尾部和摘要输出预算来自显式配置，不根据上下文窗口推断策略。
 - 开启输入降噪时，只精简摘要请求中的 thinking、工具参数和工具结果；完整历史和热尾部保持原样。
 - Agent JSONL、Python SDK 和 Rust runtime 暴露并映射同一组上下文压缩参数；runtime 在创建 session 前统一校验有限窗口的 reserve、tail、摘要输出和主请求输入预算关系。
-- `max_context_tokens=0` 禁用 auto/preflight 压缩和请求预算上限，但保留手动压缩；真实 context overflow 最多触发一次 LLM 压缩和一次重试。
+- `max_context_tokens=0` 禁用 auto/preflight 压缩和请求预算上限，但保留手动压缩；真实 context overflow 在无可见输出时按严格缩小规则重复恢复，共享 round 绝对期限且不设次数上限。
 - 子代理始终使用父 session 下的 isolated home；fork 在 runtime 初始化前克隆完整 session 状态并重置身份与遥测文件。
 - `ImmutablePrefix` 变更必须通过 prefix manager / invalidate 路径。
 - `ConversationStore` append 时保持活跃后缀缓存一致；显式完整历史读取是一次性读盘操作，缓存继续保持为活跃后缀。
@@ -688,3 +404,33 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 - Plan、Todo 和 Artifact 详情使用扣除水平 padding 后的内容宽度生成可视行，垂直滚动范围基于
   折行后的行数。
 - 子代理详情使用稳定 `session_id`，不要回退到裸 `line_idx` 作为视图主键。
+
+## 不变式（Invariants）
+
+代码中维护以下不变式：
+
+| 不变式 | 位置 | 违反后果 |
+|--------|------|---------|
+| compact 后 messages 必须刷新 | `agent/turn.rs`、`agent/compactor.rs` | LLM 发送过期数据 |
+| compact 后必须重建消息投影 | `agent/compactor.rs` | LLM 发送完整冷历史或过期边界 |
+| 压缩摘要只能进入动态消息投影 | `session/compaction.rs` | prefix cache 因摘要变化失效 |
+| Todo 文件原子提交后才能更新内存 revision | `session/todo.rs` | 文件与运行时状态分叉，stale write 失效 |
+| Todo 状态只通过成功工具结果或 TodoSync 追加 | `session/todo.rs`、`tools/todo.rs`、`agent/turn.rs` | 前置投影破坏消息前缀，或文件与上下文 revision 分叉 |
+| 输入降噪只能修改摘要请求 | `session/compaction_input.rs` | 完整历史或热尾部发生信息损失 |
+| 压缩使用调用方活动模型和共享 backend | `turn.rs`、`orchestrator.rs`、`session/compaction.rs` | 模型切换后摘要发往启动模型或绕过宿主 backend |
+| 子代理启动配置继承当前活动模型 | `turn.rs`、`sub_coordinator.rs`、`sub_executor.rs` | 模型切换后 child 请求退回父启动模型 |
+| 所有嵌入入口映射完整压缩参数 | `sdk_protocol.rs`、`sdk_adapter.rs`、`mink_agent/__init__.py` | 私有小窗口模型只能依赖外部 TOML |
+| runtime 在 session 创建前校验上下文预算组合 | `config.rs`、`runtime/builder.rs` | 首次请求才因零输入预算或不可压缩热尾部失败 |
+| StormBreaker 窗口每用户输入重置 | `agent/turn.rs` | 跨意图抑制误判 |
+| BeliefTracker 每用户输入衰减、ToolSignalProcessor/DecisionEngine 每用户输入重置 | `agent/orchestrator.rs`、`agent/turn.rs` | 跨意图信号累积误升级 |
+| 同一用户输入的压缩不设次数上限，但发布前必须净收益达标（auto ≥10%、强制严格下降） | `agent/turn.rs`、`agent/compactor.rs` | 同一投影上重复摘要、死循环或发布越压越大的摘要 |
+| PrefixManager 校验完整依赖 fingerprint，漂移时重建 ImmutablePrefix | `agent/prefix.rs`、`session/prefix.rs` | 缓存偏移不可检测 |
+| Plan/SubAgent 延迟结果完成并执行大小保护后才能采集信号 | `agent/turn.rs`、`tools/runner.rs` | 信号观察占位结果或未保护正文 |
+| store 只缓存活跃后缀，append 增量更新 | `store.rs` | 长 session 内存持续增长或读盘性能下降 |
+| compact 提交后按 active_start 裁剪 store 缓存 | `compaction.rs` | 冷历史继续常驻内存 |
+| 压缩不删除 conversation 历史 | `compaction.rs` | session 无法完整恢复或重放 |
+| artifact 序号恢复且正文独占创建 | `artifacts.rs` | fork/恢复后覆盖历史 artifact |
+| 图片能力在 session 初始化冻结；恢复/切换按能力指纹兼容门控 | `capabilities/model_capabilities.rs`、`runtime/context_build.rs`、`agent/orchestrator.rs` | 升级或改配置后旧视觉会话被拒绝启动 |
+| conversation 只存 `image://` 引用，请求时才物化；每个引用只完整发送一次 | `llm/image_projection.rs`、`session/store.rs` | 重复 base64 放大请求体或缓存缺失时谎报"已附加" |
+| 图片对象内容寻址、独占创建、读回 digest 校验；子代理不继承父缓存 | `session/image_cache.rs`、`agent/sub_executor.rs` | 覆盖/篡改对象或 fork 后引用损坏 |
+| 图片批次配额从 0 计数且在物化层重复校验；超限本轮失败、历史降级 | `tools/runner.rs`、`llm/image_projection.rs` | 导入或损坏会话绕过图片预算 |

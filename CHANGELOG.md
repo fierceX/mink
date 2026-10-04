@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### 文档与官网
+
+- 按入门、指南、集成、参考与机制重组中文文档；配置、工具、协议及用量集中维护，修正 overflow 恢复、压缩软额度与工具参数纠错的旧说明。旧文档路径移除，维护记录仅留仓库。
+- 官网文档使用统一清单、分组导航、前后篇与手机导航/本文目录；按源路径解析跨页链接与图片，复制保留代码原字节，旧地址显示总览入口。
+- 文档校验与 Pages 发布共用白名单组装命令，产物为 `target/docs-site`，不发布 development 和实验材料。
+
 - 修正官网终端回放的底栏与对齐：按真实 TUI 顺序展示模型、目录、Token/缓存/上下文及工作状态，按可用宽度逐项裁剪；正文、输入框标题和底栏共用字号与行高，补齐事件日志可追溯的中间统计与信念字段，未知值显示 —，最终总量严格核对；外层装饰框四边等距包裹终端。
 
 - 重组官网内容：以轻量可嵌入 runtime、长任务上下文、可靠编辑为三条主线，配机制示意与 CLI/Python/Rust/Server 接入方式。新增实际运行的 .env 解析修复案例，展示中途引导、失败测试与 6 项测试通过，支持跳到引导片段和查看验证记录；导出保留真实工具状态，仅结束帧读取最终统计。保留手机/键盘适配、文档链接恢复、复制反馈与本地解析/高亮资源。
@@ -106,7 +112,7 @@
 - 事件形状不变，仅 `compact.result` 字符串新增字段；公共 API 不变（`agent` 模块为私有）；`--print` / `--agent-jsonl` 协议不变。
 - 行为变化：同一用户输入内可发生多次压缩；错误文案由 `context remains over the request input budget after compaction: ...` 变为 `context remains over the request input budget: ... N compaction(s) committed and M forced attempt(s) in this input (last: ...)`。
 - server 配置兼容性：`.minkrc` 的 `[provider] image_input` / `vision_models` / `[provider.image]` 与 `MINK_IMAGE_INPUT` / `MINK_VISION_MODELS` 现被 mink-server 正确解析并映射到 `AgentOptions`（此前因 `.minkrc` 复刻缺字段，整份配置被拒绝并静默回退默认值）；TUI/CLI 与 server 创建的会话恢复互相打开（冻结图像能力指纹一致）。
-- 文档同步：`AGENTS.md`（不变式 + 日期）、`docs/DESIGN.md`、`docs/ARCHITECTURE.md`、`docs/USAGE.md`、`docs/server.md`。
+- 文档同步：`AGENTS.md`（不变式 + 日期）、`docs/concepts/runtime.md`、`docs/concepts/architecture.md`、`docs/start/quickstart.md`、`docs/reference/http-api.md`。
 
 ## v0.6.5 (2026-09-26)
 
@@ -132,7 +138,7 @@
 - 默认请求重试次数 2 → 3（总请求数上限 3 → 4）；默认不新增总请求期限。
 - 协议兼容输出（合法调用配 `stop`、旧式 `function_call`）不计格式错误。
 - 坏参数工具调用一律返回可见失败结果（`ArgumentInvalid`）而不是被词法修复或静默跳过；正文中已识别的不可解析调用进入格式反馈而非静默丢弃；`Retry` 控制通知不再延长 idle 超时；压缩请求同样受首事件/idle 与总期限约束。
-- 文档：`AGENTS.md` 新增「LLM 有界恢复」契约；`docs/ARCHITECTURE.md`、`docs/DESIGN.md`、`docs/USAGE.md`、`docs/EMBEDDING.md`、`docs/PROTOCOL.md`、`docs/server.md`、`docs/tools.md`、`docs/设计哲学-信号系统.md` 同步。
+- 文档：`AGENTS.md` 新增「LLM 有界恢复」契约；`docs/concepts/architecture.md`、`docs/concepts/runtime.md`、`docs/start/quickstart.md`、`docs/integration/rust.md`、`docs/reference/protocols.md`、`docs/reference/http-api.md`、`docs/reference/tools.md`、`docs/concepts/recovery-and-signals.md` 同步。
 
 ## v0.6.4 (2026-09-16)
 
@@ -159,7 +165,7 @@
 ### 新增：事件流进度预算与嵌入诊断接口
 
 - 实时事件流的 `Text`/`Thinking` 进度受 1 MiB pending 字节预算（每事件按 `max(payload, 128B)` 计费）：慢消费者下超限增量仅对 stream 丢弃，并以一条可靠 `Info` 通知；可靠事件（工具调用/结果、stop/error/usage、控制事件）不受预算影响。
-- `AgentEventStream::outcome()` 主动排空事件并释放进度字节，不再要求消费者先读空队列；新增嵌入诊断 API `progress_backlog()` 返回 `(pending_bytes, dropped_deltas)`；`docs/EMBEDDING.md` 记录三种消费方式与边界。
+- `AgentEventStream::outcome()` 主动排空事件并释放进度字节，不再要求消费者先读空队列；新增嵌入诊断 API `progress_backlog()` 返回 `(pending_bytes, dropped_deltas)`；`docs/integration/rust.md` 记录三种消费方式与边界。
 - observer（`EventSink`）投递独立于 stream 预算：慢 stream 消费者不会连带丢弃 observer 的增量。
 
 ### 兼容性说明
@@ -167,7 +173,7 @@
 - 公共 API 仅增量变化（新增 `AgentEventStream::progress_backlog()`，以及已有的 additive `set_model_with_outcome`）：无删除或破坏性签名变更；CLI 参数、`--print`/`--agent-jsonl` 协议与 `events.jsonl` 事件形状不变。
 - 行为变化汇总：进程失败分类改由执行事实决定；诊断事件在 writer 持续停摆时可见丢弃并计入丢失报告；取消/超时的建流请求会留下 `Unreported` 用量记录。
 - 行为变化汇总（0.6.3 内）：子代理中断不再记为成功且收集等待可停止；压缩守卫不可满足时拒绝压缩；启动边界修复写入 `startup_repair` 事件并把被跳过内容并入后续摘要；`Write` 原子写入、artifact 落盘失败可见；timeout/interrupt 不再输出虚构退出码；未知工具按 surface 拒绝；工具批次致命失败保留已完成结果。
-- 自定义 `LlmBackend` 语义补充：`Event::Retry` 会重置当前尝试累积的输出；每个请求只应发送一次 `Event::Usage`，额外 Usage 记一条 Unreported 诊断（详见 `docs/EMBEDDING.md`）。
+- 自定义 `LlmBackend` 语义补充：`Event::Retry` 会重置当前尝试累积的输出；每个请求只应发送一次 `Event::Usage`，额外 Usage 记一条 Unreported 诊断（详见 `docs/integration/rust.md`）。
 
 ### 修复：子代理终态与收集中断
 
@@ -204,7 +210,7 @@
 ### 修复：进程终止、超时清理与状态分类
 
 - Bash/Python 的终止原因类型化传递到工具状态：运行库超时 → `Timeout`，运行库中断 → `Interrupted`，信号终止/非零退出 → `ProcessFailed`；输出中出现 `timeout` 等词不再覆盖真实原因，信号终止（无输出、退出码 `None`）不再落入 `Unknown`。
-- Bash 不再把命令自行 `exit 130` 标注为 `command interrupted`（该文本改由运行库中断路径添加）；模型可见文本、退出码展示与 JSONL 字段保持兼容，分类更正已同步 `docs/tools.md`。
+- Bash 不再把命令自行 `exit 130` 标注为 `command interrupted`（该文本改由运行库中断路径添加）；模型可见文本、退出码展示与 JSONL 字段保持兼容，分类更正已同步 `docs/reference/tools.md`。
 
 ### 修复：请求取消/超时的用量记录
 
@@ -218,9 +224,9 @@
 
 ### 维护
 
-- 事件交付契约更新为：turn 可靠流保持 unbounded 但进度事件有 1 MiB 预算与结构最小值，observer 队列有界（1024）且溢出丢弃告警（详见 `docs/ARCHITECTURE.md`/`docs/DESIGN.md`）。
-- 按内聚拆分：`compaction` 1230→990+259、turn 抽出 `prepare_request`、server 抽出 `SessionSummary`；registry 租约/操作层整体拆分经评估延期（理由见 `docs/DESIGN.md`）。
-- 锁中毒逐类处理：可重建缓存恢复、权威状态 fail closed、不可错辅助函数显式 panic（分类表见 `docs/DESIGN.md`）。
+- 事件交付契约更新为：turn 可靠流保持 unbounded 但进度事件有 1 MiB 预算与结构最小值，observer 队列有界（1024）且溢出丢弃告警（详见 `docs/concepts/architecture.md`/`docs/concepts/runtime.md`）。
+- 按内聚拆分：`compaction` 1230→990+259、turn 抽出 `prepare_request`、server 抽出 `SessionSummary`；registry 租约/操作层整体拆分经评估延期（理由见 `docs/concepts/runtime.md`）。
+- 锁中毒逐类处理：可重建缓存恢复、权威状态 fail closed、不可错辅助函数显式 panic（分类表见 `docs/concepts/runtime.md`）。
 - 测试装配统一走生产组装并在构建期注入 backend（删除 `with_llm_backend` 字段复制）；公开边界覆盖 router/prefab；删除/合并低价值断言并附删测表。
 - 开发过程文档（行动计划/AUDIT/稳定性方案/收敛设计）移出版本控制并加入 `.gitignore`，仅本地保留。
 - 核心调用链收敛：turn 模型/backend 一次装配；PlanStore 归属 session 且 Plan 在工具阶段原地交接；事件日志 writer 独占无锁状态与单一已报告水位；三个失败结果分支共用构造；删除生产信号测试镜像与 stream-json 计数并改观察真实事件/stdout；进度发送失败回收预留；API 边界测试仅在消费根校验非空；删除 CLI `write_out` 薄包装。
@@ -270,7 +276,7 @@
 ### 维护
 
 - `ImageFormat::extension()` 标记 deprecated（下一个破坏性版本移除）；删除死私有接口与冗余字段；收窄 `config` 模块级 `allow(dead_code)`；移除不可达的像素溢出分支（保留真实边长/像素/字节配额检查）。
-- `docs/ARCHITECTURE.md` 明确事件交付契约：turn 可靠流为 unbounded 队列、**当前没有慢消费者内存边界**；尽力 observer 队列有界（1024）且溢出丢弃告警。队列预算与慢消费者策略列为后续工作。
+- `docs/concepts/architecture.md` 明确事件交付契约：turn 可靠流为 unbounded 队列、**当前没有慢消费者内存边界**；尽力 observer 队列有界（1024）且溢出丢弃告警。队列预算与慢消费者策略列为后续工作。
 ## v0.6.1 (2026-09-08)
 
 ### Shift+Enter 换行
@@ -285,7 +291,7 @@
 - **能力门控**：TUI 启动时读取 `model-capabilities.json`，文本会话 `Ctrl+V` 只提示、不读剪贴板、不落盘；其它平台明确报错。
 - **触发键**：`Ctrl+V`（默认）与 `Super+V`（终端转发 Kitty keyboard protocol 时）等价；macOS 的 `Cmd+V` 由终端自身占用，程序收不到按键或图片字节，文档给出终端重绑方法。
 - **浮层与提示细节**：文件选择器打开期间隐藏 chip 行且 `Ctrl+V` / 换行键不生效（浮层紧贴输入框上沿，重叠会花屏）；重复粘贴提示不再回显附件绝对路径。
-- **模块**：新增 `tui/clipboard.rs`（可注入 runner，便于测试）与 `tui/attachments.rs`；文档见 `docs/USAGE.md`、`docs/设计哲学-多模态读图能力.md` §3.1。
+- **模块**：新增 `tui/clipboard.rs`（可注入 runner，便于测试）与 `tui/attachments.rs`；文档见 `docs/start/quickstart.md`、`docs/concepts/images.md` §3.1。
 - **测试**：新增 31 个用例（剪贴板提取/校验、附件去重与损坏 fail closed、按键与 marker 展开、重复粘贴去重、chip 渲染、回放 marker 压缩、能力快照门控、浮层下按键惰性与 chip 隐藏），另有一个 `#[ignore]` 的真实剪贴板冒烟测试（`clipboard_smoke`）。
 
 ### 费用统计移除 & TUI 流式渲染修复
@@ -473,7 +479,7 @@
 
 ### 运行时缺陷修复群（约 15 个 fix 提交）
 
-- **7 项 P0**：Bash/Python 超时误报成功、输出读取线程挂起、恢复守卫反馈、execute_all
+- **7 项运行时缺陷**：Bash/Python 超时误报成功、输出读取线程挂起、恢复守卫反馈、execute_all
   失败合成结果落库、429 重试不可取消、REPL SIGINT 双按退出、replan 会话 id 碰撞。
 - Bash/Python 显式 timeout 上限 fail-closed（600s/300s），模型不可再传任意大 timeout
   挂住进程；Bash 超时结果语义反转（v0.4.0 报 success=true 为缺陷，现报失败 124/None）。
@@ -853,7 +859,7 @@
 
 ### Docs
 
-- 更新 `.minkrc.example`、README、`crates/mink-core/README.md`、`docs/USAGE.md`、`docs/DESIGN.md` 和 `docs/ARCHITECTURE.md`，补充 OpenAI-compatible 参数配置、嵌套 extra body 示例和 Rust 嵌入式 builder 用法。
+- 更新 `.minkrc.example`、README、`crates/mink-core/README.md`、`docs/start/quickstart.md`、`docs/concepts/runtime.md` 和 `docs/concepts/architecture.md`，补充 OpenAI-compatible 参数配置、嵌套 extra body 示例和 Rust 嵌入式 builder 用法。
 
 ### Tests
 
@@ -894,7 +900,7 @@
 
 ### Docs
 
-- 更新 README、`crates/mink-core/README.md`、`docs/USAGE.md`、`docs/DESIGN.md`、`docs/ARCHITECTURE.md` 和 `docs/tools.md`，同步自定义 LLM backend 注入、模型名直传、VFS 后端职责、rg 风格搜索行为、依赖要求和构建用法。
+- 更新 README、`crates/mink-core/README.md`、`docs/start/quickstart.md`、`docs/concepts/runtime.md`、`docs/concepts/architecture.md` 和 `docs/reference/tools.md`，同步自定义 LLM backend 注入、模型名直传、VFS 后端职责、rg 风格搜索行为、依赖要求和构建用法。
 
 ### Tests
 
@@ -946,10 +952,10 @@
 ### Docs
 
 - 新增 `crates/mink-core/README.md`（库 API 文档）
-- `docs/ARCHITECTURE.md` 重写运行时分层、模块索引、执行流程
-- `docs/DESIGN.md` 新增 Session、VFS、Capability、SDK Protocol 章节
-- `docs/USAGE.md` 更新 session 布局、资源读取、SDK 协议、工具参考
-- `docs/tools.md` 更新 Read/Glob/Grep 参数说明、VFS 行为
+- `docs/concepts/architecture.md` 重写运行时分层、模块索引、执行流程
+- `docs/concepts/runtime.md` 新增 Session、VFS、Capability、SDK Protocol 章节
+- `docs/start/quickstart.md` 更新 session 布局、资源读取、SDK 协议、工具参考
+- `docs/reference/tools.md` 更新 Read/Glob/Grep 参数说明、VFS 行为
 
 ### Refactor
 
@@ -994,11 +1000,11 @@
 
 ### Docs
 
-- `USAGE.md` 新增 Token 用量与费用章节，覆盖 `UsageSummary`、`TokenUsage`、定价模型和 Rust/Python/CLI 多端代码示例
-- `ARCHITECTURE.md` 新增 `session/usage.rs` 模块，数据流增加 MeteredStream 采集和 `OrchActor::finish_usage()` 汇总
+- `docs/reference/usage.md` 新增 Token 用量与费用章节，覆盖 `UsageSummary`、`TokenUsage`、定价模型和 Rust/Python/CLI 多端代码示例
+- `docs/concepts/architecture.md` 新增 `session/usage.rs` 模块，数据流增加 MeteredStream 采集和 `OrchActor::finish_usage()` 汇总
 - `crates/mink-core/README.md` 补充 `billing_turn_id`/`usage_records` Rust 嵌入示例
-- `docs/tools.md` 更新 Edit 工具描述，对齐 Read+patch 流程
-- `docs/DESIGN.md` 更新 anchored Edit 设计说明
+- `docs/reference/tools.md` 更新 Edit 工具描述，对齐 Read+patch 流程
+- `docs/concepts/runtime.md` 更新 anchored Edit 设计说明
 
 ### Tests
 

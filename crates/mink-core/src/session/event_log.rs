@@ -65,7 +65,7 @@ struct FlushAck {
 
 /// Shared state between the send side and the writer thread.
 ///
-/// Ownership rules (see docs/DESIGN.md / Q1):
+/// Ownership rules (see docs/concepts/state-and-context.md / 事件日志丢失确认):
 /// - the send side counts enqueue failures (`send_lost`): writer init failure,
 ///   channel disconnect, queue rejection — a writer that never started or has
 ///   already exited cannot be responsible for them;

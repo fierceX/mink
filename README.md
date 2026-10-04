@@ -71,6 +71,8 @@ session.close()
 ```toml
 [dependencies]
 mink = { package = "mink-core", version = "0.6.6", default-features = false, features = ["runtime"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+anyhow = "1"
 ```
 
 ```rust
@@ -98,64 +100,7 @@ async fn main() -> anyhow::Result<()> {
 
 - **可嵌入的运行时内核** — `AgentRuntime::start() → run_turn() / stream_turn() → shutdown()` 完整生命周期。CLI、REPL、TUI 和 Rust 嵌入共享 in-process 运行时；Python SDK 通过内置 `mink-core` 二进制复用同一 Rust 内核，不需要维护多套 agent 内核。
 - **长上下文与长任务可控** — 显式压缩参数 + LLM 摘要非破坏式投影 + 持久化 session 共同工作，上下文不无限膨胀，长任务可持续推进；`enabled_tools` 统一工具边界。
-- **编辑与状态管理更可靠** — Hashline / Replace 双模式编辑（`Read` snapshot + 行锚定，或 exact/fuzzy 内容匹配）、artifact 超长输出回读、Plan/Todo revision 原子提交和 session 恢复机制，不把正确性交给运气。
-
----
-
-## 特性
-
-### ⚙️ 核心引擎
-
-- **OpenAI-compatible 默认后端** — 内置 DeepSeek / OpenAI 流式客户端，支持 reasoning、usage、工具调用和扩展参数（`openai_tool_choice`、`openai_extra_body`）
-- **可注入 LLM backend** — 实现 `mink::runtime::LlmBackend` trait，接入私有模型、内网网关、厂商 SDK 或非 HTTP transport
-- **信号驱动的信念系统** — 自动检测工具执行错误，低信念时注入修正提示并约束恢复首步；`MINK_SIGNAL_POLICY=off` 可完全关闭
-- **显式上下文压缩** — 百分比阈值、响应预留、热尾部和摘要输出预算全参数化；可选摘要输入降噪（过滤 thinking、压缩工具结果）
-- **三段维修流水线** — Scavenge（回收遗漏调用）→ Truncation（修复残缺消息）→ StormBreaker（抑制重复调用），自动闭环修复
-
-### 🖥️ 终端与界面
-
-- **三种交互 surface** — REPL 行模式（`-i`）、Full TUI 全屏模式（`--tui`）、Inline TUI 原生 scrollback 模式（`--tui=inline`）
-- **Hashline / Replace 双模式编辑** — Hashline 使用 `Read` 生成的 `[PATH#TAG]` 快照和行/文本锚点；Replace 使用唯一 `old_text` exact/fuzzy 匹配；两者都在歧义时 fail closed
-- **结构化 transcript** — 统一的工具卡片渲染、Markdown 子集、自动折叠、实时信念 / token 状态栏
-- **图片粘贴** — Full/Inline TUI 中 `Ctrl+V` 读取剪贴板 PNG（macOS），内容寻址暂存到 session `attachments/` 并随消息附带绝对路径；模型 `Read` 后走既有读图链路
-- **机器协议** — `--print` 输出 ndjson 事件流；`--agent-jsonl` 提供 single-shot Agent JSONL 协议
-
-### 🛠️ 工具系统
-
-- **内置工具** — Read / Write / Edit / Bash / Python / Glob / Grep / PlanDraft / PlanConfirm / PlanClear / TodoRead / TodoWrite / TodoAdvance / SubAgent
-- **多模态读图** — 视觉会话中 `Read` 捕获图片（本地文件 / `image://sha256:<id>` 引用）、
-  内容寻址缓存、请求时以 OpenAI `image_url` data-URL 注入一次（单次消费）；MIME 双层
-  校验与数量/字节/尺寸/像素配额 fail closed。CLI 经 `[provider] image_input` /
-  `vision_models` 配置，Rust 经 `with_image_input()` / `with_vision_models()` /
-  `with_image_limits()`
-- **统一工具选择** — `enabled_tools` 是唯一启用入口，同时决定模型可见 schema、能力工作流和真实执行边界；`PythonSandbox` 仅在显式列出时启用
-- **语义能力模型** — 工具按语义能力分类，自动组合工作流提示；不可用工具不会出现在 schema、提示词或组合链路中
-- **注册式轻量资源** — `Read` 通过 `ResourceRouter` 统一分发 `artifact://`、`skill://`、`rule://`、`session://` 等 scheme
-- **技能系统** — 按需加载 skill 文件，不污染后续 prompt；`skill_discovery_policy` 控制发现策略
-
-### 🔒 沙箱与安全
-
-- **进程级沙箱** — Linux nsjail / bubblewrap（完整文件系统隔离）、macOS sandbox-exec（写入隔离）
-- **CPython WASI 沙箱** — `PythonSandbox` 工具在 wasmtime + CPython WASI 中执行，WASI 级进程隔离，无网络、无 C 扩展
-- **危险命令过滤** — Bash 危险命令拦截与误用软提示，可选审批策略
-
-### 🗃️ 持久化与状态
-
-- **Session 持久化** — Append-only JSONL 完整历史，活跃后缀内存缓存，`--continue` 无缝恢复
-- **非破坏式压缩** — 只更新 `context-state.json` 投影边界，不重写 `conversation.jsonl`；压缩统一使用 LLM 摘要
-- **Plan & Todo 状态** — Plan 使用 append-only transition 与压缩后 checkpoint；Todo 使用稳定 ID、revision 和原子批量提交
-- **Artifact 超长输出** — 工具结果超限自动落盘至 `artifacts/`，序号可恢复且禁止覆盖；`Read artifact://<id>` 读取
-- **Token 用量** — LLM 请求级 `usage.jsonl` journal，覆盖主 Agent、自动压缩和子代理
-
-### 🔌 集成与扩展
-
-- **Rust 库 API** — `mink::runtime::{AgentRuntime, AgentOptions, LlmBackend, ReadOnlyFileSystem}`，完整同步/流式 turn 生命周期
-- **Python SDK** — `pip install mink-agent`，内置无 TUI 的 `mink-core` 二进制，支持全参数配置
-- **嵌入式只读 VFS** — 为 Read/Glob/Grep 注入数据库后端，按 `resource_session_id` 隔离多租户知识库
-- **子代理（SubAgent）** — 隔离或目录级 fork 完整 session 状态，复用父 runtime 的 LLM backend，支持并发执行
-- **自定义提示词** — `--mission` 加载 MISSION.md，允许覆盖白名单 core section，runtime 保留 section fail closed
-- **模型别名系统** — `flash` / `pro` 内置 DeepSeek 别名，`model_aliases` 可覆盖；任意模型名未命中时原样传递
-- **Server 与 Web** — `mink-server` 单二进制 Web 工作区服务器：REST + SSE 实时流，前端构建产物嵌入二进制，与 TUI 共享会话，浏览器里继续终端里的工作
+- **编辑与状态管理更可靠** — Hashline / Replace 双模式编辑（`Read` snapshot + 行锚定，或 exact/fuzzy 内容匹配）、artifact 超长输出回读、Plan journal 与 Todo revision 原子提交和 session 恢复机制，不把正确性交给运气。
 
 ---
 
@@ -178,24 +123,12 @@ async fn main() -> anyhow::Result<()> {
 
 ---
 
-## 文档索引
+## 文档入口
 
-| 文档 | 说明 |
-|------|------|
-| [使用手册](docs/USAGE.md) | 面向终端用户：CLI 交互、配置、沙箱、session、工具和常见工作流 |
-| [嵌入与 SDK](docs/EMBEDDING.md) | Rust 库 / Python SDK 嵌入、Token 用量 |
-| [机器协议](docs/PROTOCOL.md) | `--print` stream-json 与 `--agent-jsonl` 协议 |
-| [工具参考](docs/tools.md) | 面向工具协议：内置工具参数、结果通道、资源 URL、审批和构建裁剪 |
-| [架构说明](docs/ARCHITECTURE.md) | 运行时分层、模块职责、资源/能力系统、核心数据流 |
-| [设计文档](docs/DESIGN.md) | 设计总纲与关键不变式；信号与工具能力细节见对应设计哲学文档 |
-| [变更日志](CHANGELOG.md) | 版本变更记录 |
-| [Server 与 Web](docs/server.md) | mink-server：REST/SSE API、嵌入构建、配置与部署 |
-| [工具能力与提示词解耦](docs/设计哲学-工具能力与提示词解耦.md) | 工具 surface、语义能力、自由组合和前向求值算法 |
-| [信号系统设计](docs/设计哲学-信号系统.md) | 控制论 + 贝叶斯、冷却机制、信念度展示 |
-| [Agent 开发指南](AGENTS.md) | 面向 AI agent：项目结构、模块索引、开发惯例 |
+从[文档总览](docs/start/overview.md)选择阅读路径：[快速开始](docs/start/quickstart.md)、[Rust 集成](docs/integration/rust.md)、[Python 集成](docs/integration/python.md)或[架构](docs/concepts/architecture.md)。配置、工具、协议与统计的完整定义统一在[参考文档](docs/reference/configuration.md)。
 
----
+版本记录见 [CHANGELOG](CHANGELOG.md)，开发约束见 [AGENTS](AGENTS.md)。
 
 ## 许可
 
-[MIT License](./LICENSE)
+[MIT License](LICENSE)

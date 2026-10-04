@@ -1,10 +1,20 @@
-# mink-server：Server 与 Web 前端
+# HTTP 与 SSE API
 
-> 更新日期：2026-10-03
+> 更新日期：2026-10-04
 
----
+持久输入、快照与服务生命周期。
 
-## 1. 概述
+## Web 持久输入与快照协议
+
+所有 session 路由接受 `?project=`。`POST /api/sessions/{id}/inputs` 接受 `{request_id, text, attachment_ids:[], target_turn_id:null|string}`，返回带 input_id、revision、turn_id、status 和 guidance 的持久回执。相同 request ID 与相同原始内容幂等，内容不同冲突；网络结果不确定时先 GET inputs?request_id=... 对账，不自动重复执行。PATCH / DELETE 使用 revision，resume 必须由用户明确触发。旧 `/turn` 保留并转入同一执行路径。
+
+`GET /stream?snapshot=true` 首帧是 `session_snapshot`：generation、stream_sequence、conversation（物理行号 seq）、progress、current_turn、phase、running、inputs、capabilities、resources（Plan/完整 Todo/Artifact）及 diagnostics / activity / last_final。可选 `activity:{work_state,wait_elapsed_secs:null|number,active_sub_agents:[]}` 保留可靠事件推导的工作状态和模型等待时间；diagnostics 的完整 `title_update.stats` 保留轮次/请求数和互斥的未缓存输入、缓存读取、缓存创建分区。快照与订阅在同一发布边界建立。后续 `conversation_committed`、`inputs_updated`、`phase_updated` 和既有事件携带 generation 与 stream_sequence；旧 generation/重复水位丢弃，gap 后重取 snapshot，无需等待运行 turn 空闲。`after_conversation_seq` 定位暂态诊断的历史相邻位置。
+
+Core 的新增 `AgentEventKind::ConversationCommitted {conversation_seq,message}` 经可靠 runtime 流发出，不能与实时候选文本混同。Web stable key 为 `message:{seq}:{block_index}` 或 `input:{input_id}`，正式历史接管 `live:{generation}:{stream_sequence}`（旧流兼容无 generation 的 key）。既有 SSE 模式不发送新增输入/提交/阶段控制事件；CLI 展示忽略 commit 通知，避免重复正文。
+
+附件 POST 发送原始图片字节，返回内容寻址描述 `{id,mime,width,height,bytes}`，GET `/attachments/{id}` 只预览本 session 的传输文件；上传不会生成模型图片块。`/conversation?turns=true` 可按真实非 internal、非 guidance 用户轮次分页，保留完整工具交换；旧行分页参数与默认行为保持兼容。
+
+## 概述
 
 `mink-server` 延续 Mink 的轻量定位：单二进制、低运行时依赖，把同一个 runtime 暴露为 Web 服务——与 CLI/TUI/Python SDK 共享内核，多端行为一致：
 
@@ -24,49 +34,7 @@
 └──────────────────────────────────────────────┘
 ```
 
-## 2. 快速开始
-
-```bash
-# 构建（build.rs 自动执行 npm run build 并嵌入前端）
-cargo build -p mink-server
-
-# 运行（默认端口 8765，读取 ~/.minkrc）
-./target/debug/mink-server
-
-# 指定端口 / 配置
-MINK_SERVER_PORT=9000 ./target/debug/mink-server
-./target/debug/mink-server path/to/mink-server.toml
-```
-
-打开 `http://localhost:8765` 即可使用 Web 界面。
-
-## 3. 配置
-
-优先级：**环境变量 > `mink-server.toml` > `~/.minkrc` > 默认值**。
-
-| 配置项 | 环境变量 | mink-server.toml | 默认 |
-|--------|----------|------------------|------|
-| 监听地址 | `MINK_SERVER_HOST` | `[server] host` | `0.0.0.0` |
-| 端口 | `MINK_SERVER_PORT` | `[server] port` | `8765` |
-| Mink home | `MINK_HOME` | `[server] mink_home` | `$HOME` |
-| 默认模型 | `MODEL` | `[server] model` / `~/.minkrc` `[provider] model` | `flash` |
-| 最大并发会话 | `MINK_SERVER_MAX_RUNNING` | `[server] max_running` | `4` |
-| 闲置自动关闭 | — | `[server] idle_close_secs` | `1800` |
-| turn 超时 | `MINK_SERVER_TURN_TIMEOUT` | — | `1200`（秒） |
-
-`~/.minkrc` 与 TUI/CLI 共享同一配置文件，**schema 完全一致**（分组格式，扁平键拒绝，与 CLI 相同的 `deny_unknown_fields` 规则）：
-
-- 每个会话启动时按 **项目级 `<cwd>/.minkrc` 覆盖用户级 `~/.minkrc`** 的层级合并，覆盖 CLI 的同一套分组：
-  `[provider]`（model/api_key/base_url/model_aliases/openai_*/http_timeout_secs/image_input/vision_models/`[provider.image]`）、`[generation]`、`[context]`、
-  `[tools]` / `[tools.edit]`、`[signal]`、`[recovery]`、`[sandbox]` / `[sandbox_python]`。
-- 会话运行时选项（provider/generation/context/tools/signal/recovery/sandbox/image）完整应用到 `AgentOptions`，
-  与 CLI 的 `assemble_runtime_options` 行为一致；schema 对齐由 `crates/mink-server/tests/config_parity.rs` 机械校验。
-- 环境变量 `MODEL` / `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `MINK_IMAGE_INPUT` /
-  `MINK_VISION_MODELS` / `MINK_SIGNAL_POLICY` /
-  `LOG_EVENTS` 在文件层之上覆盖（server 文档化优先级：环境变量 > `mink-server.toml` >
-  项目 `.minkrc` > 用户 `~/.minkrc` > 默认值）。
-
-## 4. REST API
+## REST API
 
 会话目录扫描与 ID 查找统一排除子代理：目录名或 metadata.id 带 `sub_`/`replan_` 前缀，或 metadata.parent 存在。目录判断在读取元数据之前执行，旧子代理缺失、损坏或继承元数据也不会出现在列表；正常用户会话的 alias 不参与过滤。
 
@@ -105,7 +73,7 @@ MINK_SERVER_PORT=9000 ./target/debug/mink-server
 
 默认 conversation 仍按物理行分页。`turns=true` 改为完整真实用户轮次分页（internal 与 guidance 不建立新轮次），保留工具调用/result 与引导归属；Web 每次 20 轮。
 
-## 5. SSE 事件
+## SSE 事件
 
 `/stream` 订阅 SessionRuntime 的广播通道（容量 1024），原样转发 core `AgentEvent` 的
 `{turn_id, sequence, kind}` envelope，并附加 `stream_sequence` 传输序号。事件名与
@@ -141,34 +109,10 @@ MINK_SERVER_PORT=9000 ./target/debug/mink-server
 
 后续新增 `conversation_committed {conversation_seq,message}`、`inputs_updated {inputs}`、`phase_updated {phase}`，与既有 AgentEvent 均携带 generation、stream_sequence 和 after_conversation_seq。正式历史接管暂态 text/thinking，稳定身份为物理 `(seq,block_index)` 或 input_id；诊断保持相邻时序。旧 generation 与重复水位丢弃，gap 后立即重取 snapshot，无需等待 turn 空闲。旧 SSE 模式过滤新增输入/commit/phase 控制事件，仍转发原有协议。运行态、成功与失败由 turn_final/outcome 决定，stop 与 HTTP 成功均不提前完成任务。
 
-Web 诊断按 TUI 口径展示缓存命中率 `floor(read × 100 / (input + read + creation))`，输入栏为 `input + read`；空输入或缺失完整分区时显示未知。上下文占比、信念、Plan/Todo、工作阶段与等待时间同样保留，刷新不丢当前 activity。
+Web diagnostics 的统计定义见[用量与统计](usage.md#状态栏统计口径)。
 
-### Web 交互
 
-项目导航常驻桌面，右侧详情按需打开；1024–1279px 打开详情时隐藏导航，768–1023px 侧栏覆盖，手机详情为全屏，使用 100dvh/safe-area，body 不承担对话滚动。轮次中思考/工具组成紧凑过程组，回复、重试、错误与引导有独立边界；支持简洁/标准/详细模式与手动展开优先。输入区使用一体容器，轮次跳转浮于对话内；图标按钮 32px/触控 36px、手机会话行 44px，进入窄屏收起桌面导航。菜单/提示使用 Reka UI，键盘、碰撞定位与焦点恢复由组件库处理。
-
-草稿、附件、失败提交、展开、消息锚点、内层/详情滚动按完整会话身份持久保留。切换、返回首页、关闭浏览器只停止正文订阅，不调用 close、不停止任务。断线/停止中禁用提交但仍可编辑；明确发送与“返回最新内容”恢复外层跟随。任务详情只读，文件是当前磁盘内容，工具/Artifact 是当时记录。
-
-对话与文件路径复制共用客户端 Clipboard API/选区兼容路径，适配未提供 Clipboard API 的普通 HTTP 页面；浏览器拒绝两条路径时显示失败，不能伪造成功，不新增 REST 接口。
-
-工具卡片按真实参数显示命令、脚本、写入内容与子任务；Replace/Hashline 分别展示当次编辑指令，Plan/Todo 使用正式 presentation。完整 JSON 参数保留在折叠入口，调用参数不会随结果到达消失；历史刷新与实时结果使用相同渲染器，保留旧记录兼容与 Artifact 入口。
-
-轮次选择弹层使用纵向限高列表（300px 宽、260px/40dvh 高及可用空间的交集），长标题截断；点击与键盘均可定位已加载轮次。
-
-正文列宽受当前可用空间约束，代码/工具输出/文件和表格默认自动换行；导航与轮次菜单可关闭并持久保存偏好。关闭后横向滚动限于内部内容块，不撑宽页面；不改变 REST 文本和工具输出原始字节。
-
-手机外层上滑达到 48px 时可隐藏操作栏，下滑、轻点正文、恢复入口或 Esc 重新显示；保留草稿和消息锚点，运行中停止始终可达。待处理/失败输入、附件和断线/停止/恢复状态禁用隐藏；该 UI 状态不改变 SSE 订阅和 runtime 生命周期。
-
-页面可见且有运行任务时目录每 2s 对账，否则每 15s；隐藏停止轮询，恢复可见立即刷新，只当前会话保持正文 SSE。新建任务在应用内填写 server 工作目录并生成唯一 alias；删除失败留在原位报告。
-
-## 6. 静态资源与嵌入
-
-- **自动构建**：`build.rs` 在 `cargo build` 时自动执行 `npm run build`（web/），产物复制到 `OUT_DIR/assets` 并生成 `assets.rs`（`include_str!` 内容表）
-- **嵌入服务**：默认从二进制内容服务静态资源（content-type 映射、`index.html` no-cache、静态资源 immutable 缓存、SPA fallback 到 index.html）
-- **开发模式**：`MINK_SERVER_DEV_WEB=1` 时回退磁盘 `web/dist`（前端热迭代，改完强刷即可）
-- E2E 使用 `MINK_SERVER_DEV_WEB=1` 保证测试服务最新构建产物
-
-## 7. 生命周期与并发语义
+## 生命周期与并发语义
 
 - **SessionRuntime 阶段机**：`Idle → Running → Cancelling → Closing → Closed`；
   interrupt 只作用于 Running/Cancelling，随后等待 turn 有界退出并复位。
@@ -180,26 +124,3 @@ Web 诊断按 TUI 口径展示缓存命中率 `floor(read × 100 / (input + read
 - **session lease**：fs2 advisory file lock——锁文件永久保留，独占打开的文件句柄持有
   lease；删除会话前先获取并持有同一把系统文件锁，阻止其他 Registry 或进程删除使用中的
   会话（Locked/409）。TUI/CLI 不持锁，同一会话避免多端并发写。
-
-## 8. 部署注意
-
-- **单二进制分发**：`target/release/mink-server` 即可（含前端），无需 node/npm
-- **重启更新前端**：嵌入产物随 `cargo build` 更新——修改前端后需**重新构建 mink-server** 再重启
-- **多进程一致性**：lease 锁文件是跨进程稳定对象，不依赖 PID 存活判断；两个 server 进程
-  同时操作同一会话时按文件锁顺序串行，冲突返回 409
-- **超时保护**：`MINK_SERVER_TURN_TIMEOUT`（默认 1200s）防止 LLM/工具挂起卡死 running 状态；
-  超时后进入 forced terminal 并关闭该会话 runtime
-- **安全**：单用户部署假设；`sk-fake`/受限 key 可用于测试环境
-
-## 9. 测试
-
-```bash
-cd crates/mink-server/web
-npm run e2e             # 真实浏览器 + 真实 server + 本地模拟模型
-npm run test            # reducer/controller/SSE/组件状态测试
-npm run typecheck && npm run build
-cargo test -p mink-core -p mink-cli -p mink-server
-```
-
-E2E 通过 global-setup 构造隔离临时 home + 模板会话与本地模拟 OpenAI-compatible provider，覆盖 1440/1024/768/390px、引导/续发/附件/分页锚点；失败产出
-trace/error-context 供 AI 自愈；测试产物（test-results/）已加入 .gitignore。

@@ -53,4 +53,4 @@ make feature-matrix
 cargo test -p mink-cli --all-features
 ```
 
-更多用户说明见根项目 [README](../../README.md) 和 [docs/USAGE.md](../../docs/USAGE.md)。
+更多用户说明见根项目 [README](../../README.md) 和 [docs/start/quickstart.md](../../docs/start/quickstart.md)。
