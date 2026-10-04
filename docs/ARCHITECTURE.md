@@ -1,6 +1,6 @@
 # 架构说明
 
-> 更新日期：2026-10-03
+> 更新日期：2026-10-04
 
 本文描述 Mink 当前代码结构、模块职责和运行时数据流。终端用户命令、配置和工作流见
 [USAGE.md](USAGE.md)；Rust/Python 嵌入见 [EMBEDDING.md](EMBEDDING.md)；机器协议见
@@ -44,6 +44,37 @@ server `Projection` 是可重建只读镜像：启动经公开 `SessionReader` �
 
 `session/attachments.rs` 是 CLI/TUI/Web 共享的内容寻址存储。Web 上传保存原始字节到 session `attachments/`，校验真实格式、完整解码、尺寸、能力、大小、权限和校验和。附件预览是 session 限定接口；输入只携带绝对路径，模型图片仍由 `Read` 捕获。
 
+
+## TUI 调度与布局
+
+Full 仍为默认模式；Full/Inline 共用 reducer、结构化工具状态和 Markdown。主循环以
+Crossterm EventStream、runtime signal、后台结果、Inbox watch 和绘制期限做异步选择；文本
+按 33ms 合并，键盘、停止与终态立即请求绘制，空闲不绘制。signal 批次最多 512 项/4ms，
+Inline 每批最多插入 256 行，批次之间让出执行。同步 Display 通道通过有界异步转发唤醒。
+文件选择器、历史恢复、Artifact、子代理详情与持久 Inbox 操作在后台执行；查询结果带
+operation generation，准入回执捕获草稿 revision，迟到结果不能清理新草稿。撤回/续发
+已有 Inbox 项不消耗未发送草稿和图片；编辑只消耗对应文本，新图片仅由新提交消耗。
+
+`TranscriptItem` 保存稳定 ID、revision 与按宽度缓存的行；Fenwick 高度索引定位可见消息，
+Full 只复制视口行并构建可见点击区域，不保留完整历史的展平副本。追加/结果/折叠只标脏
+对应 item；宽度变化每次最多布局 2048 项/4ms。详情按资源身份、revision、宽度缓存折行
+结果，滚动只切片，其他子代理更新不使当前 Artifact 失效。输入布局独立按草稿版本与宽度
+缓存，编辑按 grapheme 处理。
+
+流式 Markdown 增量检查完整行，匹配围栏字符和长度，列表、引用、表格及缩进结构不确定
+时保留可变尾部；不再按任意字节裁掉前文。长未闭合代码块复用已折行完整行，闭合围栏
+必须收到完整换行后才停止增量代码布局，防止后续字符改变该行语义。阅读状态为
+跟随最新或消息 ID/内容偏移锚点，封口、追加、折叠与 resize 保留阅读意图。
+Inline 插入成功才推进 item/行位置，释放已提交正文、presentation 与行缓存，保留轻量
+身份/Artifact ledger；完成子代理详情经公开 Reader 按需恢复。写入失败退出，不重试可能
+部分成功的 scrollback。详情返回继续使用原 Inline Terminal，初始化前建立恢复 guard。
+
+macOS 通知模块优先发送单条终端原生 OSC 9，由终端保留点击与 surface 的关联。
+Ghostty/iTerm2/WezTerm 不另发平台通知；Terminal.app 或其他已提供 bundle 身份的终端
+可通过可选 `terminal-notifier -activate <bundle>` 激活应用，外部命令输出隔离。禁止
+AppleScript 通知回退，其通知属于脚本编辑器；外部工具缺失时保留 OSC 与铃声。
+
+性能数据与验证脚本见 [TUI 性能记录](TUI_PERFORMANCE-2026-10-04.md)。
 
 ## 项目定位
 

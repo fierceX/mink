@@ -313,11 +313,16 @@ async fn interrupted_inputs_survive_reopen_and_only_explicit_resume_runs_them() 
     assert_eq!(state.inputs.len(), 2);
     assert_eq!(backend.requests.lock().unwrap().len(), 1);
     submit(&mut state, &tx, "/inputs");
-    assert!(
-        state
-            .lines
+    let panel = super::panels::panel_lines(&state, super::state::PanelKind::Inputs, 0);
+    assert!(panel.iter().any(|line| {
+        line.spans
             .iter()
-            .any(|l| l.text.contains(&first) && l.text.contains("Unapplied"))
+            .any(|span| span.content.contains(&first) && span.content.contains("Unapplied"))
+    }));
+    handle_event(
+        Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        &mut state,
+        &tx,
     );
     submit(&mut state, &tx, &format!("/withdraw {second}"));
     assert_eq!(state.inputs.len(), 1);
@@ -373,4 +378,58 @@ fn round_stop_and_stale_final_cannot_end_an_active_guided_turn() {
         parse_slash_command("/withdraw saved-id").unwrap(),
         Some(SlashCommand::Withdraw("saved-id".into()))
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn asynchronous_admission_preserves_later_draft_and_stop_during_admission() {
+    let root = temp_root("async");
+    let backend = Arc::new(BoundaryBackend::default());
+    let runtime = AgentRuntime::start(options(&root, backend.clone()))
+        .await
+        .unwrap();
+    let (signals, mut rx) = mpsc::channel();
+    let tx = crate::cli::start_runtime_broker(
+        runtime.handle(),
+        Arc::new(TuiDisplay::new(signals.clone())),
+    );
+    let (ui_tx, ui_rx) = mpsc::channel();
+    let mut state = TuiState {
+        runtime: Some(TuiRuntime {
+            handle: runtime.handle(),
+            signals,
+        }),
+        ui_tx: Some(ui_tx),
+        ..Default::default()
+    };
+    submit(&mut state, &tx, "old draft");
+    assert!(state.admission_pending);
+    state.input.buf = "new draft".into();
+    state.input.revision += 1;
+    assert!(!handle_ctrl_c(&mut state, &tx));
+    assert!(state.stopping);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            while let Ok(event) = ui_rx.try_recv() {
+                state.apply_ui_event(event);
+            }
+            drain_signals(&mut rx, &mut state, TuiMode::Full);
+            if !state.admission_pending && state.active_turn_id.is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(state.input.buf, "new draft");
+    assert!(!state.quit);
+    assert!(!state.stopping);
+    assert!(
+        state
+            .lines
+            .iter()
+            .any(|line| line.text.contains("Turn interrupted"))
+    );
+    runtime.shutdown().await.unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }

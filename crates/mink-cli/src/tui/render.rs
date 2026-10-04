@@ -1,8 +1,8 @@
 use crate::config::TuiMode;
 use crate::tui::render::content::{ContentMode, render_content};
 use crate::tui::render::detail::{
-    render_artifact_content, render_detail_bar, render_detail_content, render_plan_content,
-    render_todos_content,
+    render_artifact_content, render_detail_bar, render_detail_content, render_panel_content,
+    render_plan_content, render_todos_content,
 };
 use crate::tui::render::file_picker::render_file_picker;
 use crate::tui::render::input::{render_chips, render_input};
@@ -13,12 +13,13 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
 };
 
-mod content;
+pub(super) mod content;
 mod detail;
 mod file_picker;
 mod input;
 mod status;
 
+#[cfg(test)]
 pub(crate) use content::transcript_item_lines;
 #[cfg(test)]
 pub(crate) use content::{collapsed_summary, content_viewport_height, visible_lines};
@@ -39,10 +40,10 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState, mode: TuiMode) {
         View::Main => {
             state.input.clamp_cursor();
             let inner_w = area.width.saturating_sub(2).max(1) as usize;
-            let vis_lines = split_at_visual_width(&state.input.buf, inner_w);
-            let cursor = state.input.clamped_cursor();
-            let lines_before = split_at_visual_width(&state.input.buf[..cursor], inner_w);
-            let cursor_row = lines_before.len().saturating_sub(1);
+            let input_layout = state.input.layout(inner_w);
+            let vis_lines = &input_layout.lines;
+            let cursor = input_layout.cursor(state.input.clamped_cursor());
+            let cursor_row = cursor.row;
             // 待发送的剪贴板图片占输入框上方一行 chip（最多 2 行）；空间不足时
             // 直接不显示。文件选择器浮层紧贴输入框上沿绘制，重叠时会花屏，
             // 因此浮层打开期间隐藏 chip（关闭后恢复显示）。
@@ -57,9 +58,8 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState, mode: TuiMode) {
             }
             if let Some(input) = state.inputs.first() {
                 let label = format!(
-                    "Inputs {} · {} · {} (/inputs)",
+                    "Inputs {} · {} (/inputs)",
                     state.inputs.len(),
-                    input.input_id,
                     super::inbox::input_status(input.status)
                 );
                 chips.extend(split_at_visual_width(&label, inner_w));
@@ -115,7 +115,11 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState, mode: TuiMode) {
             if chips_height > 0 {
                 render_chips(f, chunks[1], &chips);
             }
-            let label = if state.stopping {
+            let label = if state.admission_pending {
+                "Accepting input · draft editable"
+            } else if state.edit_input.is_some() {
+                "Enter: save input edit"
+            } else if state.stopping {
                 "Stopping · draft kept"
             } else if state.active_turn_id.is_some() {
                 "Enter: submit guidance"
@@ -126,9 +130,7 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState, mode: TuiMode) {
             render_file_picker(f, input_area, state);
 
             let row = cursor_row.saturating_sub(state.input.scroll_row);
-            let col = lines_before.last().map_or(0, |line| {
-                unicode_width::UnicodeWidthStr::width(line.as_str())
-            });
+            let col = cursor.col;
             let cursor_x =
                 (input_area.x + 1 + col as u16).min(input_area.right().saturating_sub(2));
             let cursor_y =
@@ -136,6 +138,18 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState, mode: TuiMode) {
             f.set_cursor_position((cursor_x, cursor_y));
 
             render_status(f, status_area, state);
+        }
+        View::Panel {
+            panel,
+            scroll,
+            selected,
+        } => {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .split(area);
+            render_panel_content(f, chunks[0], state, *panel, *scroll, *selected);
+            render_detail_bar(f, chunks[1]);
         }
         View::SubAgentDetail { session_id, scroll } => {
             let chunks = Layout::default()

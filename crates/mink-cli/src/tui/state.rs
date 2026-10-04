@@ -7,7 +7,7 @@ use crate::ui::{
     ToolPresentation, ToolResultKind,
 };
 use ratatui::text::Line;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::{Debug, Display as FmtDisplay, Formatter};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -71,6 +71,9 @@ pub(crate) struct ArtifactDetail {
 
 #[derive(Clone)]
 pub(crate) struct TranscriptItem {
+    pub id: u64,
+    pub revision: u64,
+    pub cached_offsets: Vec<usize>,
     pub text: String,
     pub kind: TranscriptKind,
     pub collapsed: bool,
@@ -79,13 +82,14 @@ pub(crate) struct TranscriptItem {
     pub tool_name: Option<String>,
     pub tool_use_id: Option<String>,
     pub tool_summary: Option<String>,
-    pub tool_success: Option<bool>,
+    pub tool_status: Option<crate::runtime::ToolStatus>,
     pub tool_exit_code: Option<i32>,
     pub tool_result_kind: Option<ToolResultKind>,
     pub presentation: Option<ToolPresentation>,
     pub artifacts: Vec<ArtifactDisplay>,
     pub sealed: bool,
     pub cached_lines: Option<Vec<Line<'static>>>,
+    pub cached_width: u16,
     pub cached_collapsed: bool,
     pub cached_interactive: bool,
     pub sub_detail: Option<SubAgentDetail>,
@@ -148,6 +152,9 @@ impl TranscriptItem {
         let collapse_policy = CollapsePolicy::for_kind(kind);
         let collapsed = collapse_policy.initial_collapsed(&text);
         TranscriptItem {
+            id: next_item_id(),
+            revision: 0,
+            cached_offsets: Vec::new(),
             text,
             kind,
             collapsed,
@@ -156,13 +163,14 @@ impl TranscriptItem {
             tool_name: None,
             tool_use_id: None,
             tool_summary: None,
-            tool_success: None,
+            tool_status: None,
             tool_exit_code: None,
             tool_result_kind: None,
             presentation: None,
             artifacts: Vec::new(),
             sealed: true,
             cached_lines: None,
+            cached_width: 0,
             cached_collapsed: collapsed,
             cached_interactive: false,
             sub_detail: None,
@@ -204,6 +212,8 @@ impl TranscriptItem {
 
     pub(crate) fn invalidate_cache(&mut self) {
         self.cached_lines = None;
+        self.cached_offsets.clear();
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub(crate) fn toggle_collapsed(&mut self) {
@@ -216,6 +226,9 @@ impl TranscriptItem {
 impl Default for TranscriptItem {
     fn default() -> Self {
         TranscriptItem {
+            id: next_item_id(),
+            revision: 0,
+            cached_offsets: Vec::new(),
             text: String::new(),
             kind: TranscriptKind::Text,
             collapsed: false,
@@ -224,13 +237,14 @@ impl Default for TranscriptItem {
             tool_name: None,
             tool_use_id: None,
             tool_summary: None,
-            tool_success: None,
+            tool_status: None,
             tool_exit_code: None,
             tool_result_kind: None,
             presentation: None,
             artifacts: Vec::new(),
             sealed: true,
             cached_lines: None,
+            cached_width: 0,
             cached_collapsed: false,
             cached_interactive: false,
             sub_detail: None,
@@ -293,10 +307,41 @@ fn scaled(value: f64, unit: &str) -> String {
 }
 
 /// Result of a background clipboard read, delivered back to the TUI loop.
-#[derive(Debug)]
 pub(crate) enum TuiUiEvent {
     ImageCaptured(PendingImage),
     ClipboardFailed(String),
+    FilePickerReady {
+        generation: u64,
+        picker: FilePickerState,
+    },
+    ArtifactReady {
+        generation: u64,
+        id: String,
+        result: Result<ArtifactDetail, String>,
+    },
+    HistoryLoaded {
+        generation: u64,
+        state: Box<TuiState>,
+    },
+    Admission(Box<crate::tui::inbox::AdmissionResult>),
+    SubAgentReady {
+        generation: u64,
+        id: String,
+        result: Result<SubAgentDetail, String>,
+    },
+}
+impl Debug for TuiUiEvent {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ImageCaptured(_) => "ImageCaptured",
+            Self::ClipboardFailed(_) => "ClipboardFailed",
+            Self::FilePickerReady { .. } => "FilePickerReady",
+            Self::ArtifactReady { .. } => "ArtifactReady",
+            Self::HistoryLoaded { .. } => "HistoryLoaded",
+            Self::Admission(_) => "Admission",
+            Self::SubAgentReady { .. } => "SubAgentReady",
+        })
+    }
 }
 
 /// Injectable clipboard reader (tests); production uses the platform impl.
@@ -356,6 +401,11 @@ pub(crate) fn compact_user_input_for_display(text: &str) -> String {
 
 #[derive(Clone, Default)]
 pub(crate) struct InputState {
+    pub revision: u64,
+    pub layout: Option<std::sync::Arc<super::editor::InputLayout>>,
+    pub preferred_column: Option<usize>,
+    pub undo: Vec<super::editor::DraftEdit>,
+    pub redo: Vec<super::editor::DraftEdit>,
     pub buf: String,
     pub cursor: usize,
     pub scroll_row: usize,
@@ -368,9 +418,58 @@ pub(crate) struct InputState {
 
 impl InputState {
     pub(crate) fn clamped_cursor(&self) -> usize {
-        clamp_char_boundary(&self.buf, self.cursor)
+        if let Some(layout) = &self.layout
+            && layout.revision == self.revision
+            && layout.text == self.buf
+        {
+            layout.cursor(self.cursor.min(self.buf.len())).byte
+        } else {
+            super::editor::clamp(&self.buf, self.cursor)
+        }
     }
 
+    pub(crate) fn draft_snapshot(&self) -> Self {
+        Self {
+            revision: self.revision,
+            buf: self.buf.clone(),
+            cursor: self.cursor,
+            pending_images: self.pending_images.clone(),
+            ..Default::default()
+        }
+    }
+    pub(crate) fn layout(&mut self, width: usize) -> std::sync::Arc<super::editor::InputLayout> {
+        let valid = self.layout.as_ref().is_some_and(|layout| {
+            layout.revision == self.revision && layout.width == width && layout.text == self.buf
+        });
+        if !valid {
+            self.layout = Some(std::sync::Arc::new(super::editor::InputLayout::new(
+                &self.buf,
+                self.revision,
+                width,
+            )));
+        }
+        self.layout.as_ref().expect("input layout").clone()
+    }
+    pub(crate) fn undo_edit(&mut self, redo: bool) {
+        let edit = if redo {
+            self.redo.pop()
+        } else {
+            self.undo.pop()
+        };
+        if let Some(edit) = edit {
+            let current = super::editor::DraftEdit {
+                text: std::mem::replace(&mut self.buf, edit.text),
+                cursor: self.cursor,
+            };
+            if redo {
+                self.undo.push(current);
+            } else {
+                self.redo.push(current);
+            }
+            self.cursor = edit.cursor;
+            self.preferred_column = None;
+        }
+    }
     pub(crate) fn clamp_cursor(&mut self) {
         self.cursor = self.clamped_cursor();
     }
@@ -386,11 +485,21 @@ pub(crate) fn clamp_char_boundary(s: &str, pos: usize) -> usize {
 
 #[derive(Clone, Default)]
 pub(crate) struct ViewportState {
+    pub anchor: Option<ReadingAnchor>,
+    pub height: usize,
+    pub content_x: u16,
+    pub width: u16,
     pub scroll: usize,
     pub auto_scroll: bool,
     pub max_scroll: usize,
     pub click_map: Vec<ClickTarget>,
     pub content_y: u16,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ReadingAnchor {
+    pub id: u64,
+    pub offset: usize,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -413,11 +522,33 @@ pub(crate) enum ClickAction {
 #[derive(Clone, Default)]
 pub(crate) struct RenderCache {
     pub width: u16,
-    pub history_lines: Option<Vec<Line<'static>>>,
+    pub heights: super::height_index::HeightIndex,
+    pub indices: HashMap<u64, usize>,
+    pub pending: BTreeSet<usize>,
+    pub rebuild_next: Option<usize>,
+    pub start: usize,
+    pub interactive: bool,
+    pub visited: usize,
+    pub parsed: usize,
+    pub detail: Option<DetailLayout>,
+    pub detail_parses: usize,
+    pub stream_code_lines: Vec<Line<'static>>,
+    pub stream_code_bytes: usize,
+    pub stream_code_key: Option<(u8, usize, u16)>,
+    pub stream_code_closed: bool,
+    pub stream_parses: usize,
     pub stream_width: u16,
     pub stream_kind: TranscriptKind,
     pub stream_revision: u64,
     pub stream_lines: Option<Vec<Line<'static>>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct DetailLayout {
+    pub identity: String,
+    pub revision: u64,
+    pub width: u16,
+    pub lines: std::sync::Arc<Vec<Line<'static>>>,
 }
 
 #[derive(Clone, Default)]
@@ -437,11 +568,29 @@ impl SubAgentState {
 #[derive(Clone, Default)]
 pub(crate) struct InlineSurfaceState {
     pub committed: usize,
+    pub row_offset: usize,
 }
 
 #[derive(Clone)]
 pub(crate) struct TuiState {
+    pub input_subscription:
+        Option<tokio::sync::watch::Receiver<std::sync::Arc<Vec<crate::runtime::InputReceipt>>>>,
+    pub inbox_source: Option<std::sync::Arc<crate::runtime::InputInbox>>,
+    pub edit_input: Option<(String, u64)>,
+    pub admission_pending: bool,
+    pub failed_drafts: Vec<InputState>,
+    pub session_dir: PathBuf,
+    pub sub_detail_generation: u64,
+    pub restored_sub_detail: Option<(String, SubAgentDetail)>,
+    pub background_generation: u64,
+    pub picker_generation: u64,
+    pub picker_worker: Option<std::sync::mpsc::Sender<super::file_picker::PickerRequest>>,
+    pub admission_cancelled: bool,
+    pub artifact_generation: u64,
+    pub loading_history: bool,
     pub runtime: Option<crate::tui::TuiRuntime>,
+    pub active_tools: HashMap<String, usize>,
+    pub unsealed: HashSet<usize>,
     pub active_turn_id: Option<String>,
     pub stopping: bool,
     pub inputs: Vec<crate::runtime::InputReceipt>,
@@ -449,6 +598,7 @@ pub(crate) struct TuiState {
     pub input_notice: Option<String>,
     pub lines: Vec<TranscriptItem>,
     pub inline: InlineSurfaceState,
+    pub stream_boundary: super::stream_boundary::StreamBoundary,
     pub stream_line: String,
     pub stream_kind: TranscriptKind,
     pub streaming: bool,
@@ -459,6 +609,9 @@ pub(crate) struct TuiState {
     pub viewport: ViewportState,
     pub dirty: bool,
     pub stream_revision: u64,
+    pub detail_revision: u64,
+    pub detail_height: usize,
+    pub detail_max_scroll: usize,
     pub cache: RenderCache,
     pub quit: bool,
     pub last_interrupt: Option<Instant>,
@@ -510,6 +663,19 @@ pub(crate) enum View {
     Artifact {
         scroll: usize,
     },
+    Panel {
+        panel: PanelKind,
+        scroll: usize,
+        selected: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PanelKind {
+    Help,
+    Status,
+    Inputs,
+    Details,
 }
 
 #[derive(Clone, Debug)]
@@ -520,7 +686,23 @@ pub(crate) enum ActiveOverlay {
 impl Default for TuiState {
     fn default() -> Self {
         Self {
+            input_subscription: None,
+            inbox_source: None,
+            edit_input: None,
+            admission_pending: false,
+            failed_drafts: Vec::new(),
+            session_dir: PathBuf::new(),
+            sub_detail_generation: 0,
+            restored_sub_detail: None,
+            background_generation: 0,
+            picker_generation: 0,
+            picker_worker: None,
+            admission_cancelled: false,
+            artifact_generation: 0,
+            loading_history: false,
             runtime: None,
+            active_tools: HashMap::new(),
+            unsealed: HashSet::new(),
             active_turn_id: None,
             stopping: false,
             inputs: Vec::new(),
@@ -528,6 +710,7 @@ impl Default for TuiState {
             input_notice: None,
             lines: Vec::new(),
             inline: InlineSurfaceState::default(),
+            stream_boundary: super::stream_boundary::StreamBoundary::default(),
             stream_line: String::new(),
             stream_kind: TranscriptKind::default(),
             streaming: false,
@@ -541,6 +724,9 @@ impl Default for TuiState {
             },
             dirty: true,
             stream_revision: 0,
+            detail_revision: 0,
+            detail_height: 0,
+            detail_max_scroll: 0,
             cache: RenderCache::default(),
             quit: false,
             last_interrupt: None,
@@ -604,28 +790,58 @@ impl FmtDisplay for TuiState {
 
 impl TuiState {
     pub(crate) fn invalidate_all_cache(&mut self) {
-        self.cache.history_lines = None;
+        self.cache.heights = super::height_index::HeightIndex::default();
+        self.cache.indices.clear();
+        self.cache.pending.clear();
+        self.cache.rebuild_next = Some(0);
+        self.cache.detail = None;
     }
 
+    pub(crate) fn invalidate_item(&mut self, index: usize) {
+        self.invalidate_detail_resource("panel:Details");
+        self.cache.pending.insert(index);
+    }
+    pub(crate) fn detail_changed(&mut self) {
+        self.detail_revision = self.detail_revision.wrapping_add(1);
+    }
+    pub(crate) fn invalidate_detail_resource(&mut self, identity: &str) {
+        if self.cache.detail.as_ref().is_some_and(|cache| {
+            cache.identity == identity
+                || cache
+                    .identity
+                    .strip_prefix(identity)
+                    .is_some_and(|suffix| identity.ends_with(':') || suffix.starts_with(':'))
+        }) {
+            self.detail_changed();
+        }
+    }
     pub(crate) fn invalidate_stream_cache(&mut self) {
         self.cache.stream_lines = None;
+        self.cache.stream_code_lines.clear();
+        self.cache.stream_code_bytes = 0;
+        self.cache.stream_code_key = None;
+        self.cache.stream_code_closed = false;
     }
 
     pub(crate) fn push_line(&mut self, line: TranscriptItem) -> usize {
+        self.invalidate_detail_resource("panel:Details");
         let idx = self.lines.len();
+        if !line.sealed {
+            self.unsealed.insert(idx);
+        }
         self.lines.push(line);
-        self.invalidate_all_cache();
+        self.cache.pending.insert(idx);
         idx
     }
 
     pub(crate) fn save_stream(&mut self) {
+        self.stream_boundary = super::stream_boundary::StreamBoundary::default();
         let text = std::mem::take(&mut self.stream_line);
         if !text.is_empty() {
             self.push_line(TranscriptItem::new(text, self.stream_kind));
         }
         self.stream_revision = self.stream_revision.wrapping_add(1);
         self.invalidate_stream_cache();
-        self.viewport.auto_scroll = true;
     }
 
     pub(crate) fn finalize_stream(&mut self) {
@@ -644,7 +860,7 @@ impl TuiState {
         if self.stream_kind != TranscriptKind::StreamText || self.stream_line.is_empty() {
             return;
         }
-        let end = stable_markdown_prefix_end(&self.stream_line);
+        let end = self.stream_boundary.scan(&self.stream_line);
         if end == 0 {
             return;
         }
@@ -655,18 +871,19 @@ impl TuiState {
         }
         self.stream_revision = self.stream_revision.wrapping_add(1);
         self.invalidate_stream_cache();
-        self.viewport.auto_scroll = true;
     }
 
     pub(crate) fn seal_incomplete_transcript(&mut self, reason: &str) {
         let mut changed = false;
-        for item in self.lines.iter_mut().skip(self.inline.committed) {
-            if item.sealed {
+        for index in std::mem::take(&mut self.unsealed) {
+            if index < self.inline.committed {
                 continue;
             }
+            let Some(item) = self.lines.get_mut(index).filter(|item| !item.sealed) else {
+                continue;
+            };
             item.sealed = true;
             if item.kind == TranscriptKind::Tool {
-                item.tool_success = Some(false);
                 if item.text.is_empty() || item.text.starts_with("[tool]") {
                     item.text = reason.to_string();
                 }
@@ -675,15 +892,18 @@ impl TuiState {
                 item.text.push_str(reason);
             }
             item.invalidate_cache();
+            self.cache.pending.insert(index);
             changed = true;
         }
         if changed {
             self.sub_agents.active_sessions.clear();
-            self.invalidate_all_cache();
+            self.active_tools.clear();
         }
     }
 
     pub(crate) fn apply_todo_presentation(&mut self, update: &TodoDisplay) {
+        self.invalidate_detail_resource("todos");
+        self.invalidate_detail_resource("panel:Status");
         if update.changes.is_empty() {
             self.todos = Some(update.clone());
             return;
@@ -730,9 +950,9 @@ impl TuiState {
     /// a captured image only grows the pending list (the chip row is the
     /// visible feedback).
     pub(crate) fn apply_ui_event(&mut self, event: TuiUiEvent) {
-        self.clipboard_started = None;
         match event {
             TuiUiEvent::ImageCaptured(image) => {
+                self.clipboard_started = None;
                 // The same bytes stage to the same content-addressed path: a
                 // duplicate paste would make the model receive one picture
                 // twice (double vision tokens) for no benefit.
@@ -750,13 +970,83 @@ impl TuiState {
                     ));
                 } else {
                     self.input.pending_images.push(image);
+                    self.input.revision = self.input.revision.wrapping_add(1);
                 }
             }
             TuiUiEvent::ClipboardFailed(message) => {
+                self.clipboard_started = None;
                 self.push_line(TranscriptItem::new(
                     format!("Clipboard image unavailable: {message}"),
                     TranscriptKind::Error,
                 ));
+            }
+            TuiUiEvent::FilePickerReady { generation, picker } => {
+                if generation == self.picker_generation && self.overlay.is_some() {
+                    self.overlay = Some(ActiveOverlay::FilePicker(picker));
+                }
+            }
+            TuiUiEvent::ArtifactReady {
+                generation,
+                id,
+                result,
+            } => {
+                if generation == self.artifact_generation
+                    && matches!(self.view, View::Artifact { .. })
+                {
+                    self.invalidate_detail_resource("artifact:");
+                    match result {
+                        Ok(detail) => self.artifact_detail = Some(detail),
+                        Err(error) => {
+                            self.artifact_detail = Some(ArtifactDetail {
+                                id,
+                                content: error,
+                                truncated: false,
+                            });
+                        }
+                    }
+                }
+            }
+            TuiUiEvent::HistoryLoaded { generation, state } => {
+                if generation == self.background_generation && self.loading_history {
+                    let mut history = state.lines;
+                    let offset = history.len();
+                    history.append(&mut self.lines);
+                    self.lines = history;
+                    for index in self.sub_agents.line_by_session.values_mut() {
+                        *index += offset;
+                    }
+                    for index in self.active_tools.values_mut() {
+                        *index += offset;
+                    }
+                    self.unsealed = self.unsealed.iter().map(|index| *index + offset).collect();
+                    if self.plan.is_none() {
+                        self.plan = state.plan;
+                    }
+                    if self.todos.is_none() {
+                        self.todos = state.todos;
+                    }
+                    self.loading_history = false;
+                    self.invalidate_all_cache();
+                }
+            }
+            TuiUiEvent::Admission(result) => self.finish_admission(*result),
+            TuiUiEvent::SubAgentReady {
+                generation,
+                id,
+                result,
+            } => {
+                if generation == self.sub_detail_generation
+                    && matches!(&self.view, View::SubAgentDetail { session_id, .. } if session_id == &id)
+                {
+                    self.invalidate_detail_resource(&format!("sub:{id}"));
+                    self.restored_sub_detail = Some((
+                        id,
+                        result.unwrap_or_else(|error| SubAgentDetail {
+                            thinking: String::new(),
+                            text: sanitize_tui_text(&error),
+                        }),
+                    ));
+                }
             }
         }
     }
@@ -779,22 +1069,12 @@ impl TuiState {
     }
 
     pub(crate) fn add_help(&mut self) {
-        for (index, line) in crate::local::COMMON_COMMAND_HELP
-            .iter()
-            .chain(crate::local::TUI_EXTRA_HELP)
-            .enumerate()
-        {
-            self.push_line(TranscriptItem::new(
-                line.to_string(),
-                if index == 0 {
-                    TranscriptKind::Info
-                } else {
-                    TranscriptKind::Text
-                },
-            ));
-        }
+        self.view = View::Panel {
+            panel: PanelKind::Help,
+            scroll: 0,
+            selected: 0,
+        };
     }
-
     pub(crate) fn show_skills(&mut self) {
         self.push_line(TranscriptItem::new(
             "=== Skills ===".into(),
@@ -819,9 +1099,110 @@ impl TuiState {
         ));
     }
 
+    pub(crate) fn open_sub_agent(&mut self, id: &str) {
+        self.invalidate_detail_resource(&format!("sub:{id}"));
+        self.view = View::SubAgentDetail {
+            session_id: id.to_string(),
+            scroll: 0,
+        };
+        self.sub_detail_generation = self.sub_detail_generation.wrapping_add(1);
+        let available = self
+            .sub_agents
+            .line_by_session
+            .get(id)
+            .and_then(|index| self.lines.get(*index))
+            .is_some_and(|item| item.sub_detail.is_some());
+        if available {
+            return;
+        }
+        let Some(tx) = self.ui_tx.clone() else { return };
+        let reader = crate::runtime::session::SessionReader::new(&self.session_dir);
+        let id = id.to_string();
+        let generation = self.sub_detail_generation;
+        self.restored_sub_detail = Some((
+            id.clone(),
+            SubAgentDetail {
+                thinking: String::new(),
+                text: "Loading…".into(),
+            },
+        ));
+        std::thread::spawn(move || {
+            let result = (|| -> anyhow::Result<SubAgentDetail> {
+                let rows = reader
+                    .sub_agent(&id)?
+                    .conversation_turns(1, 1, true, None)?;
+                let mut detail = SubAgentDetail {
+                    thinking: String::new(),
+                    text: String::new(),
+                };
+                for row in rows {
+                    if row["role"] != "assistant" {
+                        continue;
+                    }
+                    if let Some(blocks) = row["content"].as_array() {
+                        for block in blocks {
+                            match block["type"].as_str() {
+                                Some("text") => {
+                                    if let Some(text) = block["text"].as_str() {
+                                        detail.text.push_str(text);
+                                    }
+                                }
+                                Some("thinking") => {
+                                    if let Some(text) = block["thinking"].as_str() {
+                                        detail.thinking.push_str(text);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                detail.text = sanitize_tui_text(&detail.text);
+                detail.thinking = sanitize_tui_text(&detail.thinking);
+                Ok(detail)
+            })()
+            .map_err(|error| format!("Cannot load sub-agent {id}: {error}"));
+            let _ = tx.send(TuiUiEvent::SubAgentReady {
+                generation,
+                id,
+                result,
+            });
+        });
+    }
+
     pub(crate) fn open_artifact(&mut self, id: &str) {
+        self.invalidate_detail_resource("artifact:");
         const MAX_ARTIFACT_DETAIL_BYTES: usize = 256 * 1024;
         let manager = crate::session::artifacts::ArtifactManager::new(self.artifacts_dir.clone());
+        if let Some(tx) = self.ui_tx.clone() {
+            self.artifact_generation = self.artifact_generation.wrapping_add(1);
+            let generation = self.artifact_generation;
+            let id = id.to_string();
+            self.artifact_detail = Some(ArtifactDetail {
+                id: id.clone(),
+                content: "Loading…".into(),
+                truncated: false,
+            });
+            self.view = View::Artifact { scroll: 0 };
+            std::thread::spawn(move || {
+                let result = manager
+                    .read_text_prefix(&id, MAX_ARTIFACT_DETAIL_BYTES)
+                    .map(|(content, truncated)| ArtifactDetail {
+                        id: id.clone(),
+                        content: sanitize_tui_text(&content),
+                        truncated,
+                    })
+                    .map_err(|error| {
+                        sanitize_tui_text(&format!("Cannot open artifact://{id}: {error}"))
+                    });
+                let _ = tx.send(TuiUiEvent::ArtifactReady {
+                    generation,
+                    id,
+                    result,
+                });
+            });
+            return;
+        }
         match manager.read_text_prefix(id, MAX_ARTIFACT_DETAIL_BYTES) {
             Ok((content, truncated)) => {
                 self.artifact_detail = Some(ArtifactDetail {
@@ -839,27 +1220,6 @@ impl TuiState {
             }
         }
     }
-}
-
-fn stable_markdown_prefix_end(text: &str) -> usize {
-    let mut in_fence = false;
-    let mut offset = 0usize;
-    let mut stable_end = 0usize;
-    for line in text.split_inclusive('\n') {
-        offset += line.len();
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            if !in_fence {
-                stable_end = offset;
-            }
-            continue;
-        }
-        if !in_fence && trimmed.is_empty() {
-            stable_end = offset;
-        }
-    }
-    stable_end
 }
 
 /// 识别 LLM 等待心跳消息并提取精简状态标签（如 `·30s`）。
@@ -882,4 +1242,9 @@ fn set_todo_status(items: &mut [crate::ui::TodoItemDisplay], id: &str, status: T
     if let Some(item) = items.iter_mut().find(|item| item.id == id) {
         item.status = status;
     }
+}
+
+fn next_item_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }

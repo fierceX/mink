@@ -1,6 +1,6 @@
 # 使用手册
 
-> 更新日期：2026-10-03
+> 更新日期：2026-10-04
 
 本文面向终端用户，覆盖 CLI 交互模式、配置参数、沙箱、session、计划、压缩、工具、技能和
 常见工作流。Rust 库 / Python SDK 嵌入见 [嵌入与 SDK 使用](EMBEDDING.md)；机器协议
@@ -113,7 +113,7 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) [idle]
 | < 0.3 | 严重 |
 
 两种 TUI 共用：
-- 多行输入和 UTF-8 安全编辑，Ctrl+C 中断当前 turn
+- 多行输入和 grapheme 编辑（组合字符、Emoji、中文宽字符），Ctrl+C 中断当前 turn
 - 运行中 Enter 提交当前 turn 的中途引导，在下一安全边界生效，不启动额外轮次
 - 工具调用与结果按 ID 合并，显示退出状态、Plan/Todo 状态和 Artifact 元数据
 - 语义工具着色、自动折叠和同一套 Markdown renderer（标题、列表、引用、代码块、表格、diff）
@@ -127,9 +127,9 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) [idle]
 **TUI / REPL 操作：**（标注 TUI 的操作仅用于 Full/Inline）
 | 操作 | 行为 |
 |------|------|
-| `Ctrl+C` | 工作中中断当前 turn；空闲时退出 |
+| `Ctrl+C` | TUI 工作中停止并等待权威终态，2 秒内再按退出；空闲退出；REPL 保持原行为 |
 | `Enter`（TUI） | 空闲发送新任务；运行中提交引导；停止期间保留草稿 |
-| `/inputs`（TUI） | 查看持久待处理/未应用输入及稳定 ID |
+| `/inputs`（TUI） | 打开输入面板；↑↓ 选择，e 编辑，w 撤回，r 明确续发或恢复失败草稿；applying 项只读 |
 | `/resume ID`（TUI） | 空闲时明确将未应用输入用于新轮次 |
 | `/withdraw ID`（TUI） | 按 revision 撤回尚未消费的输入 |
 | `Ctrl+V` | 粘贴剪贴板图片（macOS）：暂存到 session `attachments/`，随下一条消息附带绝对路径 |
@@ -137,18 +137,33 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) [idle]
 | `Ctrl+J` / `Alt+Enter` | 换行（不依赖终端协议的兜底键） |
 | `/flash` / `/pro` | 切换模型 |
 | `/compact` | 手动触发上下文压缩 |
-| `/help` / `/skills` | 显示帮助或 skill 列表 |
+| `/help` / `/status`（TUI） | 打开本地帮助/完整统计面板，不向对话追加正文 |
+| `/details`（TUI） | 键盘选择卡片折叠、Plan/Todo/Artifact/子代理详情 |
+| `/skills` | 显示 skill 列表 |
 | `/plan` / `/todos` | 打开 Plan/Todo 详情 |
 | `/artifact ID` | 打开最多 256 KiB 的 Artifact 预览 |
 | `/sub-agent ID` | 打开子代理详情 |
 | `/exit` / `/quit` / `/q` | 退出 |
 | 未知 `/xxx` | 本地提示，不发送给 LLM |
 | 行首空格 + `/xxx` | 作为普通文本发送 |
-| `Ctrl+D` | REPL 中退出 |
+| `Esc`（TUI） | 关闭补全、面板或返回主界面；主界面不退出 |
+| `↑↓`（TUI） | 非空草稿按视觉行移动并保留目标列；空输入或历史浏览时切换历史 |
+| `Home` / `End`（TUI） | 当前逻辑行首尾；Ctrl+A / Ctrl+E 为整个草稿首尾 |
+| `Ctrl+Z` / `Alt+Z`（TUI） | 撤销 / 重做；整次粘贴作为一项编辑 |
+| `PgUp` / `PgDn`（TUI） | 按当前正文或详情视口翻页 |
+| `Ctrl+L` / `/latest`（TUI） | 恢复正文跟随最新，不重置详情阅读位置 |
+| `Ctrl+D` | REPL 中退出；TUI 仅在文字、图片、上传和准入均为空闲时退出 |
 
 `/flash` / `/pro` 不会发送给 LLM；TUI 在任务执行期间拒绝切换模型和手动压缩，保留命令草稿。
 
+TUI 阅读历史后，新输出、工具边界、封口和 resize 保留阅读位置。异步发送后可继续编辑；迟到回执只清理发送时的草稿，失败原稿可在 `/inputs` 恢复。窄终端优先显示工作状态，完整模型名和统计见 `/status`。撤回或续发已有输入保留未发送草稿和图片；编辑已有输入只修改文本，待发送的新图片留给下一次新提交。
+
 TUI 输入框在运行中仍可编辑，图片可随引导一起提交。输入上方先显示 `Accepted; waiting for safe boundary`，只有写入正式历史后才回显 `[Added to context]`；不表示模型已经遵循。提交失败保留文字和图片；停止或重启后的未应用指令仍保留，可用 `/inputs` 查看并明确续发或撤回，不会自动执行。含引导的历史按完整正式轮次恢复；只有权威 outcome 才结束任务，停止通知与完成、失败通知区分。
+
+macOS 任务通知：Ghostty/iTerm2/WezTerm 使用终端原生通知，点击由终端定位对应
+窗口/会话。Terminal.app 可用已安装的 `terminal-notifier`，点击激活 Terminal；其他终端
+可使用环境中的 `__CFBundleIdentifier` 作为激活目标。工具缺失时保留终端通知与铃声，
+不再发出点击打开脚本编辑器的 AppleScript 通知。显示通知还需允许终端的系统通知。
 
 `Shift+Enter` 需要终端上报修饰键（Kitty keyboard protocol 的 `DISAMBIGUATE_ESCAPE_CODES`）：
 TUI 启动时探测并启用，退出时自动还原，panic 时由 panic hook 还原；Ghostty / kitty /

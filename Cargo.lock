@@ -715,6 +715,7 @@ dependencies = [
  "crossterm_winapi",
  "derive_more",
  "document-features",
+ "futures-core",
  "mio",
  "parking_lot",
  "rustix",
@@ -2072,6 +2073,7 @@ dependencies = [
  "time",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
+ "unicode-segmentation",
  "unicode-width",
 ]
 

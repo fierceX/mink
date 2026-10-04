@@ -140,7 +140,7 @@ fn load_session_replays_recent_turns() {
         .find(|line| line.kind == TranscriptKind::Tool)
         .unwrap();
     assert!(tool.sealed);
-    assert_eq!(tool.tool_success, Some(true));
+    assert_eq!(tool.tool_status, None);
     assert!(tool.text.contains("file contents"));
 }
 
@@ -170,7 +170,7 @@ fn sub_agent_output_invalidates_updated_line_cache() {
         out_tokens: 0,
     });
     state.lines[0].cached_lines = Some(vec![Line::from("stale")]);
-    state.cache.history_lines = Some(vec![Line::from("stale")]);
+    state.cache.rebuild_next = None;
 
     state.apply(&TuiSignal::SubAgentOutput {
         session_id: "sub_1".into(),
@@ -183,7 +183,7 @@ fn sub_agent_output_invalidates_updated_line_cache() {
 
     assert!(state.lines[0].text.contains("ok"));
     assert!(state.lines[0].cached_lines.is_none());
-    assert!(state.cache.history_lines.is_none());
+    assert!(state.cache.pending.contains(&0));
     let detail = state.lines[0].sub_detail.as_ref().unwrap();
     assert_eq!(detail.thinking, "child thinking");
     assert_eq!(detail.text, "child text");
@@ -199,7 +199,7 @@ fn sub_agent_status_updates_existing_line() {
         out_tokens: 0,
     });
     state.lines[0].cached_lines = Some(vec![Line::from("stale")]);
-    state.cache.history_lines = Some(vec![Line::from("stale")]);
+    state.cache.rebuild_next = None;
 
     state.apply(&TuiSignal::SubAgentStatus {
         session_id: "sub_1".into(),
@@ -212,7 +212,7 @@ fn sub_agent_status_updates_existing_line() {
     assert_eq!(state.sub_agents.active_sessions.len(), 1);
     assert!(state.lines[0].text.contains("running"));
     assert!(state.lines[0].cached_lines.is_none());
-    assert!(state.cache.history_lines.is_none());
+    assert!(state.cache.pending.contains(&0));
 }
 
 #[test]
@@ -794,7 +794,7 @@ fn tool_result_signal_preserves_tool_name_for_summaries() {
         tool_use_id: None,
         tool_name: "Edit".into(),
         content: "changed file".into(),
-        success: true,
+        status: Some(crate::runtime::ToolStatus::Succeeded),
         exit_code: None,
         result_kind: crate::ui::ToolResultKind::Edit,
         presentation: None,
@@ -825,7 +825,7 @@ fn structured_tool_result_updates_the_running_transcript_item() {
         tool_use_id: Some("call-1".into()),
         tool_name: "PlanDraft".into(),
         content: "Plan draft saved.".into(),
-        success: true,
+        status: Some(crate::runtime::ToolStatus::Succeeded),
         exit_code: None,
         result_kind: crate::ui::ToolResultKind::Control,
         presentation: Some(presentation),
@@ -834,7 +834,10 @@ fn structured_tool_result_updates_the_running_transcript_item() {
 
     assert_eq!(state.lines.len(), 1);
     assert!(state.lines[0].sealed);
-    assert_eq!(state.lines[0].tool_success, Some(true));
+    assert_eq!(
+        state.lines[0].tool_status,
+        Some(crate::runtime::ToolStatus::Succeeded)
+    );
     assert!(state.plan.is_some());
 }
 
@@ -862,7 +865,7 @@ fn tool_result_with_mismatched_id_does_not_merge_by_tool_name() {
         tool_use_id: Some("provider-call-1".into()),
         tool_name: "TodoAdvance".into(),
         content: "<todo-event>raw protocol</todo-event>".into(),
-        success: true,
+        status: Some(crate::runtime::ToolStatus::Succeeded),
         exit_code: None,
         result_kind: ToolResultKind::Control,
         presentation: Some(presentation),
@@ -900,7 +903,7 @@ fn reused_tool_id_updates_the_latest_unsealed_call() {
         tool_use_id: Some("call-1".into()),
         tool_name: "Read".into(),
         content: "old result".into(),
-        success: true,
+        status: Some(crate::runtime::ToolStatus::Succeeded),
         exit_code: None,
         result_kind: ToolResultKind::FileRead,
         presentation: None,
@@ -916,7 +919,7 @@ fn reused_tool_id_updates_the_latest_unsealed_call() {
         tool_use_id: Some("call-1".into()),
         tool_name: "Read".into(),
         content: "new result".into(),
-        success: true,
+        status: Some(crate::runtime::ToolStatus::Succeeded),
         exit_code: None,
         result_kind: ToolResultKind::FileRead,
         presentation: None,
@@ -1007,7 +1010,7 @@ fn todo_delta_preserves_items_not_mentioned_by_the_update() {
 #[test]
 fn shared_tool_card_renderer_colors_tools_by_result_kind() {
     let mut item = TranscriptItem::new_tool_result("Edit".into(), "updated file".into());
-    item.tool_success = Some(true);
+    item.tool_status = Some(crate::runtime::ToolStatus::Succeeded);
     item.tool_result_kind = Some(ToolResultKind::Edit);
 
     let lines = render::transcript_item_lines(&item, 80);
@@ -1027,7 +1030,7 @@ fn inline_tool_projection_auto_collapses_without_expand_marker() {
             .collect::<Vec<_>>()
             .join("\n"),
     );
-    item.tool_success = Some(true);
+    item.tool_status = Some(crate::runtime::ToolStatus::Succeeded);
     item.tool_result_kind = Some(ToolResultKind::Command);
 
     let lines = render::transcript_item_lines(&item, 80);
@@ -1047,7 +1050,7 @@ fn full_tui_restores_mouse_toggle_for_collapsible_cards() {
             .collect::<Vec<_>>()
             .join("\n"),
     );
-    item.tool_success = Some(true);
+    item.tool_status = Some(crate::runtime::ToolStatus::Succeeded);
     item.tool_result_kind = Some(ToolResultKind::Command);
     let mut state = TuiState::default();
     state.push_line(item);
@@ -1290,7 +1293,7 @@ fn terminal_signal_seals_orphan_tool_calls() {
     state.apply(&TuiSignal::Error("connection failed".into()));
 
     assert!(state.lines[0].sealed);
-    assert_eq!(state.lines[0].tool_success, Some(false));
+    assert_eq!(state.lines[0].tool_status, None);
     assert!(state.lines[0].text.contains("turn failed"));
     assert_eq!(sealed_prefix_end(&state), state.lines.len());
 }
@@ -2041,7 +2044,7 @@ fn render_clamps_invalid_cursor_and_repairs_missing_cache() {
         .lines
         .push(TranscriptItem::new("second".into(), TranscriptKind::Text));
     state.cache.width = 78;
-    state.cache.history_lines = Some(vec![Line::from("stale")]);
+    state.cache.rebuild_next = None;
     state.lines[0].cached_lines = Some(vec![Line::from("first")]);
     state.lines[0].cached_collapsed = state.lines[0].collapsed;
 
@@ -2053,13 +2056,7 @@ fn render_clamps_invalid_cursor_and_repairs_missing_cache() {
 
     assert_eq!(state.input.cursor, "a".len());
     assert!(state.lines[1].cached_lines.is_some());
-    assert!(
-        state
-            .cache
-            .history_lines
-            .as_ref()
-            .is_some_and(|lines| lines.len() >= 2)
-    );
+    assert!(state.cache.heights.total() >= 2);
 }
 
 #[test]
@@ -2842,4 +2839,132 @@ fn tui_display_preserves_tool_call_and_title_fields() {
         }
         other => panic!("unexpected signal: {other:?}"),
     }
+}
+
+#[test]
+fn stale_background_queries_do_not_replace_current_resource_or_closed_picker() {
+    let mut state = TuiState {
+        artifact_generation: 2,
+        picker_generation: 2,
+        ..Default::default()
+    };
+    state.view = View::Artifact { scroll: 0 };
+    state.apply_ui_event(state::TuiUiEvent::ArtifactReady {
+        generation: 1,
+        id: "old".into(),
+        result: Ok(state::ArtifactDetail {
+            id: "old".into(),
+            content: "old".into(),
+            truncated: false,
+        }),
+    });
+    assert!(state.artifact_detail.is_none());
+    state.apply_ui_event(state::TuiUiEvent::FilePickerReady {
+        generation: 2,
+        picker: FilePickerState::default(),
+    });
+    assert!(state.overlay.is_none());
+}
+
+#[test]
+fn late_failed_admission_keeps_new_draft_and_recovers_old_draft_separately() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = TuiState::default();
+    let mut draft = state.input.clone();
+    draft.buf = "submitted".into();
+    state.input.buf = "new draft".into();
+    state.input.revision = 1;
+    state.finish_admission(super::inbox::AdmissionResult {
+        action: super::inbox::AdmissionAction::Submit,
+        draft,
+        result: Err("failed".into()),
+        tx,
+    });
+    assert_eq!(state.input.buf, "new draft");
+    assert_eq!(state.failed_drafts[0].buf, "submitted");
+}
+
+#[test]
+fn inbox_control_receipts_preserve_unsent_text_images_and_history() {
+    use super::inbox::{AdmissionAction, AdmissionResult};
+    let receipt = || {
+        serde_json::from_value::<crate::runtime::InputReceipt>(serde_json::json!({
+        "input_id":"queued", "revision":2, "turn_id":"turn", "status":"withdrawn", "guidance":false,
+        "input":{"request_id":"queued", "text":"original task", "attachment_ids":[]},
+        "original":{"request_id":"queued", "text":"original task", "attachment_ids":[]}
+    })).unwrap()
+    };
+    for action in [AdmissionAction::Update, AdmissionAction::Resume] {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = "unsent draft".into();
+        state.input.cursor = state.input.buf.len();
+        state.input.pending_images.push(state::PendingImage {
+            path: "image.png".into(),
+            width: 1,
+            height: 1,
+            bytes: 1,
+        });
+        let draft = state.input.draft_snapshot();
+        state.finish_admission(AdmissionResult {
+            action,
+            draft,
+            result: Ok((receipt(), None)),
+            tx,
+        });
+        assert_eq!(state.input.buf, "unsent draft");
+        assert_eq!(state.input.pending_images.len(), 1);
+        let expected = if matches!(action, AdmissionAction::Resume) {
+            vec!["original task"]
+        } else {
+            vec![]
+        };
+        assert_eq!(state.input.history, expected);
+    }
+    for (action, text) in [
+        (AdmissionAction::Update, "/withdraw queued"),
+        (AdmissionAction::Resume, "/resume queued"),
+        (AdmissionAction::Edit, "edited task"),
+    ] {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = text.into();
+        state.input.pending_images.push(state::PendingImage {
+            path: "image.png".into(),
+            width: 1,
+            height: 1,
+            bytes: 1,
+        });
+        let draft = state.input.draft_snapshot();
+        state.finish_admission(AdmissionResult {
+            action,
+            draft,
+            result: Ok((receipt(), None)),
+            tx,
+        });
+        assert!(state.input.buf.is_empty());
+        assert_eq!(state.input.pending_images.len(), 1);
+        let expected = if matches!(action, AdmissionAction::Resume) {
+            vec!["original task"]
+        } else {
+            vec![]
+        };
+        assert_eq!(state.input.history, expected);
+    }
+}
+
+#[test]
+fn failed_control_receipt_does_not_create_a_failed_submission_from_an_unrelated_draft() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = TuiState::default();
+    let draft = state.input.draft_snapshot();
+    state.input.buf = "later draft".into();
+    state.finish_admission(super::inbox::AdmissionResult {
+        action: super::inbox::AdmissionAction::Update,
+        draft,
+        result: Err("stale revision".into()),
+        tx,
+    });
+    assert_eq!(state.input.buf, "later draft");
+    assert!(state.failed_drafts.is_empty());
 }

@@ -22,30 +22,28 @@ pub(crate) fn parse_blocks(text: &str) -> Vec<MdBlock> {
     // an extra Markdown block solely because a streamed fragment ends in `\n`.
     let raw_lines: Vec<&str> = text.lines().collect();
     let mut blocks = Vec::new();
-    let mut in_code = false;
+    let mut fence: Option<crate::tui::stream_boundary::Fence> = None;
     let mut code_lang: Option<String> = None;
     let mut code_lines: Vec<String> = Vec::new();
     let mut idx = 0usize;
     while idx < raw_lines.len() {
         let raw = raw_lines[idx];
-        let trimmed = raw.trim_start();
-        if let Some(lang) = fence_lang(trimmed) {
-            if in_code {
+        if let Some(open) = fence {
+            if open.closes(raw) {
                 blocks.push(MdBlock::CodeBlock {
                     lang: code_lang.take(),
                     lines: std::mem::take(&mut code_lines),
                 });
-                in_code = false;
+                fence = None;
             } else {
-                in_code = true;
-                code_lang = (!lang.is_empty()).then(|| lang.to_string());
+                code_lines.push(raw.to_string());
             }
             idx += 1;
             continue;
         }
-
-        if in_code {
-            code_lines.push(raw.to_string());
+        if let Some((open, lang)) = crate::tui::stream_boundary::Fence::opening(raw) {
+            fence = Some(open);
+            code_lang = (!lang.is_empty()).then(|| lang.to_string());
             idx += 1;
             continue;
         }
@@ -89,7 +87,7 @@ pub(crate) fn parse_blocks(text: &str) -> Vec<MdBlock> {
         blocks.push(MdBlock::Paragraph(parse_inline(raw)));
         idx += 1;
     }
-    if in_code {
+    if fence.is_some() {
         blocks.push(MdBlock::CodeBlock {
             lang: code_lang,
             lines: code_lines,
@@ -137,12 +135,6 @@ fn render_blocks(lines: &mut Vec<Line<'static>>, blocks: &[MdBlock], base: Style
             MdBlock::Table(table) => render_table(lines, table, base, max_width),
         }
     }
-}
-
-fn fence_lang(line: &str) -> Option<&str> {
-    line.strip_prefix("```")
-        .or_else(|| line.strip_prefix("~~~"))
-        .map(str::trim)
 }
 
 fn parse_heading(line: &str) -> Option<(usize, &str)> {

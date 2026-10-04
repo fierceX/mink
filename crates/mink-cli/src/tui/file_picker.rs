@@ -99,7 +99,7 @@ pub(crate) struct FilePickerState {
     pub replace_start: usize,
     pub replace_end: usize,
     pub query: String,
-    pub candidates: Vec<FilePickCandidate>,
+    pub candidates: std::sync::Arc<Vec<FilePickCandidate>>,
     pub items: Vec<FilePickItem>,
     pub selected: usize,
     pub scroll: usize,
@@ -147,7 +147,7 @@ impl FilePickerState {
             replace_start,
             replace_end,
             query,
-            candidates,
+            candidates: std::sync::Arc::new(candidates),
             items: Vec::new(),
             selected: 0,
             scroll: 0,
@@ -204,11 +204,11 @@ impl FilePickerState {
         &mut self,
         target: &ScanTarget,
         policy: &FilePickerPolicy,
-    ) -> Vec<FilePickCandidate> {
+    ) -> std::sync::Arc<Vec<FilePickCandidate>> {
         if let Some(entry) = self.scan_cache.iter().find(|entry| entry.key == target.key) {
             return entry.candidates.clone();
         }
-        let candidates = scan_candidates_for_target(target, policy);
+        let candidates = std::sync::Arc::new(scan_candidates_for_target(target, policy));
         self.scan_cache.push(ScanCacheEntry {
             key: target.key.clone(),
             candidates: candidates.clone(),
@@ -455,7 +455,7 @@ fn scan_allowed_root_entrypoints(
 #[derive(Clone, Debug)]
 struct ScanCacheEntry {
     key: ScanKey,
-    candidates: Vec<FilePickCandidate>,
+    candidates: std::sync::Arc<Vec<FilePickCandidate>>,
 }
 
 fn resolve_policy_dir(cwd: &Path, dir: &str) -> PathBuf {
@@ -560,7 +560,7 @@ fn fuzzy_score(path: &str, query: &str) -> Option<i64> {
     Some(score)
 }
 
-fn path_query_at_cursor(input: &str, cursor: usize) -> (usize, usize, String) {
+pub(crate) fn path_query_at_cursor(input: &str, cursor: usize) -> (usize, usize, String) {
     let cursor = crate::tui::state::clamp_char_boundary(input, cursor);
     let mut start = cursor;
     while start > 0 {
@@ -680,3 +680,43 @@ fn prev_char_boundary(s: &str, pos: usize) -> usize {
 #[cfg(test)]
 #[path = "file_picker_tests.rs"]
 mod tests;
+
+/// One serialized scan worker coalesces superseded queries before scanning.
+pub(crate) struct PickerRequest {
+    pub generation: u64,
+    pub input: String,
+    pub cursor: usize,
+    pub policy: FilePickerPolicy,
+}
+pub(crate) fn start_worker(
+    tx: std::sync::mpsc::Sender<super::state::TuiUiEvent>,
+) -> std::sync::mpsc::Sender<PickerRequest> {
+    let (requests, rx) = std::sync::mpsc::channel::<PickerRequest>();
+    std::thread::spawn(move || {
+        let mut picker: Option<FilePickerState> = None;
+        while let Ok(mut request) = rx.recv() {
+            while let Ok(next) = rx.try_recv() {
+                request = next;
+            }
+            if let Some(picker) = picker.as_mut() {
+                picker.refresh_with_policy(&request.input, request.cursor, &request.policy);
+            } else {
+                picker = Some(FilePickerState::open(
+                    &request.input,
+                    request.cursor,
+                    &request.policy,
+                ));
+            }
+            if tx
+                .send(super::state::TuiUiEvent::FilePickerReady {
+                    generation: request.generation,
+                    picker: picker.as_ref().expect("picker").clone(),
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    requests
+}

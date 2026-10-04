@@ -173,11 +173,10 @@ fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> 
                         .map(str::to_owned),
                     tool_name: tool_name.to_string(),
                     content: c.to_string(),
-                    success: evt
+                    status: evt
                         .get("status")
-                        .and_then(|status| status.get("state"))
-                        .and_then(serde_json::Value::as_str)
-                        .is_none_or(|state| state == "succeeded"),
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok()),
                     exit_code: evt
                         .get("exit_code")
                         .and_then(serde_json::Value::as_i64)
@@ -199,7 +198,7 @@ fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> 
         if !item.sealed {
             item.sealed = true;
             if item.kind == TranscriptKind::Tool {
-                item.tool_success = Some(false);
+                item.tool_status = None;
                 if item.text.starts_with("[tool]") {
                     item.text
                         .push_str("\nResult unavailable in the persisted event log.");
@@ -208,4 +207,37 @@ fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> 
         }
     }
     state.lines
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use crate::runtime::{ToolBlocker, ToolFailureKind, ToolStatus};
+
+    #[test]
+    fn live_and_replay_preserve_all_authoritative_tool_statuses() {
+        for status in [
+            ToolStatus::Succeeded,
+            ToolStatus::Failed(ToolFailureKind::Timeout),
+            ToolStatus::Blocked(ToolBlocker::RecoveryGuard),
+            ToolStatus::Interrupted,
+        ] {
+            let mut live = TuiState::default();
+            live.apply(&TuiSignal::ToolResult {
+                tool_use_id: Some("call".into()),
+                tool_name: "Bash".into(),
+                content: "body".into(),
+                status: Some(status),
+                exit_code: None,
+                result_kind: ToolResultKind::Text,
+                presentation: None,
+                artifacts: Vec::new(),
+            });
+            let replay = build_lines_from_events(&[serde_json::json!({
+                "type": "tool_result", "tool_use_id": "call", "name": "Bash", "content": "body", "status": status,
+            })]);
+            assert_eq!(live.lines[0].tool_status, Some(status));
+            assert_eq!(replay[0].tool_status, live.lines[0].tool_status);
+        }
+    }
 }

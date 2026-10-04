@@ -4,7 +4,7 @@ use crate::session::store::ConversationStore;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -67,6 +67,7 @@ pub struct InputInbox {
     path: PathBuf,
     state: Mutex<State>,
     fault: PersistenceFault,
+    changes: tokio::sync::watch::Sender<Arc<Vec<InputReceipt>>>,
 }
 impl InputInbox {
     pub(crate) fn load(path: PathBuf, fault: PersistenceFault) -> Result<Self> {
@@ -75,7 +76,9 @@ impl InputInbox {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Snapshot::default(),
             Err(e) => return Err(e.into()),
         };
+        let (changes, _) = tokio::sync::watch::channel(Arc::new(outstanding_entries(&snapshot)));
         Ok(Self {
+            changes,
             path,
             state: Mutex::new(State {
                 snapshot,
@@ -87,6 +90,8 @@ impl InputInbox {
     fn publish(&self, state: &mut State, snapshot: Snapshot) -> Result<()> {
         publish_state(&self.path, &serde_json::to_vec(&snapshot)?, &self.fault)?;
         state.snapshot = snapshot;
+        self.changes
+            .send_replace(Arc::new(outstanding_entries(&state.snapshot)));
         Ok(())
     }
     pub fn entries(&self) -> Vec<InputReceipt> {
@@ -97,21 +102,14 @@ impl InputInbox {
             .entries
             .clone()
     }
+    /// Current outstanding inputs and subsequent durable publications. Subscription
+    /// and initial snapshot share the admission lock; failed writes never notify.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Arc<Vec<InputReceipt>>> {
+        let _state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.changes.subscribe()
+    }
     pub fn outstanding(&self) -> Vec<InputReceipt> {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .snapshot
-            .entries
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry.status,
-                    InputStatus::Pending | InputStatus::Applying | InputStatus::Unapplied
-                )
-            })
-            .cloned()
-            .collect()
+        self.changes.borrow().as_ref().clone()
     }
     pub fn active_turn(&self) -> Option<String> {
         self.state
@@ -374,6 +372,20 @@ impl InputInbox {
         Ok(())
     }
 }
+fn outstanding_entries(snapshot: &Snapshot) -> Vec<InputReceipt> {
+    snapshot
+        .entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.status,
+                InputStatus::Pending | InputStatus::Applying | InputStatus::Unapplied
+            )
+        })
+        .cloned()
+        .collect()
+}
+
 fn validate(input: &HumanInput) -> Result<()> {
     if input.request_id.is_empty()
         || input.request_id.len() > 128
@@ -428,6 +440,25 @@ mod tests {
             attachment_ids: vec![],
         }
     }
+    #[tokio::test]
+    async fn subscription_tracks_only_durable_publications() {
+        let dir = TestDir::new();
+        let path = dir.path().join("inputs.json");
+        let inbox = InputInbox::load(path.clone(), PersistenceFault::default()).unwrap();
+        let mut changes = inbox.subscribe();
+        assert!(changes.borrow_and_update().is_empty());
+        let receipt = inbox.accept(input("first", None), Some("turn")).unwrap();
+        assert!(changes.has_changed().unwrap());
+        assert_eq!(changes.borrow_and_update()[0].revision, receipt.revision);
+        let late = inbox.subscribe();
+        assert_eq!(late.borrow()[0].input_id, "first");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(inbox.update("first", receipt.revision, None).is_err());
+        assert!(!changes.has_changed().unwrap());
+        assert_eq!(changes.borrow()[0].status, InputStatus::Pending);
+    }
+
     #[tokio::test]
     async fn delivery_is_ordered_idempotent_and_terminal_admission_is_closed() {
         let dir = TestDir::new();

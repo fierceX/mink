@@ -9,6 +9,9 @@ pub(crate) enum SlashCommand {
     Plan,
     Todos,
     Inputs,
+    Status,
+    Latest,
+    Details,
     Resume(String),
     Withdraw(String),
     SubAgent(String),
@@ -35,6 +38,9 @@ pub(crate) fn parse_slash_command(input: &str) -> Result<Option<SlashCommand>, S
         "/plan" => SlashCommand::Plan,
         "/todos" => SlashCommand::Todos,
         "/inputs" => SlashCommand::Inputs,
+        "/status" => SlashCommand::Status,
+        "/latest" => SlashCommand::Latest,
+        "/details" => SlashCommand::Details,
         _ if input.starts_with("/resume ") && !input[8..].trim().is_empty() => {
             SlashCommand::Resume(input[8..].trim().to_string())
         }

@@ -4,18 +4,26 @@ mod attachments;
 mod clipboard;
 mod command;
 mod display;
+mod editor;
 mod file_picker;
+mod height_index;
 mod inbox;
 #[cfg(test)]
 mod inbox_tests;
 mod input;
 mod markdown;
 mod notify;
+mod panels;
+#[cfg(test)]
+mod perf_tests;
+#[cfg(test)]
+mod regression_tests;
 mod render;
 mod replay;
 mod sanitize;
 mod signal;
 mod state;
+mod stream_boundary;
 mod theme;
 
 pub use display::{TuiDisplay, TuiSubAgentStreamSink};
@@ -34,6 +42,7 @@ use input::handle_event_for_mode;
 use notify::send_task_notification;
 use render::render;
 use replay::load_session;
+#[cfg(test)]
 use signal::drain_signals;
 use state::{TuiState, short_cwd_label};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -49,16 +58,22 @@ pub fn run_tui(
     sandbox: &SandboxConfig,
     runtime: TuiRuntime,
 ) -> anyhow::Result<()> {
-    match mode {
-        TuiMode::Full => run_full_tui(sig_rx, orch_tx, session, initial_model, sandbox, runtime),
-        TuiMode::Inline => {
-            run_inline_tui(sig_rx, orch_tx, session, initial_model, sandbox, runtime)
-        }
-        TuiMode::Off => anyhow::bail!("TUI mode is disabled"),
-    }
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            match mode {
+                TuiMode::Full => {
+                    run_full_tui(sig_rx, orch_tx, session, initial_model, sandbox, runtime).await
+                }
+                TuiMode::Inline => {
+                    run_inline_tui(sig_rx, orch_tx, session, initial_model, sandbox, runtime).await
+                }
+                TuiMode::Off => anyhow::bail!("TUI mode is disabled"),
+            }
+        })
+    })
 }
 
-fn run_full_tui(
+async fn run_full_tui(
     sig_rx: mpsc::Receiver<TuiSignal>,
     orch_tx: tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
     session: &crate::runtime::SessionInfo,
@@ -66,13 +81,6 @@ fn run_full_tui(
     sandbox: &SandboxConfig,
     runtime: TuiRuntime,
 ) -> anyhow::Result<()> {
-    let mut terminal = ratatui::init();
-    crossterm::execute!(
-        std::io::stdout(),
-        crossterm::event::EnableMouseCapture,
-        crossterm::event::EnableBracketedPaste,
-    )?;
-    enable_keyboard_enhancement();
     struct FullRestoreGuard;
     impl Drop for FullRestoreGuard {
         fn drop(&mut self) {
@@ -86,6 +94,13 @@ fn run_full_tui(
         }
     }
     let _guard = FullRestoreGuard;
+    let mut terminal = ratatui::try_init()?;
+    crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::EnableMouseCapture,
+        crossterm::event::EnableBracketedPaste
+    )?;
+    enable_keyboard_enhancement();
     tui_main_loop(
         &mut terminal,
         sig_rx,
@@ -95,9 +110,10 @@ fn run_full_tui(
         initial_model,
         sandbox,
     )
+    .await
 }
 
-fn run_inline_tui(
+async fn run_inline_tui(
     sig_rx: mpsc::Receiver<TuiSignal>,
     orch_tx: tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
     session: &crate::runtime::SessionInfo,
@@ -105,24 +121,6 @@ fn run_inline_tui(
     sandbox: &SandboxConfig,
     runtime: TuiRuntime,
 ) -> anyhow::Result<()> {
-    let inline_height = preferred_inline_height();
-    // ratatui 的 Inline viewport 初始化依赖光标位置查询（DSR `\x1b[6n`）。
-    // 部分终端（dumb terminal、某些 SSH/multiplexer 环境）不响应该查询，
-    // 直接 `init_with_options` 会在 `try_init_with_options` 失败时 panic。
-    // 这里改用可失败的初始化，失败时降级为全屏 TUI，保证交互可用。
-    let (mut terminal, effective_mode) =
-        match ratatui::try_init_with_options(ratatui::TerminalOptions {
-            viewport: ratatui::Viewport::Inline(inline_height),
-        }) {
-            Ok(terminal) => (terminal, TuiMode::Inline),
-            Err(error) => {
-                eprintln!("Inline TUI unavailable ({error}); falling back to fullscreen TUI.");
-                crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture,)?;
-                (ratatui::init(), TuiMode::Full)
-            }
-        };
-    crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste,)?;
-    enable_keyboard_enhancement();
     struct RestoreGuard;
     impl Drop for RestoreGuard {
         fn drop(&mut self) {
@@ -137,6 +135,24 @@ fn run_inline_tui(
         }
     }
     let _guard = RestoreGuard;
+    let inline_height = preferred_inline_height();
+    // ratatui 的 Inline viewport 初始化依赖光标位置查询（DSR `\x1b[6n`）。
+    // 部分终端（dumb terminal、某些 SSH/multiplexer 环境）不响应该查询，
+    // 直接 `init_with_options` 会在 `try_init_with_options` 失败时 panic。
+    // 这里改用可失败的初始化，失败时降级为全屏 TUI，保证交互可用。
+    let (mut terminal, effective_mode) =
+        match ratatui::try_init_with_options(ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Inline(inline_height),
+        }) {
+            Ok(terminal) => (terminal, TuiMode::Inline),
+            Err(error) => {
+                eprintln!("Inline TUI unavailable ({error}); falling back to fullscreen TUI.");
+                crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture,)?;
+                (ratatui::try_init()?, TuiMode::Full)
+            }
+        };
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste,)?;
+    enable_keyboard_enhancement();
     tui_main_loop(
         &mut terminal,
         sig_rx,
@@ -146,9 +162,10 @@ fn run_inline_tui(
         initial_model,
         sandbox,
     )
+    .await
 }
 
-fn tui_main_loop(
+async fn tui_main_loop(
     terminal: &mut ratatui::DefaultTerminal,
     sig_rx: mpsc::Receiver<TuiSignal>,
     runtime: (tokio::sync::mpsc::UnboundedSender<RuntimeCmd>, TuiRuntime),
@@ -161,33 +178,50 @@ fn tui_main_loop(
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let (ui_tx, ui_rx) = mpsc::channel::<state::TuiUiEvent>();
     let mut state = TuiState {
-        lines: load_session(&session.events_path),
+        loading_history: true,
+        session_dir: session
+            .events_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf(),
         cwd_label: short_cwd_label(),
         artifacts_dir: session.artifacts_dir.clone(),
         attachments_dir: attachments_dir(session),
         image_input: load_image_limits(session),
-        ui_tx: Some(ui_tx),
+        ui_tx: Some(ui_tx.clone()),
         model: initial_model.to_string(),
         file_picker_policy: FilePickerPolicy::from_sandbox(cwd, sandbox),
         runtime: Some(runtime),
         ..Default::default()
     };
-    load_persisted_state(session, &mut state);
-    let mut sig_rx = sig_rx;
+    let snapshot = session.clone();
+    std::thread::spawn(move || {
+        let mut history = TuiState {
+            lines: load_session(&snapshot.events_path),
+            ..Default::default()
+        };
+        load_persisted_state(&snapshot, &mut history);
+        let _ = ui_tx.send(state::TuiUiEvent::HistoryLoaded {
+            generation: 0,
+            state: Box::new(history),
+        });
+    });
+    state.refresh_inputs();
+    let mut sig_rx = async_receiver(sig_rx);
+    let mut ui_rx = async_receiver(ui_rx);
+    let mut events = crossterm::event::EventStream::new();
+    use futures::StreamExt;
     let mut saved_inline_terminal = None;
-
+    let mut draw_at = tokio::time::Instant::now();
+    let mut signal_closed = false;
+    let mut pending_signals = std::collections::VecDeque::new();
     loop {
-        state.refresh_inputs();
-        if drain_signals(&mut sig_rx, &mut state, mode) {
-            state.dirty = true;
-        }
-        while let Ok(event) = ui_rx.try_recv() {
-            state.apply_ui_event(event);
-            state.dirty = true;
-        }
         if mode == TuiMode::Inline {
             sync_inline_terminal_mode(terminal, &state, &mut saved_inline_terminal)?;
-            if matches!(state.view, state::View::Main) && commit_ready(terminal, &mut state)? {
+            if !state.loading_history
+                && matches!(state.view, state::View::Main)
+                && commit_ready(terminal, &mut state)?
+            {
                 state.dirty = true;
             }
         }
@@ -197,35 +231,114 @@ fn tui_main_loop(
         if state.quit {
             break;
         }
-
-        if state.dirty {
+        if state.dirty && tokio::time::Instant::now() >= draw_at {
             terminal.draw(|f| render(f, &mut state, mode))?;
-            state.dirty = false;
+            state.dirty = matches!(state.view, state::View::Main)
+                && (state.cache.rebuild_next.is_some() || !state.cache.pending.is_empty());
+            draw_at = tokio::time::Instant::now() + Duration::from_millis(33);
         }
-
-        let poll_timeout = if state.streaming {
-            Duration::from_millis(16)
-        } else {
-            Duration::from_millis(100)
-        };
-        if crossterm::event::poll(poll_timeout).unwrap_or(false) {
-            let mut should_quit = false;
-            while let Ok(ev) = crossterm::event::read() {
-                if handle_event_for_mode(ev, &mut state, &orch_tx, mode) {
-                    should_quit = true;
-                    break;
-                }
-                if !crossterm::event::poll(Duration::ZERO).unwrap_or(false) {
-                    break;
+        tokio::select! {
+            event = events.next() => {
+                match event {
+                    Some(Ok(event)) => {
+                        if handle_event_for_mode(event, &mut state, &orch_tx, mode) { break; }
+                        state.dirty = true;
+                        draw_at = tokio::time::Instant::now();
+                    }
+                    Some(Err(error)) => return Err(error.into()),
+                    None => break,
                 }
             }
-            state.dirty = true;
-            if should_quit {
-                break;
+            first = sig_rx.recv(), if !signal_closed && pending_signals.is_empty() => {
+                if let Some(first) = first {
+                    let start = std::time::Instant::now();
+                    pending_signals.push_back(first);
+                    while pending_signals.len() < 512 && start.elapsed() < Duration::from_millis(4) {
+                        match sig_rx.try_recv() { Ok(signal) => pending_signals.push_back(signal), Err(_) => break }
+                    }
+                } else { signal_closed = true; }
             }
+            _ = tokio::task::yield_now(), if !pending_signals.is_empty() => {
+                let (changed, immediate) = process_signal_batch(&mut pending_signals, &mut state, mode);
+                state.dirty |= changed;
+                if immediate { draw_at = tokio::time::Instant::now(); }
+            }
+            Some(event) = ui_rx.recv() => {
+                state.apply_ui_event(event);
+                state.dirty = true;
+                draw_at = tokio::time::Instant::now();
+            }
+            _ = async {
+                if let Some(subscription) = state.input_subscription.as_mut() { let _ = subscription.changed().await; }
+                else { std::future::pending::<()>().await; }
+            } => {
+                if let Some(subscription) = state.input_subscription.as_mut() {
+                    state.inputs = subscription.borrow_and_update().as_ref().clone();
+                    state.invalidate_detail_resource("panel:Inputs");
+                    state.invalidate_detail_resource("panel:Status");
+                    state.dirty = true;
+                }
+            }
+            _ = tokio::time::sleep_until(draw_at), if state.dirty => {}
+            _ = tokio::task::yield_now(), if mode == TuiMode::Inline && !state.loading_history && matches!(state.view, state::View::Main)
+                && state.lines.get(state.inline.committed).is_some_and(|item| item.sealed)
+                && (state.work_state.is_working() || state.inline.committed + 1 < state.lines.len()) => {}
         }
     }
     Ok(())
+}
+
+/// Check the processing budget between reducer operations, retaining the rest
+/// in order so the next select can service keys, stop, and background results.
+fn process_signal_batch(
+    pending: &mut std::collections::VecDeque<TuiSignal>,
+    state: &mut TuiState,
+    mode: TuiMode,
+) -> (bool, bool) {
+    let began = std::time::Instant::now();
+    let mut count = 0;
+    let mut changed = false;
+    let mut immediate = false;
+    while count < 512 {
+        let Some(mut signal) = pending.pop_front() else {
+            break;
+        };
+        count += 1;
+        while count < 512 {
+            match (&mut signal, pending.front()) {
+                (TuiSignal::Text(text), Some(TuiSignal::Text(next)))
+                | (TuiSignal::Thinking(text), Some(TuiSignal::Thinking(next))) => {
+                    text.push_str(next);
+                    pending.pop_front();
+                    count += 1;
+                }
+                _ => break,
+            }
+        }
+        immediate |= !matches!(
+            signal,
+            TuiSignal::Text(_) | TuiSignal::Thinking(_) | TuiSignal::SubAgentStream { .. }
+        );
+        changed |= signal::apply_signals(vec![signal], state, mode);
+        if began.elapsed() >= Duration::from_millis(4) {
+            break;
+        }
+    }
+    (changed, immediate)
+}
+
+/// Preserve reliable ordering while waking the async loop from Display's sync API.
+/// Bounded forwarding prevents a second unbounded progress queue.
+fn async_receiver<T: Send + 'static>(rx: mpsc::Receiver<T>) -> tokio::sync::mpsc::Receiver<T> {
+    let (tx, receiver) = tokio::sync::mpsc::channel(1024);
+    std::thread::spawn(move || {
+        while let Ok(event) = rx.recv() {
+            if tx.blocking_send(event).is_err() {
+                break;
+            }
+        }
+    });
+    receiver
 }
 
 /// Whether this process pushed the progressive keyboard enhancement flags.
@@ -422,27 +535,69 @@ fn commit_ready<B: ratatui::backend::Backend>(
     use ratatui::text::Text;
     use ratatui::widgets::{Paragraph, Widget};
 
-    let start = state.inline.committed;
-    let end = committable_prefix_end(state);
-    if end == start {
-        return Ok(false);
-    }
-
+    let end = if !state.work_state.is_working() {
+        state.lines.len().saturating_sub(1)
+    } else {
+        state.lines.len()
+    };
     let width = terminal.size()?.width.saturating_sub(2).max(1);
-    for item in &state.lines[start..end] {
-        let lines = render::transcript_item_lines(item, width);
-        for chunk in lines.chunks(4096) {
-            let owned = chunk.to_vec();
-            terminal.insert_before(owned.len() as u16, move |buf| {
-                Paragraph::new(Text::from(owned)).render(buf.area, buf);
-            })?;
+    let mut batch = Vec::new();
+    let mut consumed = Vec::new();
+    let mut index = state.inline.committed;
+    let mut offset = state.inline.row_offset;
+    while index < end && batch.len() < 256 {
+        let item = &mut state.lines[index];
+        if !item.sealed {
+            break;
+        }
+        render::content::prepare_inline_item(item, width, &mut offset);
+        let lines = item.cached_lines.as_deref().unwrap_or(&[]);
+        let count = (256 - batch.len()).min(lines.len().saturating_sub(offset));
+        batch.extend(lines.iter().skip(offset).take(count).cloned());
+        offset += count;
+        if offset >= lines.len() {
+            consumed.push(index);
+            index += 1;
+            offset = 0;
+        } else {
+            break;
         }
     }
-    state.inline.committed = end;
-    state.invalidate_all_cache();
+    if batch.is_empty() && consumed.is_empty() {
+        return Ok(false);
+    }
+    if !batch.is_empty() {
+        terminal.insert_before(batch.len() as u16, move |buf| {
+            Paragraph::new(Text::from(batch)).render(buf.area, buf);
+        })?;
+    }
+    // Advance only after terminal insertion succeeds; never retry partial writes.
+    state.inline.committed = index;
+    state.inline.row_offset = offset;
+    if index < state.lines.len() {
+        state.cache.pending.insert(index);
+    }
+    for index in consumed {
+        let item = &mut state.lines[index];
+        if item.kind != state::TranscriptKind::SubAgent {
+            item.text.clear();
+            item.text.shrink_to_fit();
+        }
+        item.cached_lines = None;
+        item.cached_offsets.clear();
+        item.cached_offsets.shrink_to_fit();
+        item.presentation = None;
+        item.sub_detail = None;
+        state.cache.pending.remove(&index);
+        if index < state.cache.heights.len() {
+            state.cache.heights.set(index, 0);
+        }
+    }
+    // Partial rows remain in the active viewport until the next bounded batch.
     Ok(true)
 }
 
+#[cfg(test)]
 fn sealed_prefix_end(state: &TuiState) -> usize {
     let mut end = state.inline.committed;
     while state.lines.get(end).is_some_and(|item| item.sealed) {
@@ -451,6 +606,7 @@ fn sealed_prefix_end(state: &TuiState) -> usize {
     end
 }
 
+#[cfg(test)]
 fn committable_prefix_end(state: &TuiState) -> usize {
     let end = sealed_prefix_end(state);
     if !state.work_state.is_working() && end == state.lines.len() && end > state.inline.committed {

@@ -19,7 +19,9 @@ required-features = ["sdk-bin"]
 
 [dependencies]
 anyhow.workspace = true
-crossterm = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true, features = ["event-stream"] }
+futures = { workspace = true, optional = true }
+unicode-segmentation = { version = "1.13", optional = true }
 ignore = { workspace = true, optional = true }
 mink = { package = "mink-core", version = "0.6.6", path = "../mink-core", default-features = false }
 ratatui = { workspace = true, optional = true }
@@ -40,7 +42,7 @@ default = ["full-cli"]
 runtime = ["mink/runtime"]
 cli = ["runtime", "repl"]
 repl = ["runtime", "dep:rustyline"]
-tui = ["runtime", "dep:crossterm", "dep:ignore", "dep:ratatui"]
+tui = ["runtime", "dep:crossterm", "dep:ignore", "dep:ratatui", "dep:futures", "dep:unicode-segmentation"]
 python-sandbox = ["mink/python-sandbox"]
 full-cli = ["cli", "tui", "python-sandbox"]
 sdk-bin = ["runtime"]

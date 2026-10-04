@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-10-03
+> 更新日期：2026-10-04
 
 ## 项目概览
 
@@ -164,6 +164,12 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 
 ### Display 与 TUI
 
+- macOS TUI 通知优先使用终端原生单条 OSC；不得用 `osascript display notification` 回退（点击属于脚本编辑器）。外部 `terminal-notifier` 必须携带终端 bundle 的 `-activate`，输出不能污染 TUI。
+
+- TUI 主循环按事件唤醒，空闲不绘制/克隆 Inbox；正文暖缓存输入帧只访问视口，高度索引与消息 ID/revision/宽度缓存保持一致，宽度变化分批布局。详情按资源身份/revision/宽度缓存，滚动只切片，后台结果按 generation 拒绝过期查询。
+- TUI 阅读锚点在追加、封口、折叠和 resize 后保留；只有明确提交或 Ctrl+L/`/latest` 恢复跟随。输入移动/删除按 grapheme，迟到准入回执只能清理对应草稿 revision；撤回/续发已有输入不消耗未发送草稿与图片，文本编辑不消耗新图片；停止等待权威 Final。
+- Inline 每批最多提交 256 行，插入成功才推进消息/行位置；失败立即退出、不重试部分写入。已提交正文/presentation/行缓存释放，子代理详情经公开 Reader 按需读取；resize 不重写 committed 内容。
+- Inbox 只读 watch 的初始快照与订阅同准入锁建立，持久发布成功后通知；watch 可合并状态，不能替代正式历史和权威终态。Reader 历史窗口流式保留完整轮次，子代理读取不得越出父 session。
 - Display 实现必须完整转发 `ToolCallDisplay` / `PresentedToolResultDisplay` 结构化字段，不得丢失 `tool_use_id`、presentation 或 artifact 元数据。
 - REPL/TUI 输出不可信 payload（模型文本/thinking、工具输出/摘要、错误）前必须经共享控制序列清洗（thinking/text 块内跨 chunk 保留解析状态、类型切换与消息边界 reset、每条错误 reset stderr、子代理 thinking/text 两段分别清洗、stdout/stderr 状态独立）；renderer 的颜色/标题码在清洗之后添加。
 - TUI 光标必须落在 UTF-8 char boundary，输入/删除按 char boundary 处理。

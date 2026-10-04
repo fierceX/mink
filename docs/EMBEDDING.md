@@ -1,6 +1,6 @@
 # 嵌入与 SDK 使用
 
-> 更新日期：2026-09-08
+> 更新日期：2026-10-04
 
 本文面向把 Mink 作为**库或 SDK** 集成的开发者：Rust 嵌入式 runtime（`mink::runtime`）
 和 Python SDK（`mink-agent`），以及跨端统一的 Token 用量访问。终端用户的
@@ -25,6 +25,20 @@ mink = { package = "mink-core", version = "0.6.6", default-features = false, fea
 ```
 
 公开入口为 `mink::prelude`、`mink::runtime`、`mink::sdk_protocol` 和 `mink::ui`。
+
+### 只读输入变更与历史窗口
+
+`handle.input_inbox().subscribe()` 返回
+`tokio::sync::watch::Receiver<Arc<Vec<InputReceipt>>>`，初始值与订阅在准入锁内建立。
+先消费 `borrow_and_update()`，再等待 `changed().await`；只在持久发布成功后通知，快照
+包含 pending/applying/unapplied 项。watch 可以合并中间状态，权威正式交接仍由可靠
+`ConversationCommitted` / Final 事件判断；写操作仍走公开准入、revision 编辑/撤回接口。
+
+`SessionReader::conversation_turns(from, limit, tail, before)` 流式扫描 JSONL，只保留所需
+轮次和当前轮次，保持物理 seq、internal、guidance 和完整工具交换；只容忍未换行的损坏
+尾记录，正文损坏返回错误，limit=0 返回空窗口。
+`SessionReader::sub_agent(id)` 提供父 session 内的只读子代理 Reader；ID 必须是单个路径
+分量，canonical 路径必须仍位于父 session 的 subagents 目录，不接受目录穿越。
 
 ### 最小示例
 

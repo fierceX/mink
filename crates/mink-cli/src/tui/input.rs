@@ -4,8 +4,8 @@ use crate::tui::command::{SlashCommand, parse_slash_command};
 use crate::tui::file_picker::FilePickerState;
 use crate::tui::sanitize::normalize_tui_input;
 use crate::tui::state::{
-    ActiveOverlay, ClickAction, PendingImage, TranscriptItem, TranscriptKind, TuiState, TuiUiEvent,
-    View, WorkState, display_user_input, submitted_user_input,
+    ActiveOverlay, ClickAction, PanelKind, PendingImage, TranscriptItem, TranscriptKind, TuiState,
+    TuiUiEvent, View, WorkState, display_user_input, submitted_user_input,
 };
 use crossterm::event::{Event, KeyCode, KeyModifiers, MouseEventKind};
 use std::time::{Duration, Instant};
@@ -24,6 +24,7 @@ fn scroll_by(state: &mut TuiState, delta: isize) {
         state.viewport.scroll
     };
     state.viewport.auto_scroll = false;
+    state.viewport.anchor = None;
     if delta < 0 {
         state.viewport.scroll = base.saturating_sub(delta.unsigned_abs());
     } else {
@@ -49,10 +50,18 @@ fn handle_key(
         return handle_ctrl_c(state, orch_tx);
     }
 
+    if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('l') {
+        state.viewport.auto_scroll = true;
+        state.viewport.anchor = None;
+        return false;
+    }
     if handle_overlay_key(&key, state) {
         return false;
     }
 
+    if handle_panel_key(&key, state, orch_tx) {
+        return false;
+    }
     if !matches!(state.view, View::Main) {
         match (key.modifiers, key.code) {
             (KeyModifiers::NONE, KeyCode::Esc) => {
@@ -61,13 +70,13 @@ fn handle_key(
             }
             (KeyModifiers::NONE, KeyCode::PageUp) => {
                 if let Some(scroll) = view_scroll_mut(&mut state.view) {
-                    *scroll = scroll.saturating_sub(10);
+                    *scroll = scroll.saturating_sub(state.detail_height.max(1));
                 }
                 return false;
             }
             (KeyModifiers::NONE, KeyCode::PageDown) => {
                 if let Some(scroll) = view_scroll_mut(&mut state.view) {
-                    *scroll = scroll.saturating_add(10);
+                    *scroll = scroll.saturating_add(state.detail_height.max(1));
                 }
                 return false;
             }
@@ -89,16 +98,9 @@ fn handle_key(
 
     match (key.modifiers, key.code) {
         (KeyModifiers::NONE, KeyCode::Tab) => {
-            state.overlay = Some(ActiveOverlay::FilePicker(FilePickerState::open(
-                &state.input.buf,
-                state.input.cursor,
-                &state.file_picker_policy,
-            )));
+            open_file_picker(state);
         }
-        (KeyModifiers::NONE, KeyCode::Esc) => {
-            state.quit = true;
-            return true;
-        }
+        (KeyModifiers::NONE, KeyCode::Esc) => {}
         (mods, KeyCode::Char(c)) if is_text_modifier(mods) => {
             if !c.is_control() {
                 insert_char(state, c);
@@ -113,11 +115,27 @@ fn handle_key(
                 insert_char(state, '\n');
             }
         }
-        (KeyModifiers::CONTROL, KeyCode::Char('a')) | (KeyModifiers::NONE, KeyCode::Home) => {
+        (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
             state.input.cursor = 0;
         }
-        (KeyModifiers::CONTROL, KeyCode::Char('e')) | (KeyModifiers::NONE, KeyCode::End) => {
+        (KeyModifiers::CONTROL, KeyCode::Char('e')) => {
             state.input.cursor = state.input.buf.len();
+        }
+        (KeyModifiers::NONE, KeyCode::Home) => {
+            state.input.cursor = state.input.buf[..state.input.cursor]
+                .rfind('\n')
+                .map_or(0, |pos| pos + 1);
+        }
+        (KeyModifiers::NONE, KeyCode::End) => {
+            state.input.cursor += state.input.buf[state.input.cursor..]
+                .find('\n')
+                .unwrap_or(state.input.buf.len() - state.input.cursor);
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('z')) => state.input.undo_edit(false),
+        (KeyModifiers::ALT, KeyCode::Char('z')) => state.input.undo_edit(true),
+        (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
+            state.viewport.auto_scroll = true;
+            state.viewport.anchor = None;
         }
         (KeyModifiers::CONTROL, KeyCode::Char('u')) => cursor_delete_before(state),
         (KeyModifiers::CONTROL, KeyCode::Char('k')) => cursor_delete_after(state),
@@ -131,7 +149,11 @@ fn handle_key(
             }
         }
         (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
-            if state.input.buf.is_empty() {
+            if state.input.buf.is_empty()
+                && state.input.pending_images.is_empty()
+                && state.clipboard_started.is_none()
+                && !state.admission_pending
+            {
                 state.quit = true;
                 return true;
             }
@@ -146,6 +168,7 @@ fn handle_key(
         (KeyModifiers::NONE, KeyCode::Left) => cursor_left(state),
         (KeyModifiers::NONE, KeyCode::Right) => cursor_right(state),
         (KeyModifiers::NONE, KeyCode::Enter) => return handle_enter(state, orch_tx),
+        (KeyModifiers::NONE, KeyCode::Delete) => cursor_delete_char_after(state),
         (KeyModifiers::NONE, KeyCode::Backspace) => {
             if state.input.buf.is_empty() {
                 // An empty input turns Backspace into "remove the last queued
@@ -159,10 +182,10 @@ fn handle_key(
             cursor_delete_word(state)
         }
         (KeyModifiers::NONE, KeyCode::PageUp) => {
-            scroll_by(state, -((SCROLL_STEP * 5) as isize));
+            scroll_by(state, -(state.viewport.height.max(1) as isize));
         }
         (KeyModifiers::NONE, KeyCode::PageDown) => {
-            scroll_by(state, (SCROLL_STEP * 5) as isize);
+            scroll_by(state, state.viewport.height.max(1) as isize);
         }
         (KeyModifiers::NONE, KeyCode::Up) => {
             if !state.input.history.is_empty()
@@ -178,6 +201,8 @@ fn handle_key(
                 state.input.buf = state.input.history[idx].clone();
                 state.input.cursor = state.input.buf.len();
                 state.input.history_idx = Some(idx);
+            } else if !state.input.buf.is_empty() {
+                cursor_vertical(state, -1);
             } else {
                 scroll_by(state, -(SCROLL_STEP as isize));
             }
@@ -194,6 +219,8 @@ fn handle_key(
                     state.input.cursor = state.input.buf.len();
                     state.input.history_idx = Some(next);
                 }
+            } else if !state.input.buf.is_empty() {
+                cursor_vertical(state, 1);
             } else {
                 scroll_by(state, SCROLL_STEP as isize);
             }
@@ -204,12 +231,134 @@ fn handle_key(
     false
 }
 
+fn handle_panel_key(
+    key: &crossterm::event::KeyEvent,
+    state: &mut TuiState,
+    tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
+) -> bool {
+    let View::Panel {
+        panel, selected, ..
+    } = state.view.clone()
+    else {
+        return false;
+    };
+    if !matches!(panel, PanelKind::Inputs | PanelKind::Details) {
+        return false;
+    }
+    let actions = if panel == PanelKind::Details {
+        super::panels::detail_actions(state)
+    } else {
+        Vec::new()
+    };
+    let count = if panel == PanelKind::Inputs {
+        state.inputs.len() + state.failed_drafts.len()
+    } else {
+        actions.len()
+    };
+    if key.modifiers != KeyModifiers::NONE {
+        return false;
+    }
+    match key.code {
+        KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End => {
+            let next = match key.code {
+                KeyCode::Up => selected.saturating_sub(1),
+                KeyCode::Down => (selected + 1).min(count.saturating_sub(1)),
+                KeyCode::Home => 0,
+                _ => count.saturating_sub(1),
+            };
+            if let View::Panel {
+                selected, scroll, ..
+            } = &mut state.view
+            {
+                *selected = next;
+                *scroll = next;
+            }
+            true
+        }
+        KeyCode::Enter if panel == PanelKind::Details => {
+            if let Some((_, index, action)) = actions.get(selected) {
+                state.view = View::Main;
+                activate_action(state, *index, action.clone());
+            }
+            true
+        }
+        KeyCode::Char('r') | KeyCode::Char('e') | KeyCode::Char('w')
+            if panel == PanelKind::Inputs =>
+        {
+            if state.admission_pending {
+                return true;
+            }
+            if let Some(receipt) = state.inputs.get(selected).cloned() {
+                if !matches!(
+                    receipt.status,
+                    crate::runtime::InputStatus::Pending | crate::runtime::InputStatus::Unapplied
+                ) {
+                    state.input_notice = Some(
+                        "Input is already applying; wait for its authoritative result.".into(),
+                    );
+                    return true;
+                }
+                if key.code == KeyCode::Char('e') {
+                    state.edit_input = Some((receipt.input_id, receipt.revision));
+                    state.input.buf = receipt.input.text;
+                    state.input.cursor = state.input.buf.len();
+                    state.input.revision = state.input.revision.wrapping_add(1);
+                    state.input.undo.clear();
+                    state.input.redo.clear();
+                    state.view = View::Main;
+                } else {
+                    let command = if key.code == KeyCode::Char('r') {
+                        SlashCommand::Resume(receipt.input_id)
+                    } else {
+                        SlashCommand::Withdraw(receipt.input_id)
+                    };
+                    if let Err(error) = state.inbox_command(&command, tx) {
+                        state.input_rejected(error.to_string());
+                    }
+                }
+            } else if key.code == KeyCode::Char('r') && selected >= state.inputs.len() {
+                let index = selected - state.inputs.len();
+                if index < state.failed_drafts.len() {
+                    let draft = state.failed_drafts.remove(index);
+                    state.input.buf = draft.buf;
+                    state.input.cursor = draft.cursor;
+                    state.input.pending_images = draft.pending_images;
+                    state.input.undo.clear();
+                    state.input.redo.clear();
+                    state.input.revision = state.input.revision.wrapping_add(1);
+                    state.view = View::Main;
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn activate_action(state: &mut TuiState, index: usize, action: ClickAction) {
+    match action {
+        ClickAction::ToggleCollapse => {
+            if index >= state.inline.committed
+                && let Some(item) = state.lines.get_mut(index)
+            {
+                item.toggle_collapsed();
+                state.invalidate_item(index);
+            }
+        }
+        ClickAction::OpenPlan => state.view = View::Plan { scroll: 0 },
+        ClickAction::OpenTodos => state.view = View::Todos { scroll: 0 },
+        ClickAction::OpenArtifact { id } => state.open_artifact(&id),
+        ClickAction::OpenSubAgent { session_id } => state.open_sub_agent(&session_id),
+    }
+}
+
 fn view_scroll_mut(view: &mut View) -> Option<&mut usize> {
     match view {
         View::SubAgentDetail { scroll, .. }
         | View::Plan { scroll }
         | View::Todos { scroll }
-        | View::Artifact { scroll } => Some(scroll),
+        | View::Artifact { scroll }
+        | View::Panel { scroll, .. } => Some(scroll),
         View::Main => None,
     }
 }
@@ -267,17 +416,63 @@ fn accept_file_picker(state: &mut TuiState, keep_open_for_dirs: bool) {
         state.input.buf.replace_range(start..end, &path);
         state.input.cursor = start + path.len();
         if keep_open_for_dirs && path.ends_with('/') {
-            state.overlay = Some(ActiveOverlay::FilePicker(FilePickerState::open(
-                &state.input.buf,
-                state.input.cursor,
-                &state.file_picker_policy,
-            )));
+            open_file_picker(state);
         }
     }
 }
 
+fn open_file_picker(state: &mut TuiState) {
+    if state.ui_tx.is_none() {
+        state.overlay = Some(ActiveOverlay::FilePicker(FilePickerState::open(
+            &state.input.buf,
+            state.input.cursor,
+            &state.file_picker_policy,
+        )));
+        return;
+    }
+    state.overlay = Some(ActiveOverlay::FilePicker(FilePickerState::default()));
+    request_file_picker(state, true);
+}
+fn request_file_picker(state: &mut TuiState, initial: bool) {
+    let Some(tx) = state.ui_tx.clone() else {
+        return;
+    };
+    let Some(ActiveOverlay::FilePicker(picker)) = state.overlay.as_mut() else {
+        return;
+    };
+    let (start, end, query) =
+        super::file_picker::path_query_at_cursor(&state.input.buf, state.input.cursor);
+    if !initial
+        && picker.query == query
+        && picker.replace_start == start
+        && picker.replace_end == end
+    {
+        return;
+    }
+    picker.query = query;
+    picker.replace_start = start;
+    picker.replace_end = end;
+    // Stale candidates may not be accepted while a new query is being scanned.
+    picker.items.clear();
+    state.picker_generation = state.picker_generation.wrapping_add(1);
+    let generation = state.picker_generation;
+    let input = state.input.buf.clone();
+    let cursor = state.input.cursor;
+    let policy = state.file_picker_policy.clone();
+    let worker = state
+        .picker_worker
+        .get_or_insert_with(|| super::file_picker::start_worker(tx));
+    let _ = worker.send(super::file_picker::PickerRequest {
+        generation,
+        input,
+        cursor,
+        policy,
+    });
+}
 fn refresh_file_picker(state: &mut TuiState) {
-    if let Some(ActiveOverlay::FilePicker(picker)) = state.overlay.as_mut() {
+    if state.ui_tx.is_some() {
+        request_file_picker(state, false);
+    } else if let Some(ActiveOverlay::FilePicker(picker)) = state.overlay.as_mut() {
         picker.refresh_with_policy(
             &state.input.buf,
             state.input.cursor,
@@ -303,9 +498,10 @@ pub(crate) fn handle_ctrl_c(
         return true;
     }
 
-    if state.active_turn_id.is_some() || state.work_state.is_working() {
+    if state.active_turn_id.is_some() || state.work_state.is_working() || state.admission_pending {
         let _ = orch_tx.send(RuntimeCmd::Interrupt);
-        state.stopping = state.active_turn_id.is_some();
+        state.stopping = state.active_turn_id.is_some() || state.admission_pending;
+        state.admission_cancelled |= state.admission_pending;
         state.last_interrupt = Some(now);
         return false;
     }
@@ -384,23 +580,23 @@ fn request_clipboard_image(state: &mut TuiState) {
 }
 
 fn cursor_left(state: &mut TuiState) {
-    if state.input.cursor > 0 {
-        let mut pos = state.input.cursor - 1;
-        while pos > 0 && !state.input.buf.is_char_boundary(pos) {
-            pos -= 1;
-        }
-        state.input.cursor = pos;
-    }
+    state.input.cursor = prev_char_boundary(&state.input.buf, state.input.cursor);
 }
-
 fn cursor_right(state: &mut TuiState) {
-    if state.input.cursor < state.input.buf.len() {
-        let mut pos = state.input.cursor + 1;
-        while pos < state.input.buf.len() && !state.input.buf.is_char_boundary(pos) {
-            pos += 1;
-        }
-        state.input.cursor = pos;
-    }
+    state.input.cursor = next_char_boundary(&state.input.buf, state.input.cursor);
+}
+fn cursor_vertical(state: &mut TuiState, delta: isize) {
+    let layout = state.input.layout(if state.cache.width == 0 {
+        78
+    } else {
+        state.cache.width as usize
+    });
+    let col = state
+        .input
+        .preferred_column
+        .unwrap_or_else(|| layout.cursor(state.input.cursor).col);
+    state.input.preferred_column = Some(col);
+    state.input.cursor = layout.vertical(state.input.cursor, delta, col);
 }
 
 fn cursor_word_left(state: &mut TuiState) {
@@ -438,7 +634,7 @@ fn cursor_word_right(state: &mut TuiState) {
         if ch.is_whitespace() {
             break;
         }
-        pos += ch.len_utf8();
+        pos = next_char_boundary(&state.input.buf, pos);
     }
     while pos < state.input.buf.len() {
         let Some(ch) = char_at(&state.input.buf, pos) else {
@@ -447,21 +643,19 @@ fn cursor_word_right(state: &mut TuiState) {
         if !ch.is_whitespace() {
             break;
         }
-        pos += ch.len_utf8();
+        pos = next_char_boundary(&state.input.buf, pos);
     }
     state.input.cursor = pos;
 }
 
 fn cursor_backspace(state: &mut TuiState) {
     state.input.clamp_cursor();
-    if state.input.cursor > 0 {
-        let mut pos = state.input.cursor - 1;
-        while pos > 0 && !state.input.buf.is_char_boundary(pos) {
-            pos -= 1;
-        }
-        state.input.buf.remove(pos);
-        state.input.cursor = pos;
-    }
+    let previous = prev_char_boundary(&state.input.buf, state.input.cursor);
+    state
+        .input
+        .buf
+        .replace_range(previous..state.input.cursor, "");
+    state.input.cursor = previous;
 }
 
 fn cursor_delete_before(state: &mut TuiState) {
@@ -519,19 +713,10 @@ fn char_at(s: &str, pos: usize) -> Option<char> {
 }
 
 fn prev_char_boundary(s: &str, pos: usize) -> usize {
-    let mut prev = pos.saturating_sub(1);
-    while prev > 0 && !s.is_char_boundary(prev) {
-        prev -= 1;
-    }
-    prev
+    super::editor::previous(s, pos)
 }
-
 fn next_char_boundary(s: &str, pos: usize) -> usize {
-    let mut next = (pos + 1).min(s.len());
-    while next < s.len() && !s.is_char_boundary(next) {
-        next += 1;
-    }
-    next
+    super::editor::next(s, pos)
 }
 
 fn handle_enter(
@@ -539,7 +724,55 @@ fn handle_enter(
     orch_tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
 ) -> bool {
     state.input.clamp_cursor();
+    if state.edit_input.is_some() {
+        if let Err(error) = state.submit_human_input(orch_tx) {
+            state.input_rejected(error.to_string());
+        }
+        return false;
+    }
     let parsed = parse_slash_command(&state.input.buf);
+    if let Ok(Some(
+        command @ (SlashCommand::Help
+        | SlashCommand::Status
+        | SlashCommand::Inputs
+        | SlashCommand::Details
+        | SlashCommand::Latest),
+    )) = &parsed
+    {
+        match command {
+            SlashCommand::Help => state.add_help(),
+            SlashCommand::Status => {
+                state.view = View::Panel {
+                    panel: PanelKind::Status,
+                    scroll: 0,
+                    selected: 0,
+                }
+            }
+            SlashCommand::Inputs => {
+                state.refresh_inputs();
+                state.view = View::Panel {
+                    panel: PanelKind::Inputs,
+                    scroll: 0,
+                    selected: 0,
+                };
+            }
+            SlashCommand::Details => {
+                state.view = View::Panel {
+                    panel: PanelKind::Details,
+                    scroll: 0,
+                    selected: 0,
+                }
+            }
+            SlashCommand::Latest => {
+                state.viewport.auto_scroll = true;
+                state.viewport.anchor = None;
+            }
+            _ => unreachable!(),
+        }
+        state.input.buf.clear();
+        state.input.cursor = 0;
+        return false;
+    }
     if state.runtime.is_some() {
         if matches!(parsed, Ok(None)) {
             if let Err(error) = state.submit_human_input(orch_tx) {
@@ -627,18 +860,18 @@ fn handle_enter(
                 SlashCommand::Skills => state.show_skills(),
                 SlashCommand::Plan => state.view = View::Plan { scroll: 0 },
                 SlashCommand::Todos => state.view = View::Todos { scroll: 0 },
-                SlashCommand::Inputs | SlashCommand::Resume(_) | SlashCommand::Withdraw(_) => {
+                SlashCommand::Status
+                | SlashCommand::Latest
+                | SlashCommand::Details
+                | SlashCommand::Inputs
+                | SlashCommand::Resume(_)
+                | SlashCommand::Withdraw(_) => {
                     state.push_line(TranscriptItem::new(
                         "TUI runtime unavailable.".into(),
                         TranscriptKind::Error,
                     ));
                 }
-                SlashCommand::SubAgent(session_id) => {
-                    state.view = View::SubAgentDetail {
-                        session_id,
-                        scroll: 0,
-                    }
-                }
+                SlashCommand::SubAgent(session_id) => state.open_sub_agent(&session_id),
                 SlashCommand::Artifact(id) => state.open_artifact(&id),
                 SlashCommand::Quit => {
                     state.quit = true;
@@ -692,8 +925,18 @@ pub(crate) fn handle_event_for_mode(
     orch_tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
     mode: TuiMode,
 ) -> bool {
+    let is_undo = matches!(&ev, Event::Key(key) if key.code == KeyCode::Char('z') && (key.modifiers == KeyModifiers::CONTROL || key.modifiers == KeyModifiers::ALT));
+    let edit = matches!(&ev, Event::Paste(_))
+        || matches!(&ev, Event::Key(key) if matches!(key.code, KeyCode::Backspace | KeyCode::Delete | KeyCode::Char(_)) || key.code == KeyCode::Enter && (key.modifiers != KeyModifiers::NONE || state.overlay.is_some()));
+    if !matches!(&ev, Event::Key(key) if matches!(key.code, KeyCode::Up | KeyCode::Down)) {
+        state.input.preferred_column = None;
+    }
+    let old_cursor = state.input.cursor;
+    let old_text = state.input.buf.clone();
+    let old_images = state.input.pending_images.clone();
+    let mut quit = false;
     match ev {
-        Event::Key(key) => return handle_key(key, state, orch_tx),
+        Event::Key(key) => quit = handle_key(key, state, orch_tx),
         Event::Mouse(mouse) => {
             if let Some(scroll) = view_scroll_mut(&mut state.view) {
                 match mouse.kind {
@@ -705,7 +948,16 @@ pub(crate) fn handle_event_for_mode(
                 match mouse.kind {
                     MouseEventKind::ScrollUp => scroll_by(state, -(SCROLL_STEP as isize)),
                     MouseEventKind::ScrollDown => scroll_by(state, SCROLL_STEP as isize),
-                    MouseEventKind::Down(_) => handle_full_click(state, mouse.row),
+                    MouseEventKind::Down(crossterm::event::MouseButton::Left)
+                        if mouse.column >= state.viewport.content_x
+                            && mouse.column
+                                < state
+                                    .viewport
+                                    .content_x
+                                    .saturating_add(state.viewport.width) =>
+                    {
+                        handle_full_click(state, mouse.row)
+                    }
                     _ => {}
                 }
             }
@@ -722,7 +974,23 @@ pub(crate) fn handle_event_for_mode(
         }
         _ => {}
     }
-    false
+    if old_text != state.input.buf || old_images != state.input.pending_images {
+        state.input.revision = state.input.revision.wrapping_add(1);
+        if edit {
+            state.input.history_idx = None;
+        }
+        if edit && !is_undo && old_text != state.input.buf {
+            state.input.undo.push(super::editor::DraftEdit {
+                text: old_text,
+                cursor: old_cursor,
+            });
+            if state.input.undo.len() > 100 {
+                state.input.undo.remove(0);
+            }
+            state.input.redo.clear();
+        }
+    }
+    quit
 }
 
 fn handle_full_click(state: &mut TuiState, mouse_row: u16) {
@@ -740,17 +1008,14 @@ fn handle_full_click(state: &mut TuiState, mouse_row: u16) {
         Some((idx, ClickAction::ToggleCollapse)) => {
             if let Some(item) = state.lines.get_mut(idx) {
                 item.toggle_collapsed();
-                state.invalidate_all_cache();
+                state.invalidate_item(idx);
             }
         }
         Some((_, ClickAction::OpenPlan)) => state.view = View::Plan { scroll: 0 },
         Some((_, ClickAction::OpenTodos)) => state.view = View::Todos { scroll: 0 },
         Some((_, ClickAction::OpenArtifact { id })) => state.open_artifact(&id),
         Some((_, ClickAction::OpenSubAgent { session_id })) => {
-            state.view = View::SubAgentDetail {
-                session_id,
-                scroll: 0,
-            };
+            state.open_sub_agent(&session_id);
         }
         None => {}
     }

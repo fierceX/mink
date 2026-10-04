@@ -1,4 +1,3 @@
-#[cfg(test)]
 use crate::tui::markdown::truncate_visual;
 use crate::tui::state::TuiState;
 use crate::tui::theme;
@@ -55,21 +54,31 @@ fn visible_status_items(state: &TuiState, width: u16) -> Vec<StatusItem> {
         else {
             break;
         };
-        if items[idx].priority == 0 {
+        if items[idx].priority <= 1 {
             break;
         }
         items.remove(idx);
     }
+    if status_width(&items) > width as usize
+        && let Some(model) = items.iter_mut().find(|item| item.priority == 1)
+    {
+        let work_width = state.work_state.label().len() + 3;
+        model.text = truncate_visual(&model.text, (width as usize).saturating_sub(work_width + 1));
+    }
+    items.retain(|item| !item.text.is_empty());
     items
 }
 
 fn build_status_items(state: &TuiState) -> Vec<StatusItem> {
     let s = &state.stats;
-    let ti = s.total_input_tokens + s.total_cache_read_tokens;
+    let ti = s
+        .total_input_tokens
+        .saturating_add(s.total_cache_read_tokens)
+        .saturating_add(s.total_cache_creation_tokens);
     let mut items = vec![StatusItem {
-        text: state.model.clone(),
+        text: super::super::sanitize::sanitize_tui_text(&state.model),
         style: theme::primary_bold(),
-        priority: 0,
+        priority: 1,
     }];
     if !state.cwd_label.is_empty() {
         items.push(StatusItem {
@@ -142,7 +151,7 @@ fn build_status_items(state: &TuiState) -> Vec<StatusItem> {
     items.push(StatusItem {
         text: format!("[{}]", state.work_state.label()),
         style: theme::work_state(state.work_state),
-        priority: 1,
+        priority: 0,
     });
     items
 }

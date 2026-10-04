@@ -4,6 +4,7 @@ use crate::tui::sanitize::sanitize_tui_text;
 use crate::tui::state::{SubAgentDetail, TranscriptItem, TranscriptKind, TuiState, WorkState};
 use crate::ui::{ArtifactDisplay, ToolPresentation, ToolResultKind};
 use crate::ui::{StatsSnapshot, SubAgentStreamKind};
+#[cfg(test)]
 use std::sync::mpsc;
 
 #[derive(Debug, Clone, Default)]
@@ -27,7 +28,7 @@ pub enum TuiSignal {
         tool_use_id: Option<String>,
         tool_name: String,
         content: String,
-        success: bool,
+        status: Option<crate::runtime::ToolStatus>,
         exit_code: Option<i32>,
         result_kind: ToolResultKind,
         presentation: Option<ToolPresentation>,
@@ -63,6 +64,13 @@ pub enum TuiSignal {
 
 impl TuiState {
     pub(crate) fn apply(&mut self, sig: &TuiSignal) {
+        self.invalidate_detail_resource("panel:Status");
+        if let TuiSignal::SubAgentStatus { session_id, .. }
+        | TuiSignal::SubAgentStream { session_id, .. }
+        | TuiSignal::SubAgentOutput { session_id, .. } = sig
+        {
+            self.invalidate_detail_resource(&format!("sub:{session_id}"));
+        }
         match sig {
             TuiSignal::GuidanceApplied { input_id, text } => {
                 if self.applied_inputs.insert(input_id.clone()) {
@@ -156,11 +164,14 @@ impl TuiState {
             } => {
                 self.finalize_stream();
                 self.work_state = WorkState::RunningTool;
-                self.push_line(TranscriptItem::new_tool_call(
+                let index = self.push_line(TranscriptItem::new_tool_call(
                     tool_use_id.clone(),
                     tool_name.clone(),
                     summary.clone(),
                 ));
+                if let Some(id) = tool_use_id {
+                    self.active_tools.insert(id.clone(), index);
+                }
             }
             TuiSignal::Info(n) => {
                 // 等待心跳（LLM 流式等待/首事件等待）：只在状态栏瞬时展示（如 `·30s`），
@@ -181,7 +192,7 @@ impl TuiState {
                 tool_use_id,
                 tool_name,
                 content,
-                success,
+                status,
                 exit_code,
                 result_kind,
                 presentation,
@@ -189,16 +200,13 @@ impl TuiState {
             } => {
                 self.finalize_stream();
                 self.work_state = WorkState::WaitingModel;
-                let existing = tool_use_id.as_ref().and_then(|id| {
-                    self.lines
-                        .get(self.inline.committed..)
-                        .and_then(|items| {
-                            items.iter().rposition(|item| {
-                                !item.sealed && item.tool_use_id.as_ref() == Some(id)
-                            })
-                        })
-                        .map(|idx| self.inline.committed + idx)
-                });
+                let existing = tool_use_id
+                    .as_ref()
+                    .and_then(|id| self.active_tools.remove(id))
+                    .filter(|index| {
+                        *index >= self.inline.committed
+                            && self.lines.get(*index).is_some_and(|item| !item.sealed)
+                    });
                 let idx = if let Some(idx) = existing {
                     idx
                 } else {
@@ -211,7 +219,7 @@ impl TuiState {
                     item.text = content.clone();
                     item.tool_name = Some(tool_name.clone());
                     item.tool_use_id.clone_from(tool_use_id);
-                    item.tool_success = Some(*success);
+                    item.tool_status = *status;
                     item.tool_exit_code = *exit_code;
                     item.tool_result_kind = Some(*result_kind);
                     item.presentation.clone_from(presentation);
@@ -219,12 +227,17 @@ impl TuiState {
                     item.sealed = true;
                     item.invalidate_cache();
                 }
+                self.unsealed.remove(&idx);
                 match presentation {
-                    Some(ToolPresentation::Plan(plan)) => self.plan = Some(plan.clone()),
+                    Some(ToolPresentation::Plan(plan)) => {
+                        self.invalidate_detail_resource("plan");
+                        self.invalidate_detail_resource("panel:Status");
+                        self.plan = Some(plan.clone());
+                    }
                     Some(ToolPresentation::Todo(todos)) => self.apply_todo_presentation(todos),
                     None => {}
                 }
-                self.invalidate_all_cache();
+                self.invalidate_item(idx);
             }
             TuiSignal::Error(m) => {
                 self.finalize_stream();
@@ -239,6 +252,7 @@ impl TuiState {
                 }
             }
             TuiSignal::TitleUpdate(m, s) => {
+                self.invalidate_detail_resource("panel:Status");
                 self.model = m.clone();
                 self.stats = s.clone();
             }
@@ -279,11 +293,16 @@ impl TuiState {
                 {
                     line.text = title;
                     line.sealed = !running;
+                    if running {
+                        self.unsealed.insert(idx);
+                    } else {
+                        self.unsealed.remove(&idx);
+                    }
                     if running && line.sub_detail.is_none() {
                         line.sub_detail = sub_detail;
                     }
                     line.invalidate_cache();
-                    self.invalidate_all_cache();
+                    self.invalidate_item(idx);
                 } else {
                     let mut item = TranscriptItem::new(title, TranscriptKind::SubAgent)
                         .with_sub_detail(sub_detail);
@@ -337,6 +356,7 @@ impl TuiState {
                 {
                     line.text = title.clone();
                     line.sealed = true;
+                    self.unsealed.remove(&idx);
                     if let Some(ref mut detail) = line.sub_detail {
                         detail.thinking = thinking.clone();
                         detail.text = text.clone();
@@ -344,8 +364,8 @@ impl TuiState {
                     line.invalidate_cache();
                     found = true;
                 }
-                if found {
-                    self.invalidate_all_cache();
+                if found && let Some(&idx) = self.sub_agents.line_by_session.get(session_id) {
+                    self.invalidate_item(idx);
                 }
                 if !found {
                     let mut item = TranscriptItem::new(title, TranscriptKind::SubAgent)
@@ -365,6 +385,7 @@ impl TuiState {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn drain_signals(
     rx: &mut mpsc::Receiver<TuiSignal>,
     state: &mut TuiState,
@@ -386,6 +407,18 @@ pub(crate) fn drain_signals(
         }
     }
 
+    apply_signals(pending, state, mode)
+}
+
+pub(crate) fn apply_signals(signals: Vec<TuiSignal>, state: &mut TuiState, _mode: TuiMode) -> bool {
+    let mut pending = Vec::new();
+    for sig in signals {
+        match (pending.last_mut(), sig) {
+            (Some(TuiSignal::Thinking(existing)), TuiSignal::Thinking(next))
+            | (Some(TuiSignal::Text(existing)), TuiSignal::Text(next)) => existing.push_str(&next),
+            (_, sig) => pending.push(sig),
+        }
+    }
     let mut visible_change = false;
     for sig in pending {
         let visible = match &sig {
@@ -399,9 +432,7 @@ pub(crate) fn drain_signals(
             _ => true,
         };
         state.apply(&sig);
-        if mode == TuiMode::Inline {
-            state.promote_stable_stream_prefix();
-        }
+        state.promote_stable_stream_prefix();
         visible_change |= visible;
     }
     visible_change

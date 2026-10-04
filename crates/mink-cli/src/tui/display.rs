@@ -47,7 +47,7 @@ impl Display for TuiDisplay {
             tool_use_id: result.base.tool_use_id.map(str::to_owned),
             tool_name: result.base.tool_name.into(),
             content: result.base.content.into(),
-            success: result.status.is_success(),
+            status: Some(result.status),
             exit_code: result.base.exit_code,
             result_kind: result.result_kind,
             presentation: result.presentation.cloned(),

@@ -160,54 +160,72 @@ impl SessionReader {
         tail: bool,
         before: Option<u64>,
     ) -> Result<Vec<serde_json::Value>> {
-        let rows = self.conversation()?;
-        let mut starts: Vec<usize> = rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| {
-                row["role"] == "user"
+        use std::collections::VecDeque;
+        use std::io::BufRead;
+        let file = std::fs::File::open(self.directory.join("conversation.jsonl"))?;
+        let mut reader = std::io::BufReader::new(file);
+        let mut turns = VecDeque::new();
+        let mut current: Vec<serde_json::Value> = Vec::new();
+        let mut line = String::new();
+        let mut seq = 0u64;
+        let keep_tail = tail || before.is_some();
+        let retain = |turn: Vec<serde_json::Value>,
+                      turns: &mut VecDeque<Vec<serde_json::Value>>| {
+            let Some(start) = turn.first().and_then(|row| row["seq"].as_u64()) else {
+                return;
+            };
+            if limit == 0 || start < from || before.is_some_and(|boundary| start >= boundary) {
+                return;
+            }
+            if keep_tail || turns.len() < limit {
+                turns.push_back(turn);
+                if turns.len() > limit {
+                    turns.pop_front();
+                }
+            }
+        };
+        while reader.read_line(&mut line)? != 0 {
+            seq += 1;
+            if !line.trim().is_empty() {
+                let mut row: serde_json::Value = match serde_json::from_str(&line) {
+                    Ok(row) => row,
+                    Err(_) if !line.ends_with('\n') => break,
+                    Err(error) => return Err(error.into()),
+                };
+                let starts_turn = row["role"] == "user"
                     && row["content"].is_string()
                     && row["internal"] != true
-                    && row.pointer("/_mink/guidance") != Some(&serde_json::Value::Bool(true))
-            })
-            .map(|(index, _)| index)
-            .collect();
-        if starts.first() != Some(&0) && !rows.is_empty() {
-            starts.insert(0, 0);
+                    && row.pointer("/_mink/guidance") != Some(&serde_json::Value::Bool(true));
+                if starts_turn && !current.is_empty() {
+                    retain(std::mem::take(&mut current), &mut turns);
+                }
+                row["seq"] = seq.into();
+                current.push(row);
+            }
+            line.clear();
         }
-        let eligible: Vec<usize> = starts
-            .iter()
-            .copied()
-            .filter(|index| {
-                let seq = rows[*index]["seq"].as_u64().unwrap_or_default();
-                seq >= from && before.is_none_or(|boundary| seq < boundary)
-            })
-            .collect();
-        if eligible.is_empty() {
-            return Ok(vec![]);
-        }
-        let chosen: Vec<usize> = if tail || before.is_some() {
-            eligible
-                .iter()
-                .rev()
-                .take(limit)
-                .copied()
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect()
-        } else {
-            eligible.into_iter().take(limit).collect()
-        };
-        let begin = chosen[0];
-        let last = *chosen.last().unwrap();
-        let end = starts
-            .iter()
-            .find(|index| **index > last)
-            .copied()
-            .unwrap_or(rows.len());
-        Ok(rows[begin..end].to_vec())
+        retain(current, &mut turns);
+        Ok(turns.into_iter().flatten().collect())
     }
+
+    /// Read a child session within this parent's isolated subagent collection.
+    pub fn sub_agent(&self, id: &str) -> Result<SessionReader> {
+        let mut components = Path::new(id).components();
+        anyhow::ensure!(
+            matches!(components.next(), Some(std::path::Component::Normal(_)))
+                && components.next().is_none(),
+            "invalid sub-agent session ID"
+        );
+        let root = self.directory.join("subagents").canonicalize()?;
+        anyhow::ensure!(
+            root.starts_with(self.directory.canonicalize()?),
+            "sub-agent collection escapes session"
+        );
+        let child = root.join(id).canonicalize()?;
+        anyhow::ensure!(child.starts_with(&root), "sub-agent path escapes session");
+        Ok(SessionReader::new(child))
+    }
+
     pub fn inputs(&self) -> Result<Vec<crate::runtime::InputReceipt>> {
         crate::session::input::InputInbox::load(
             self.directory.join("inputs.json"),
@@ -286,4 +304,54 @@ pub async fn resolve_record(
 
 pub async fn ensure_metadata(paths: &SessionPaths, cwd: &Path, seed: SessionSeed) -> Result<()> {
     crate::session::metadata::ensure_metadata(paths, cwd, seed).await
+}
+
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+    #[test]
+    fn streamed_turn_windows_keep_guidance_internal_and_tool_exchange() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-reader-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("conversation.jsonl");
+        let data = concat!(
+            "{\"role\":\"user\",\"content\":\"one\"}\n",
+            "{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"x\"}]}\n",
+            "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"x\"}]}\n",
+            "{\"role\":\"user\",\"content\":\"guide\",\"_mink\":{\"guidance\":true}}\n",
+            "{\"role\":\"user\",\"content\":\"internal\",\"internal\":true}\n",
+            "{\"role\":\"user\",\"content\":\"two\"}\n",
+            "{\"role\":\"assistant\",\"content\":\"answer\"}\n",
+            "{partial"
+        );
+        std::fs::write(&path, data).unwrap();
+        let reader = SessionReader::new(&dir);
+        let head = reader.conversation_turns(1, 1, false, None).unwrap();
+        assert_eq!(head.len(), 5);
+        assert_eq!(head[4]["seq"], 5);
+        let tail = reader.conversation_turns(1, 1, true, None).unwrap();
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0]["seq"], 6);
+        assert_eq!(
+            reader.conversation_turns(1, 1, false, Some(6)).unwrap(),
+            head
+        );
+        assert!(
+            reader
+                .conversation_turns(1, 0, true, None)
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::write(&path, "{broken}\n").unwrap();
+        assert!(reader.conversation_turns(1, 1, true, None).is_err());
+        assert!(reader.sub_agent("../escape").is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

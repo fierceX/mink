@@ -28,62 +28,159 @@ impl ContentMode {
 pub(super) fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState, mode: ContentMode) {
     let content_area = padded_content_area(area);
     state.viewport.content_y = content_area.y;
-    let start = match mode {
-        ContentMode::Full => 0,
-        ContentMode::Inline => state.inline.committed,
+    state.viewport.content_x = content_area.x;
+    state.viewport.width = content_area.width;
+    state.viewport.height = content_area.height as usize;
+    let start = if mode == ContentMode::Full {
+        0
+    } else {
+        state.inline.committed
     };
     let interactive = mode.interactive();
     let inner_w = content_area.width.max(1);
-    let width_changed = state.cache.width != inner_w;
-    state.cache.width = inner_w;
-
-    let mut need_rebuild = width_changed || state.cache.history_lines.is_none();
-    for item in state.lines.iter_mut().skip(start) {
-        if width_changed || !item.cache_valid(interactive) {
-            rebuild_message_cache(item, inner_w, interactive);
-            need_rebuild = true;
-        }
-    }
-
-    if need_rebuild {
-        let mut all_lines: Vec<Line<'static>> = Vec::new();
-        for item in state.lines.iter_mut().skip(start) {
-            if item.cached_lines.is_none() {
-                rebuild_message_cache(item, inner_w, interactive);
-            }
-            if let Some(cached) = item.cached_lines.as_ref() {
-                all_lines.extend(cached.clone());
-            }
-        }
-        state.cache.history_lines = Some(all_lines);
-    }
-
+    ensure_history_layout(state, start, inner_w, interactive);
     ensure_stream_cache(state, inner_w);
-    let history_len = state.cache.history_lines.as_ref().map_or(0, Vec::len);
-    let stream_len = state.cache.stream_lines.as_ref().map_or(0, Vec::len);
-    let total_len = history_len + stream_len;
-    let viewport = content_viewport_height(area.height);
-    let max_scroll = total_len.saturating_sub(viewport);
+    let history_len = state.cache.heights.total();
+    let stream_len =
+        state.cache.stream_code_lines.len() + state.cache.stream_lines.as_ref().map_or(0, Vec::len);
+    let viewport = content_area.height as usize;
+    let max_scroll = (history_len + stream_len).saturating_sub(viewport);
     state.viewport.max_scroll = max_scroll;
-
-    let scroll = if state.viewport.auto_scroll {
-        max_scroll
-    } else {
-        state.viewport.scroll.min(max_scroll)
-    };
+    let mut scroll = state.viewport.scroll.min(max_scroll);
+    if state.viewport.auto_scroll {
+        scroll = max_scroll;
+    } else if let Some(anchor) = &state.viewport.anchor
+        && let Some(&index) = state.cache.indices.get(&anchor.id)
+        && let Some(item) = state.lines.get(index).filter(|item| item.id == anchor.id)
+    {
+        let row = item
+            .cached_offsets
+            .partition_point(|offset| *offset <= anchor.offset)
+            .saturating_sub(1);
+        scroll = (state.cache.heights.prefix(index) + row).min(max_scroll);
+    }
+    state.viewport.scroll = scroll;
+    if !state.viewport.auto_scroll
+        && state.cache.rebuild_next.is_none()
+        && state.cache.pending.is_empty()
+    {
+        let index = state.cache.heights.locate(scroll);
+        if let Some(item) = state.lines.get(index) {
+            let row = scroll.saturating_sub(state.cache.heights.prefix(index));
+            state.viewport.anchor =
+                item.cached_offsets
+                    .get(row)
+                    .map(|offset| super::super::state::ReadingAnchor {
+                        id: item.id,
+                        offset: *offset,
+                    });
+        }
+    }
     state.viewport.click_map = if interactive {
         build_visible_click_map(state, start, scroll, viewport)
     } else {
         Vec::new()
     };
-
-    let visible = visible_lines(
-        state.cache.history_lines.as_deref().unwrap_or(&[]),
-        state.cache.stream_lines.as_deref().unwrap_or(&[]),
-        scroll,
-        viewport,
-    );
+    let mut visible = Vec::with_capacity(viewport);
+    let mut index = state.cache.heights.locate(scroll);
+    let mut row = state.cache.heights.prefix(index);
+    while index < state.lines.len() && visible.len() < viewport {
+        if let Some(lines) = &state.lines[index].cached_lines {
+            let partial = if !interactive && index == start {
+                state.inline.row_offset
+            } else {
+                0
+            };
+            visible.extend(
+                lines
+                    .iter()
+                    .skip(partial + scroll.saturating_sub(row))
+                    .take(viewport - visible.len())
+                    .cloned(),
+            );
+            row += lines.len().saturating_sub(partial);
+        }
+        index += 1;
+    }
+    if visible.len() < viewport {
+        visible.extend(
+            state
+                .cache
+                .stream_code_lines
+                .iter()
+                .chain(state.cache.stream_lines.iter().flatten())
+                .skip(scroll.saturating_sub(history_len))
+                .take(viewport - visible.len())
+                .cloned(),
+        );
+    }
     f.render_widget(Paragraph::new(Text::from(visible)), content_area);
+}
+
+pub(crate) fn ensure_history_layout(
+    state: &mut TuiState,
+    start: usize,
+    width: u16,
+    interactive: bool,
+) {
+    if state.cache.width != width || state.cache.interactive != interactive {
+        state.cache.width = width;
+        state.cache.interactive = interactive;
+        state.cache.rebuild_next = Some(start);
+    }
+    while state.cache.heights.len() < state.lines.len() {
+        state.cache.pending.insert(state.cache.heights.len());
+        state.cache.heights.push(0);
+    }
+    // Committed items have no active layout, regardless of the previous viewport.
+    for index in state.cache.start..start {
+        state.cache.heights.set(index, 0);
+    }
+    state.cache.start = start;
+    let began = std::time::Instant::now();
+    let mut count = 0;
+    loop {
+        let next = if let Some(index) = state.cache.rebuild_next {
+            if index >= state.lines.len() {
+                state.cache.rebuild_next = None;
+                continue;
+            }
+            state.cache.rebuild_next = Some(index + 1);
+            Some(index)
+        } else {
+            state.cache.pending.pop_first()
+        };
+        let Some(index) = next else { break };
+        state.cache.pending.remove(&index);
+        if index < start || index >= state.lines.len() {
+            continue;
+        }
+        let item = &mut state.lines[index];
+        if !interactive && index == start && state.inline.row_offset > 0 {
+            prepare_inline_item(item, width, &mut state.inline.row_offset);
+        }
+        state.cache.visited += 1;
+        if item.cached_width != width || !item.cache_valid(interactive) {
+            rebuild_message_cache(item, width, interactive);
+            state.cache.parsed += 1;
+        }
+        state.cache.heights.set(
+            index,
+            item.cached_lines
+                .as_ref()
+                .map_or(0, Vec::len)
+                .saturating_sub(if !interactive && index == start {
+                    state.inline.row_offset
+                } else {
+                    0
+                }),
+        );
+        state.cache.indices.insert(item.id, index);
+        count += 1;
+        if count >= 2048 || began.elapsed() >= std::time::Duration::from_millis(4) {
+            break;
+        }
+    }
 }
 
 fn rebuild_message_cache(item: &mut TranscriptItem, inner_w: u16, interactive: bool) {
@@ -97,15 +194,46 @@ fn rebuild_message_cache(item: &mut TranscriptItem, inner_w: u16, interactive: b
         seg = build_message_segments(item, inner_w, interactive);
         wrapped = wrap_lines_word(&seg, inner_w);
     }
+    let mut offset = 0;
+    item.cached_offsets = wrapped
+        .iter()
+        .map(|line| {
+            let start = offset;
+            offset += line
+                .spans
+                .iter()
+                .map(|span| span.content.len())
+                .sum::<usize>();
+            start
+        })
+        .collect();
+    item.cached_width = inner_w;
     item.cached_lines = Some(wrapped);
     item.cached_collapsed = item.collapsed;
     item.cached_interactive = interactive;
 }
 
+#[cfg(test)]
 pub(crate) fn transcript_item_lines(item: &TranscriptItem, width: u16) -> Vec<Line<'static>> {
-    let mut item = item.clone();
-    rebuild_message_cache(&mut item, width.max(1), false);
-    item.cached_lines.unwrap_or_default()
+    let segments = build_message_segments(item, width.max(1), false);
+    wrap_lines_word(&segments, width.max(1))
+}
+
+pub(crate) fn prepare_inline_item(item: &mut TranscriptItem, width: u16, row_offset: &mut usize) {
+    if *row_offset > 0 && item.cached_width != width {
+        let remaining = item
+            .cached_lines
+            .take()
+            .unwrap_or_default()
+            .into_iter()
+            .skip(*row_offset)
+            .collect::<Vec<_>>();
+        item.cached_lines = Some(wrap_lines_word(&remaining, width.max(1)));
+        item.cached_width = width;
+        *row_offset = 0;
+    } else if item.cached_width != width || !item.cache_valid(false) {
+        rebuild_message_cache(item, width.max(1), false);
+    }
 }
 
 fn build_message_segments(
@@ -171,9 +299,12 @@ fn build_tool_card_segments(
 }
 
 fn tool_header_line(item: &TranscriptItem, interactive: bool) -> Line<'static> {
-    let (status, status_style) = match item.tool_success {
-        Some(true) => ("✓", theme::success()),
-        Some(false) => ("✗", theme::error()),
+    let (status, status_style) = match item.tool_status {
+        Some(crate::runtime::ToolStatus::Succeeded) => ("✓", theme::success()),
+        Some(crate::runtime::ToolStatus::Failed(_)) => ("✗ failed", theme::error()),
+        Some(crate::runtime::ToolStatus::Blocked(_)) => ("⊘ blocked", theme::info()),
+        Some(crate::runtime::ToolStatus::Interrupted) => ("■ interrupted", theme::info()),
+        None if item.sealed => ("? 状态未记录", theme::muted()),
         None => ("◇", theme::info()),
     };
     let name = item.tool_name.as_deref().unwrap_or("Tool");
@@ -345,28 +476,27 @@ pub(crate) fn build_visible_click_map(
     }
     let visible_end = scroll.saturating_add(viewport).saturating_sub(1);
     let mut out = Vec::new();
-    let mut current_row = 0usize;
-    for (idx, item) in state.lines.iter().enumerate().skip(start_index) {
-        let Some(cached) = item.cached_lines.as_ref() else {
-            continue;
-        };
-        if cached.is_empty() {
-            continue;
+    let mut idx = state.cache.heights.locate(scroll).max(start_index);
+    let mut current_row = state.cache.heights.prefix(idx);
+    while let Some(item) = state.lines.get(idx) {
+        let len = item.cached_lines.as_ref().map_or(0, Vec::len);
+        if current_row > visible_end {
+            break;
         }
-        let start = current_row;
-        let end = start + cached.len().saturating_sub(1);
-        current_row += cached.len();
-        if end < scroll || start > visible_end {
-            continue;
-        }
-        if let Some(action) = click_action_for_message(state, idx, item) {
+        let end = current_row + len.saturating_sub(1);
+        if len > 0
+            && end >= scroll
+            && let Some(action) = click_action_for_message(state, idx, item)
+        {
             out.push(ClickTarget {
                 line_idx: idx,
-                start_row: start.saturating_sub(scroll),
+                start_row: current_row.saturating_sub(scroll),
                 end_row: end.min(visible_end).saturating_sub(scroll),
                 action,
             });
         }
+        current_row += len;
+        idx += 1;
     }
     out
 }
@@ -400,7 +530,6 @@ fn tool_result_summary_prefix(item: &TranscriptItem, line_count: usize) -> Strin
 }
 
 fn ensure_stream_cache(state: &mut TuiState, inner_w: u16) {
-    const STREAM_RENDER_TAIL_BYTES: usize = 64 * 1024;
     if !state.streaming || state.stream_line.is_empty() {
         state.invalidate_stream_cache();
         return;
@@ -412,17 +541,70 @@ fn ensure_stream_cache(state: &mut TuiState, inner_w: u16) {
     if cache_valid {
         return;
     }
-    let mut start = state
-        .stream_line
-        .len()
-        .saturating_sub(STREAM_RENDER_TAIL_BYTES);
-    while start < state.stream_line.len() && !state.stream_line.is_char_boundary(start) {
-        start += 1;
+    if state.stream_kind == TranscriptKind::StreamText
+        && let Some(end) = state.stream_line.find('\n')
+        && let Some((fence, info)) =
+            crate::tui::stream_boundary::Fence::opening(&state.stream_line[..end])
+    {
+        let key = (fence.marker, fence.len, inner_w);
+        if state.cache.stream_code_key != Some(key) {
+            state.cache.stream_code_lines.clear();
+            state.cache.stream_code_bytes = end + 1;
+            state.cache.stream_code_key = Some(key);
+            state.cache.stream_code_closed = false;
+            if !info.is_empty() {
+                state.cache.stream_code_lines.extend(wrap_lines_word(
+                    &[Line::from(Span::styled(
+                        format!("-- {info} --"),
+                        theme::muted(),
+                    ))],
+                    inner_w,
+                ));
+            }
+        }
+        if !state.cache.stream_code_closed {
+            let start = state.cache.stream_code_bytes;
+            let mut complete = start;
+            let mut tail = Vec::new();
+            for raw in state.stream_line[start..].split_inclusive('\n') {
+                if raw.ends_with('\n') && fence.closes(raw) {
+                    state.cache.stream_code_closed = true;
+                    break;
+                }
+                let lines = wrap_lines_word(
+                    &[Line::from(Span::styled(
+                        raw.trim_end_matches('\n').to_string(),
+                        theme::muted(),
+                    ))],
+                    inner_w,
+                );
+                state.cache.stream_parses += 1;
+                if raw.ends_with('\n') {
+                    complete += raw.len();
+                    state.cache.stream_code_lines.extend(lines);
+                } else {
+                    tail = lines;
+                }
+            }
+            state.cache.stream_code_bytes = complete;
+            if !state.cache.stream_code_closed {
+                state.cache.stream_lines = Some(tail);
+                state.cache.stream_width = inner_w;
+                state.cache.stream_kind = state.stream_kind;
+                state.cache.stream_revision = state.stream_revision;
+                return;
+            }
+        }
+        state.cache.stream_code_lines.clear();
+    } else {
+        state.cache.stream_code_key = None;
+        state.cache.stream_code_lines.clear();
     }
+    state.cache.stream_parses += 1;
     let mut seg = Vec::new();
     push_msg_with_width(
         &mut seg,
-        &state.stream_line[start..],
+        &state.stream_line,
         state.stream_kind,
         inner_w,
         None,
@@ -433,6 +615,7 @@ fn ensure_stream_cache(state: &mut TuiState, inner_w: u16) {
     state.cache.stream_revision = state.stream_revision;
 }
 
+#[cfg(test)]
 pub(crate) fn visible_lines(
     history: &[Line<'static>],
     stream: &[Line<'static>],
@@ -455,6 +638,7 @@ pub(crate) fn visible_lines(
     visible
 }
 
+#[cfg(test)]
 pub(crate) fn content_viewport_height(area_height: u16) -> usize {
     padded_content_area(Rect {
         x: 0,
