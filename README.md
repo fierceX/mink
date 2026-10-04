@@ -4,7 +4,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/mink-core.svg)](https://crates.io/crates/mink-core)
 [![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Rust 1.94+](https://img.shields.io/badge/rust-1.94%2B-blue)](https://blog.rust-lang.org/2025/06/05/Rust-1.94.0.html)
+[![Rust 1.94+](https://img.shields.io/badge/rust-1.94%2B-blue)](docs/start/quickstart.md)
 [![Python SDK](https://img.shields.io/badge/pypi-mink--agent-blue)](https://pypi.org/project/mink-agent)
 
 **Rust 原生 · 终端优先 · 可嵌入**

@@ -2,6 +2,7 @@
 name = "mink-server"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Web workspace server for mink: remote interactive sessions over SSE"
 license.workspace = true
 repository.workspace = true

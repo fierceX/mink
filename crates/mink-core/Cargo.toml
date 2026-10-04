@@ -2,6 +2,7 @@
 name = "mink-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Embeddable Rust runtime for the mink AI coding agent"
 license.workspace = true
 repository.workspace = true
