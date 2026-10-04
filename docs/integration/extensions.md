@@ -1,6 +1,6 @@
 # 扩展契约
 
-> 更新日期：2026-10-04
+> 更新日期：2026-10-05
 
 LLM backend、只读 VFS 与初始化扩展。
 
@@ -16,7 +16,7 @@ REPL/TUI 在 `mink-cli` 内把同一事件流投影为终端输出或 `TuiSignal
 - **turn 可靠流**（`AgentEventStream`）：`stream_turn` 返回的每 turn 事件流是可靠交付通道，宿主必须消费 `recv()` 直到结束或用 `outcome()` 等待结果；内部为 unbounded 队列。边界策略：可靠事件由结构约束（工具结果受 `format_tool_result` 上限），`Text`/`Thinking` 进度受 1 MiB pending 预算（含每事件 128B 结构最小值），`outcome()` 主动排空；上游 SSE 生产者队列有界（1024）并 async 背压。
 - **EventLog 两级提交**：契约关键事件（`prefix_snapshot`、signal rollback/replan/handover）经 `log_critical_event` 异步、有期限，并同时响应 runtime cancel 与当前轮 interrupt（健康 writer 有宽限期（500ms/测试 150ms）快速成功），等待 writer 单次写入应答（入队≠写入），失败向调用方传播，并保持 stream-json stdout 输出；`flush` 的 ack 等待同样有期限；诊断事件走 `send_best_effort`（可见丢弃 + 丢失报告）。SSE 队列有界仅指事件个数，单事件字节/解析缓冲与 runtime 可靠事件仍不在预算内。
 - **尽力 observer**（`EventSink` + `EventDispatcher`）：有界队列（容量 1024），溢出时丢弃最新事件并告警一次，适合遥测，不承担 UI 完整性；**observer 投递独立于 stream 进度预算**（慢 stream 消费者不会连带饿死 observer）。
-- **延期项（队列预算/慢消费者）**：合并增量、字节预算、落盘溢出或明确中止等策略尚未实现，在实现前不得宣称事件流已有内存边界。后续验收占位：`outcome`-only 消费、满队列行为、长流式输出下的积压字节与 RSS 压力测试。
+- **预算范围与延期项**：进度字节预算、慢消费者丢弃通知及 `outcome`-only 排空已有回归测试；可靠事件整体字节、SSE 单事件/解析缓冲仍未有统一预算，不能据此宣称整条事件链有固定内存上限。合并增量、可靠事件落盘溢出或明确中止策略仍属后续工作；长流式输出/RSS 测量见[性能与验证](../development/performance.md)。
 
 ### 事件词汇职责与转换边界
 

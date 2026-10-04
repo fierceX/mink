@@ -1,6 +1,6 @@
 # Python 集成
 
-> 更新日期：2026-10-04
+> 更新日期：2026-10-05
 
 子进程调用、流式接口与磁盘会话复用。
 
@@ -138,12 +138,20 @@ Rust core 会在 `conversation.jsonl` 中完整保留历史，并通过 `context
 
 ## 支持平台
 
-| 平台 | 架构 | 沙箱（由 Rust 内部处理） |
+| 发布 wheel 的平台 | 架构/ABI | 沙箱（由 Rust 内部处理） |
 |------|------|------|
-| macOS | arm64（Apple Silicon） | sandbox-exec |
-| macOS | x86_64（Intel） | sandbox-exec |
-| Linux | x86_64 | nsjail / bubblewrap |
-| Linux | aarch64 | nsjail / bubblewrap |
+| macOS | arm64（Apple Silicon），最低系统版本以 wheel 标签为准 | sandbox-exec |
+| Linux | x86_64 GNU（glibc ≥2.35） | nsjail / bubblewrap |
+| Linux | x86_64 musl（musl ≥1.2） | nsjail / bubblewrap |
+
+macOS Intel 与 Linux aarch64 不在当前 wheel 发布矩阵中。从源码构建可在这些目标环境尝试，但需自行验证二进制、沙箱与 SDK 任务，不能将源码可构建等同于已有兼容 wheel。源码构建命令：
+
+```bash
+cargo build -p mink-cli --release --no-default-features --features sdk-bin --bin mink-core
+export MINK_BINARY="$(pwd)/target/release/mink-core"
+```
+
+每个发布 wheel 在 CI 中安装到独立环境，检查 import、内置二进制版本，并通过本地隔离 provider 运行两轮验证会话复用；不依赖真实模型服务。
 
 ## 下一步
 

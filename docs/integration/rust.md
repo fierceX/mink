@@ -1,6 +1,6 @@
 # Rust 集成
 
-> 更新日期：2026-10-04
+> 更新日期：2026-10-05
 
 进程内 runtime 生命周期与可靠事件。
 
@@ -16,7 +16,7 @@ Rust 发布包为 `mink-core`，库 crate 名为 `mink`。发布包只包含可�
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.6.6", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.6.7", default-features = false, features = ["runtime"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
 ```
@@ -148,7 +148,7 @@ Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。`mink-core` 发布�
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.6.6", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.6.7", default-features = false, features = ["runtime"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
 ```
@@ -158,15 +158,13 @@ anyhow = "1"
 ### 三入口共用核心
 
 ```text
-mink CLI ──────────┐
-mink-core SDK ─────┤
-Rust crate mink ───┘
-         │
-    mink-cli::cli::main_entry()
-         │
-    AgentRuntime::start(AgentOptions)
-         │
-    OrchActor::run()
+mink CLI ────────┐
+mink-core SDK ───┴─ mink-cli::cli::main_entry() ─┐
+Rust crate mink ────────────────────────────────┤
+                                              │
+                 AgentRuntime::start(AgentOptions)
+                         │
+                 OrchActor::run()
 ```
 
 两个二进制入口通过 `crates/mink-cli/src/cli.rs` 调用 `mink::runtime`，Rust 库调用方直接使用

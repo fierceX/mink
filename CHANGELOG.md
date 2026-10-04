@@ -2,13 +2,15 @@
 
 ## Unreleased
 
+## v0.6.7 (2026-10-05)
+
 ### 兼容性与发布修复
 
-- 恢复旧引导启动新 turn 时遵守 server 全局运行会话上限；保留当前 turn 引导与 request ID 幂等重试，增加隔离 backend 的 HTTP API 回归。
-
-- 修复 server 丢弃首个配置路径，非法/缺失文件、未知选项与多余参数明确失败；增加实际进程启动回归。
-
-- 保持 Rust 1.94：事件进度预算改用稳定 atomic 接口，TUI 高度索引改用稳定最低有效位运算；各 crate 明确继承最低 Rust 版本。
+- 保持最低 Rust 1.94：事件进度预算改用稳定 atomic 接口，TUI 高度索引改用稳定最低有效位运算；各 crate 明确继承 MSRV，CI 检查最低版本、完整 feature 与精简 SDK。
+- 锁文件将 Wasmtime/WASI 间接依赖的已撤回 `chacha20 0.10.1` 更新为兼容且未撤回的 `0.10.2`。
+- 修复 server 首个配置路径被丢弃，未知选项、多余参数和非法文件明确失败；恢复旧引导启动新 turn 时遵守全局并发上限，保留当前 turn 引导与请求幂等性，并增加实际进程/API 回归。
+- crates.io 发布仅在 registry 明确确认相同且未撤回版本已存在时跳过；认证、网络、响应异常与 cargo 失败阻止后续发布。新增跨渠道版本/tag 检查，发布依赖文档、最低版本与 Web E2E 验证；wheel 安装后检查内置二进制和隔离 provider 下的会话复用。
+- 修正文档中的响应接受/截断恢复、Edit 参数、进度预算和按策略 replan/handover 契约；工具 JSON 示例使用 runtime 导出的 schema 校验。Python 文档明确当前 wheel 平台与源码构建验证范围。
 
 ### 文档与官网
 

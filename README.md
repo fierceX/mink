@@ -70,7 +70,7 @@ session.close()
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.6.6", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.6.7", default-features = false, features = ["runtime"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
 ```

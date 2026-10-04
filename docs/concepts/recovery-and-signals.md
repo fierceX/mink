@@ -1,6 +1,6 @@
 # 恢复与信号
 
-> 更新日期：2026-10-04
+> 更新日期：2026-10-05
 
 有界格式恢复、请求重试和信念反馈。
 
@@ -38,8 +38,13 @@ tool-call 列表中。每个候选调用都通过 `build_tool_call_event()` 转�
 
 这些格式是“容器协议”兼容层，不代表旧参数重新成为模型协议。回收层只把内容规整成
 `{name, arguments}`，之后仍由当前 `tools.json` schema、`ToolExec` 参数反序列化和工具实现校验。
-例如 XML/Bracket/R1 中可以恢复 `Read {"path":"src/lib.rs:40-80"}` 或
-`Edit {"path":"src/lib.rs","patch":"@src/lib.rs#TAG\nreplace 40:\n+..."}`。`Read` 的行范围仍写在
+例如 XML/Bracket/R1 中可以恢复 `Read {"path":"src/lib.rs:40-80"}`，或下面的 Hashline 调用（TAG 必须来自实际 Read snapshot）：
+
+```json
+{"name":"Edit","arguments":{"input":"[src/lib.rs#0A3B]\nPUT 40:\n+    return new_value;"}}
+```
+
+Replace 模式使用 `path + edits`，两种模式都不接受旧 `path + patch`；完整定义见[工具参考](../reference/tools.md#edit)。`Read` 的行范围仍写在
 `path` 选择器里；外部框架习惯的读参（`limit`/`offset`/`selector` 等）以及 `Grep`/`Python` 的
 同类字段只被接受并忽略，真正未知的字段仍会在模型与执行层被拒绝；`Edit old_string/new_string`
 会被拒绝。

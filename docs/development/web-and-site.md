@@ -1,8 +1,18 @@
 # Web 与官网维护
 
-> 更新日期：2026-10-04
+> 更新日期：2026-10-05
 
 仅供仓库维护，不进入官网发布产物。
+
+## 发布候选检查
+
+`python3 scripts/check-release.py --tag v0.6.7` 核对 Cargo、Python、Web、锁文件、当前安装示例、官网版本和发布记录；历史回放与性能记录保留原版本。`python3 -m unittest discover -s scripts -p 'test_release.py'` 检查版本漂移及 registry/发布错误分支，不发送真实发布请求。
+
+CI 在 Rust 1.94 上检查 workspace/all-features 与精简 runtime/SDK，Web 运行单元、类型及隔离 provider E2E；文档 job 使用统一组装命令与五档宽度验收。publish 必须等待 binaries、wheels、pages-check 和 msrv，全渠道版本须与 tag 一致。
+
+每个 wheel 安装到独立环境后运行 `scripts/verify-wheel.py`：检查包元数据、内置二进制、两个本地 fixture 回合及会话复用。GNU/macOS 使用原生环境，musl 使用 Alpine 容器；不强制把 musl wheel 安装到不兼容的 GNU Python 中。crates.io 发布只对明确存在的相同未撤回版本跳过，网络、认证、异常响应或 cargo 失败均传播并阻止后续发布。
+
+文档示例检查通过 `PostInitHook` 导出 Hashline/Replace 的实际工具 schema，核对工具 JSON 的必填字段、类型和未知字段；没有模型请求，不能称为真实任务验证。Rust、Python、CLI 和 TOML 示例的统一检查入口为 `make docs-examples`。
 
 ## 官网与文档
 

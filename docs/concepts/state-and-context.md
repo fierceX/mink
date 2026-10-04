@@ -1,6 +1,6 @@
 # 持久化与上下文
 
-> 更新日期：2026-10-04
+> 更新日期：2026-10-05
 
 投影、原子发布、压缩和状态恢复。
 
@@ -47,8 +47,9 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 ├── plan.draft             # 未确认草稿存在时生成
 ├── plan-transaction.json  # 计划文件变更与 conversation 追加的事务 journal（事务期间存在，结束后移除）
 ├── todos.json             # 首次成功 Todo 变更后生成
+├── inputs.json            # InputInbox 的持久回执、revision 与未应用输入
 ├── usage.jsonl            # 首次记录 LLM 请求后生成
-├── attachments/           # TUI Ctrl+V 粘贴图片的暂存副本（内容寻址 PNG，随 session 保留）
+├── attachments/           # CLI/TUI/Web 共用的内容寻址附件原始字节，随 session 保留
 └── artifacts/
     ├── index.jsonl
     └── <tool>-0001.txt

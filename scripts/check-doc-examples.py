@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 import tomllib
+from doc_tool_inputs import check as check_tool_inputs
 
 ROOT = Path(__file__).resolve().parent.parent
 manifest = json.loads((ROOT / 'docs/manifest.json').read_text())
@@ -60,7 +61,7 @@ def validate_toml(table, group=''):
         if isinstance(value, dict):
             validate_toml(value, f'{group}.{name}' if group else name)
 
-counts = dict(python=0, toml=0, cli=0, rust=0)
+counts = dict(python=0, toml=0, cli=0, rust=0, tool_json=0)
 rust = set()
 for file in files:
     for language, code in re.findall(r'^```(\w+)\n(.*?)^```', file.read_text(), re.M | re.S):
@@ -99,7 +100,9 @@ edition = "2024"
 mink = {{ package = "mink-core", path = "{ROOT / 'crates/mink-core'}", default-features = false, features = ["runtime"] }}
 tokio = {{ version = "1", features = ["full"] }}
 anyhow = "1"
+serde_json = "1"
 ''')
+    (project / 'src/bin/doc_tool_schemas.rs').write_text((ROOT / 'scripts/doc-tool-schemas.rs').read_text())
     for index, code in enumerate(sorted(rust)):
         if 'pub fn parse_assignment' in code:
             (project / 'src/lib.rs').write_text(code)
@@ -107,5 +110,10 @@ anyhow = "1"
             (project / f'src/bin/example_{index}.rs').write_text(code)
     subprocess.run(['cargo', 'check', '--manifest-path', str(project / 'Cargo.toml'), '--all-targets', '--target-dir', str(ROOT / 'target/doc-examples')], check=True)
     subprocess.run(['cargo', 'test', '--manifest-path', str(project / 'Cargo.toml'), '--lib', '--target-dir', str(ROOT / 'target/doc-examples')], check=True)
+    subprocess.run(['cargo', 'run', '--quiet', '--manifest-path', str(project / 'Cargo.toml'), '--bin', 'doc_tool_schemas', '--target-dir', str(ROOT / 'target/doc-examples'), '--', str(project)], check=True)
+    schemas = {mode: {tool['name']: tool['input_schema'] for tool in json.loads((project / f'{mode}.json').read_text())} for mode in ['hashline', 'replace']}
+    for file in files:
+        counts['tool_json'] += check_tool_inputs(file.read_text(), schemas)
+    assert counts['tool_json'] >= 3, 'expected both Edit modes and recovery envelope'
 counts['rust'] = len(rust)
 print('Documentation examples passed:', counts, '(syntax/API/fixture checks; no real model task)')

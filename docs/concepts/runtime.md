@@ -1,6 +1,6 @@
 # 运行时执行
 
-> 更新日期：2026-10-04
+> 更新日期：2026-10-05
 
 完整进程隔离由 worker 的 sandbox re-exec 提供；macOS 写入规则须覆盖声明目录、临时目录与会话存储的字面/真实路径，以适配内核按真实路径判断的行为。运行时本身不隔离宿主进程，平台边界见[安全指南](../guides/security.md)。
 
@@ -158,25 +158,16 @@ SubAgent 由 `SubAgentCoordinator` 在 turn 内部启动、收集和注入结果
 
 ### LLM 调用循环
 
-同一个用户输入可能触发多次 LLM 调用（工具调用→工具结果→再次调用 LLM）。循环受两个条件约束：
+同一个用户输入可能触发多次 LLM 调用（工具调用→工具结果→再次调用 LLM）。每次响应先作为候选接受检查，再决定是否持久化、执行工具或结束：
 
-```rust
-while turn < max_turns {
-    // 每一轮 LLM 调用...
+1. interrupt 优先结束；明确 provider 错误、拒绝或过滤为终态失败，不作为格式错误反复重发。
+2. `length/max_tokens` 废弃整份候选正文与工具调用，只结算 usage 并追加截断诊断，进入有界格式恢复。
+3. 工具名、调用 ID 缺失或 ID 重复时整批调用不执行，追加一次格式诊断；身份合法的调用批进入工具执行阶段。
+4. 无调用响应仅在 `end_turn/stop/done` 且正文非空时确认完成。空正文、thinking-only、无调用的 `tool_calls` 或空/未知原因进入格式恢复，不能静默成功。
+5. 所有可继续分支在唯一 round 尾部结算格式滑动窗口，再执行 Todo 提醒、证据注入与决策。超出 `llm_recovery` 额度以 `format_recovery_exhausted` 失败；新输入清空窗口，压缩与引导不清空。
+6. 继续前通过 `compaction.active_messages()` 刷新活跃投影；同时受 `max_turns`、取消、持久化故障与请求期限约束。
 
-    match stop.as_str() {
-        "tool_use" | "tool_calls" => {
-            messages = compaction.active_messages().await?;  // 刷新活跃投影
-            continue;  // 继续下一轮 LLM 调用
-        }
-        "end_turn" | "stop" => return Stop,
-        "error" | "max_tokens" | "length" => return Failed,
-        _ => return Stop,
-    }
-}
-```
-
-`messages` 在 tool_use 路径末尾通过 `compaction.active_messages()` 刷新，确保下一轮 LLM 调用
+`messages` 在本轮所有正式追加之后刷新，确保下一轮 LLM 调用
 看到最新工具结果、信号注入消息、计划变更和子代理结果，同时不会把冷历史重新加载进模型上下文。
 
 ## SSE 流式解析

@@ -1,6 +1,6 @@
 # mink-agent 使用文档
 
-> 更新日期：2026-08-17
+> 更新日期：2026-10-05
 
 ## 简介
 
@@ -10,7 +10,7 @@ mink-agent 是 [Mink](https://github.com/fierceX/mink) 的 Python 封装。SDK �
 pip install mink-agent
 ```
 
-安装时会自动选择匹配当前系统平台（macOS arm64/x86_64、Linux x86_64/aarch64）的 wheel 包。
+发布工作流提供 macOS arm64 和 Linux x86_64（GNU / musl）的 wheel，安装时按 wheel 标签选择兼容系统版本。macOS Intel 与 Linux aarch64 当前没有预构建 wheel；需要从源码构建 SDK 二进制并验证目标环境，详见[平台与构建](../docs/integration/python.md#支持平台)。
 
 ## 快速开始
 

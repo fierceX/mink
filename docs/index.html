@@ -449,7 +449,7 @@
   <div class="shell nav-inner">
     <a class="brand" href="#home" onclick="showPage('home'); return false;" aria-label="Mink 首页">
       <span class="brand-word"><span class="m">M</span>ink</span>
-      <span class="brand-version">v0.6.6 / OPEN SOURCE</span>
+      <span class="brand-version">v0.6.7 / OPEN SOURCE</span>
     </a>
     <div class="nav-links">
       <a id="nav-home" class="active" href="#features" onclick="openSection('features'); return false;">探索</a>
@@ -556,7 +556,7 @@ finally:
         <div id="tab-rust" class="tab-panel" role="tabpanel" aria-labelledby="quick-tab-rust" tabindex="0">
           <div class="tab-copy"><h3>在 Rust 进程内运行。</h3><p>通过 mink::runtime 直接在 Rust 进程内运行 agent，管理启动、任务和关闭，无需启动 CLI 子进程。</p><ul><li>crate：mink-core · library：mink</li><li>等待结果，或订阅事件流</li><li>可注入自己的 LLM backend</li></ul><a class="text-link" href="#docs/integration/rust.md" onclick="loadDoc('integration/rust.md'); return false;">阅读 Rust 嵌入指南 ↗</a></div>
           <div class="quick-code"><div class="top"><span>rust / quickstart</span><button class="copy-button" type="button" data-copy="code-rust">复制代码 ⧉</button></div><pre><code id="code-rust"><span class="c">// Cargo.toml：还需添加 tokio 和 anyhow</span>
-<span class="c">// mink = { package = "mink-core", version = "0.6.6",</span>
+<span class="c">// mink = { package = "mink-core", version = "0.6.7",</span>
 <span class="c">//   default-features = false, features = ["runtime"] }</span>
 use mink::prelude::{AgentOptions, AgentRuntime};
 
