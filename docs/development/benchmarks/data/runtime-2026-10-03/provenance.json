@@ -1,0 +1,63 @@
+{
+  "source_directory": "target/bench",
+  "recorded_commit": "5a86554+dirty",
+  "note": "Historical records; original dirty tree was not captured. Metrics and diagnostics unchanged.",
+  "files": [
+    {
+      "file": "runtime-5a86554+dirty-20261003T103727Z.json",
+      "original_sha256": "16363112d92cbe7d57ac0f82cd126bb2a1595530eb1a27513a65f40224e7a9cc",
+      "archived_sha256": "7c88367bac7f0cd472b06bb1d012c172f4acd37842bcb9d8fb61090237c8a70c",
+      "redactions": [
+        "absolute repository path replaced with <repo>"
+      ]
+    },
+    {
+      "file": "runtime-5a86554+dirty-20261003T103727Z.txt",
+      "original_sha256": "2496ae878dabdb46a6ff3e8d352e166a3901d5a06ba6441a78b0c5c90aed2c1f",
+      "archived_sha256": "cd53718589feded05324fafc5d01ddc88b22acd05521297e0ecec2003711cc7e",
+      "redactions": [
+        "absolute repository path replaced with <repo>"
+      ]
+    },
+    {
+      "file": "runtime-5a86554+dirty-20261003T103956Z.json",
+      "original_sha256": "1c8292305b05b09e2ecd990016e1897a9efefc45b76cdaaeed0a45365f748ec0",
+      "archived_sha256": "1c8292305b05b09e2ecd990016e1897a9efefc45b76cdaaeed0a45365f748ec0",
+      "redactions": [
+        "absolute repository path replaced with <repo>"
+      ]
+    },
+    {
+      "file": "runtime-5a86554+dirty-20261003T103956Z.txt",
+      "original_sha256": "4d51769bb41680a4d32eb0ed589e8db23f637a2ae21661fa2ae6c8e4cce69357",
+      "archived_sha256": "72d9c8a521c66dcafb3c7422e510341890b671c70a453765ffbf717960d85b3b",
+      "redactions": [
+        "absolute repository path replaced with <repo>"
+      ]
+    },
+    {
+      "file": "runtime-5a86554+dirty-20261003T104132Z.txt",
+      "original_sha256": "20b9b8eb8bb006620b37e7350803b9b95af6376cf882e1ad2862d0a7a7786881",
+      "archived_sha256": "003c32dae53d5793cd3fa756fc0d8cee6d079e157231634e1371b080f4687619",
+      "redactions": [
+        "absolute repository path replaced with <repo>"
+      ]
+    },
+    {
+      "file": "runtime-5a86554+dirty-20261003T110243Z.json",
+      "original_sha256": "4d95952ddd5f8c722d48f6835340809facfa796759dc87220a8e6d4f6662db15",
+      "archived_sha256": "9cc80a32183b9ee7d8428b10b55daa08ac34c5823ccc24b60db6ca37514af767",
+      "redactions": [
+        "absolute repository path replaced with <repo>"
+      ]
+    },
+    {
+      "file": "runtime-5a86554+dirty-20261003T110243Z.txt",
+      "original_sha256": "18aa564badd1d702e0063cbe8834eee72f4b041b5c67649bf244e1aa4c5e724a",
+      "archived_sha256": "f1c84cb3df0d57bded0d30dfffea4265dbb5dc881e8fb5443336bb10b9449bda",
+      "redactions": [
+        "absolute repository path replaced with <repo>"
+      ]
+    }
+  ]
+}

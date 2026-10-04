@@ -129,6 +129,8 @@ async fn main() -> anyhow::Result<()> {
 
 版本记录见 [CHANGELOG](CHANGELOG.md)，开发约束见 [AGENTS](AGENTS.md)。
 
+维护者的运行时/TUI 测量方法及按日期存档的结果见[性能与验证](docs/development/performance.md)。
+
 ## 许可
 
 [MIT License](LICENSE)

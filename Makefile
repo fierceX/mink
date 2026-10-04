@@ -1,4 +1,4 @@
-.PHONY: build check test clippy feature-matrix regression-mock regression-client regression-api regression-all coverage coverage-core coverage-with-ignored clean \
+.PHONY: build check test clippy feature-matrix bench bench-quick regression-mock regression-client regression-api regression-all coverage coverage-core coverage-with-ignored clean \
         pip-build pip-wheel pip-install pip-publish pip-clean
 
 CORE_COVERAGE_IGNORE := (main\.rs|tui/|ui/|tools/(web|search|runner|bash|file)\.rs|llm/(client|transport)\.rs|sse/toolcall\.rs|session/compaction\.rs|config\.rs|prompt\.rs|assets\.rs|context\.rs|errors\.rs|events\.rs|session/(paths|init)\.rs|regression\.rs|agent/(orchestrator|prefix|compactor|sub_coordinator|sub_executor)\.rs|.*_tests\.rs)
@@ -14,6 +14,16 @@ test: check
 
 clippy:
 	cargo clippy --all-targets --all-features -- -D warnings
+
+bench:
+	./scripts/bench-runtime.sh
+
+bench-quick:
+	./scripts/bench-runtime.sh --quick
+
+.PHONY: bench-check
+bench-check:
+	python3 scripts/test_runtime_bench.py
 
 feature-matrix:
 	cargo check -p mink-core --no-default-features --features runtime

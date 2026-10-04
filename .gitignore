@@ -33,6 +33,8 @@ reference-trajectory/
 
 node_modules/
 data/
+# Reviewed, sanitized benchmark evidence; day-to-day runs remain in target/bench.
+!/docs/development/benchmarks/data/
 test-results/
 playwright-report/
 

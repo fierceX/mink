@@ -1,0 +1,21 @@
+# mink runtime benchmark
+# machine:  Apple M4 Pro (12 cores, 24GB)
+# os:       macOS 15.7.7 (kernel 24.6.0)
+# commit:   e7fb6f2+dirty
+# rustc:    rustc 1.98.0 (88d9e12ae 2026-08-18)
+# cargo:    cargo 1.98.0 (797e8a9bc 2026-08-05)
+# rss:      ps_rss_kb (current) + 20ms sampler peak; macOS RSS overstates footprint
+# fd limit: 8192
+# quick:    0
+# reps:     2
+
+    Blocking waiting for file lock on build directory
+warning: mink-core@0.6.6: Generated embedded_skills.rs with 4 skills
+    Finished `bench` profile [optimized] target(s) in 30.08s
+     Running benches/runtime_bench.rs (target/release/deps/runtime_bench-4eb075df2d1e27bb)
+# mink runtime bench | os=macOS 15.7.7 arch=aarch64 cores=12 rss_metric=ps_rss_kb reps=2 quick=false
+[case] subagent_fanout_2 n=1 p50=94.70ms p95=94.70ms min=94.70 max=94.70 mean=94.70 extra={"requested_subagents":2,"rss_metric":"ps_rss_kb","rss_peak_kb":12720,"status":"Ok","subagent_requests":2,"tool_calls":2,"tool_errors":0}
+[case] subagent_fanout_4 n=1 p50=216.47ms p95=216.47ms min=216.47 max=216.47 mean=216.47 extra={"requested_subagents":4,"rss_metric":"ps_rss_kb","rss_peak_kb":14368,"status":"Ok","subagent_requests":4,"tool_calls":4,"tool_errors":0}
+[case] subagent_fanout_8 n=1 p50=328.51ms p95=328.51ms min=328.51 max=328.51 mean=328.51 extra={"requested_subagents":8,"rss_metric":"ps_rss_kb","rss_peak_kb":17504,"status":"Ok","subagent_requests":8,"tool_calls":8,"tool_errors":0}
+[case] sandbox_start n=2 p50=145.35ms p95=145.35ms min=137.57 max=145.35 mean=141.46 extra={"inner_start_p50_ms":55.582125000000005,"inner_turn_p50_ms":27.457333000000002,"probe_failures":[],"probe_requested":2,"probe_successes":2,"sandboxed":true}
+[report] <repo>/target/bench-adoption/runtime-e7fb6f2+dirty-20261004T153004Z.json

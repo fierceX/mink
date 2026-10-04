@@ -4,6 +4,8 @@
 
 进程内 runtime 生命周期与可靠事件。
 
+评估会话密度和宿主开销时，参阅仓库中的[性能测量方法与记录](../development/performance.md)；历史 mock 结果不包含真实模型延迟。
+
 ## Rust 库 API 设计
 
 ### Rust 库嵌入

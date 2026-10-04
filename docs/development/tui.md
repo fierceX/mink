@@ -33,7 +33,7 @@ Ghostty/iTerm2/WezTerm 不另发平台通知；Terminal.app 或其他已提供 b
 可通过可选 `terminal-notifier -activate <bundle>` 激活应用，外部命令输出隔离。禁止
 AppleScript 通知回退，其通知属于脚本编辑器；外部工具缺失时保留 OSC 与铃声。
 
-性能数据与验证脚本见 [TUI 性能记录](performance.md)。
+性能数据与验证脚本见 [TUI 性能记录](benchmarks/tui-2026-10-04.md)，统一测量入口见[性能与验证](performance.md)。
 
 ## TUI 阅读、编辑与异步反馈
 

@@ -41,6 +41,7 @@ Mink 是用 Rust 实现的轻量 AI coding agent，面向 DeepSeek/OpenAI-compat
 - **契约必守**：「关键不变式」不可逾越；确需变更协议时先更新本文件与 `docs/` 对应章节，并保持全仓一致。
 - **同步文档**：架构/行为变更更新 `docs/concepts/` 的对应机制、`docs/guides/` 的操作说明及 `docs/reference/` 的唯一权威定义；集成契约更新 `docs/integration/`，新增公开页登记 `docs/manifest.json`。同步本文件（含更新日期）；用户可见变更记入 `CHANGELOG.md` Unreleased。维护记录放 `docs/development/`，不发布。
 - **测试锚定**：新增行为必有测试；不变式守护优先落在 `tests/invariants.rs` 或模块级回归测试。
+- **性能证据**：`docs/development/performance.md` 维护测量方法与索引，日期结果及脱敏 JSON/日志存 `docs/development/benchmarks/`；保留版本、dirty 标记、样本口径及失败/跳过，不把历史结果称为当前 HEAD 实测。日常输出留 `target/bench/`。
 - **官网展示**：`docs/index.html` 是静态官网，与 server 工作台分离；以轻量可嵌入、长任务上下文、可靠编辑为主线。回放使用公开记录或独立实跑，标注节选/重建与来源，不编造结果或统计；终端示例的字号、行高、状态字段及窄屏优先级对照真实 TUI；中间统计须有事件来源并与最终总量核对，未记录值显示未知；安装示例核对公开 API，本地资源保留许可。改动运行 `node scripts/test-homepage.mjs`、`python3 -m unittest discover -s scripts -p 'test_hero_replay.py'` 并检查桌面/窄屏渲染。
 
 ### 提交纪律
@@ -202,7 +203,7 @@ cargo test              # 日常测试（跳过重型测试）
 cargo test -p mink-core --lib           # 仅 core 单元测试
 cargo test --workspace                  # 全 workspace
 cargo test --features slow-tests -- --include-ignored   # 全量（含 WASM 沙箱，较慢）
-make build / make check / make test / make feature-matrix / make regression-all
+make build / make check / make test / make feature-matrix / make regression-all / make bench / make bench-quick / make bench-check
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # 调试（session 目录内）

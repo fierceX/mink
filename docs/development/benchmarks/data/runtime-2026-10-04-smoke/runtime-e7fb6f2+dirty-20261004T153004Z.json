@@ -1,0 +1,105 @@
+{
+  "failures": [],
+  "meta": {
+    "arch": "aarch64",
+    "commit": "e7fb6f2+dirty",
+    "fd_limit": "8192",
+    "kernel": "24.6.0",
+    "logical_cores": 12,
+    "machine": "Apple M4 Pro",
+    "mock_calls": 20,
+    "os": "macOS 15.7.7",
+    "quick": false,
+    "report_version": 2,
+    "reps_override": 2,
+    "rss_metric": "ps_rss_kb",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "suite": "mink-core/runtime_bench",
+    "summary_calls": 0,
+    "timestamp_epoch_secs": 1791127835
+  },
+  "samples": [
+    {
+      "case": "subagent_fanout_2",
+      "extra": {
+        "requested_subagents": 2,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 12720,
+        "status": "Ok",
+        "subagent_requests": 2,
+        "tool_calls": 2,
+        "tool_errors": 0
+      },
+      "max": 94.697875,
+      "mean": 94.697875,
+      "min": 94.697875,
+      "n": 1,
+      "p50": 94.697875,
+      "p95": 94.697875,
+      "unit": "ms"
+    },
+    {
+      "case": "subagent_fanout_4",
+      "extra": {
+        "requested_subagents": 4,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 14368,
+        "status": "Ok",
+        "subagent_requests": 4,
+        "tool_calls": 4,
+        "tool_errors": 0
+      },
+      "max": 216.46825,
+      "mean": 216.46825,
+      "min": 216.46825,
+      "n": 1,
+      "p50": 216.46825,
+      "p95": 216.46825,
+      "unit": "ms"
+    },
+    {
+      "case": "subagent_fanout_8",
+      "extra": {
+        "requested_subagents": 8,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 17504,
+        "status": "Ok",
+        "subagent_requests": 8,
+        "tool_calls": 8,
+        "tool_errors": 0
+      },
+      "max": 328.506708,
+      "mean": 328.506708,
+      "min": 328.506708,
+      "n": 1,
+      "p50": 328.506708,
+      "p95": 328.506708,
+      "unit": "ms"
+    },
+    {
+      "case": "sandbox_start",
+      "extra": {
+        "inner_start_p50_ms": 55.582125000000005,
+        "inner_turn_p50_ms": 27.457333000000002,
+        "probe_failures": [],
+        "probe_requested": 2,
+        "probe_successes": 2,
+        "sandboxed": true
+      },
+      "max": 145.346959,
+      "mean": 141.458417,
+      "min": 137.569875,
+      "n": 2,
+      "p50": 145.346959,
+      "p95": 145.346959,
+      "unit": "ms"
+    }
+  ],
+  "selected_cases": [
+    "subagent_fanout_2",
+    "subagent_fanout_4",
+    "subagent_fanout_8",
+    "sandbox_start"
+  ],
+  "skipped_cases": []
+}

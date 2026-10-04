@@ -1,0 +1,20 @@
+# mink runtime benchmark
+# machine:  Apple M4 Pro (12 cores, 24GB)
+# os:       macOS 15.7.7 (kernel 24.6.0)
+# commit:   5a86554+dirty
+# rustc:    rustc 1.98.0 (88d9e12ae 2026-08-18)
+# cargo:    cargo 1.98.0 (797e8a9bc 2026-08-05)
+# rss:      ps_rss_kb (current) + 20ms sampler peak; macOS RSS overstates footprint
+# fd limit: 8192
+# quick:    0
+# reps:     per-case default
+
+warning: mink-core@0.6.6: Generated embedded_skills.rs with 4 skills
+   Compiling mink-core v0.6.6 (<repo>/crates/mink-core)
+    Finished `bench` profile [optimized] target(s) in 28.26s
+     Running benches/runtime_bench.rs (target/release/deps/runtime_bench-4eb075df2d1e27bb)
+# mink runtime bench | os=macOS 15.7.7 arch=aarch64 cores=12 rss_metric=ps_rss_kb reps=default quick=false
+[case] idle_1 n=1 p50=48.68ms p95=48.68ms min=48.68 max=48.68 mean=48.68 extra={"create_total_ms":48.708708,"created":1,"delta_per_runtime_kb":2880.0,"failure":null,"failure_at":null,"fds_after":15,"fds_before":14,"fds_per_runtime":1.0,"requested":1,"rss_after_kb":7552,"rss_before_kb":4672,"rss_metric":"ps_rss_kb","rss_peak_kb":7792,"shutdown_total_ms":19.884583,"threads_after":16,"threads_before":13}
+[case] idle_100 n=100 p50=38.69ms p95=42.27ms min=31.36 max=46.73 mean=38.51 extra={"create_total_ms":3851.024792,"created":100,"delta_per_runtime_kb":232.64,"failure":null,"failure_at":null,"fds_after":114,"fds_before":14,"fds_per_runtime":1.0,"requested":100,"rss_after_kb":31088,"rss_before_kb":7824,"rss_metric":"ps_rss_kb","rss_peak_kb":31120,"shutdown_total_ms":1844.7507079999998,"threads_after":115,"threads_before":14}
+[case] idle_1000 n=1000 p50=37.85ms p95=41.33ms min=27.90 max=53.23 mean=37.63 extra={"create_total_ms":37636.966042,"created":1000,"delta_per_runtime_kb":202.16,"failure":null,"failure_at":null,"fds_after":1014,"fds_before":14,"fds_per_runtime":1.0,"requested":1000,"rss_after_kb":229344,"rss_before_kb":27184,"rss_metric":"ps_rss_kb","rss_peak_kb":229680,"shutdown_total_ms":19045.273583000002,"threads_after":1015,"threads_before":14}
+[report] target/bench/runtime-5a86554+dirty-20261003T103956Z.json

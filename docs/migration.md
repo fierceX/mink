@@ -4,6 +4,8 @@
 
 每行覆盖一个旧正式文档的二级章节，含工作区 EMBEDDING 新增性能内容。SHA-256 标识迁移前章节，便于核对；对应内容经过主题拆分、事实修正与重复定义收敛。旧引言、目录和相关链接由新总览及统一清单取代。未跟踪评审、benchmark 与图像设计草案未纳入公开内容。
 
+维护者的运行时套件与结果已纳入仓库：[performance.md](development/performance.md)保留方法和索引，原 TUI 测量正文完整转入[日期记录](development/benchmarks/tui-2026-10-04.md)，运行时结果及脱敏证据另存[2026-10-03 记录](development/benchmarks/runtime-2026-10-03.md)。以下迁移前摘要不变；性能入口继续承接旧章节。
+
 | 来源标识 | 章节（原行） | 去向 | 原章节 SHA-256 |
 |---|---|---|---|
 | USAGE | 官网与文档（19） | [development/web-and-site.md](development/web-and-site.md) | `1abaef5641837ecef4149656cc269c5de493851c1d8754f50fefd6ee273c4c8e` |

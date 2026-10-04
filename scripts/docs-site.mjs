@@ -28,7 +28,9 @@ for (const entry of manifest) {
 const documents = new Map();
 const assets = new Set(['assets/hero-replay.json','assets/mink-wordmark.svg','assets/vendor/README.md','assets/vendor/marked.LICENSE.md','assets/vendor/highlight.LICENSE']);
 const formal = [...sources, ...['README.md','AGENTS.md','mink_agent/README.md', ...['mink-core','mink-cli','mink-server'].map(p=>`crates/${p}/README.md`)]];
-for (const dir of ['development']) for (const name of readdirSync(resolve(root, 'docs', dir))) if (name.endsWith('.md')) formal.push(`docs/${dir}/${name}`);
+for (const name of readdirSync(resolve(root, 'docs/development'), { recursive: true })) {
+  if (name.endsWith('.md')) formal.push(`docs/development/${name}`);
+}
 formal.push('docs/migration.md');
 for (const source of formal) {
   const markdown = readFileSync(resolve(root, source), 'utf8');

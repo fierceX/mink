@@ -1,0 +1,34 @@
+# mink runtime benchmark
+# machine:  Apple M4 Pro (12 cores, 24GB)
+# os:       macOS 15.7.7 (kernel 24.6.0)
+# commit:   5a86554+dirty
+# rustc:    rustc 1.98.0 (88d9e12ae 2026-08-18)
+# cargo:    cargo 1.98.0 (797e8a9bc 2026-08-05)
+# rss:      ps_rss_kb (current) + 20ms sampler peak; macOS RSS overstates footprint
+# fd limit: 8192
+# quick:    0
+# reps:     per-case default
+
+warning: mink-core@0.6.6: Generated embedded_skills.rs with 4 skills
+    Finished `bench` profile [optimized] target(s) in 0.07s
+     Running benches/runtime_bench.rs (target/release/deps/runtime_bench-4eb075df2d1e27bb)
+# mink runtime bench | os=macOS 15.7.7 arch=aarch64 cores=12 rss_metric=ps_rss_kb reps=default quick=false
+[case] process_start n=50 p50=2.48ms p95=2.98ms min=2.20 max=3.31 mean=2.55 extra={}
+[case] process_start_cli n=50 p50=2.69ms p95=3.63ms min=2.46 max=3.79 mean=2.91 extra={"binary":"<repo>/target/release/mink"}
+[case] runtime_start n=20 p50=11.08ms p95=14.44ms min=9.01 max=19.20 mean=11.48 extra={}
+[case] session_create n=20 p50=12.35ms p95=14.32ms min=9.09 max=37.92 mean=13.30 extra={}
+[case] idle_1 n=1 p50=39.12ms p95=39.12ms min=39.12 max=39.12 mean=39.12 extra={"create_total_ms":39.126834,"created":1,"delta_per_runtime_kb":64.0,"failure":null,"failure_at":null,"fds_after":15,"fds_before":14,"fds_per_runtime":1.0,"requested":1,"rss_after_kb":10480,"rss_before_kb":10416,"rss_metric":"ps_rss_kb","rss_peak_kb":10480,"shutdown_total_ms":18.891791,"threads_after":16,"threads_before":14}
+[case] idle_100 n=100 p50=38.06ms p95=41.79ms min=32.13 max=42.84 mean=38.16 extra={"create_total_ms":3815.937833,"created":100,"delta_per_runtime_kb":202.08,"failure":null,"failure_at":null,"fds_after":114,"fds_before":14,"fds_per_runtime":1.0,"requested":100,"rss_after_kb":30672,"rss_before_kb":10464,"rss_metric":"ps_rss_kb","rss_peak_kb":30688,"shutdown_total_ms":1888.612834,"threads_after":115,"threads_before":14}
+[case] idle_1000 n=1000 p50=37.09ms p95=40.84ms min=30.09 max=94.89 mean=37.25 extra={"create_total_ms":37252.382791,"created":1000,"delta_per_runtime_kb":202.784,"failure":null,"failure_at":null,"fds_after":1016,"fds_before":14,"fds_per_runtime":1.002,"requested":1000,"rss_after_kb":228640,"rss_before_kb":25856,"rss_metric":"ps_rss_kb","rss_peak_kb":228960,"shutdown_total_ms":18796.187125,"threads_after":1015,"threads_before":14}
+[case] mock_turn_no_tool n=50 p50=11.04ms p95=12.67ms min=8.69 max=13.12 mean=11.25 extra={"conversation_kb":8.6640625,"events_kb":92.9638671875,"rss_metric":"ps_rss_kb","rss_peak_kb":149056,"usage_kb":20.3935546875}
+[case] mock_turn_1_tool n=30 p50=12.98ms p95=13.96ms min=11.00 max=14.02 mean=12.70 extra={"conversation_kb":29.6064453125,"events_kb":96.658203125,"rss_metric":"ps_rss_kb","rss_peak_kb":149504}
+[case] sse_1k n=1 p50=14.47ms p95=14.47ms min=14.47 max=14.47 mean=14.47 extra={"backlog_dropped":0,"backlog_pending_bytes":0,"chunks":1000,"events_per_sec":69651.94343433004,"received_events":1008,"rss_before_kb":149776,"rss_metric":"ps_rss_kb","rss_peak_kb":149776,"text_bytes":64000}
+[mink] Warning: event log queue is full; dropping diagnostic event (1 lost so far)
+[case] sse_10k n=1 p50=25.94ms p95=25.94ms min=25.94 max=25.94 mean=25.94 extra={"backlog_dropped":0,"backlog_pending_bytes":0,"chunks":10000,"events_per_sec":385783.80697041843,"received_events":10009,"rss_before_kb":151904,"rss_metric":"ps_rss_kb","rss_peak_kb":151904,"text_bytes":640000}
+[case] replay_1k n=1 p50=16.39ms p95=16.39ms min=16.39 max=16.39 mean=16.39 extra={"first_turn_ms":16.387124999999997,"messages":1000,"read_ms":0.481625,"rss_before_kb":156944,"rss_metric":"ps_rss_kb","rss_peak_kb":156944,"start_ms":12.441583000000001}
+[case] replay_10k n=1 p50=52.11ms p95=52.11ms min=52.11 max=52.11 mean=52.11 extra={"first_turn_ms":52.114334,"messages":10000,"read_ms":9.236792000000001,"rss_before_kb":162544,"rss_metric":"ps_rss_kb","rss_peak_kb":211200,"start_ms":28.772417}
+[case] replay_100k n=1 p50=433.39ms p95=433.39ms min=433.39 max=433.39 mean=433.39 extra={"first_turn_ms":433.39125,"messages":100000,"read_ms":29.695083,"rss_before_kb":259696,"rss_metric":"ps_rss_kb","rss_peak_kb":859696,"start_ms":135.31562499999998}
+[case] turns_500 n=500 p50=12.97ms p95=14.92ms min=9.09 max=21.03 mean=12.83 extra={"conversation_kb":81.43359375,"events_kb":636.9736328125,"rss_before_kb":251040,"rss_curve":[{"rss_kb":252128,"turn":125},{"rss_kb":252128,"turn":250},{"rss_kb":252128,"turn":375},{"rss_kb":252128,"turn":500}],"rss_metric":"ps_rss_kb","rss_peak_kb":252128,"total_turns":500,"usage_kb":198.3544921875}
+[case] turns_2000 n=2000 p50=18.00ms p95=25.07ms min=9.92 max=28.84 mean=18.13 extra={"conversation_kb":325.57421875,"events_kb":2450.0615234375,"rss_before_kb":251104,"rss_curve":[{"rss_kb":251104,"turn":500},{"rss_kb":259952,"turn":1000},{"rss_kb":268912,"turn":1500},{"rss_kb":282944,"turn":2000}],"rss_metric":"ps_rss_kb","rss_peak_kb":282944,"total_turns":2000,"usage_kb":791.1162109375}
+[case] compact_10 n=1 p50=976.85ms p95=976.85ms min=976.85 max=976.85 mean=976.85 extra={"context_state_exists":true,"ms_per_compaction":97.68465,"ok_turns":64,"rss_metric":"ps_rss_kb","rss_peak_kb":267664,"start_ms":36.368708,"summaries":10,"target_compactions":10,"turns_used":64}
+[case] compact_100 n=1 p50=9383.92ms p95=9383.92ms min=9383.92 max=9383.92 mean=9383.92 extra={"context_state_exists":true,"ms_per_compaction":93.83915166999999,"ok_turns":604,"rss_metric":"ps_rss_kb","rss_peak_kb":268144,"start_ms":39.185333,"summaries":100,"target_compactions":100,"turns_used":604}

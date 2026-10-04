@@ -4,6 +4,8 @@
 
 分层、职责与关键不变式。
 
+运行时资源与 TUI 渲染的测量方法、日期记录和证据见仓库[性能与验证](../development/performance.md)。
+
 ## 核心原则
 
 - **单进程主循环**：`OrchActor` 接收命令并为每个用户输入创建 `TurnExecutor`。

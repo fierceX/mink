@@ -48,6 +48,13 @@
 
 - macOS sandbox profile 的写白名单同时包含字面路径与可解析真实路径，避免 TMPDIR `/var/folders/...`、`/tmp` 等符号链接路径在 sandbox-exec 下被 `EPERM` 拒绝；覆盖声明目录、临时目录与会话存储，并增加单元测试。
 
+### 新增：运行时性能基准套件
+
+- `cargo bench -p mink-core --bench runtime_bench`（`--quick` / `--list` / `--case` / `--reps` / `--json`）：mock LLM backend 下覆盖 process_start、runtime_start、session_create、idle_1/100/1000、mock_turn_no_tool/1_tool、sse_1k/10k、replay_1k/10k/100k、turns_500/2000、compact_10/100、concurrent_32/64/128、subagent_fanout_2/4/8、sandbox_start。
+- `./scripts/bench-runtime.sh`（`make bench` / `make bench-quick`）：记录机器、OS、commit（dirty 标注）、rustc/cargo 版本与 RSS 口径，报告留存 `target/bench/*.json|txt`（P50/P95/min/max/mean 与内存/线程/吞吐 extra）。
+- `make bench-check` 验证 mock 工作负载和失败报告，不设置机器相关的性能阈值。报告 v2 保留失败/跳过并在失败时返回非零；mock 同步填充工具 fields，核对真实子代理请求，修正旧扇出用例只完成父轮次的假成功。
+- 运行时和 TUI 的日期结果分别存入 `docs/development/benchmarks/`，方法与索引见 `docs/development/performance.md`。保留历史 dirty 标记、失败/中断记录、脱敏 JSON/日志及 SHA-256，维护材料不进入官网发布产物。
+
 ### 新增：以会话为中心的 Web 开发工作台
 
 - 项目会话导航、用户轮次与紧凑过程组、统一任务/文件/输出/诊断详情；浅色/深色、过程偏好、手机布局与按会话保留的草稿、附件、展开和阅读位置。

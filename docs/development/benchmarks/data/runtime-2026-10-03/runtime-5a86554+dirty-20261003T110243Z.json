@@ -1,0 +1,523 @@
+{
+  "meta": {
+    "arch": "aarch64",
+    "commit": "5a86554+dirty",
+    "fd_limit": "8192",
+    "kernel": "24.6.0",
+    "logical_cores": 12,
+    "machine": "Apple M4 Pro",
+    "mock_calls": 3634,
+    "os": "macOS 15.7.7",
+    "quick": false,
+    "reps_override": null,
+    "rss_metric": "ps_rss_kb",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "suite": "mink-core/runtime_bench",
+    "summary_calls": 110,
+    "timestamp_epoch_secs": 1791025494
+  },
+  "samples": [
+    {
+      "case": "process_start",
+      "extra": {},
+      "max": 3.34975,
+      "mean": 2.6097116200000006,
+      "min": 2.216416,
+      "n": 50,
+      "p50": 2.447542,
+      "p95": 3.236958,
+      "unit": "ms"
+    },
+    {
+      "case": "process_start_cli",
+      "extra": {
+        "binary": "<repo>/target/release/mink"
+      },
+      "max": 3.7847910000000002,
+      "mean": 2.9511074600000007,
+      "min": 2.488209,
+      "n": 50,
+      "p50": 2.772083,
+      "p95": 3.525417,
+      "unit": "ms"
+    },
+    {
+      "case": "runtime_start",
+      "extra": {},
+      "max": 13.246333,
+      "mean": 10.725389600000002,
+      "min": 7.923082999999999,
+      "n": 20,
+      "p50": 11.165709,
+      "p95": 12.252084,
+      "unit": "ms"
+    },
+    {
+      "case": "session_create",
+      "extra": {},
+      "max": 49.506084,
+      "mean": 13.5489521,
+      "min": 9.247834,
+      "n": 20,
+      "p50": 12.140625,
+      "p95": 13.27975,
+      "unit": "ms"
+    },
+    {
+      "case": "idle_1",
+      "extra": {
+        "create_total_ms": 31.948333,
+        "created": 1,
+        "delta_per_runtime_kb": 32.0,
+        "failure": null,
+        "failure_at": null,
+        "fds_after": 15,
+        "fds_before": 14,
+        "fds_per_runtime": 1.0,
+        "requested": 1,
+        "rss_after_kb": 10896,
+        "rss_before_kb": 10864,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 10896,
+        "shutdown_total_ms": 15.932084,
+        "threads_after": 16,
+        "threads_before": 14
+      },
+      "max": 31.946125,
+      "mean": 31.946125,
+      "min": 31.946125,
+      "n": 1,
+      "p50": 31.946125,
+      "p95": 31.946125,
+      "unit": "ms"
+    },
+    {
+      "case": "idle_100",
+      "extra": {
+        "create_total_ms": 3556.31475,
+        "created": 100,
+        "delta_per_runtime_kb": 200.0,
+        "failure": null,
+        "failure_at": null,
+        "fds_after": 114,
+        "fds_before": 14,
+        "fds_per_runtime": 1.0,
+        "requested": 100,
+        "rss_after_kb": 30880,
+        "rss_before_kb": 10880,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 30896,
+        "shutdown_total_ms": 1740.99775,
+        "threads_after": 115,
+        "threads_before": 14
+      },
+      "max": 39.829042,
+      "mean": 35.56023381999999,
+      "min": 29.266459,
+      "n": 100,
+      "p50": 35.717791999999996,
+      "p95": 38.706333,
+      "unit": "ms"
+    },
+    {
+      "case": "idle_1000",
+      "extra": {
+        "create_total_ms": 37772.507584000006,
+        "created": 1000,
+        "delta_per_runtime_kb": 202.576,
+        "failure": null,
+        "failure_at": null,
+        "fds_after": 1014,
+        "fds_before": 14,
+        "fds_per_runtime": 1.0,
+        "requested": 1000,
+        "rss_after_kb": 228816,
+        "rss_before_kb": 26240,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 229152,
+        "shutdown_total_ms": 18819.755458,
+        "threads_after": 1015,
+        "threads_before": 14
+      },
+      "max": 77.16466700000001,
+      "mean": 37.77036286500005,
+      "min": 29.625917,
+      "n": 1000,
+      "p50": 37.89725,
+      "p95": 41.669791999999994,
+      "unit": "ms"
+    },
+    {
+      "case": "mock_turn_no_tool",
+      "extra": {
+        "conversation_kb": 8.6640625,
+        "events_kb": 92.953125,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 150480,
+        "usage_kb": 20.39453125
+      },
+      "max": 20.603875000000002,
+      "mean": 10.566487460000003,
+      "min": 8.218125,
+      "n": 50,
+      "p50": 10.783666,
+      "p95": 11.758750000000001,
+      "unit": "ms"
+    },
+    {
+      "case": "mock_turn_1_tool",
+      "extra": {
+        "conversation_kb": 29.6064453125,
+        "events_kb": 96.658203125,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 150656
+      },
+      "max": 13.554125,
+      "mean": 11.854911133333333,
+      "min": 10.90275,
+      "n": 30,
+      "p50": 11.962250000000001,
+      "p95": 13.076,
+      "unit": "ms"
+    },
+    {
+      "case": "sse_1k",
+      "extra": {
+        "backlog_dropped": 0,
+        "backlog_pending_bytes": 0,
+        "chunks": 1000,
+        "events_per_sec": 78762.81741786574,
+        "received_events": 1008,
+        "rss_before_kb": 150896,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 150896,
+        "text_bytes": 64000
+      },
+      "max": 12.797917,
+      "mean": 12.797917,
+      "min": 12.797917,
+      "n": 1,
+      "p50": 12.797917,
+      "p95": 12.797917,
+      "unit": "ms"
+    },
+    {
+      "case": "sse_10k",
+      "extra": {
+        "backlog_dropped": 0,
+        "backlog_pending_bytes": 0,
+        "chunks": 10000,
+        "events_per_sec": 414119.1073414186,
+        "received_events": 10009,
+        "rss_before_kb": 156592,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 157360,
+        "text_bytes": 640000
+      },
+      "max": 24.169375,
+      "mean": 24.169375,
+      "min": 24.169375,
+      "n": 1,
+      "p50": 24.169375,
+      "p95": 24.169375,
+      "unit": "ms"
+    },
+    {
+      "case": "replay_1k",
+      "extra": {
+        "first_turn_ms": 14.323334000000001,
+        "messages": 1000,
+        "read_ms": 0.443083,
+        "rss_before_kb": 157360,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 159040,
+        "start_ms": 10.47475
+      },
+      "max": 14.323334000000001,
+      "mean": 14.323334000000001,
+      "min": 14.323334000000001,
+      "n": 1,
+      "p50": 14.323334000000001,
+      "p95": 14.323334000000001,
+      "unit": "ms"
+    },
+    {
+      "case": "replay_10k",
+      "extra": {
+        "first_turn_ms": 49.929500000000004,
+        "messages": 10000,
+        "read_ms": 7.595583,
+        "rss_before_kb": 164016,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 205184,
+        "start_ms": 27.623124999999998
+      },
+      "max": 49.929500000000004,
+      "mean": 49.929500000000004,
+      "min": 49.929500000000004,
+      "n": 1,
+      "p50": 49.929500000000004,
+      "p95": 49.929500000000004,
+      "unit": "ms"
+    },
+    {
+      "case": "replay_100k",
+      "extra": {
+        "first_turn_ms": 435.544291,
+        "messages": 100000,
+        "read_ms": 29.050833,
+        "rss_before_kb": 259744,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 893600,
+        "start_ms": 135.32475
+      },
+      "max": 435.544291,
+      "mean": 435.544291,
+      "min": 435.544291,
+      "n": 1,
+      "p50": 435.544291,
+      "p95": 435.544291,
+      "unit": "ms"
+    },
+    {
+      "case": "turns_500",
+      "extra": {
+        "conversation_kb": 81.43359375,
+        "events_kb": 636.9375,
+        "rss_before_kb": 248432,
+        "rss_curve": [
+          {
+            "rss_kb": 249152,
+            "turn": 125
+          },
+          {
+            "rss_kb": 249152,
+            "turn": 250
+          },
+          {
+            "rss_kb": 249440,
+            "turn": 375
+          },
+          {
+            "rss_kb": 250464,
+            "turn": 500
+          }
+        ],
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 250976,
+        "total_turns": 500,
+        "usage_kb": 198.3408203125
+      },
+      "max": 21.097708,
+      "mean": 12.008454414000006,
+      "min": 8.840584,
+      "n": 500,
+      "p50": 11.999625,
+      "p95": 14.0795,
+      "unit": "ms"
+    },
+    {
+      "case": "turns_2000",
+      "extra": {
+        "conversation_kb": 325.57421875,
+        "events_kb": 2450.01953125,
+        "rss_before_kb": 247392,
+        "rss_curve": [
+          {
+            "rss_kb": 251520,
+            "turn": 500
+          },
+          {
+            "rss_kb": 262912,
+            "turn": 1000
+          },
+          {
+            "rss_kb": 275536,
+            "turn": 1500
+          },
+          {
+            "rss_kb": 283728,
+            "turn": 2000
+          }
+        ],
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 283728,
+        "total_turns": 2000,
+        "usage_kb": 791.1318359375
+      },
+      "max": 49.220625,
+      "mean": 17.601777304000027,
+      "min": 8.604667,
+      "n": 2000,
+      "p50": 17.028958,
+      "p95": 24.99275,
+      "unit": "ms"
+    },
+    {
+      "case": "compact_10",
+      "extra": {
+        "context_state_exists": true,
+        "ms_per_compaction": 92.27646659999999,
+        "ok_turns": 64,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 264448,
+        "start_ms": 31.764833,
+        "summaries": 10,
+        "target_compactions": 10,
+        "turns_used": 64
+      },
+      "max": 922.7646659999999,
+      "mean": 922.7646659999999,
+      "min": 922.7646659999999,
+      "n": 1,
+      "p50": 922.7646659999999,
+      "p95": 922.7646659999999,
+      "unit": "ms"
+    },
+    {
+      "case": "compact_100",
+      "extra": {
+        "context_state_exists": true,
+        "ms_per_compaction": 88.70585542,
+        "ok_turns": 604,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 264928,
+        "start_ms": 34.224334,
+        "summaries": 100,
+        "target_compactions": 100,
+        "turns_used": 604
+      },
+      "max": 8870.585542,
+      "mean": 8870.585542,
+      "min": 8870.585542,
+      "n": 1,
+      "p50": 8870.585542,
+      "p95": 8870.585542,
+      "unit": "ms"
+    },
+    {
+      "case": "concurrent_32",
+      "extra": {
+        "concurrency": 32,
+        "rss_after_kb": 268560,
+        "rss_before_kb": 264912,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 269072,
+        "throughput_per_sec": 20.262547732436204,
+        "wall_ms": 1579.268334
+      },
+      "max": 1578.217333,
+      "mean": 1413.92462103125,
+      "min": 1219.760667,
+      "n": 32,
+      "p50": 1390.469583,
+      "p95": 1552.406833,
+      "unit": "ms"
+    },
+    {
+      "case": "concurrent_64",
+      "extra": {
+        "concurrency": 64,
+        "rss_after_kb": 272208,
+        "rss_before_kb": 268576,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 275968,
+        "throughput_per_sec": 20.464749668546997,
+        "wall_ms": 3127.32875
+      },
+      "max": 3123.270709,
+      "mean": 2651.702109390625,
+      "min": 2081.4384170000003,
+      "n": 64,
+      "p50": 2612.403375,
+      "p95": 3101.004708,
+      "unit": "ms"
+    },
+    {
+      "case": "concurrent_128",
+      "extra": {
+        "concurrency": 128,
+        "rss_after_kb": 278704,
+        "rss_before_kb": 272224,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 299136,
+        "throughput_per_sec": 19.19677170481804,
+        "wall_ms": 6667.787791000001
+      },
+      "max": 6667.157208,
+      "mean": 5716.537928367188,
+      "min": 4255.389916,
+      "n": 128,
+      "p50": 5801.1057089999995,
+      "p95": 6562.868334,
+      "unit": "ms"
+    },
+    {
+      "case": "subagent_fanout_2",
+      "extra": {
+        "requested_subagents": 2,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 278736,
+        "status": "Ok",
+        "tool_calls": 2
+      },
+      "max": 9.651041000000001,
+      "mean": 9.651041000000001,
+      "min": 9.651041000000001,
+      "n": 1,
+      "p50": 9.651041000000001,
+      "p95": 9.651041000000001,
+      "unit": "ms"
+    },
+    {
+      "case": "subagent_fanout_4",
+      "extra": {
+        "requested_subagents": 4,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 278736,
+        "status": "Ok",
+        "tool_calls": 4
+      },
+      "max": 10.805916,
+      "mean": 10.805916,
+      "min": 10.805916,
+      "n": 1,
+      "p50": 10.805916,
+      "p95": 10.805916,
+      "unit": "ms"
+    },
+    {
+      "case": "subagent_fanout_8",
+      "extra": {
+        "requested_subagents": 8,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 278736,
+        "status": "Ok",
+        "tool_calls": 8
+      },
+      "max": 10.454125,
+      "mean": 10.454125,
+      "min": 10.454125,
+      "n": 1,
+      "p50": 10.454125,
+      "p95": 10.454125,
+      "unit": "ms"
+    },
+    {
+      "case": "sandbox_start",
+      "extra": {
+        "inner_start_p50_ms": 31.504834000000002,
+        "inner_turn_p50_ms": 9.982208,
+        "probe_failures": [],
+        "sandboxed": true
+      },
+      "max": 88.384458,
+      "mean": 80.3836665,
+      "min": 78.744375,
+      "n": 10,
+      "p50": 79.814791,
+      "p95": 88.384458,
+      "unit": "ms"
+    }
+  ]
+}

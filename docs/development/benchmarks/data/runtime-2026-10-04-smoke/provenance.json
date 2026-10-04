@@ -1,0 +1,28 @@
+{
+  "purpose": "adoption smoke validation, not a performance baseline",
+  "recorded_commit": "e7fb6f2+dirty",
+  "command": "./scripts/bench-runtime.sh --cases sandbox_start,subagent_fanout --reps 2 --out target/bench-adoption",
+  "source_sha256": {
+    "crates/mink-core/benches/runtime_bench.rs": "fa5bce2188067a98eaa47917d51ee54668f834303cde42b547ade7640313edfa",
+    "scripts/bench-runtime.sh": "9002ff065bcb93cf1afdd2b0db870c2fb1bd29ec393c130535686a93d447a36a",
+    "crates/mink-core/src/sandbox/platform_macos.rs": "ff93fa09d1caa72337c61d4f0de4b56eebe0babbecba0c25e5bbf1606a3bf5b1"
+  },
+  "files": [
+    {
+      "file": "runtime-e7fb6f2+dirty-20261004T153004Z.json",
+      "original_sha256": "3399ea1b9d7fb64152990f492da5be77e92295290935ac05ba036a90f0030273",
+      "archived_sha256": "3399ea1b9d7fb64152990f492da5be77e92295290935ac05ba036a90f0030273",
+      "redactions": [
+        "absolute repository path replaced with <repo>"
+      ]
+    },
+    {
+      "file": "runtime-e7fb6f2+dirty-20261004T153004Z.txt",
+      "original_sha256": "5afc74efcba82c27280f3efae0629d1be9c79a0e3d1487e7b9f76df2d685dcf5",
+      "archived_sha256": "42e9ab233c5568bd9f22e7519f27ddb98d292dab80a010a6215edb1e8e3f1455",
+      "redactions": [
+        "absolute repository path replaced with <repo>"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+# mink runtime benchmark
+# machine:  Apple M4 Pro (12 cores, 24GB)
+# os:       macOS 15.7.7 (kernel 24.6.0)
+# commit:   5a86554+dirty
+# rustc:    rustc 1.98.0 (88d9e12ae 2026-08-18)
+# cargo:    cargo 1.98.0 (797e8a9bc 2026-08-05)
+# rss:      ps_rss_kb (current) + 20ms sampler peak; macOS RSS overstates footprint
+# quick:    0
+# reps:     per-case default
+
+warning: mink-core@0.6.6: Generated embedded_skills.rs with 4 skills
+   Compiling mink-core v0.6.6 (<repo>/crates/mink-core)
+    Finished `bench` profile [optimized] target(s) in 28.49s
+     Running benches/runtime_bench.rs (target/release/deps/runtime_bench-4eb075df2d1e27bb)
+# mink runtime bench | os=macOS 15.7.7 arch=aarch64 cores=12 rss_metric=ps_rss_kb reps=default quick=false
+[case] process_start n=50 p50=2.68ms p95=4.17ms min=2.21 max=5.25 mean=2.84 extra={}
+[case] process_start_cli n=50 p50=2.73ms p95=3.64ms min=2.49 max=3.79 mean=2.92 extra={"binary":"<repo>/target/release/mink"}
+[case] runtime_start n=20 p50=12.07ms p95=14.03ms min=8.06 max=14.35 mean=11.67 extra={}
+[case] session_create n=20 p50=13.08ms p95=14.31ms min=11.03 max=41.57 mean=14.15 extra={}
+[case] idle_1 n=1 p50=36.53ms p95=36.53ms min=36.53 max=36.53 mean=36.53 extra={"count":1,"create_total_ms":36.532792,"delta_per_runtime_kb":48.0,"rss_after_kb":10352,"rss_before_kb":10304,"rss_metric":"ps_rss_kb","rss_peak_kb":10352,"shutdown_total_ms":16.222209000000003,"threads_after":16,"threads_before":14}
+[case] idle_100 n=100 p50=39.02ms p95=42.10ms min=34.08 max=47.57 mean=38.70 extra={"count":100,"create_total_ms":3869.977916,"delta_per_runtime_kb":199.04,"rss_after_kb":30240,"rss_before_kb":10336,"rss_metric":"ps_rss_kb","rss_peak_kb":30240,"shutdown_total_ms":1854.692416,"threads_after":115,"threads_before":14}
+[error] idle_1000: idle runtime 245/1000 failed: runtime configuration failed: content was published but the directory sync failed; do not retry from the previous state: Too many open files (os error 24)
+[case] mock_turn_no_tool n=50 p50=10.95ms p95=12.34ms min=8.05 max=12.45 mean=10.83 extra={"conversation_kb":8.6640625,"events_kb":92.9638671875,"rss_metric":"ps_rss_kb","rss_peak_kb":49360,"usage_kb":20.3935546875}
+[case] mock_turn_1_tool n=30 p50=12.91ms p95=13.27ms min=11.08 max=13.29 mean=12.64 extra={"conversation_kb":29.6064453125,"events_kb":96.658203125,"rss_metric":"ps_rss_kb","rss_peak_kb":49952}
+[case] sse_1k n=1 p50=13.87ms p95=13.87ms min=13.87 max=13.87 mean=13.87 extra={"backlog_dropped":0,"backlog_pending_bytes":0,"chunks":1000,"events_per_sec":72661.306117253,"received_events":1008,"rss_before_kb":50256,"rss_metric":"ps_rss_kb","rss_peak_kb":50256,"text_bytes":64000}
+[mink] Warning: event log queue is full; dropping diagnostic event (1 lost so far)
+[case] sse_10k n=1 p50=24.38ms p95=24.38ms min=24.38 max=24.38 mean=24.38 extra={"backlog_dropped":0,"backlog_pending_bytes":0,"chunks":10000,"events_per_sec":410478.28984467115,"received_events":10009,"rss_before_kb":56384,"rss_metric":"ps_rss_kb","rss_peak_kb":60224,"text_bytes":640000}
+[case] replay_1k n=1 p50=16.38ms p95=16.38ms min=16.38 max=16.38 mean=16.38 extra={"first_turn_ms":16.377583,"messages":1000,"read_ms":0.588083,"rss_before_kb":60208,"rss_metric":"ps_rss_kb","rss_peak_kb":60208,"start_ms":11.992916}
+[case] replay_10k n=1 p50=52.18ms p95=52.18ms min=52.18 max=52.18 mean=52.18 extra={"first_turn_ms":52.178125,"messages":10000,"read_ms":9.24,"rss_before_kb":66000,"rss_metric":"ps_rss_kb","rss_peak_kb":118624,"start_ms":28.139833}
+[case] replay_100k n=1 p50=444.88ms p95=444.88ms min=444.88 max=444.88 mean=444.88 extra={"first_turn_ms":444.878334,"messages":100000,"read_ms":29.791167,"rss_before_kb":176304,"rss_metric":"ps_rss_kb","rss_peak_kb":828768,"start_ms":135.484292}
+[case] turns_500 n=500 p50=12.98ms p95=15.02ms min=8.95 max=19.95 mean=12.97 extra={"conversation_kb":81.43359375,"events_kb":636.970703125,"rss_before_kb":190368,"rss_curve":[{"rss_kb":192336,"turn":125},{"rss_kb":192336,"turn":250},{"rss_kb":192368,"turn":375},{"rss_kb":192416,"turn":500}],"rss_metric":"ps_rss_kb","rss_peak_kb":192416,"total_turns":500,"usage_kb":198.33984375}
+[case] turns_2000 n=2000 p50=17.97ms p95=25.17ms min=8.09 max=34.40 mean=18.23 extra={"conversation_kb":325.57421875,"events_kb":2450.052734375,"rss_before_kb":191392,"rss_curve":[{"rss_kb":195008,"turn":500},{"rss_kb":202544,"turn":1000},{"rss_kb":216560,"turn":1500},{"rss_kb":225520,"turn":2000}],"rss_metric":"ps_rss_kb","rss_peak_kb":225520,"total_turns":2000,"usage_kb":791.1337890625}
+[case] compact_10 n=1 p50=955.25ms p95=955.25ms min=955.25 max=955.25 mean=955.25 extra={"context_state_exists":true,"ms_per_compaction":95.5247166,"ok_turns":64,"rss_metric":"ps_rss_kb","rss_peak_kb":206160,"start_ms":33.122791,"summaries":10,"target_compactions":10,"turns_used":64}
+[case] compact_100 n=1 p50=9514.68ms p95=9514.68ms min=9514.68 max=9514.68 mean=9514.68 extra={"context_state_exists":true,"ms_per_compaction":95.14683457999999,"ok_turns":604,"rss_metric":"ps_rss_kb","rss_peak_kb":206768,"start_ms":35.921665999999995,"summaries":100,"target_compactions":100,"turns_used":604}
+[case] concurrent_32 n=32 p50=1306.84ms p95=1429.16ms min=1065.68 max=1434.37 mean=1288.50 extra={"concurrency":32,"rss_after_kb":210320,"rss_before_kb":206752,"rss_metric":"ps_rss_kb","rss_peak_kb":211008,"throughput_per_sec":22.297537046667973,"wall_ms":1435.136084}
+[case] concurrent_64 n=64 p50=2474.74ms p95=2916.39ms min=1937.81 max=2949.71 mean=2487.84 extra={"concurrency":64,"rss_after_kb":214176,"rss_before_kb":210336,"rss_metric":"ps_rss_kb","rss_peak_kb":219648,"throughput_per_sec":21.69426657360477,"wall_ms":2950.088208}
+[case] concurrent_128 n=128 p50=4769.48ms p95=5733.82ms min=3399.50 max=5777.35 mean=4726.98 extra={"concurrency":128,"rss_after_kb":221920,"rss_before_kb":214192,"rss_metric":"ps_rss_kb","rss_peak_kb":239712,"throughput_per_sec":22.080091694480792,"wall_ms":5797.077375}
+[case] subagent_fanout_2 n=1 p50=10.08ms p95=10.08ms min=10.08 max=10.08 mean=10.08 extra={"requested_subagents":2,"rss_metric":"ps_rss_kb","rss_peak_kb":221952,"status":"Ok","tool_calls":2}
+[case] subagent_fanout_4 n=1 p50=10.60ms p95=10.60ms min=10.60 max=10.60 mean=10.60 extra={"requested_subagents":4,"rss_metric":"ps_rss_kb","rss_peak_kb":221952,"status":"Ok","tool_calls":4}
+[case] subagent_fanout_8 n=1 p50=12.10ms p95=12.10ms min=12.10 max=12.10 mean=12.10 extra={"requested_subagents":8,"rss_metric":"ps_rss_kb","rss_peak_kb":221952,"status":"Ok","tool_calls":8}
+[case] sandbox_start n=10 p50=89.78ms p95=94.11ms min=86.04 max=94.11 mean=89.61 extra={"inner_start_p50_ms":35.910790999999996,"inner_turn_p50_ms":10.8005,"probe_failures":[],"sandboxed":true}
+[report] target/bench/runtime-5a86554+dirty-20261003T103727Z.json
