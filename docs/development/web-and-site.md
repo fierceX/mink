@@ -152,10 +152,10 @@ trace/error-context 供 AI 自愈；测试产物（test-results/）已加入 .gi
 
 - `make docs-site`：27 个公开条目、37 个 Markdown 来源及 11 个必要静态资源通过；产物不含 development、migration 与未跟踪材料。
 - `node scripts/test-homepage.mjs`：18 项交互回归；`test_hero_replay.py`：8 项来源与统计回归。
-- `make docs-examples`：4 个完整 Rust fenced 示例编译，.env 案例 6 项测试；8 个 Python 示例语法/字段、11 个 TOML 示例语法/分组字段、28 个 CLI 参数引用通过。已有 core examples 全 feature 编译通过。
+- `make docs-examples`：4 个完整 Rust fenced 示例编译，.env 案例 6 项测试；8 个 Python 示例语法/字段、11 个 TOML 示例语法/分组字段、29 个 CLI 参数引用通过（含续行）。已有 core examples 全 feature 编译通过。
 - `cargo run -p mink-core --example custom_llm_backend`：无网络 echo backend 实际运行，返回 model=private-model-v1、alias=local 与一笔 fixture usage；不是生产模型任务。
 - `cargo test -p mink-core`：991 单元 + 5 集成测试通过，12 项默认忽略；`cargo test -p mink-cli`：251 单元 + 3 兼容测试通过，4 项默认忽略。
 - `cargo fmt --all -- --check` 无输出；workspace all-targets/all-features clippy 成功，无 clippy 诊断（build.rs 仍输出已有 embedded skills 生成通知）。
-- 真实 Chromium 验收 320/390/768/1024/1440px：总览与长配置页无页面级溢出；导航/目录、Esc/Tab 焦点与恢复、跨目录中文锚点、刷新/前后历史、Clipboard API 原字节复制通过。截图在 `target/docs-browser/`，未入库。复制拒绝/兼容回退由 jsdom 回归覆盖。
+- 真实 Chromium 在根地址及 Pages `/mink/` 子路径验收 320/390/768/1024/1440px：总览与长配置页无页面级溢出；导航/目录、Esc/Tab 焦点与恢复、跨目录中文锚点、刷新/前后历史、Clipboard API 原字节复制通过。截图在 `target/docs-browser/`，未入库。复制拒绝/兼容回退由 jsdom 回归覆盖。
 
 预览：先 `make docs-site`，再 `python3 -m http.server 8026 --bind 127.0.0.1 --directory target/docs-site`，打开 `http://127.0.0.1:8026/#docs/start/overview.md`。`make docs-browser` 对该预览运行验收；可用 `MINK_DOCS_URL` 指定 Pages 子路径预览。

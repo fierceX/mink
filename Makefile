@@ -84,3 +84,18 @@ pip-publish:
 
 pip-clean:
 	rm -rf mink_agent/_binary dist *.egg-info build
+
+.PHONY: docs-check docs-site docs-examples
+docs-check:
+	node scripts/docs-site.mjs
+
+docs-site:
+	node scripts/docs-site.mjs --build
+
+docs-examples:
+	python3 scripts/check-doc-examples.py
+	cargo check -p mink-core --examples --all-features
+
+.PHONY: docs-browser
+docs-browser:
+	node scripts/test-docs-browser.mjs

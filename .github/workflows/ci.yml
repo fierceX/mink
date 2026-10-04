@@ -31,6 +31,8 @@ jobs:
         run: |
           node scripts/test-homepage.mjs
           python3 -m unittest discover -s scripts -p 'test_hero_replay.py'
+      - name: Documentation examples
+        run: make docs-examples
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
@@ -84,42 +86,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Prepare published docs files
-        run: cp CHANGELOG.md docs/CHANGELOG.md
-
-      - name: Validate homepage assets
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.19.0"
+      - run: npm ci
+        working-directory: crates/mink-server/web
+      - name: Check and assemble documentation
+        run: make docs-site
+      - name: Install documentation browser
+        working-directory: crates/mink-server/web
+        run: npx playwright install --with-deps chromium
+      - name: Documentation browser acceptance
         run: |
-          test -f docs/.nojekyll
-          test -f docs/index.html
-          test -f docs/assets/home.css
-          test -f docs/assets/mink-mark.svg
-          test -f docs/assets/vendor/marked.min.js
-          test -f docs/assets/vendor/highlight.min.js
-          test -f docs/assets/hero-replay.json
-          test -f docs/USAGE.md
-          test -f docs/EMBEDDING.md
-          test -f docs/PROTOCOL.md
-          test -f docs/tools.md
-          test -f docs/ARCHITECTURE.md
-          test -f docs/DESIGN.md
-          test -f docs/CHANGELOG.md
-          test -f docs/设计哲学-信号系统.md
-          test -f docs/设计哲学-工具能力与提示词解耦.md
-          test -f docs/server.md
-
-      - name: Validate hero replay JSON
-        run: python3 -m json.tool docs/assets/hero-replay.json > /dev/null
-
-      - name: Check homepage doc references
-        run: |
-          # 侧栏引用的每篇文档都必须存在（含 CI 生成的 CHANGELOG.md）
-          for f in USAGE.md EMBEDDING.md PROTOCOL.md tools.md ARCHITECTURE.md DESIGN.md \
-                   CHANGELOG.md server.md 设计哲学-信号系统.md 设计哲学-工具能力与提示词解耦.md; do
-            grep -q "loadDoc('$f')" docs/index.html || { echo "missing sidebar ref: $f"; exit 1; }
-            test -f "docs/$f" || { echo "missing doc file: docs/$f"; exit 1; }
-          done
-          grep -q "fetch(path)" docs/index.html
-          grep -q 'fetch("assets/hero-replay.json")' docs/index.html
+          python3 -m http.server 8026 --bind 127.0.0.1 --directory target/docs-site > /tmp/mink-docs-preview.log 2>&1 &
+          preview_pid=$!
+          trap 'kill "$preview_pid"' EXIT
+          make docs-browser
 
   # ── Build multi-arch binaries ──────────────────────────────────
   binaries:
@@ -332,16 +314,18 @@ jobs:
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
 
-      - name: Prepare published docs files
-        run: |
-          cp CHANGELOG.md docs/CHANGELOG.md
-          # 内部文档不上传到站点（避免公开维护建议与技术笔记）
-          rm -f docs/TUI_OPTIMIZATION_ROADMAP.md docs/VFS_FORMATTER_RG_STYLE_GAP.md
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.19.0"
+      - run: npm ci
+        working-directory: crates/mink-server/web
+      - name: Check and assemble documentation
+        run: make docs-site
 
       - name: Upload docs site artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs
+          path: target/docs-site
 
       - name: Deploy to GitHub Pages
         id: deployment
