@@ -31,7 +31,20 @@ test.describe('mobile reading controls',()=>{
   test.use({hasTouch:true,isMobile:true,viewport:{width:390,height:844}});
   async function swipe(page:import('@playwright/test').Page,distance:number,x=190,y=350) {
     const cdp=await page.context().newCDPSession(page);
-    await cdp.send('Input.synthesizeScrollGesture',{x,y,yDistance:distance,speed:700,preventFling:true,gestureSourceType:'touch'});await cdp.detach();
+    const frame=()=>page.evaluate(()=>new Promise<void>(resolve=>requestAnimationFrame(()=>resolve())));
+    try {
+      // Use trusted touch input; native gesture synthesis can omit movement on Linux headless Chromium.
+      await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y,id:0}]});
+      const steps=Math.ceil(Math.abs(distance)/12);
+      for(let step=1;step<=steps;step++) {
+        await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x,y:y+distance*step/steps,id:0}]});
+        await frame();
+      }
+      // Hold the final point before release so inertia cannot shift the captured reading anchor.
+      for(let held=0;held<5;held++)await frame();
+      await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+      await frame();await frame();
+    } finally { await cdp.detach(); }
   }
   test('upward swipes hide chrome; down, taps and reveal controls restore it without losing the draft or anchor',async({page}, testInfo)=>{
     await page.goto('/?session=e2e-session');const input=page.getByRole('textbox',{name:'任务或补充指令'});await expect(input).toBeVisible();

@@ -133,6 +133,10 @@ trace/error-context 供定位。截图通过 `testInfo.outputPath()` 写入每�
 `test-results/`（已加入 .gitignore），也可用 `--output=<目录>` 指定；不依赖平台临时目录，
 并发测试不会互相覆盖。global-setup 从 `CARGO_TARGET_DIR`（默认仓库 `target/`）启动刚构建的 server。
 
+手机滑动测试使用 CDP `Input.dispatchTouchEvent` 发送可信的 touchStart/move/end，逐帧移动，
+释放前停留以避免惯性改变阅读锚点。Linux headless Chromium 的 `Input.synthesizeScrollGesture`
+在相同 fixture 中可能只产生开始/结束事件、没有实际滚动，不能作为阅读模式验收依据。
+
 ## 文档清单、校验与预览
 
 `docs/manifest.json` 是公开文档唯一清单，只含 path/title/group/description/source，数组顺序用于分组导航、总览、上一篇/下一篇和加载白名单。根 CHANGELOG 映射到站点 CHANGELOG.md。`assets/docs-shared.js` 同时供阅读器和校验器使用标题 ID 及链接解析；先经 marked 得到 DOM，再从源路径解析文档、图片及仓库源码链接，支持 Pages 子路径。
