@@ -1,8 +1,8 @@
 # 快速开始
 
-> 更新日期：2026-10-04
+> 更新日期：2026-10-05
 
-目标：在项目目录让 Mink 读取文件并给出简洁说明。前置：Rust 1.94+、可访问的 DeepSeek/OpenAI-compatible 模型端点及 API key。
+目标：在项目目录让 Mink 读取文件并给出简洁说明。前置：Rust 1.99+、可访问的 DeepSeek/OpenAI-compatible 模型端点及 API key。
 
 ## 从源码安装
 

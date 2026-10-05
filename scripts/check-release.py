@@ -16,7 +16,12 @@ def check(root: Path, tag: str | None = None) -> str:
     cargo = tomllib.loads((root / "Cargo.toml").read_text())
     version = cargo["workspace"]["package"]["version"]
     require(re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version), f"invalid version: {version}")
-    require(cargo["workspace"]["package"]["rust-version"] == "1.94", "MSRV mismatch")
+    minimum_rust = cargo["workspace"]["package"]["rust-version"]
+    require(minimum_rust == "1.99", "MSRV mismatch")
+    for file in ["README.md", "crates/mink-core/README.md", "docs/start/quickstart.md", "docs/integration/rust.md", "docs/integration/python.md", "docs/index.html", "docs/development/web-and-site.md"]:
+        require(f"Rust {minimum_rust}" in (root / file).read_text(), f"documented MSRV: {file}")
+    workflow = (root / ".github/workflows/ci.yml").read_text()
+    require(f"dtolnay/rust-toolchain@{minimum_rust}.0" in workflow, "CI MSRV toolchain")
     if tag is not None:
         require(tag == f"v{version}", f"tag {tag!r} does not match v{version}")
     for name in ["mink-core", "mink-cli", "mink-server"]:

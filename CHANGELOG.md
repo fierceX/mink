@@ -2,11 +2,13 @@
 
 ## Unreleased
 
+- 最低 Rust 版本提升至 1.99，事件进度预算使用 `try_update`，TUI 高度索引使用 `isolate_lowest_one`，修复新版 stable 的弃用及手写运算 lint；同步 CI、安装说明和发布校验，补充并发预留/释放回归。
+
 ## v0.6.7 (2026-10-05)
 
 ### 兼容性与发布修复
 
-- 保持最低 Rust 1.94：事件进度预算改用稳定 atomic 接口，TUI 高度索引改用稳定最低有效位运算；各 crate 明确继承 MSRV，CI 检查最低版本、完整 feature 与精简 SDK。
+- 最低 Rust 1.99：事件进度预算使用 `try_update`，TUI 高度索引使用 `isolate_lowest_one`；各 crate 明确继承 MSRV，CI 检查最低版本、完整 feature 与精简 SDK。
 - 锁文件将 Wasmtime/WASI 间接依赖的已撤回 `chacha20 0.10.1` 更新为兼容且未撤回的 `0.10.2`。
 - 修复 server 首个配置路径被丢弃，未知选项、多余参数和非法文件明确失败；恢复旧引导启动新 turn 时遵守全局并发上限，保留当前 turn 引导与请求幂等性，并增加实际进程/API 回归。
 - crates.io 发布仅在 registry 明确确认相同且未撤回版本已存在时跳过；认证、网络、响应异常与 cargo 失败阻止后续发布。新增跨渠道版本/tag 检查，发布依赖文档、最低版本与 Web E2E 验证；wheel 安装后检查内置二进制和隔离 provider 下的会话复用。

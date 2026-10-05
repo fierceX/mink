@@ -10,7 +10,7 @@ impl HeightIndex {
     }
     pub fn push(&mut self, height: usize) {
         let index = self.heights.len() + 1;
-        let start = index - (index & index.wrapping_neg());
+        let start = index - index.isolate_lowest_one();
         let covered = self.prefix(index - 1) - self.prefix(start);
         self.heights.push(height);
         self.tree.push(covered + height);
@@ -20,7 +20,7 @@ impl HeightIndex {
         let mut pos = index + 1;
         while pos <= self.tree.len() {
             self.tree[pos - 1] = self.tree[pos - 1] - old + height;
-            pos += pos & pos.wrapping_neg();
+            pos += pos.isolate_lowest_one();
         }
     }
     pub fn prefix(&self, count: usize) -> usize {

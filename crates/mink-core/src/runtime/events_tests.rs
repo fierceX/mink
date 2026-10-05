@@ -207,6 +207,36 @@ fn progress_budget_bounds_pending_bytes_and_counts_drops() {
 }
 
 #[test]
+fn progress_budget_preserves_accounting_under_concurrent_reserve_and_release() {
+    const WORKERS: usize = 8;
+    let min = super::PROGRESS_EVENT_MIN_BYTES;
+    let limit = (0..WORKERS).map(|worker| (worker * min).max(min)).sum();
+    let budget = super::ProgressBudget::new(limit);
+    let start = std::sync::Arc::new(std::sync::Barrier::new(WORKERS));
+
+    std::thread::scope(|scope| {
+        for worker in 0..WORKERS {
+            let budget = budget.clone();
+            let start = start.clone();
+            scope.spawn(move || {
+                start.wait();
+                for _ in 0..1000 {
+                    let payload = worker * min;
+                    assert!(budget.reserve(payload));
+                    budget.release(payload);
+                }
+            });
+        }
+    });
+
+    assert_eq!(budget.pending(), 0);
+    assert_eq!(budget.dropped(), 0);
+    assert!(budget.reserve(limit));
+    budget.release(limit);
+    assert_eq!(budget.pending(), 0);
+}
+
+#[test]
 fn emitter_drops_progress_over_budget_but_keeps_reliable_events() {
     let budget = super::ProgressBudget::new(super::PROGRESS_EVENT_MIN_BYTES);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

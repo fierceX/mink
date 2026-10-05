@@ -4,7 +4,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/mink-core.svg)](https://crates.io/crates/mink-core)
 [![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Rust 1.94+](https://img.shields.io/badge/rust-1.94%2B-blue)](docs/start/quickstart.md)
+[![Rust 1.99+](https://img.shields.io/badge/rust-1.99%2B-blue)](docs/start/quickstart.md)
 [![Python SDK](https://img.shields.io/badge/pypi-mink--agent-blue)](https://pypi.org/project/mink-agent)
 
 **Rust 原生 · 终端优先 · 可嵌入**
@@ -25,7 +25,7 @@ Mink 是一个 Rust 实现的 **AI agent runtime**：面向终端，也面向系
 ### 终端使用
 
 ```bash
-# 前置：Rust 1.94+，设置 DEEPSEEK_API_KEY 或通过配置指定 OpenAI-compatible 端点
+# 前置：Rust 1.99+，设置 DEEPSEEK_API_KEY 或通过配置指定 OpenAI-compatible 端点
 
 # 编译
 cargo build --release        # 或 make build

@@ -69,7 +69,7 @@ class VersionTests(unittest.TestCase):
             release.check(ROOT, "v99.0.0")
 
     def test_channel_and_lock_drift_are_rejected(self):
-        files = ["Cargo.toml", "Cargo.lock", "pyproject.toml", "README.md", "CHANGELOG.md", "docs/index.html", "docs/integration/rust.md"]
+        files = ["Cargo.toml", "Cargo.lock", "pyproject.toml", "README.md", "CHANGELOG.md", "docs/index.html", "docs/integration/rust.md", "docs/integration/python.md", "docs/start/quickstart.md", "docs/development/web-and-site.md", ".github/workflows/ci.yml"]
         files += [f"crates/{p}/Cargo.toml" for p in ["mink-core", "mink-cli", "mink-server"]]
         files += ["crates/mink-core/README.md", "crates/mink-server/web/package.json", "crates/mink-server/web/package-lock.json"]
         with tempfile.TemporaryDirectory() as temporary:
@@ -84,6 +84,13 @@ class VersionTests(unittest.TestCase):
                 original = path.read_text()
                 path.write_text(original.replace(version, "99.0.0"))
                 with self.subTest(file=file), self.assertRaises(ValueError):
+                    release.check(root)
+                path.write_text(original)
+            for file in ["Cargo.toml", "README.md", "crates/mink-core/README.md", "docs/start/quickstart.md", "docs/integration/rust.md", "docs/integration/python.md", "docs/index.html", "docs/development/web-and-site.md", ".github/workflows/ci.yml"]:
+                path = root / file
+                original = path.read_text()
+                path.write_text(original.replace("1.99", "1.98"))
+                with self.subTest(msrv=file), self.assertRaises(ValueError):
                     release.check(root)
                 path.write_text(original)
 

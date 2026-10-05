@@ -144,7 +144,7 @@ Rust core 会在 `conversation.jsonl` 中完整保留历史，并通过 `context
 | Linux | x86_64 GNU（glibc ≥2.35） | nsjail / bubblewrap |
 | Linux | x86_64 musl（musl ≥1.2） | nsjail / bubblewrap |
 
-macOS Intel 与 Linux aarch64 不在当前 wheel 发布矩阵中。从源码构建可在这些目标环境尝试，但需自行验证二进制、沙箱与 SDK 任务，不能将源码可构建等同于已有兼容 wheel。源码构建命令：
+macOS Intel 与 Linux aarch64 不在当前 wheel 发布矩阵中。从源码构建需要 Rust 1.99+，可在这些目标环境尝试，但需自行验证二进制、沙箱与 SDK 任务，不能将源码可构建等同于已有兼容 wheel。源码构建命令：
 
 ```bash
 cargo build -p mink-cli --release --no-default-features --features sdk-bin --bin mink-core

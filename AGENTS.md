@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-Mink 是用 Rust 实现的轻量 AI coding agent，面向 DeepSeek/OpenAI-compatible API：单二进制、终端优先，也可作为库嵌入（`mink::runtime`）。核心能力：
+Mink 是用 Rust 1.99+ 实现的轻量 AI coding agent，面向 DeepSeek/OpenAI-compatible API：单二进制、终端优先，也可作为库嵌入（`mink::runtime`）。核心能力：
 
 - LLM 流式请求 → 工具执行 → 决策的内循环；REPL / TUI 两种终端模式，`AgentRuntime::start() → run_turn()/stream_turn() → shutdown()` 无需子进程
 - 信号驱动的信念系统：轨迹证据注入（`[trajectory]`/`[detector]`）、编辑循环快照回滚、恢复首步守卫；`SignalPolicy` 分档，阈值/超参为内部常量，`MINK_SIGNAL_POLICY=off` 关闭

@@ -47,7 +47,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
       - run: cargo test -p mink-core --features python-sandbox
-      # R10：真实 Linux 进程树回收验证（bwrap 缺失或命名空间受限则失败）。
+      # 真实 Linux 进程树回收验证（bwrap 缺失或命名空间受限则失败）。
       - name: Install bubblewrap for Linux sandbox integration
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
       # Ubuntu24.04+ 默认用 AppArmor 限制非特权 user namespace：bwrap 会在创建
@@ -99,7 +99,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: actions/setup-node@v4
         with:
           node-version: "20.19.0"

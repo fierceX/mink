@@ -17,6 +17,8 @@
 
 ## 依赖方式
 
+需要 Rust 1.99+。
+
 ```toml
 [dependencies]
 mink = { package = "mink-core", version = "0.6.7", default-features = false, features = ["runtime"] }

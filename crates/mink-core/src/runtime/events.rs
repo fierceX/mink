@@ -265,7 +265,7 @@ impl ProgressBudget {
         let bytes = payload_len.max(PROGRESS_EVENT_MIN_BYTES);
         let _ = self
             .pending
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 debug_assert!(
                     current >= bytes,
                     "progress budget released more than reserved: {current} < {bytes}"
