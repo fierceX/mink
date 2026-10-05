@@ -18,6 +18,7 @@ export const E2E_SESSION_ID = "e2e-session";
 export const E2E_HOME = join(tmpdir(), "mink-e2e-home");
 const WEB_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const REPO_DIR = resolve(WEB_DIR, "../../..");
+const TARGET_DIR = resolve(REPO_DIR, process.env.CARGO_TARGET_DIR ?? "target");
 
 export default async function globalSetup() {
   // 清理残留（上次运行失败时的）
@@ -73,7 +74,7 @@ export default async function globalSetup() {
   await waitFor("http://127.0.0.1:18822");
   // 启动 server（临时 home + 非默认端口）
   const server = spawn(
-    join(REPO_DIR, "target/debug/mink-server"),
+    join(TARGET_DIR, "debug", "mink-server"),
     [],
     {
       env: {

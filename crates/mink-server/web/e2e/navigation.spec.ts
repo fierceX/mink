@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { openSettings } from './settings-helper';
 
 for (const width of [1440, 390]) {
-  test(`settings are on demand and restore focus at ${width}px`, async ({ page }) => {
+  test(`settings are on demand and restore focus at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 844 });
     await page.goto('/?session=e2e-session');
     await expect(page.getByRole('textbox', { name: '任务或补充指令' })).toBeVisible();
@@ -16,7 +16,7 @@ for (const width of [1440, 390]) {
     expect(await settings.evaluate(el => el.contains(document.activeElement))).toBe(true);
     await page.getByRole('combobox', { name: '外观', exact: true }).selectOption('dark');
     await page.getByRole('combobox', { name: '过程展示', exact: true }).selectOption('detailed');
-    await page.screenshot({ animations: 'disabled', path: `/private/tmp/mink-settings-${width}.png` });
+    await page.screenshot({ animations: 'disabled', path: testInfo.outputPath(`mink-settings-${width}.png`) });
     expect(await page.evaluate(() => document.scrollingElement!.scrollWidth <= innerWidth)).toBe(true);
     await page.keyboard.press('Escape');
     await expect(settings).not.toBeVisible();
@@ -69,7 +69,7 @@ test('missing session links return to Home with an explicit explanation', async 
   expect(new URL(page.url()).searchParams.has('session')).toBe(false);
 });
 
-test('mobile Home leaves a running task in the background and retains the draft', async ({ page }) => {
+test('mobile Home leaves a running task in the background and retains the draft', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const session = (await (await page.request.post('/api/sessions', { data: { name: `home-${Date.now()}`, cwd: '/tmp/mink-e2e-cwd' } })).json()).data;
   try {
@@ -84,7 +84,7 @@ test('mobile Home leaves a running task in the background and retains the draft'
     await expect(page.getByRole('heading', { name: '继续工作' })).toBeVisible();
     expect((await page.locator('.hero').boundingBox())!.y).toBeGreaterThan(48);
     expect(await page.evaluate(() => document.scrollingElement!.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ animations: 'disabled', path: '/private/tmp/mink-home-390.png' });
+    await page.screenshot({ animations: 'disabled', path: testInfo.outputPath('mink-home-390.png') });
     expect(new URL(page.url()).searchParams.has('session')).toBe(false);
     const runtime = (await (await page.request.get(`/api/sessions/${session.id}?project=${session.project_key}`)).json()).data;
     expect(runtime.running).toBe(true);
@@ -99,7 +99,7 @@ test('mobile Home leaves a running task in the background and retains the draft'
 });
 
 for (const width of [1440, 1024, 768, 390, 320]) {
-  test(`catalog scope isolates names and paths at ${width}px`, async ({ page }) => {
+  test(`catalog scope isolates names and paths at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 844 }); await page.goto('/');
     if (width < 1024) await page.getByRole('button', { name: '切换导航', exact: true }).click();
     const catalog = page.locator('.session-list');
@@ -127,7 +127,7 @@ for (const width of [1440, 1024, 768, 390, 320]) {
     await expect(catalog.locator('.sess-row')).toHaveCount(count);
     await expect(page.getByRole('button', { name: '首页', exact: true })).toBeVisible();
     await scope.selectOption('session'); await query.fill('工具卡片');
-    await page.screenshot({ animations: 'disabled', path: `/private/tmp/mink-filter-${width}.png` });
+    await page.screenshot({ animations: 'disabled', path: testInfo.outputPath(`mink-filter-${width}.png`) });
     expect(await page.locator('.sessions-sidebar').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
     expect(await page.evaluate(() => document.scrollingElement!.scrollWidth <= innerWidth)).toBe(true);
     await page.locator('.sess-row .session-select').click();

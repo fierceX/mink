@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test';
 import { E2E_MOBILE_ID, LONG_LINE } from './mobile-fixture';
 
 for(const width of [320,390,768,1440]) {
-  test(`reading width and wrapping remain bounded at ${width}px`,async({page})=>{
+  test(`reading width and wrapping remain bounded at ${width}px`,async({page}, testInfo)=>{
     await page.setViewportSize({width,height:844});await page.goto(`/?session=${E2E_MOBILE_ID}`);
     const transcript=page.locator('.transcript');const code=page.locator('.msg.agent pre');
     await expect(code).toHaveText(LONG_LINE);await expect(page.locator('html')).toHaveAttribute('data-wrap','on');
@@ -11,7 +11,7 @@ for(const width of [320,390,768,1440]) {
     expect(await transcript.evaluate(el=>el.scrollWidth<=el.clientWidth+1)).toBe(true);
     await page.locator('.process-group > summary').click();await page.locator('.tool-card > summary').click();
     expect(await page.locator('.t-file').evaluate(el=>el.scrollWidth<=el.clientWidth+1)).toBe(true);
-    await code.scrollIntoViewIfNeeded();await page.screenshot({animations:'disabled',path:`/private/tmp/mink-mobile-wrap-${width}.png`});
+    await code.scrollIntoViewIfNeeded();await page.screenshot({animations:'disabled',path:testInfo.outputPath(`mink-mobile-wrap-${width}.png`)});
     await page.getByRole('button',{name:'跳转已加载轮次',exact:true}).click();
     const wrap=page.getByRole('menuitemcheckbox',{name:'自动换行'});await expect(wrap).toHaveAttribute('aria-checked','true');await wrap.click();await expect(wrap).toHaveAttribute('aria-checked','false');
     await page.keyboard.press('Escape');await expect(page.locator('html')).toHaveAttribute('data-wrap','off');
@@ -33,14 +33,14 @@ test.describe('mobile reading controls',()=>{
     const cdp=await page.context().newCDPSession(page);
     await cdp.send('Input.synthesizeScrollGesture',{x,y,yDistance:distance,speed:700,preventFling:true,gestureSourceType:'touch'});await cdp.detach();
   }
-  test('upward swipes hide chrome; down, taps and reveal controls restore it without losing the draft or anchor',async({page})=>{
+  test('upward swipes hide chrome; down, taps and reveal controls restore it without losing the draft or anchor',async({page}, testInfo)=>{
     await page.goto('/?session=e2e-session');const input=page.getByRole('textbox',{name:'任务或补充指令'});await expect(input).toBeVisible();
     await input.fill('保留手机草稿');await input.evaluate(el=>(el as HTMLTextAreaElement).blur());
     const transcript=page.locator('.transcript');await transcript.evaluate(el=>el.scrollTop=400);await expect(page.locator('.topbar')).toBeVisible();
     const height=await transcript.evaluate(el=>el.clientHeight);
     await swipe(page,-220);await expect(page.getByRole('button',{name:'显示顶部栏',exact:true})).toBeVisible();await expect(input).not.toBeVisible();
     expect(await transcript.evaluate(el=>el.clientHeight)).toBeGreaterThan(height+100);
-    await page.screenshot({animations:'disabled',path:'/private/tmp/mink-mobile-reading-hidden.png'});
+    await page.screenshot({animations:'disabled',path:testInfo.outputPath('mink-mobile-reading-hidden.png')});
     const anchor=await transcript.evaluate(el=>{const top=el.getBoundingClientRect().top;const node=[...el.querySelectorAll<HTMLElement>('[data-item-key]')].find(n=>n.getBoundingClientRect().bottom>top+1)!;return {key:node.dataset.itemKey,offset:node.getBoundingClientRect().top-top}});
     await page.getByRole('button',{name:'显示顶部栏',exact:true}).tap();await expect(input).toBeVisible();
     await expect.poll(()=>transcript.evaluate((el,anchor)=>{const node=[...el.querySelectorAll<HTMLElement>('[data-item-key]')].find(n=>n.dataset.itemKey===anchor.key)!;return Math.abs(node.getBoundingClientRect().top-el.getBoundingClientRect().top-anchor.offset)},anchor)).toBeLessThan(4);
@@ -59,13 +59,13 @@ test.describe('mobile reading controls',()=>{
     const box=(await body.boundingBox())!;const before=await body.evaluate(el=>el.scrollTop);await swipe(page,-140,box.x+40,box.y+80);
     expect(await body.evaluate(el=>el.scrollTop)).toBeGreaterThan(before);await expect(page.locator('.topbar')).toBeVisible();await expect(page.getByRole('textbox',{name:'任务或补充指令'})).toBeVisible();
   });
-  test('reading mode keeps Stop reachable and restores the composer on stop',async({page})=>{
+  test('reading mode keeps Stop reachable and restores the composer on stop',async({page}, testInfo)=>{
     await page.goto(`/?session=${E2E_MOBILE_ID}`);const input=page.getByRole('textbox',{name:'任务或补充指令'});await expect(input).toBeVisible();
     await input.fill('slow-task');await page.getByRole('button',{name:'发送',exact:true}).tap();await expect(page.getByRole('button',{name:'提交引导',exact:true})).toBeVisible();
     await expect(page.locator('.process-group > summary').last()).toContainText('正在思考');
     await page.locator('.transcript').evaluate(el=>el.scrollTop=300);await swipe(page,-160);
     await expect(page.getByRole('button',{name:'显示输入框',exact:true})).toBeVisible();await expect(page.getByRole('button',{name:'停止',exact:true})).toBeVisible();
-    await page.screenshot({animations:'disabled',path:'/private/tmp/mink-mobile-reading-running.png'});
+    await page.screenshot({animations:'disabled',path:testInfo.outputPath('mink-mobile-reading-running.png')});
     await page.getByRole('button',{name:'停止',exact:true}).tap();await expect(page.getByRole('button',{name:'发送',exact:true})).toBeVisible();await expect(input).toBeVisible();
   });
   test('accepted guidance reveals the composer immediately and remains visible after Stop',async({page})=>{

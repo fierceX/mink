@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test';
 import { E2E_CARDS_ID } from './tool-cards-fixture';
 
 for(const width of [1440,390]) {
-  test(`tool cards render formal structured history after reload at ${width}px`,async({page})=>{
+  test(`tool cards render formal structured history after reload at ${width}px`,async({page}, testInfo)=>{
     const errors:string[]=[];page.on('pageerror',error=>errors.push(error.message));
     await page.setViewportSize({width,height:844});await page.goto(`/?session=${E2E_CARDS_ID}`);
     await expect(page.locator('.msg.agent').last()).toContainText('已完成配置检查与验证');
@@ -23,12 +23,12 @@ for(const width of [1440,390]) {
     await expect(card('Bash').locator('.raw-input pre')).not.toBeVisible();await card('Bash').locator('.raw-input summary').click();await expect(card('Bash').locator('.raw-input pre')).toContainText('"command": "cargo test -p fixture"');
     expect(await page.evaluate(()=>document.scrollingElement!.scrollWidth<=innerWidth)).toBe(true);
     for(const name of ['Edit','PlanDraft','TodoRead','SubAgent']) {
-      await card(name).scrollIntoViewIfNeeded();await card(name).screenshot({animations:'disabled',path:`/private/tmp/mink-card-${name}-${width}.png`});
+      await card(name).scrollIntoViewIfNeeded();await card(name).screenshot({animations:'disabled',path:testInfo.outputPath(`mink-card-${name}-${width}.png`)});
     }
-    await page.screenshot({animations:'disabled',path:`/private/tmp/mink-cards-${width}.png`});
+    await page.screenshot({animations:'disabled',path:testInfo.outputPath(`mink-cards-${width}.png`)});
     await openSettings(page); await page.getByRole('combobox',{name:'外观',exact:true}).selectOption('dark'); await page.getByRole('button',{name:'关闭设置',exact:true}).click();
     await expect(page.locator('html')).toHaveAttribute('data-theme','dark');
-    await card('PythonSandbox').scrollIntoViewIfNeeded();await card('PythonSandbox').screenshot({animations:'disabled',path:`/private/tmp/mink-card-command-dark-${width}.png`});
+    await card('PythonSandbox').scrollIntoViewIfNeeded();await card('PythonSandbox').screenshot({animations:'disabled',path:testInfo.outputPath(`mink-card-command-dark-${width}.png`)});
     expect(await page.evaluate(()=>document.scrollingElement!.scrollWidth<=innerWidth)).toBe(true);expect(errors).toEqual([]);
   });
 }

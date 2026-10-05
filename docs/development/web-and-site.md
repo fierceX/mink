@@ -128,8 +128,10 @@ npm run typecheck && npm run build
 cargo test -p mink-core -p mink-cli -p mink-server
 ```
 
-E2E 通过 global-setup 构造隔离临时 home + 模板会话与本地模拟 OpenAI-compatible provider，覆盖 1440/1024/768/390px、引导/续发/附件/分页锚点；失败产出
-trace/error-context 供 AI 自愈；测试产物（test-results/）已加入 .gitignore。
+E2E 通过 global-setup 构造隔离临时 home + 模板会话与本地模拟 OpenAI-compatible provider，覆盖 1440/1024/768/390/320px、引导/续发/附件/分页锚点；失败产出
+trace/error-context 供定位。截图通过 `testInfo.outputPath()` 写入每个测试独立的产物目录，默认
+`test-results/`（已加入 .gitignore），也可用 `--output=<目录>` 指定；不依赖平台临时目录，
+并发测试不会互相覆盖。global-setup 从 `CARGO_TARGET_DIR`（默认仓库 `target/`）启动刚构建的 server。
 
 ## 文档清单、校验与预览
 

@@ -40,7 +40,7 @@ test('desktop project navigation, final replies and ordered process groups', asy
   expect(errors).toEqual([]);
 });
 for (const width of [1440, 1024, 768, 390]) {
-  test(`responsive workbench ${width}px: no body overflow, reachable composer and details`, async ({ page }) => {
+  test(`responsive workbench ${width}px: no body overflow, reachable composer and details`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 844 }); await open(page);
     const textarea = page.getByRole('textbox', { name: '任务或补充指令' });
     const geometry = await textarea.boundingBox(); expect(geometry!.y + geometry!.height).toBeLessThan(844);
@@ -54,7 +54,7 @@ for (const width of [1440, 1024, 768, 390]) {
     await textarea.fill('draft remains editable');
     if (width < 768) { await textarea.press('Enter'); await expect(textarea).toHaveValue('draft remains editable\n'); }
     await textarea.fill('');
-    await page.screenshot({animations:'disabled',path:`/private/tmp/mink-workbench-${width}.png`});
+    await page.screenshot({animations:'disabled',path:testInfo.outputPath(`mink-workbench-${width}.png`)});
   });
 }
 test('running guidance, navigation, snapshot reconnect and stable user handoff', async ({ page }) => {
@@ -158,7 +158,7 @@ test('action menu dismisses outside, restores keyboard focus, and closes after s
   await page.locator('.delete-confirm').getByRole('button',{name:'取消',exact:true}).click();
 });
 
-test('mobile drawers have reachable touch targets, local focus and restored reading position',async({page})=>{
+test('mobile drawers have reachable touch targets, local focus and restored reading position',async({page}, testInfo)=>{
   await page.setViewportSize({width:390,height:844}); await open(page);
   const navigation=page.getByRole('button',{name:'切换导航'});
   for (const button of await page.locator('.topbar button,.composer-actions button').all()) {
@@ -166,7 +166,7 @@ test('mobile drawers have reachable touch targets, local focus and restored read
   }
   expect((await page.locator('.composer').boundingBox())!.height).toBeLessThan(126);
   await navigation.click(); const drawer=page.getByRole('dialog',{name:'项目会话导航'});
-  await expect(drawer).toBeVisible(); const close=page.getByRole('button',{name:'关闭导航',exact:true}); await expect(close).toBeFocused(); expect((await close.boundingBox())!.width).toBe(34); await page.screenshot({animations:'disabled',path:'/private/tmp/mink-web-polish-navigation-390.png'});
+  await expect(drawer).toBeVisible(); const close=page.getByRole('button',{name:'关闭导航',exact:true}); await expect(close).toBeFocused(); expect((await close.boundingBox())!.width).toBe(34); await page.screenshot({animations:'disabled',path:testInfo.outputPath('mink-web-polish-navigation-390.png')});
   await drawer.getByRole('button',{name:'会话操作',exact:true}).last().focus(); await drawer.getByRole('button',{name:'会话操作',exact:true}).last().press('Tab');
   await expect(drawer.getByRole('button',{name:'＋ 新建任务'})).toBeFocused();
   await page.keyboard.press('Escape'); await expect(navigation).toBeFocused();
@@ -184,7 +184,7 @@ test('mobile drawers have reachable touch targets, local focus and restored read
   expect(Math.abs(await transcript.evaluate(el=>el.scrollTop)-before)).toBeLessThan(5);
 });
 
-test('nested file navigation and restored multiline drafts remain usable on a small viewport',async({page})=>{
+test('nested file navigation and restored multiline drafts remain usable on a small viewport',async({page}, testInfo)=>{
   await page.setViewportSize({width:390,height:844}); await open(page);
   const input=page.getByRole('textbox',{name:'任务或补充指令'});
   await input.fill('one\ntwo\nthree\nfour\nfive'); const expanded=(await input.boundingBox())!.height;
@@ -194,7 +194,7 @@ test('nested file navigation and restored multiline drafts remain usable on a sm
   await page.locator('.file-tree').getByRole('button',{name:'▸ src',exact:true}).click();
   await expect(page.locator('.directory-path')).toHaveText('src/');
   await page.locator('.file-tree').getByRole('button',{name:'· main.ts',exact:true}).click();
-  await expect(page.locator('.file-content')).toContainText('createApp'); await expect(page.locator('.file-tree')).toHaveCount(0); await page.screenshot({animations:'disabled',path:'/private/tmp/mink-web-polish-details-390.png'});
+  await expect(page.locator('.file-content')).toContainText('createApp'); await expect(page.locator('.file-tree')).toHaveCount(0); await page.screenshot({animations:'disabled',path:testInfo.outputPath('mink-web-polish-details-390.png')});
   await page.getByRole('button',{name:'返回目录',exact:true}).click(); await expect(page.locator('.directory-path')).toHaveText('src/');
   await page.getByRole('button',{name:'上一级',exact:true}).click(); await expect(page.locator('.directory-path')).toHaveText('项目根目录');
   await page.getByRole('button',{name:'关闭详情',exact:true}).click(); await input.fill('');
@@ -205,7 +205,7 @@ test('nested file navigation and restored multiline drafts remain usable on a sm
 });
 
 
-test('diagnostics match TUI cache partition and survive refresh with complete counters',async({page})=>{
+test('diagnostics match TUI cache partition and survive refresh with complete counters',async({page}, testInfo)=>{
   await page.setViewportSize({width:1440,height:844});
   const session=await create(page); const input=page.getByRole('textbox',{name:'任务或补充指令'});
   await input.fill('cache-metrics-fixture'); await page.getByRole('button',{name:'发送',exact:true}).click();
@@ -220,24 +220,24 @@ test('diagnostics match TUI cache partition and survive refresh with complete co
   await expect(metric('输入')).toHaveText('90'); await expect(metric('输出')).toHaveText('20');
   await expect(metric('轮次')).toHaveText('1'); await expect(metric('模型请求')).toHaveText('1');
   await expect(metric('计划')).toHaveText('无'); await expect(metric('Todo')).toHaveText('进行中 0 / 待办 0');
-  await page.screenshot({animations:'disabled',path:'/private/tmp/mink-ui-review-diagnostics-1440.png'});
+  await page.screenshot({animations:'disabled',path:testInfo.outputPath('mink-ui-review-diagnostics-1440.png')});
   await page.reload(); await page.getByRole('button',{name:'详情',exact:true}).click(); await expect(metric('缓存命中率')).toHaveText('60%'); await expect(metric('模型请求')).toHaveText('1');
-  await page.setViewportSize({width:390,height:844}); await page.screenshot({animations:'disabled',path:'/private/tmp/mink-ui-review-diagnostics-390.png'});
+  await page.setViewportSize({width:390,height:844}); await page.screenshot({animations:'disabled',path:testInfo.outputPath('mink-ui-review-diagnostics-390.png')});
   await page.request.delete(`/api/sessions/${session.id}?project=${session.project_key}`);
 });
 
-test('compact composer supports multiline, attachment and dark mode without persistent footer bars',async({page})=>{
+test('compact composer supports multiline, attachment and dark mode without persistent footer bars',async({page}, testInfo)=>{
   await page.setViewportSize({width:1440,height:844});
   const session=await create(page);const input=page.getByRole('textbox',{name:'任务或补充指令'});
   await input.fill('检查配置并运行验证\n保持公共接口兼容');
   const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGP4DwQACfsD/fteaysAAAAASUVORK5CYII=','base64');
   await page.locator('input[type=file]').setInputFiles({name:'reference.png',mimeType:'image/png',buffer:png});
   await expect(page.locator('.upload')).toContainText('已上传');
-  await page.screenshot({animations:'disabled',path:'/private/tmp/mink-ui-review-composer-1440.png'});
-  await page.setViewportSize({width:390,height:844});await page.screenshot({animations:'disabled',path:'/private/tmp/mink-ui-review-composer-390.png'});
+  await page.screenshot({animations:'disabled',path:testInfo.outputPath('mink-ui-review-composer-1440.png')});
+  await page.setViewportSize({width:390,height:844});await page.screenshot({animations:'disabled',path:testInfo.outputPath('mink-ui-review-composer-390.png')});
   await page.getByRole('button',{name:'移除附件',exact:true}).click();await expect(page.locator('.upload')).toHaveCount(0);await expect(page.getByRole('button',{name:'发送',exact:true})).toBeEnabled();
   await openSettings(page); await page.getByRole('combobox',{name:'外观',exact:true}).selectOption('dark'); await page.getByRole('button',{name:'关闭设置',exact:true}).click();await expect(page.getByRole('button',{name:'发送',exact:true})).toBeEnabled();
-  await page.screenshot({animations:'disabled',path:'/private/tmp/mink-ui-review-dark-390.png'});
+  await page.screenshot({animations:'disabled',path:testInfo.outputPath('mink-ui-review-dark-390.png')});
   await page.request.delete(`/api/sessions/${session.id}?project=${session.project_key}`);
 });
 
@@ -253,13 +253,13 @@ test('loaded-turn menu jumps without adding a footer row and Escape keeps the mo
 });
 
 
-test('running diagnostics retain activity after snapshot reconnect',async({page})=>{
+test('running diagnostics retain activity after snapshot reconnect',async({page}, testInfo)=>{
   const session=await create(page);const input=page.getByRole('textbox',{name:'任务或补充指令'});
   await input.fill('slow-task');await page.getByRole('button',{name:'发送',exact:true}).click();
   await expect(page.locator('.process-group > summary').last()).toContainText('正在思考');
   await page.reload();await page.getByRole('button',{name:'详情',exact:true}).click();await page.getByRole('button',{name:'诊断',exact:true}).click();
   await expect(page.locator('.diagnostic-group dt').filter({hasText:'工作状态'}).locator('+ dd')).toHaveText('思考中');
-  await page.screenshot({animations:'disabled',path:'/private/tmp/mink-ui-review-running.png'});
+  await page.screenshot({animations:'disabled',path:testInfo.outputPath('mink-ui-review-running.png')});
   await page.getByRole('button',{name:'关闭详情',exact:true}).click();
   await page.getByRole('button',{name:'停止',exact:true}).click();await expect(page.getByRole('button',{name:'发送',exact:true})).toBeVisible();
   await page.getByRole('button',{name:'详情',exact:true}).click();
@@ -289,14 +289,14 @@ test('blocked copying reports a useful error without a false success',async({pag
   await expect(page.getByRole('status').filter({hasText:'浏览器未允许复制'})).toBeVisible();await expect(message.getByRole('button',{name:'已复制',exact:true})).toHaveCount(0);
 });
 
-test('mobile turn selection is a bounded vertical list with keyboard and touch-sized rows',async({page})=>{
+test('mobile turn selection is a bounded vertical list with keyboard and touch-sized rows',async({page}, testInfo)=>{
   await page.setViewportSize({width:390,height:844});await open(page);
   await page.getByRole('button',{name:'跳转已加载轮次',exact:true}).click();
   const menu=page.getByRole('menu',{name:'跳转已加载轮次',exact:true});await expect(menu).toBeVisible();
   const rows=menu.getByRole('menuitem');const boxes=await rows.evaluateAll(nodes=>nodes.map(node=>{const r=node.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}}));
   expect(boxes).toHaveLength(20);expect(boxes[1].y).toBeGreaterThanOrEqual(boxes[0].y+boxes[0].height-1);expect(boxes[1].x).toBeCloseTo(boxes[0].x,0);
   const geometry=(await menu.boundingBox())!;expect(geometry.height).toBeLessThanOrEqual(260);expect(geometry.width).toBeLessThanOrEqual(374);
-  await page.screenshot({animations:'disabled',path:'/private/tmp/mink-mobile-turn-list.png'});
+  await page.screenshot({animations:'disabled',path:testInfo.outputPath('mink-mobile-turn-list.png')});
   await page.keyboard.press('End');await expect(rows.last()).toBeFocused();await page.keyboard.press('Enter');await expect(menu).toHaveCount(0);
   await page.getByRole('button',{name:'跳转已加载轮次',exact:true}).click();await rows.first().click();await expect(menu).toHaveCount(0);await expect(page.locator('.msg.user').first()).toContainText('fixture question 25');
 });

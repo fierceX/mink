@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 修复 Web E2E 在 Linux CI 中因 macOS 固定截图路径失败：截图改用 Playwright 独立测试产物目录，支持 `--output`；隔离 server 启动遵循 `CARGO_TARGET_DIR`。
 - 最低 Rust 版本提升至 1.99，事件进度预算使用 `try_update`，TUI 高度索引使用 `isolate_lowest_one`，修复新版 stable 的弃用及手写运算 lint；同步 CI、安装说明和发布校验，补充并发预留/释放回归。
 
 ## v0.6.7 (2026-10-05)
