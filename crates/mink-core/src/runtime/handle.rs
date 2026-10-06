@@ -523,10 +523,7 @@ impl AgentRuntimeHandle {
 }
 
 /// Per-stage budget for shutdown flush/teardown work.
-#[cfg(not(test))]
 const SHUTDOWN_STAGE_BUDGET: Duration = Duration::from_secs(5);
-#[cfg(test)]
-const SHUTDOWN_STAGE_BUDGET: Duration = Duration::from_millis(200);
 
 /// Run one shutdown stage under a deadline, recording failures/timeouts.
 ///
@@ -727,6 +724,29 @@ pub(crate) fn new_turn_gate(interrupt: Arc<AtomicBool>) -> Arc<TurnGate> {
 #[cfg(test)]
 mod shutdown_stage_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn default_stage_budget_allows_delayed_blocking_flush() {
+        let finished = Arc::new(AtomicBool::new(false));
+        let worker_finished = finished.clone();
+        let mut failures = Vec::new();
+        let mut timed_out = false;
+        flush_stage_blocking(
+            SHUTDOWN_STAGE_BUDGET,
+            "delayed blocking flush",
+            move || {
+                std::thread::sleep(Duration::from_millis(300));
+                worker_finished.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            &mut failures,
+            &mut timed_out,
+        )
+        .await;
+        assert!(!timed_out, "{failures:?}");
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(finished.load(Ordering::SeqCst));
+    }
 
     #[tokio::test]
     async fn blocking_stage_timeout_bounds_caller() {

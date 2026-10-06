@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 修复并行 core 回归中的日志应答与 shutdown 偶发超时：正常测试沿用生产期限，短期限仅注入 writer 停摆和收尾超时单测；补充延迟应答、满队列恢复及阻塞 flush 回归，生产预算不变。
 - 修复 Linux headless Chromium 下手机阅读 E2E 的触摸手势未实际滚动：显式发送可信触摸序列，保留阅读锚点、内部滚动、停止和引导可见性断言。
 - 修复 Web E2E 在 Linux CI 中因 macOS 固定截图路径失败：截图改用 Playwright 独立测试产物目录，支持 `--output`；隔离 server 启动遵循 `CARGO_TARGET_DIR`。
 - 最低 Rust 版本提升至 1.99，事件进度预算使用 `try_update`，TUI 高度索引使用 `isolate_lowest_one`，修复新版 stable 的弃用及手写运算 lint；同步 CI、安装说明和发布校验，补充并发预留/释放回归。

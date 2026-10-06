@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-10-05
+> 更新日期：2026-10-06
 
 ## 项目概览
 
@@ -31,6 +31,7 @@ Mink 是用 Rust 1.99+ 实现的轻量 AI coding agent，面向 DeepSeek/OpenAI-
 - **改完必验**：跑相关测试并读完整输出（`cargo test -p mink-core` 起手；涉及 CLI 加 `-p mink-cli`；构建矩阵改动跑 `make feature-matrix`）。
 - **提交前干净**：`cargo fmt --all -- --check` 与 `cargo clippy --workspace --all-targets --all-features -- -D warnings` 必须无输出（CI 同款命令）。
 - **报告证据**：声称“完成/修复/通过”前必须有命令输出佐证；无法验证就说明无法验证。
+- **期限测试**：正常 runtime 回归使用生产的日志提交与 shutdown 预算；短期限仅注入故障测试，不通过全局 `cfg(test)` 缩短健康路径的等待时间。
 - **回归意识**：核心路径（压缩/持久化/编辑/信号）注意 `crates/mink-core/tests/invariants.rs` 与 regression 套件；删除或弱化被测试钉住的行为前先确认其已废弃。
 - **停止-重析**：同一命令连续失败或输出异常时停下，重读代码与错误，换一种方法；禁止无修改重复相同命令。
 - **假定不可信**：编译通过≠行为正确，测试全绿≠没有回归；用新证据（针对性测试/日志）确认因果，与先前结论矛盾时按新证据行事并明说。

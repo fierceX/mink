@@ -9,33 +9,20 @@ use tokio::sync::oneshot;
 const EVENT_LOG_QUEUE_CAPACITY: usize = 1024;
 
 /// How long `flush` may retry a full queue before reporting a stalled writer.
-#[cfg(not(test))]
 const FLUSH_ENQUEUE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
-#[cfg(test)]
-const FLUSH_ENQUEUE_DEADLINE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// How long `flush` may wait for the writer acknowledgement. The deadline is
 /// measured from `flush()` entry: enqueue retries (`FLUSH_ENQUEUE_DEADLINE`)
 /// and the ack wait share the same start instant.
-#[cfg(not(test))]
 const FLUSH_ACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
-#[cfg(test)]
-const FLUSH_ACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Deadline for committing contract-critical events.
-#[cfg(not(test))]
 pub(crate) const CRITICAL_ENQUEUE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
-#[cfg(test)]
-pub(crate) const CRITICAL_ENQUEUE_DEADLINE: std::time::Duration =
-    std::time::Duration::from_millis(200);
 
 /// Grace period where an in-flight acknowledgement may still land before a
 /// pending cancel/interrupt aborts the wait (a healthy writer acks far sooner;
 /// a stalled writer does not).
-#[cfg(not(test))]
 const CRITICAL_ACK_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
-#[cfg(test)]
-const CRITICAL_ACK_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
 
 enum EventLogCmd {
     Append(String),
@@ -373,6 +360,15 @@ impl EventLogWriter {
     /// the reported watermark is advanced only after the snapshot arrives, so
     /// a cancelled flush leaves its loss unreported for the next flush.
     pub(crate) async fn flush(&self) -> io::Result<()> {
+        self.flush_with_deadlines(FLUSH_ENQUEUE_DEADLINE, FLUSH_ACK_DEADLINE)
+            .await
+    }
+
+    async fn flush_with_deadlines(
+        &self,
+        enqueue_budget: std::time::Duration,
+        ack_budget: std::time::Duration,
+    ) -> io::Result<()> {
         let mut reported = self.reported.lock().await;
         let started = std::time::Instant::now();
         let send_lost_before = self.state.send_lost.load(Ordering::SeqCst);
@@ -380,7 +376,7 @@ impl EventLogWriter {
         // Never block the async worker on the bounded queue: retry with async
         // sleeps up to an internal deadline, then report a stalled writer so
         // the caller (e.g. shutdown) can apply its own budget.
-        let enqueue_deadline = started + FLUSH_ENQUEUE_DEADLINE;
+        let enqueue_deadline = started + enqueue_budget;
         let mut command = Some(EventLogCmd::Flush { done });
         loop {
             let next = command.take().expect("flush command enqueued once");
@@ -400,7 +396,7 @@ impl EventLogWriter {
                 }
             }
         }
-        let remaining = FLUSH_ACK_DEADLINE.saturating_sub(started.elapsed());
+        let remaining = ack_budget.saturating_sub(started.elapsed());
         let ack = tokio::select! {
             ack = done_rx => {
                 ack.map_err(|_| io::Error::other("event log writer dropped flush ack"))?
@@ -408,7 +404,7 @@ impl EventLogWriter {
             _ = tokio::time::sleep(remaining) => {
                 return Err(io::Error::other(format!(
                     "event log flush was not acknowledged within {:?}; writer stalled",
-                    FLUSH_ACK_DEADLINE
+                    ack_budget
                 )));
             }
         };
@@ -865,10 +861,16 @@ mod tests {
             assert!(writer.send(format!("{{\"index\":{index}}}")));
         }
 
-        // flush must report instead of blocking the async worker forever
-        // (test-only enqueue deadline is 200 ms).
+        // A short injected deadline tests the stalled queue without changing
+        // the budget for healthy writers in other regression tests.
         let started = std::time::Instant::now();
-        let error = writer.flush().await.unwrap_err();
+        let error = writer
+            .flush_with_deadlines(
+                std::time::Duration::from_millis(200),
+                std::time::Duration::from_secs(2),
+            )
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("not draining"), "{error}");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(1),
@@ -938,7 +940,13 @@ mod tests {
             "a full queue must drop the diagnostic event instead of blocking"
         );
 
-        let error = writer.flush().await.unwrap_err();
+        let error = writer
+            .flush_with_deadlines(
+                std::time::Duration::from_millis(200),
+                std::time::Duration::from_secs(2),
+            )
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("lost 1 event(s)"), "{error}");
 
         gate.set_paused(false);
@@ -953,6 +961,98 @@ mod tests {
         assert!(recovered);
         drop(writer);
         let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn flush_ack_timeout_is_reported_and_recovers() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-event-log-ack-timeout-{}-{}",
+            std::process::id(),
+            uuid_like()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        let gate = EventLogWriterGate::new();
+        gate.set_paused(true);
+        let writer = EventLogWriter::start_paused(path.clone(), gate.clone());
+        assert!(writer.send_best_effort("{\"index\":0}".to_string()));
+        let error = writer
+            .flush_with_deadlines(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_millis(50),
+            )
+            .await
+            .expect_err("an accepted barrier must still wait for the writer acknowledgement");
+        gate.set_paused(false);
+        assert!(error.to_string().contains("not acknowledged within 50ms"));
+        writer.flush().await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"index\":0}\n");
+        drop(writer);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn default_flush_deadline_allows_delayed_full_queue() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-event-log-delayed-flush-{}-{}",
+            std::process::id(),
+            uuid_like()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        let gate = EventLogWriterGate::new();
+        gate.set_paused(true);
+        let writer = EventLogWriter::start_paused(path.clone(), gate.clone());
+        for index in 0..EVENT_LOG_QUEUE_CAPACITY {
+            assert!(writer.send_best_effort(format!("{{\"index\":{index}}}")));
+        }
+        let (result, ()) = tokio::join!(writer.flush(), async {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            gate.set_paused(false);
+        });
+        result.expect("a delayed drain must still use the production flush deadline");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().lines().count(),
+            EVENT_LOG_QUEUE_CAPACITY
+        );
+        drop(writer);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn default_critical_deadline_allows_delayed_writer_ack() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-event-log-delayed-ack-{}-{}",
+            std::process::id(),
+            uuid_like()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        let gate = EventLogWriterGate::new();
+        gate.set_paused(true);
+        let writer = EventLogWriter::start_paused(path.clone(), gate.clone());
+        let cancel = crate::cancel::CancellationToken::new();
+        let interrupt = AtomicBool::new(false);
+        let (result, ()) = tokio::join!(
+            writer.send_critical_async(
+                "{\"type\":\"prefix_snapshot\"}".to_string(),
+                &cancel,
+                &interrupt,
+                CRITICAL_ENQUEUE_DEADLINE,
+            ),
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                gate.set_paused(false);
+            }
+        );
+        result.expect("a scheduling delay must not replace the production commit deadline");
+        writer.flush().await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"type\":\"prefix_snapshot\"}\n"
+        );
+        drop(writer);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -1036,7 +1136,7 @@ mod tests {
                 "{\"type\":\"prefix_snapshot\"}".to_string(),
                 &cancel,
                 &AtomicBool::new(false),
-                CRITICAL_ENQUEUE_DEADLINE,
+                std::time::Duration::from_millis(200),
             )
             .await
             .expect_err("a stalled full queue must hit the deadline");
