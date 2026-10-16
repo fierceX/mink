@@ -209,7 +209,7 @@ async fn blocked_review_fixture() -> (AgentRuntime, AgentRuntimeHandle, PathBuf,
         iteration: 1,
         conversation_seq: 0,
         reviewer_id: format!(
-            "goal-review-v2:{}:{}",
+            "goal-review:{}:{}",
             handle.goal_ctx.active_model.lock().unwrap().actual,
             handle.goal_ctx.tool_surface.fingerprint()
         ),
@@ -1812,81 +1812,48 @@ async fn restart_reuses_successful_screening_report_and_retries_only_host() {
 }
 
 #[tokio::test]
-async fn v2_snapshot_migrates_only_known_schema_and_preserves_budget() {
+async fn unknown_goal_format_version_fails_closed() {
     use crate::runtime::SessionPolicy;
-    for (version, altered) in [(2, false), (2, true), (3, false), (3, true)] {
-        let root = std::env::temp_dir().join(format!(
-            "mink-goal-migration-{}-{version}-{altered}",
-            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
-        ));
-        let cwd = root.join("work");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let options =
-            || AgentOptions::new(root.join("home"), &cwd).with_llm_backend(Arc::new(NoRequest));
-        let runtime = AgentRuntime::start(options()).await.unwrap();
-        let handle = runtime.handle();
-        let goal = handle
-            .goal_ctx
-            .goal_store
-            .create(
-                GoalSpec::new("preserve old contract"),
-                goal_environment(&cwd, &handle.goal_ctx.tool_surface),
-            )
-            .unwrap();
-        let legacy = format!(
-            "{}:{}{}",
-            cwd.canonicalize().unwrap().display(),
-            if version == 2 {
-                handle.goal_ctx.tool_surface.goal_v2_fingerprint().unwrap()
-            } else {
-                handle.goal_ctx.tool_surface.goal_v3_fingerprint().unwrap()
-            },
-            if altered { "-changed-permissions" } else { "" }
-        );
-        let directory = handle.goal_ctx.store.path().parent().unwrap().to_path_buf();
-        let sid = handle.session_info().session_id.clone();
-        runtime.shutdown().await.unwrap();
-        drop(handle);
-        // Synthetic pre-upgrade journal and snapshot, outside user sessions.
+    let root = std::env::temp_dir().join(format!(
+        "mink-goal-version-{}",
+        time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+    ));
+    let cwd = root.join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let options =
+        || AgentOptions::new(root.join("home"), &cwd).with_llm_backend(Arc::new(NoRequest));
+    let runtime = AgentRuntime::start(options()).await.unwrap();
+    let handle = runtime.handle();
+    handle
+        .goal_ctx
+        .goal_store
+        .create(
+            GoalSpec::new("reject unknown formats"),
+            goal_environment(&cwd, &handle.goal_ctx.tool_surface),
+        )
+        .unwrap();
+    let directory = handle.goal_ctx.store.path().parent().unwrap().to_path_buf();
+    let sid = handle.session_info().session_id.clone();
+    runtime.shutdown().await.unwrap();
+    drop(handle);
+    // A container written by another format version must never read as
+    // executable state.
+    for version in [2, 4] {
         let mut state: serde_json::Value =
             serde_json::from_slice(&std::fs::read(directory.join("goal.json")).unwrap()).unwrap();
         state["version"] = serde_json::json!(version);
         state["current"]["version"] = serde_json::json!(version);
-        state["current"]["environment"] = serde_json::json!(legacy);
-        for key in [
-            "review_stage",
-            "review_requires_full",
-            "review_escalation_reason",
-            "review_report",
-            "continuations",
-            "continuation_fingerprint",
-            "continuation_rounds",
-        ] {
-            state["current"].as_object_mut().unwrap().remove(key);
-        }
         let bytes = serde_json::to_vec(&state).unwrap();
         std::fs::write(directory.join("goal.json"), &bytes).unwrap();
         std::fs::write(directory.join("goal-transaction.json"), &bytes).unwrap();
-        let reopened = AgentRuntime::start(options().with_session(SessionPolicy::Resume(sid)))
-            .await
-            .unwrap();
-        let after = reopened.handle().goal_snapshot().unwrap();
-        assert_eq!(after.spec, goal.spec);
-        assert_eq!(after.id, goal.id);
-        assert!(!after.needs_confirmation);
-        assert!(after.continuations.is_empty());
-        assert_eq!(after.version, 4);
-        assert_eq!(
-            after.status,
-            if altered {
-                GoalStatus::Blocked
-            } else {
-                GoalStatus::Active
-            }
+        assert!(
+            AgentRuntime::start(options().with_session(SessionPolicy::Resume(sid.clone())))
+                .await
+                .is_err(),
+            "format version {version} must be rejected"
         );
-        reopened.shutdown().await.unwrap();
-        std::fs::remove_dir_all(root).unwrap();
     }
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

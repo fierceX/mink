@@ -119,18 +119,6 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         persistence_fault.clone(),
     )?);
     if !params.is_sub_agent && goal_store.snapshot().is_some() {
-        let current = crate::runtime::goal::goal_environment(&params.cwd, &tool_surface);
-        let cwd = params
-            .cwd
-            .canonicalize()
-            .unwrap_or_else(|_| params.cwd.clone());
-        for fingerprint in [
-            tool_surface.goal_v2_fingerprint()?,
-            tool_surface.goal_v3_fingerprint()?,
-        ] {
-            let previous = format!("{}:{}", cwd.display(), fingerprint);
-            goal_store.migrate_review_environment(&previous, &current)?;
-        }
         goal_store.reconcile_usage(&usage.all_records()?)?;
     }
     if !params.is_sub_agent

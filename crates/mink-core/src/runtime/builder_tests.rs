@@ -5616,7 +5616,7 @@ async fn goal_recovery_reaudits_known_checker_changes_without_replaying_checker(
         iteration: 1,
         conversation_seq: 0,
         reviewer_id: format!(
-            "goal-review-v2:{}:{}",
+            "goal-review:{}:{}",
             runtime.ctx.active_model.lock().unwrap().actual,
             runtime.ctx.tool_surface.fingerprint()
         ),

@@ -335,23 +335,6 @@ impl ModelToolSurface {
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
-
-    /// Recognize exactly the prior GoalReview schema while keeping every other
-    /// resolved tool, permission and working-directory boundary unchanged.
-    pub(crate) fn goal_v2_fingerprint(&self) -> Result<String> {
-        let mut tools = self.ordered.clone();
-        if let Some(tool) = tools.iter_mut().find(|t| t.metadata.name == "GoalReview") {
-            tool.schema = serde_json::from_str(include_str!("../assets/goal-review-v2.json"))?;
-        }
-        Ok(surface_fingerprint(&tools))
-    }
-    pub(crate) fn goal_v3_fingerprint(&self) -> Result<String> {
-        let mut tools = self.ordered.clone();
-        if let Some(tool) = tools.iter_mut().find(|t| t.metadata.name == "GoalReview") {
-            tool.schema = serde_json::from_str(include_str!("../assets/goal-review-v3.json"))?;
-        }
-        Ok(surface_fingerprint(&tools))
-    }
 }
 
 /// Statically augment the Read tool description for image-capable sessions

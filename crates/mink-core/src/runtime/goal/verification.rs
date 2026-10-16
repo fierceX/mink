@@ -165,7 +165,7 @@ impl AgentRuntimeHandle {
         }
         let seq = self.goal_ctx.store.lines().await?.len();
         let reviewer_id = format!(
-            "goal-review-v2:{}:{}",
+            "goal-review:{}:{}",
             self.goal_ctx
                 .active_model
                 .lock()

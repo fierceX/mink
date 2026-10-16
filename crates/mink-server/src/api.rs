@@ -1561,7 +1561,7 @@ mod tests {
         std::fs::write(
             dir.join("goal.json"),
             serde_json::json!({
-                "version": 4,
+                "version": 1,
                 "current": {
                     "id": "goal-1", "status": "cancelled", "phase": "idle",
                     "hidden": true

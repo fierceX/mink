@@ -137,6 +137,11 @@ impl GoalLimits {
         Ok(())
     }
 }
+/// Persisted format version for the goal contract, snapshot, state container
+/// and journal. The first release ships version 1; any other value is rejected
+/// so an unknown format never reads as executable state.
+pub(crate) const GOAL_FORMAT_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalSpec {
     pub version: u32,
@@ -161,7 +166,7 @@ impl GoalSpec {
     pub fn new(objective: impl Into<String>) -> Self {
         let objective = objective.into();
         Self {
-            version: 2,
+            version: GOAL_FORMAT_VERSION,
             original_request: objective.clone(),
             subgoals: vec![GoalSubgoal { id: "subgoal-1".into(), objective: objective.clone() }],
             criteria: vec![GoalCriterion { id: "criterion-1".into(), subgoal_id: "subgoal-1".into(), outcome: objective.clone(), required_evidence: "Concrete files, artifacts or recorded verification results demonstrating the outcome".into() }],
@@ -200,8 +205,8 @@ impl GoalSpec {
     }
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.version == 2,
-            "goal protocol upgraded; draft and confirm a version 2 contract"
+            self.version == GOAL_FORMAT_VERSION,
+            "unsupported goal contract version"
         );
         ensure!(
             self.acceptance != GoalAcceptance::ModelReported,
@@ -479,11 +484,10 @@ pub type GoalOutcome = GoalSnapshot;
 pub fn read_snapshot(path: &Path) -> Option<GoalSnapshot> {
     let bytes = std::fs::read(path).ok()?;
     let state: State = serde_json::from_slice(&bytes).ok()?;
-    if !matches!(state.version, 1..=4)
-        || state
-            .current
-            .as_ref()
-            .is_some_and(|g| !matches!(g.version, 1..=4) || !matches!(g.spec.version, 1 | 2))
+    if state.version != GOAL_FORMAT_VERSION
+        || state.current.as_ref().is_some_and(|g| {
+            g.version != GOAL_FORMAT_VERSION || g.spec.version != GOAL_FORMAT_VERSION
+        })
     {
         return None;
     }
@@ -550,52 +554,23 @@ impl GoalChangeError {
 }
 
 impl GoalStore {
-    pub(crate) fn migrate_review_environment(&self, previous: &str, current: &str) -> Result<()> {
-        let Some(goal) = self.snapshot().filter(|g| {
-            g.version < 4
-                && g.spec.version == 2
-                && !g.status.is_terminal()
-                && g.environment == previous
-        }) else {
-            return Ok(());
-        };
-        self.change(&goal.id, goal.revision, |g| {
-            g.environment = current.into();
-            if g.review_candidate.is_some() {
-                g.review_requires_full = true;
-                g.review_escalation_reason =
-                    Some("review protocol upgraded; preserve full candidate audit".into());
-                if g.phase == GoalPhase::Verifying {
-                    g.review_failure_reason =
-                        Some("review protocol upgraded; resume the candidate audit".into());
-                }
-            }
-            Ok(())
-        })?;
-        Ok(())
-    }
-
     pub(crate) fn load(directory: &Path, fault: PersistenceFault) -> Result<Self> {
         let path = directory.join("goal.json");
         let journal = directory.join("goal-transaction.json");
         let read = |p: &Path| -> Result<Option<State>> {
             match std::fs::read(p) {
                 Ok(bytes) => {
-                    let mut state: State = serde_json::from_slice(&bytes)?;
+                    let state: State = serde_json::from_slice(&bytes)?;
                     ensure!(
-                        matches!(state.version, 1..=4),
+                        state.version == GOAL_FORMAT_VERSION,
                         "unsupported goal state version"
                     );
                     for goal in state.current.iter().chain(state.history.iter()) {
                         ensure!(
-                            matches!(goal.version, 1..=4) && matches!(goal.spec.version, 1 | 2),
+                            goal.version == GOAL_FORMAT_VERSION
+                                && goal.spec.version == GOAL_FORMAT_VERSION,
                             "unsupported goal contract version"
                         );
-                    }
-                    for goal in state.current.iter_mut().chain(state.history.iter_mut()) {
-                        if goal.version < 3 && goal.phase == GoalPhase::Verifying {
-                            goal.review_requires_full = true;
-                        }
                     }
                     Ok(Some(state))
                 }
@@ -604,7 +579,7 @@ impl GoalStore {
             }
         };
         let state = read(&path)?.unwrap_or(State {
-            version: 2,
+            version: GOAL_FORMAT_VERSION,
             ..State::default()
         });
         let (changes, _) = tokio::sync::watch::channel(state.current.clone());
@@ -616,13 +591,16 @@ impl GoalStore {
             changes,
         };
         if let Some(pending) = read(&store.journal)? {
-            ensure!(matches!(pending.version, 1..=4), "unsupported goal journal");
+            ensure!(
+                pending.version == GOAL_FORMAT_VERSION,
+                "unsupported goal journal"
+            );
             publish_state(&store.path, &serde_json::to_vec(&pending)?, &store.fault)?;
             *store.state.lock().unwrap() = pending.clone();
             store.changes.send_replace(pending.current);
         }
         ensure!(
-            matches!(store.state.lock().unwrap().version, 1..=4),
+            store.state.lock().unwrap().version == GOAL_FORMAT_VERSION,
             "unsupported goal state"
         );
         Ok(store)
@@ -639,9 +617,9 @@ impl GoalStore {
     }
     fn publish(&self, state: &mut State, mut next: State) -> Result<()> {
         self.fault.check()?;
-        next.version = 4;
+        next.version = GOAL_FORMAT_VERSION;
         for goal in next.current.iter_mut().chain(next.history.iter_mut()) {
-            goal.version = 4;
+            goal.version = GOAL_FORMAT_VERSION;
         }
         let bytes = serde_json::to_vec(&next)?;
         publish_state(&self.journal, &bytes, &self.fault)?;
@@ -729,7 +707,7 @@ impl GoalStore {
             next.history.push(old);
         }
         let goal = GoalSnapshot {
-            version: 4,
+            version: GOAL_FORMAT_VERSION,
             id: format!(
                 "goal-{}",
                 time::OffsetDateTime::now_utc().unix_timestamp_nanos()
@@ -842,7 +820,7 @@ impl GoalStore {
             .revision
             .checked_add(1)
             .ok_or_else(|| GoalChangeError::Rejected(anyhow::anyhow!("goal revision overflow")))?;
-        g.version = 4;
+        g.version = GOAL_FORMAT_VERSION;
         let result = g.clone();
         self.publish(&mut state, next)
             .map_err(GoalChangeError::Publish)?;
@@ -866,7 +844,7 @@ impl GoalStore {
             .revision
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("goal revision overflow"))?;
-        g.version = 4;
+        g.version = GOAL_FORMAT_VERSION;
         let result = g.clone();
         self.publish(&mut state, next)?;
         Ok(result)
@@ -900,7 +878,7 @@ impl GoalStore {
             .revision
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("goal revision overflow"))?;
-        goal.version = 4;
+        goal.version = GOAL_FORMAT_VERSION;
         let result = goal.clone();
         self.publish(&mut state, next)?;
         Ok(Some(result))
@@ -1221,7 +1199,6 @@ impl GoalStore {
             return Ok(());
         };
         self.change(&g.id, g.revision, |g| {
-            if g.version < 3 && g.phase == GoalPhase::Verifying { g.review_requires_full = true; }
             let start = g.iterations.last().map_or(0, |i| i.conversation_start);
             let resolved: Vec<_> = history
                 .iter()
@@ -1239,40 +1216,16 @@ impl GoalStore {
                 .collect();
             g.pending_effects
                 .retain(|id| !resolved.contains(&id.as_str()));
-            if g.spec.version == 1 {
-                let mut spec = GoalSpec::new(g.spec.objective.clone());
-                spec.original_request = g.spec.objective.clone();
-                spec.scope = g.spec.scope.clone();
-                spec.constraints = g.spec.constraints.clone();
-                spec.acceptance = match &g.spec.acceptance {
-                    GoalAcceptance::ModelReported => GoalAcceptance::AgentReviewed,
-                    other => other.clone(),
-                };
-                spec.limits = g.spec.limits.clone();
-                spec.criteria = g.spec.acceptance_criteria.iter().enumerate().map(|(i, outcome)| GoalCriterion {
-                    id: format!("criterion-{}", i + 1), subgoal_id: "subgoal-1".into(), outcome: outcome.clone(), required_evidence: "Concrete files or recorded verification results".into()
-                }).collect();
-                spec.acceptance_criteria = g.spec.acceptance_criteria.clone();
-                g.spec = spec;
-                g.version = 2;
-                g.contract_revision = g.contract_revision.checked_add(1).ok_or_else(|| anyhow::anyhow!("goal contract revision overflow"))?;
-                g.status = GoalStatus::Draft;
-                g.phase = GoalPhase::Idle;
-                g.needs_confirmation = true;
-                g.draft_ready = true;
-                g.draft_duration_secs = None;
-                g.report = None;
-                g.review_candidate = None;
-            g.review_failure_stage = None;
-                g.evidence_versions.clear();
-                g.reason = Some("goal protocol upgraded; review and confirm the preserved contract before execution".into());
-                return Ok(());
-            }
-            ensure!(g.spec.version == 2, "unsupported goal contract version");
+            ensure!(
+                g.spec.version == GOAL_FORMAT_VERSION,
+                "unsupported goal contract version"
+            );
             g.spec.validate()?;
             if g.status != GoalStatus::Active {
                 if !g.pending_effects.is_empty() {
-                    if g.status != GoalStatus::Draft { g.status = GoalStatus::Blocked; }
+                    if g.status != GoalStatus::Draft {
+                        g.status = GoalStatus::Blocked;
+                    }
                     g.reason = Some("side effect result unknown; reconcile before resume".into());
                 }
                 return Ok(());
@@ -1294,19 +1247,43 @@ impl GoalStore {
                         && review.verdict != GoalReviewVerdict::Satisfied
                 });
                 match g.iterations.last().and_then(|i| i.outcome_status) {
-                    Some(crate::runtime::TurnStatus::Failed) => { g.status=GoalStatus::Failed; g.reason=g.iterations.last().and_then(|i| i.outcome_error.clone()); g.phase=GoalPhase::Idle; }
-                    Some(crate::runtime::TurnStatus::Ok) if settled_review.is_some() || g.continuations.last().is_some_and(|c| c.proposal.candidate.goal_id == g.id && c.proposal.candidate.contract_revision == g.contract_revision && c.proposal.candidate.iteration as usize == g.iterations.len() && c.conversation_seq == history.len()) => {
+                    Some(crate::runtime::TurnStatus::Failed) => {
+                        g.status = GoalStatus::Failed;
+                        g.reason = g.iterations.last().and_then(|i| i.outcome_error.clone());
+                        g.phase = GoalPhase::Idle;
+                    }
+                    Some(crate::runtime::TurnStatus::Ok)
+                        if settled_review.is_some()
+                            || g.continuations.last().is_some_and(|c| {
+                                c.proposal.candidate.goal_id == g.id
+                                    && c.proposal.candidate.contract_revision == g.contract_revision
+                                    && c.proposal.candidate.iteration as usize == g.iterations.len()
+                                    && c.conversation_seq == history.len()
+                            }) =>
+                    {
                         // This boundary already includes an atomic review/decision;
                         // resume the next execution rather than replaying its audit.
                         g.phase = GoalPhase::Idle;
-                        g.review_candidate = settled_review.map(|r| r.candidate.clone()).or_else(|| g.continuations.last().map(|c| c.proposal.candidate.clone()));
+                        g.review_candidate =
+                            settled_review.map(|r| r.candidate.clone()).or_else(|| {
+                                g.continuations.last().map(|c| c.proposal.candidate.clone())
+                            });
                     }
-                    Some(crate::runtime::TurnStatus::Ok) if matches!(g.phase, GoalPhase::Idle | GoalPhase::Executing) => { g.phase=GoalPhase::Verifying; g.review_candidate=None; g.reason=Some("recovered normal execution boundary; independent audit required".into()); }
+                    Some(crate::runtime::TurnStatus::Ok)
+                        if matches!(g.phase, GoalPhase::Idle | GoalPhase::Executing) =>
+                    {
+                        g.phase = GoalPhase::Verifying;
+                        g.review_candidate = None;
+                        g.reason = Some(
+                            "recovered normal execution boundary; independent audit required"
+                                .into(),
+                        );
+                    }
                     _ => {}
                 }
             } else if g.phase == GoalPhase::Executing {
-                g.phase=GoalPhase::Idle;
-                g.reason=Some("interrupted iteration; recovery iteration required".into());
+                g.phase = GoalPhase::Idle;
+                g.reason = Some("interrupted iteration; recovery iteration required".into());
             }
             Ok(())
         })?;
@@ -1320,7 +1297,7 @@ mod tests {
     #[test]
     fn new_contract_requires_independent_review_protocol() {
         let spec = serde_json::to_value(GoalSpec::new("produce proof")).unwrap();
-        assert_eq!(spec["version"], 2);
+        assert_eq!(spec["version"], GOAL_FORMAT_VERSION);
         assert_eq!(spec["acceptance"]["mode"], "agent_reviewed");
         assert_eq!(spec["original_request"], "produce proof");
         assert_eq!(spec["criteria"][0]["id"], "criterion-1");
@@ -1401,31 +1378,6 @@ mod tests {
                 .confirm(&ready.id, ready.revision, "env".into())
                 .is_ok()
         );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn legacy_migration_preserves_budget_and_requires_confirmation() {
-        let (dir, store) = store();
-        let goal = store.create(GoalSpec::new("ship"), "env".into()).unwrap();
-        let mut value = serde_json::to_value(&*store.state.lock().unwrap()).unwrap();
-        value["current"]["version"] = serde_json::json!(1);
-        value["current"]["spec"]["version"] = serde_json::json!(1);
-        value["current"]["spec"]["acceptance"] = serde_json::json!({"mode":"model_reported"});
-        std::fs::write(&store.path, serde_json::to_vec(&value).unwrap()).unwrap();
-        std::fs::write(&store.journal, serde_json::to_vec(&value).unwrap()).unwrap();
-        let restored = GoalStore::load(&dir, PersistenceFault::default()).unwrap();
-        restored.recover("env", &[]).unwrap();
-        let draft = restored.snapshot().unwrap();
-        assert_eq!(draft.status, GoalStatus::Draft);
-        assert!(draft.needs_confirmation);
-        assert_eq!(draft.spec.limits, goal.spec.limits);
-        assert_eq!(draft.id, goal.id);
-        assert!(restored.begin_iteration("turn", 0).is_err());
-        let confirmed = restored
-            .confirm(&draft.id, draft.revision, "env".into())
-            .unwrap();
-        assert_eq!(confirmed.spec.limits, goal.spec.limits);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
