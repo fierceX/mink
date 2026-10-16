@@ -135,7 +135,13 @@ pub(super) fn append_external_sections(
             .rule_snapshot
             .discoverable
             .iter()
-            .map(|rule| format!("- {}: {}", rule.rule.name, rule.rule.description))
+            .map(|rule| {
+                format!(
+                    "- {}: {}",
+                    rule.rule.name,
+                    crate::capabilities::index_description(&rule.rule.description)
+                )
+            })
             .collect::<Vec<_>>();
         if !rule_index.is_empty() {
             push_external(
@@ -146,20 +152,9 @@ pub(super) fn append_external_sections(
                 None,
             )?;
         }
-        let skill_index = builder
-            .skill_snapshot
-            .discoverable
-            .iter()
-            .map(|skill| format!("- {}: {}", skill.skill.name, skill.skill.description))
-            .collect::<Vec<_>>();
+        let skill_index = render_skill_index(builder);
         if !skill_index.is_empty() {
-            push_external(
-                document,
-                "skill-index",
-                "skill-index",
-                skill_index.join("\n"),
-                None,
-            )?;
+            push_external(document, "skill-index", "skill-index", skill_index, None)?;
         }
     }
     if !builder.skill_snapshot.selected.is_empty() {
@@ -192,6 +187,98 @@ pub(super) fn append_external_sections(
         )?;
     }
     Ok(())
+}
+
+struct SkillIndexEntry {
+    rank: u8,
+    name: String,
+    description: String,
+}
+
+impl SkillIndexEntry {
+    fn line_chars(&self) -> usize {
+        2 + self.name.chars().count()
+            + if self.description.is_empty() {
+                0
+            } else {
+                2 + self.description.chars().count()
+            }
+    }
+
+    fn line(&self) -> String {
+        if self.description.is_empty() {
+            format!("- {}", self.name)
+        } else {
+            format!("- {}: {}", self.name, self.description)
+        }
+    }
+}
+
+/// Drop priority for one source (lower drops first): user-level descriptions
+/// go before runtime/project ones, built-in descriptions are kept last.
+fn degradation_rank(provider_id: &str, level: &crate::capabilities::SourceLevel) -> u8 {
+    use crate::capabilities::SourceLevel;
+    match provider_id {
+        "user-claude-skills" => 1,
+        "runtime-skills" => 2,
+        "project-claude-skills" => 3,
+        "project-local-skills" => 4,
+        "built-in-skills" => 5,
+        _ => match level {
+            SourceLevel::User => 1,
+            SourceLevel::Runtime => 2,
+            SourceLevel::Project => 3,
+            SourceLevel::BuiltIn => 5,
+        },
+    }
+}
+
+/// Render the model-visible skill index. Every skill keeps its name; when the
+/// rendered size exceeds the configured budget, descriptions are dropped
+/// starting with the lowest-priority sources (user → runtime → project
+/// .claude → project skills → built-in last), and within one source by name
+/// descending. Names-only entries always remain discoverable.
+fn render_skill_index(builder: &Builder) -> String {
+    let mut entries: Vec<SkillIndexEntry> = builder
+        .skill_snapshot
+        .discoverable
+        .iter()
+        .map(|skill| SkillIndexEntry {
+            rank: degradation_rank(&skill.source.provider_id, &skill.source.level),
+            name: crate::capabilities::sanitize_index_text(&skill.skill.name),
+            description: crate::capabilities::index_description(&skill.skill.description),
+        })
+        .collect();
+    let mut total: usize = entries
+        .iter()
+        .map(SkillIndexEntry::line_chars)
+        .sum::<usize>()
+        + entries.len().saturating_sub(1);
+    if total > builder.skill_index_budget_chars {
+        let mut order: Vec<usize> = (0..entries.len()).collect();
+        order.sort_by(|a, b| {
+            entries[*a]
+                .rank
+                .cmp(&entries[*b].rank)
+                .then_with(|| entries[*b].name.cmp(&entries[*a].name))
+        });
+        for index in order {
+            if total <= builder.skill_index_budget_chars {
+                break;
+            }
+            let entry = &mut entries[index];
+            if entry.description.is_empty() {
+                continue;
+            }
+            total = total.saturating_sub(2 + entry.description.chars().count());
+            entry.description.clear();
+        }
+    }
+    entries
+        .iter()
+        .map(SkillIndexEntry::line)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn push_core(document: &mut PromptDocument, id: &str, content: &str) -> Result<()> {

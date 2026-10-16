@@ -30,6 +30,9 @@ pub struct Builder {
     pub edit_fuzzy_threshold: f64,
     pub edit_enforce_seen_lines: bool,
     pub signal_policy: crate::config::SignalPolicy,
+    /// Character budget for the model-visible skill index (see
+    /// [`skill_index_budget_chars`]).
+    pub skill_index_budget_chars: usize,
 }
 
 pub struct PromptBuildContext {
@@ -122,6 +125,32 @@ fn validate_pack(
         spec.id
     );
     Ok(())
+}
+
+/// Default character budget for the model-visible skill index when the
+/// context window is unknown (unlimited).
+pub(crate) const DEFAULT_SKILL_INDEX_BUDGET_CHARS: usize = 8_000;
+
+/// Character budget for the model-visible skill index.
+///
+/// One percent of a finite context window, clamped to [2_000, 8_000]; the
+/// default when the window is unbounded. `MINK_SKILL_INDEX_BUDGET_CHARS`
+/// overrides the computed budget (escape hatch for embeddings/tests).
+pub(crate) fn skill_index_budget_chars(max_context_tokens: usize) -> usize {
+    if let Ok(value) = std::env::var("MINK_SKILL_INDEX_BUDGET_CHARS")
+        && let Ok(parsed) = value.trim().parse::<usize>()
+    {
+        return parsed.max(1);
+    }
+    skill_index_budget_default(max_context_tokens)
+}
+
+fn skill_index_budget_default(max_context_tokens: usize) -> usize {
+    if max_context_tokens == 0 {
+        DEFAULT_SKILL_INDEX_BUDGET_CHARS
+    } else {
+        (max_context_tokens / 100).clamp(2_000, 8_000)
+    }
 }
 
 pub(crate) fn escape_attr(value: &str) -> String {

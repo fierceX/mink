@@ -173,16 +173,17 @@ pub fn skill_providers_for_policy(
 }
 
 impl SkillSnapshot {
-    /// Render the model-discoverable skill list shared by the CLI
-    /// `--list-skills`, TUI `/skills`, and the `skill://list` resource.
+    /// Render the model-visible skill list served by the `skill://list`
+    /// resource. CLI `--list-skills` / TUI `/skills` render the full
+    /// (untruncated) text separately in `mink-cli`.
     pub fn format_discoverable_skills(&self) -> String {
         let mut out = String::new();
         for skill in &self.discoverable {
             out.push_str(&format!(
                 "- {} [{}]: {}\n",
-                skill.skill.name,
+                crate::capabilities::sanitize_index_text(&skill.skill.name),
                 skill.source.model_display_label(),
-                skill.skill.description
+                crate::capabilities::index_description(&skill.skill.description)
             ));
         }
         out
@@ -233,6 +234,23 @@ impl SkillSnapshot {
                         ),
                     });
                     continue;
+                }
+                if let Some(directory_name) = skill
+                    .source
+                    .source_path
+                    .as_deref()
+                    .and_then(|path| path.parent())
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|name| name.to_str())
+                    && directory_name != skill.skill.name
+                {
+                    warnings.push(CapabilityWarning {
+                        provider_id: provider.id().to_string(),
+                        message: format!(
+                            "skill '{}' adopts frontmatter name '{}' instead of its directory name",
+                            directory_name, skill.skill.name
+                        ),
+                    });
                 }
                 if matches!(skill.exposure, CapabilityExposure::HostOnly) {
                     warnings.push(CapabilityWarning {
@@ -406,8 +424,8 @@ impl SkillProvider for FileSystemSkillProvider {
             if !file_type.is_dir() {
                 continue;
             }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !crate::capabilities::source::is_valid_skill_name(&name) {
+            let directory_name = entry.file_name().to_string_lossy().to_string();
+            if !crate::capabilities::source::is_valid_skill_name(&directory_name) {
                 continue;
             }
             let skill_file = entry.path().join("SKILL.md");
@@ -421,19 +439,27 @@ impl SkillProvider for FileSystemSkillProvider {
                 .to_string();
             let content = raw_content.replace("${MINK_SKILL_DIR}", &base_dir);
             let frontmatter = parse_frontmatter(&content);
+            // The Agent Skills standard lets a skill name itself in frontmatter;
+            // adopt it when valid (the directory name stays the fallback identity).
+            let name = frontmatter
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|candidate| crate::capabilities::source::is_valid_skill_name(candidate))
+                .map(str::to_string)
+                .unwrap_or(directory_name);
             let disable_model_invocation = frontmatter.disable_model_invocation;
             let exposure = if frontmatter.hide || disable_model_invocation {
                 CapabilityExposure::ModelAddressable
             } else {
                 CapabilityExposure::ModelDiscoverable
             };
+            let description = resolve_skill_description(&frontmatter, &content);
             out.push(LoadedSkill {
                 revision: crate::capabilities::fingerprint::sha256_hex(&content),
                 skill: SkillCapability {
                     name,
-                    description: frontmatter
-                        .description
-                        .unwrap_or_else(|| extract_skill_summary(&content)),
+                    description,
                     content,
                     base_dir,
                     disable_model_invocation,
@@ -499,53 +525,205 @@ impl SkillProvider for BuiltInSkillProvider {
 
 #[derive(Default)]
 struct Frontmatter {
+    name: Option<String>,
     description: Option<String>,
+    when_to_use: Option<String>,
     hide: bool,
     disable_model_invocation: bool,
 }
 
+/// Parse the YAML-subset frontmatter written at the top of SKILL.md files.
+///
+/// Supported subset (what the Agent Skills ecosystem actually writes):
+/// - single-line `key: value` (surrounding quotes trimmed);
+/// - block scalars `key: >` / `key: |` with optional chomping (`-`/`+`) and
+///   indentation indicators, consumed while following lines stay indented;
+/// - `#` comment lines.
+///
+/// Unknown keys are ignored. A block without a closing `---` is treated as
+/// absent so a malformed header never leaks body lines into parsed fields.
 fn parse_frontmatter(content: &str) -> Frontmatter {
     let mut out = Frontmatter::default();
-    let mut lines = content.lines();
+    let mut lines = content.lines().peekable();
     if lines.next().map(str::trim) != Some("---") {
         return out;
     }
-    for line in lines {
+    loop {
+        let Some(raw) = lines.next() else {
+            // Unclosed frontmatter: treat the header as absent.
+            return Frontmatter::default();
+        };
+        let line = raw.trim_end_matches('\r');
         let trimmed = line.trim();
         if trimmed == "---" {
-            break;
+            return out;
         }
-        if let Some(value) = trimmed.strip_prefix("description:") {
-            let value = trim_yaml_scalar(value);
-            if !value.is_empty() {
-                out.description = Some(value.to_string());
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if let Some(style) = block_scalar_style(value) {
+            let body = collect_block_scalar(&mut lines);
+            let text = render_block_scalar(&body, style);
+            if !text.is_empty() {
+                assign_frontmatter_field(&mut out, key, &text);
             }
-        } else if let Some(value) = trimmed.strip_prefix("hide:") {
-            out.hide = parse_bool(value);
-        } else if let Some(value) = trimmed.strip_prefix("disable-model-invocation:") {
-            out.disable_model_invocation = parse_bool(value);
+            continue;
+        }
+        let value = trim_yaml_scalar(value);
+        if value.is_empty() {
+            continue;
+        }
+        assign_frontmatter_field(&mut out, key, value);
+    }
+}
+
+/// Chomping/indentation indicators are accepted for syntax compatibility with
+/// real SKILL.md files; the parsed value is trimmed either way.
+struct BlockStyle {
+    literal: bool,
+}
+
+fn block_scalar_style(raw: &str) -> Option<BlockStyle> {
+    let first = raw.chars().next()?;
+    let literal = match first {
+        '>' => false,
+        '|' => true,
+        _ => return None,
+    };
+    let header = raw.split('#').next().unwrap_or(raw).trim();
+    for ch in header.chars().skip(1) {
+        match ch {
+            '-' | '+' | '0'..='9' => {}
+            _ => return None,
         }
     }
-    out
+    Some(BlockStyle { literal })
+}
+
+/// Consume the indented body of a block scalar; blank lines inside the block
+/// are kept as paragraph breaks, trailing blanks are not part of the value.
+fn collect_block_scalar<'a, I>(lines: &mut std::iter::Peekable<I>) -> Vec<String>
+where
+    I: Iterator<Item = &'a str>,
+{
+    let mut body: Vec<String> = Vec::new();
+    let mut pending_blanks = 0usize;
+    while let Some(peek) = lines.peek() {
+        let line = peek.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            pending_blanks += 1;
+            lines.next();
+            continue;
+        }
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            break;
+        }
+        for _ in 0..pending_blanks {
+            body.push(String::new());
+        }
+        pending_blanks = 0;
+        let consumed = lines.next().expect("peeked line must exist");
+        body.push(consumed.trim_end_matches('\r').to_string());
+    }
+    body
+}
+
+/// Strip the common indentation, join the body, and trim the result. `>`
+/// folds single newlines into spaces (blank lines become paragraph breaks);
+/// `|` keeps the line structure.
+fn render_block_scalar(lines: &[String], style: BlockStyle) -> String {
+    let indent = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start_matches([' ', '\t']).len())
+        .min()
+        .unwrap_or(0);
+    let stripped = lines
+        .iter()
+        .map(|line| {
+            if line.len() > indent {
+                &line[indent..]
+            } else {
+                ""
+            }
+        })
+        .collect::<Vec<_>>();
+    let text = if style.literal {
+        stripped.join("\n")
+    } else {
+        let mut out = String::new();
+        let mut paragraph: Vec<&str> = Vec::new();
+        for line in &stripped {
+            if line.trim().is_empty() {
+                if !paragraph.is_empty() {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(&paragraph.join(" "));
+                    paragraph.clear();
+                }
+            } else {
+                paragraph.push(line.trim_end());
+            }
+        }
+        if !paragraph.is_empty() {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&paragraph.join(" "));
+        }
+        out
+    };
+    text.trim().to_string()
+}
+
+fn assign_frontmatter_field(out: &mut Frontmatter, key: &str, value: &str) {
+    match key {
+        "name" => out.name = Some(value.to_string()),
+        "description" => out.description = Some(value.to_string()),
+        "when_to_use" => out.when_to_use = Some(value.to_string()),
+        "hide" => out.hide = parse_bool(value),
+        "disable-model-invocation" => out.disable_model_invocation = parse_bool(value),
+        _ => {}
+    }
+}
+
+/// `description` (from frontmatter or the first content line) with the
+/// optional `when_to_use` trigger text appended, matching how the Agent
+/// Skills listing combines both fields.
+fn resolve_skill_description(frontmatter: &Frontmatter, content: &str) -> String {
+    let base = frontmatter
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| extract_skill_summary(content));
+    match frontmatter
+        .when_to_use
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(when) => format!("{} — {when}", base.trim()),
+        None => base,
+    }
 }
 
 pub(crate) fn extract_skill_summary(content: &str) -> String {
-    let mut in_frontmatter = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == "---" {
-            if !in_frontmatter {
-                in_frontmatter = true;
-                continue;
-            } else if in_frontmatter {
-                break;
-            }
-        }
-        if in_frontmatter && let Some(desc) = trimmed.strip_prefix("description:") {
-            return desc.trim().trim_matches('"').to_string();
-        }
+    if let Some(description) = parse_frontmatter(content)
+        .description
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return description;
     }
-    content
+    body_after_frontmatter(content)
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty() && *line != "---")
@@ -553,6 +731,36 @@ pub(crate) fn extract_skill_summary(content: &str) -> String {
         .chars()
         .take(120)
         .collect()
+}
+
+/// Content after the closing `---` of a frontmatter block; the full content
+/// when there is no header or the header is unclosed.
+fn body_after_frontmatter(content: &str) -> &str {
+    let Some(idx) = content.find('\n') else {
+        return content;
+    };
+    let (first, after) = content.split_at(idx + 1);
+    if first.trim() != "---" {
+        return content;
+    }
+    let mut rest = after;
+    loop {
+        match rest.find('\n') {
+            Some(idx) => {
+                let (line, after) = rest.split_at(idx + 1);
+                if line.trim() == "---" {
+                    return after;
+                }
+                rest = after;
+            }
+            None => {
+                if rest.trim() == "---" {
+                    return "";
+                }
+                return content;
+            }
+        }
+    }
 }
 
 fn parse_bool(value: &str) -> bool {
