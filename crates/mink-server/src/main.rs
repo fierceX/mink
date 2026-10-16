@@ -59,13 +59,16 @@ async fn main() -> Result<()> {
         cwd: cwd.clone(),
         shutdown: shutdown_tx.clone(),
     });
-    // Web UI：默认服务嵌入二进制的前端产物（build.rs 自动构建并 include_str! 嵌入）。
-    // MINK_SERVER_DEV_WEB=1 时回退磁盘 ServeDir（web/dist）——前端开发热迭代场景。
-    let web_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("web")
-        .join("dist");
-    let use_embedded =
-        std::env::var("MINK_SERVER_DEV_WEB").is_err() && !crate::web_assets::FILES.is_empty();
+    // Web UI：默认服务嵌入二进制的前端产物（build.rs 自动构建 apps/web 并嵌入）。
+    // MINK_SERVER_DEV_WEB 指向目录时改为从磁盘 ServeDir（前端热迭代场景）。
+    let dev_web = std::env::var("MINK_SERVER_DEV_WEB").ok();
+    let web_dir = match dev_web.as_deref() {
+        Some(value) if !value.is_empty() && value != "1" => PathBuf::from(value),
+        _ => Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/web")
+            .join("dist"),
+    };
+    let use_embedded = dev_web.is_none() && !crate::web_assets::FILES.is_empty();
     let app = if use_embedded {
         use axum::handler::HandlerWithoutStateExt;
         api::router(state).fallback_service(crate::web_assets::embedded_serve.into_service())

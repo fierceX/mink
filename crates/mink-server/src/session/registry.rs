@@ -1,16 +1,19 @@
 //! Session registry: scans the mink home, manages the active runtime map,
 //! and owns the `session.lock` mutual-exclusion protocol.
 //!
-//! The lock is advisory: the TUI does not take locks. The stable lock file is
+//! All writable runtimes and deletion share the core advisory lease. The stable lock file is
 //! retained permanently; an open, exclusively locked file handle owns lease.
 
+use crate::session::admission::{
+    CapacityOwner, CapacityPool, PermitLease, ReserveError, SessionInstanceKey,
+};
 use crate::session::runtime::SessionRuntime;
 use anyhow::{Result, anyhow};
+use mink::runtime::SessionLease;
 use mink::runtime::session::{self as runtime_session, SessionMetadata};
 use mink::runtime::{AgentOptions, SessionPolicy};
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{Seek, Write};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -76,7 +79,6 @@ pub(crate) use crate::session::summary::summarize_usage;
 
 struct ActiveSession {
     runtime: Arc<SessionRuntime>,
-    _lease: Arc<SessionLease>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -97,9 +99,16 @@ pub struct Registry {
     home: PathBuf,
     model: String,
     active: Mutex<HashMap<SessionLocator, ActiveSession>>,
+    /// The single capacity ledger shared by ordinary turns, resumed inputs
+    /// and goal drivers. Every execution that spends `max_running` holds a
+    /// permit for exactly as long as it runs.
+    pub(crate) capacity: Arc<CapacityPool>,
+    /// Per-session instance generation: closing a session bumps it so a
+    /// permit from the closed instance can never be released into the
+    /// reopened one.
+    generations: Mutex<HashMap<SessionLocator, u64>>,
     operation_locks: Mutex<HashMap<SessionLocator, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     create_locks: Mutex<HashMap<CreateLocator, std::sync::Weak<tokio::sync::Mutex<()>>>>,
-    max_running: usize,
     llm_backend: Option<Arc<dyn mink::runtime::LlmBackend>>,
     /// User-level agent config from `~/.minkrc`（与 CLI 同格式同文件）。
     agent_layer: crate::session::agent_config::AgentConfig,
@@ -111,9 +120,10 @@ impl Registry {
             home,
             model,
             active: Mutex::new(HashMap::new()),
+            capacity: Arc::new(CapacityPool::new(max_running)),
+            generations: Mutex::new(HashMap::new()),
             operation_locks: Mutex::new(HashMap::new()),
             create_locks: Mutex::new(HashMap::new()),
-            max_running,
             llm_backend: None,
             agent_layer: crate::session::agent_config::AgentConfig::default(),
         }
@@ -263,7 +273,7 @@ impl Registry {
         let operation_lock = self.operation_lock(&session_locator);
         let _operation = operation_lock.lock().await;
         let result = async {
-            let _lease = SessionLease::acquire(paths.session_dir.join(LOCK_FILE))?;
+            let seed_lease = SessionLease::acquire(paths.session_dir.join(LOCK_FILE))?;
             runtime_session::ensure_metadata(
                 &paths,
                 cwd,
@@ -274,6 +284,7 @@ impl Registry {
                 },
             )
             .await?;
+            drop(seed_lease);
             let runtime = SessionRuntime::open(
                 self.build_options(&session_id, cwd)
                     .with_session(SessionPolicy::Resume(session_id.clone())),
@@ -291,7 +302,9 @@ impl Registry {
             ))
         }
         .await;
-        if result.is_err() {
+        if result.is_err()
+            && let Ok(_cleanup_lease) = SessionLease::acquire(paths.session_dir.join(LOCK_FILE))
+        {
             let _ = std::fs::remove_dir_all(&paths.session_dir);
         }
         result
@@ -330,9 +343,6 @@ impl Registry {
         if !dir.is_dir() {
             return Err(RegistryError::NotFound(format!("session {id} not found")));
         }
-        let lease = Arc::new(
-            SessionLease::acquire(dir.join(LOCK_FILE)).map_err(RegistryError::from_lease)?,
-        );
         // 使用 session 自身的 cwd（跨工作区打开的关键：UseOrCreate 需要在
         // 正确的 project 布局下解析，而不是服务启动目录）。
         let session_cwd = session_cwd_from_dir(&dir).map_err(RegistryError::Internal)?;
@@ -341,7 +351,7 @@ impl Registry {
                 .with_session(SessionPolicy::Resume(id.to_string())),
         )
         .await
-        .map_err(RegistryError::Internal)?;
+        .map_err(RegistryError::from_lease)?;
         let actual_id = runtime.session_id();
         // 校验与插入顺序：先验证实际解析出的 id，再入 active——
         // 校验失败时不得留下不一致状态。
@@ -359,7 +369,6 @@ impl Registry {
                 locator,
                 ActiveSession {
                     runtime: Arc::new(runtime),
-                    _lease: lease,
                 },
             );
         }
@@ -437,22 +446,105 @@ impl Registry {
                 "session {id} runtime is closed; reopen it"
             )));
         }
-        if session.runtime.running() {
-            return Err(RegistryError::Busy(format!(
-                "session {id} already has a turn in progress"
-            )));
-        }
-        let running = active.values().filter(|a| a.runtime.running()).count();
-        if running >= self.max_running {
-            return Err(RegistryError::Capacity(format!(
-                "too many running sessions (limit {})",
-                self.max_running
-            )));
-        }
+        let instance = self.instance_key(&locator);
+        let permit = self
+            .capacity
+            .try_reserve(instance, CapacityOwner::OrdinaryTurn)
+            .map_err(|error| self.capacity_error(id, error))?;
         session
             .runtime
-            .start_turn(input)
+            .start_turn_with_permit(input, Some(permit))
             .map_err(|error| RegistryError::Busy(error.to_string()))
+    }
+
+    /// Identity of the session instance a permit belongs to.
+    fn instance_key(&self, locator: &SessionLocator) -> SessionInstanceKey {
+        let mut generations = self.generations.lock().unwrap_or_else(|e| e.into_inner());
+        let generation = *generations.entry(locator.clone()).or_insert(1);
+        SessionInstanceKey {
+            project_key: locator.project_key.clone(),
+            id: locator.id.clone(),
+            generation,
+        }
+    }
+
+    fn capacity_error(&self, id: &str, error: ReserveError) -> RegistryError {
+        match error {
+            ReserveError::Full { limit, .. } => {
+                RegistryError::Capacity(format!("too many running sessions (limit {limit})"))
+            }
+            ReserveError::Occupied => RegistryError::Busy(format!(
+                "session {id} already has a turn or goal run in progress"
+            )),
+        }
+    }
+
+    /// Reserve the single capacity slot a goal run will own.
+    ///
+    /// The lease is destroyed by core when the activation is refused, so the
+    /// caller never rolls a reservation back by hand.
+    pub(crate) async fn reserve_goal_run(
+        &self,
+        id: &str,
+        project: Option<&str>,
+    ) -> RegistryResult<PermitLease> {
+        let locator = self.required_active_locator(id, project)?;
+        let instance = self.instance_key(&locator);
+        // A previous run of the same instance may still be exiting (a paused
+        // turn settles within milliseconds). Wait briefly for it to release
+        // its permit instead of refusing a replacement that is not concurrent.
+        let deadline = std::time::Instant::now() + Duration::from_millis(1_000);
+        loop {
+            match self
+                .capacity
+                .try_reserve(instance.clone(), CapacityOwner::GoalDriver)
+            {
+                Ok(permit) => return Ok(PermitLease::new(permit)),
+                Err(error @ ReserveError::Full { .. }) => {
+                    return Err(self.capacity_error(id, error));
+                }
+                Err(ReserveError::Occupied) if std::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(occupied) => return Err(self.capacity_error(id, occupied)),
+            }
+        }
+    }
+
+    /// Record that a stop was requested for this session's running execution.
+    ///
+    /// The permit itself belongs to the run; the ledger entry is marked
+    /// draining so capacity stays occupied until the execution actually
+    /// exits.
+    pub(crate) fn mark_goal_draining(&self, id: &str, project: Option<&str>) -> bool {
+        let Ok(locator) = self.required_active_locator(id, project) else {
+            return false;
+        };
+        let instance = self.instance_key(&locator);
+        self.capacity.mark_draining(&instance)
+    }
+
+    /// Serialise goal creation/control commands on one session.
+    ///
+    /// The reservation is only safe to roll back if no other attempt can
+    /// create or drop a goal for this session in between: holding this lock
+    /// from the reserve to the rollback makes "this attempt created nothing"
+    /// a stable fact for the whole attempt.
+    pub async fn lock_goal_commands(
+        &self,
+        id: &str,
+        project: Option<&str>,
+    ) -> RegistryResult<tokio::sync::OwnedMutexGuard<()>> {
+        let locator = self.required_active_locator(id, project)?;
+        Ok(self.operation_lock(&locator).lock_owned().await)
+    }
+
+    /// Whether a goal checker is configured for this deployment.
+    ///
+    /// The workbench must not offer checker acceptance the server cannot
+    /// honour, and the capability is what lets it decide.
+    pub fn verifier_configured(&self) -> bool {
+        std::env::var("MINK_GOAL_CHECK").is_ok_and(|c| !c.trim().is_empty())
     }
 
     pub fn submit_input(
@@ -481,15 +573,21 @@ impl Registry {
         }
         // Resuming an unapplied input starts a new turn even when its original
         // input was guidance targeting an older turn. Only live guidance can
-        // share an already admitted running session's slot.
-        if (resume.is_some() || input.target_turn_id.is_none())
-            && active.values().filter(|s| s.runtime.running()).count() >= self.max_running
-        {
-            return Err(RegistryError::Capacity("too many running sessions".into()));
-        }
+        // share an already admitted running session's slot, and it does not
+        // take a second one.
+        let permit = if resume.is_some() || input.target_turn_id.is_none() {
+            let instance = self.instance_key(&locator);
+            Some(
+                self.capacity
+                    .try_reserve(instance, CapacityOwner::OrdinaryTurn)
+                    .map_err(|error| self.capacity_error(id, error))?,
+            )
+        } else {
+            None
+        };
         session
             .runtime
-            .submit(input, resume)
+            .submit(input, resume, permit)
             .map_err(|e| RegistryError::Busy(e.to_string()))
     }
     pub fn interrupt(&self, id: &str, project: Option<&str>) -> RegistryResult<()> {
@@ -533,6 +631,12 @@ impl Registry {
         };
         let shutdown_result = runtime.shutdown().await;
         self.lock_active_state()?.remove(&locator);
+        // A permit from the closed instance must never be released into the
+        // reopened one: give the next open a new generation.
+        if let Ok(mut generations) = self.generations.lock() {
+            let entry = generations.entry(locator).or_insert(1);
+            *entry = entry.saturating_add(1);
+        }
         shutdown_result.map_err(RegistryError::Internal)
     }
 
@@ -768,6 +872,23 @@ impl Registry {
             options = options.with_base_url(url);
         }
         options = options.with_project_scoped_sessions().with_log_events(true);
+        // Checker acceptance needs a verifier. The terminal reads MINK_GOAL_CHECK;
+        // without the same wiring the workbench would offer an acceptance mode
+        // the server cannot honour.
+        if let Ok(command) = std::env::var("MINK_GOAL_CHECK")
+            && !command.trim().is_empty()
+        {
+            match mink::runtime::CommandGoalVerifier::new(command, 60) {
+                Ok(verifier) => {
+                    options = options.with_goal_verifier(std::sync::Arc::new(verifier));
+                }
+                // A bad command disables checker acceptance rather than failing
+                // session startup; the capability is reported as unavailable.
+                Err(error) => {
+                    eprintln!("MINK_GOAL_CHECK ignored: {error:#}");
+                }
+            }
+        }
         if let Some(backend) = &self.llm_backend {
             options = options.with_llm_backend(backend.clone());
         }
@@ -804,6 +925,7 @@ fn summary_from_metadata(
         id: m.id.clone(),
         alias: m.alias.clone(),
         title: m.title.clone(),
+        first_prompt: m.first_prompt.clone(),
         cwd: m.cwd.clone(),
         created_at: m.created_at.clone(),
         updated_at: m.updated_at.clone(),
@@ -923,48 +1045,6 @@ fn scan_all_sessions(home: &Path) -> Result<Vec<ScannedSession>> {
     Ok(out)
 }
 
-struct SessionLease {
-    _file: File,
-}
-
-impl SessionLease {
-    fn acquire(path: PathBuf) -> Result<Self> {
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|error| anyhow!("failed to open lock {}: {error}", path.display()))?;
-        if let Err(error) = fs2::FileExt::try_lock_exclusive(&file) {
-            if error.kind() == std::io::ErrorKind::WouldBlock {
-                anyhow::bail!("session is locked by another process");
-            }
-            return Err(anyhow!(
-                "failed to acquire lock {}: {error}",
-                path.display()
-            ));
-        }
-        let text = format!(
-            "{{\"pid\":{},\"taken_at\":{}}}",
-            std::process::id(),
-            now_secs()
-        );
-        file.set_len(0)?;
-        file.rewind()?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        Ok(Self { _file: file })
-    }
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1075,6 +1155,87 @@ mod tests {
 
         assert_eq!(ids.len(), 1);
         assert_eq!(registry.list().await.unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The pool is the single owner of goal capacity: a permit occupies the
+    /// slot until it is dropped, a competitor is refused, and the same session
+    /// cannot hold two permits at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn goal_run_permits_are_exclusive_and_release_on_drop() {
+        let root = unique_temp_dir("goal-reservation");
+        let home = root.join("home");
+        let cwd = root.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let registry = Registry::new(home, "flash".to_string(), 1);
+        let first = registry.create("first", &cwd).await.unwrap();
+        let second = registry.create("second", &cwd).await.unwrap();
+        registry
+            .open(&first.id, Some(&first.project_key))
+            .await
+            .unwrap();
+        registry
+            .open(&second.id, Some(&second.project_key))
+            .await
+            .unwrap();
+
+        // A creation attempt takes the single slot; a competitor is refused.
+        let attempt = registry
+            .reserve_goal_run(&first.id, Some(&first.project_key))
+            .await
+            .unwrap();
+        assert!(matches!(
+            registry
+                .reserve_goal_run(&second.id, Some(&second.project_key))
+                .await,
+            Err(RegistryError::Capacity(_))
+        ));
+        // The same session cannot hold a second permit either.
+        assert!(matches!(
+            registry
+                .reserve_goal_run(&first.id, Some(&first.project_key))
+                .await,
+            Err(RegistryError::Busy(_))
+        ));
+        // Dropping the failed attempt's lease frees exactly its own slot.
+        drop(attempt);
+        let claimed = registry
+            .reserve_goal_run(&second.id, Some(&second.project_key))
+            .await
+            .unwrap();
+        drop(claimed);
+
+        // A stale permit from a closed instance must not release the reopened
+        // instance's slot.
+        let stale = registry
+            .reserve_goal_run(&first.id, Some(&first.project_key))
+            .await
+            .unwrap();
+        registry
+            .close(&first.id, Some(&first.project_key))
+            .await
+            .unwrap();
+        drop(stale);
+        registry
+            .open(&first.id, Some(&first.project_key))
+            .await
+            .unwrap();
+        let reopened = registry
+            .reserve_goal_run(&first.id, Some(&first.project_key))
+            .await
+            .unwrap();
+        assert!(matches!(
+            registry
+                .reserve_goal_run(&second.id, Some(&second.project_key))
+                .await,
+            Err(RegistryError::Capacity(_))
+        ));
+        drop(reopened);
+        let freed = registry
+            .reserve_goal_run(&second.id, Some(&second.project_key))
+            .await
+            .unwrap();
+        drop(freed);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1499,6 +1660,33 @@ mod poison_public_tests {
         );
         // Pure-read helpers recover the poisoned lock instead of panicking.
         assert!(registry.idle_session_ids(Duration::from_secs(0)).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn summary_offers_the_first_prompt_as_a_label_fallback() {
+        // A session without a title still has the request that opened it; the
+        // list uses that rather than showing a raw id.
+        let dir =
+            std::env::temp_dir().join(format!("mink-registry-first-prompt-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let metadata = SessionMetadata {
+            id: "session-under-test".into(),
+            alias: None,
+            title: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            cwd: "/tmp".into(),
+            parent: None,
+            first_prompt: Some("把这个会话的标题补上".into()),
+            summary: None,
+        };
+        let summary = summary_from_metadata(Some(metadata), None, &dir, (0, 0, 0, 0));
+        assert_eq!(summary.title, None);
+        assert_eq!(
+            summary.first_prompt.as_deref(),
+            Some("把这个会话的标题补上")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

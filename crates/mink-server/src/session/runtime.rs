@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use mink::runtime::{AgentEvent, AgentEventStream, AgentOptions, AgentRuntime, SessionInfo};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -57,6 +57,11 @@ struct Projection {
     resources: serde_json::Value,
     diagnostics: serde_json::Value,
     activity: serde_json::Value,
+    /// Goal mirror rendered into snapshots. It lives here, next to the
+    /// watermark and the `goal_updated` payload, so a snapshot never has to
+    /// reach for the state lock while holding the projection: the lock order
+    /// state -> projection stays one-way and cannot invert.
+    goal: Option<mink::runtime::GoalSnapshot>,
 }
 impl Projection {
     fn trim(&mut self) {
@@ -83,6 +88,7 @@ pub struct SessionRuntime {
     inbox: Arc<mink::runtime::InputInbox>,
     image_input: mink::runtime::ImageInputCapability,
     attachments: Arc<mink::runtime::AttachmentStore>,
+    goal_dir: std::path::PathBuf,
     state: Arc<Mutex<RuntimeState>>,
     event_tx: broadcast::Sender<String>,
     stream_sequence: Arc<AtomicU64>,
@@ -90,6 +96,18 @@ pub struct SessionRuntime {
 
 impl SessionRuntime {
     pub async fn open(options: AgentOptions) -> Result<Self> {
+        // Goal turns bypass `submit_input`, so without a sink their body, tool
+        // calls, formal history and final never reach the mirror. The
+        // projection is built below, so the sink reaches it through a slot that
+        // is filled before the driver can run.
+        let goal_projection: Arc<OnceLock<Arc<Mutex<Projection>>>> = Arc::new(OnceLock::new());
+        let (event_tx, _) = broadcast::channel(1024);
+        let stream_sequence = Arc::new(AtomicU64::new(1));
+        let options = options.with_goal_event_sink(Arc::new(GoalTurnSink {
+            tx: event_tx.clone(),
+            sequence: Arc::clone(&stream_sequence),
+            projection: goal_projection.clone(),
+        }));
         let runtime = AgentRuntime::start(options).await?;
         let info = runtime.session_info();
         let directory = info
@@ -118,6 +136,11 @@ impl SessionRuntime {
             }
         };
         let (model, stats) = runtime.presentation_snapshot().await;
+        // Seed the goal mirror before the projection is shared: a restored
+        // goal must be visible in the first snapshot without a state read. A
+        // cleared (hidden) goal is seeded as null, exactly like every later
+        // publication normalizes it.
+        let goal = runtime.handle().goal_snapshot().filter(|goal| !goal.hidden);
         let mut projection = Projection {
             generation: format!(
                 "{}-{}",
@@ -135,6 +158,7 @@ impl SessionRuntime {
             resources,
             diagnostics: serde_json::json!({"type":"title_update","model":model,"stats":stats}),
             activity: serde_json::json!({"work_state":"idle","wait_elapsed_secs":null,"active_sub_agents":[]}),
+            goal,
         };
         projection.trim();
         let inbox = runtime.handle().input_inbox().clone();
@@ -142,22 +166,96 @@ impl SessionRuntime {
         let attachments = Arc::new(mink::runtime::AttachmentStore::new(
             directory.join("attachments"),
         ));
-        let (event_tx, _) = broadcast::channel(1024);
-        Ok(Self {
-            projection: Arc::new(Mutex::new(projection)),
+        // Subscribe before the runtime is moved into state: the watch channel
+        // carries every later lifecycle change and replays the current value.
+        let mut goal_updates = runtime.handle().subscribe_goal();
+        let mut goal_turns = runtime.handle().subscribe_goal_turns();
+        let projection = Arc::new(Mutex::new(projection));
+        let _ = goal_projection.set(projection.clone());
+        let state = Arc::new(Mutex::new(RuntimeState {
+            runtime: Some(runtime),
+            phase: RuntimePhase::Idle,
+            turn_task: None,
+            last_idle: Instant::now(),
+            forced_terminal: None,
+        }));
+        let runtime_this = Self {
+            projection: projection.clone(),
             inbox,
             image_input,
             attachments,
-            state: Arc::new(Mutex::new(RuntimeState {
-                runtime: Some(runtime),
-                phase: RuntimePhase::Idle,
-                turn_task: None,
-                last_idle: Instant::now(),
-                forced_terminal: None,
-            })),
-            event_tx,
-            stream_sequence: Arc::new(AtomicU64::new(1)),
-        })
+            goal_dir: directory,
+            state: state.clone(),
+            event_tx: event_tx.clone(),
+            stream_sequence: stream_sequence.clone(),
+        };
+        // Goal lifecycle is not part of the turn event stream, so the workbench
+        // would never hear about it. Mirror the authoritative watch channel into
+        // the same ordered SSE channel the browser already subscribes to; the
+        // runtime stays the single writer of goal state.
+        let goal_tx = event_tx.clone();
+        let goal_seq = Arc::clone(&runtime_this.stream_sequence);
+        let goal_projection = Arc::clone(&projection);
+        let turn_tx = goal_tx.clone();
+        let turn_seq = Arc::clone(&goal_seq);
+        let turn_projection = Arc::clone(&goal_projection);
+        let turn_state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                if goal_turns.changed().await.is_err() {
+                    return;
+                }
+                let active = *goal_turns.borrow_and_update();
+                // A goal turn is a turn. Writing it into the session's own state
+                // is what makes interrupt, idle_for and the idle reaper see it:
+                // a parallel display flag left those three blind, and the
+                // reaper would close a session mid-goal.
+                {
+                    let mut guard = turn_state.lock().unwrap_or_else(|e| e.into_inner());
+                    if !matches!(guard.phase, RuntimePhase::Closed | RuntimePhase::Closing) {
+                        guard.phase = if active {
+                            RuntimePhase::Running
+                        } else {
+                            // An interrupted goal turn settles as Cancelling, not
+                            // Running. Leaving it there kept `running` true
+                            // forever: the session held its concurrency slot
+                            // and `idle_for` never reclaimed it.
+                            match guard.phase {
+                                RuntimePhase::Running | RuntimePhase::Cancelling => {
+                                    RuntimePhase::Idle
+                                }
+                                other => other,
+                            }
+                        };
+                        if !active {
+                            guard.last_idle = Instant::now();
+                        }
+                    }
+                }
+                publish(
+                    &turn_tx,
+                    &turn_seq,
+                    &turn_projection,
+                    serde_json::json!({
+                        "type": "phase_updated",
+                        "phase": if active { "running" } else { "idle" }
+                    }),
+                );
+            }
+        });
+
+        tokio::spawn(async move {
+            loop {
+                if goal_updates.changed().await.is_err() {
+                    return;
+                }
+                let current = goal_updates.borrow_and_update().clone();
+                // Mirror and event share one critical section: the snapshot
+                // watermark and the goal it carries can never disagree.
+                publish_goal(&goal_tx, &goal_seq, &goal_projection, current);
+            }
+        });
+        Ok(runtime_this)
     }
 
     pub fn phase(&self) -> RuntimePhase {
@@ -180,6 +278,58 @@ impl SessionRuntime {
         self.event_tx.subscribe()
     }
 
+    /// Cloneable handle to the live runtime, or `None` once it is closed.
+    /// Goal control goes through this so the core goal contract — host-owned
+    /// limits, lease ownership and acceptance checks — stays authoritative.
+    /// Core handle for host controls that are not goal commands.
+    ///
+    /// Named after what it is rather than `goal_handle` so model switching and
+    /// manual compaction do not read as goal operations.
+    pub fn handle(&self) -> Option<mink::runtime::AgentRuntimeHandle> {
+        self.goal_handle()
+    }
+
+    pub fn goal_handle(&self) -> Option<mink::runtime::AgentRuntimeHandle> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .runtime
+            .as_ref()
+            .map(mink::runtime::AgentRuntime::handle)
+    }
+
+    /// Live goal snapshot, falling back to the persisted file when no runtime
+    /// is open so a closed session still reports what it left behind.
+    pub fn goal_snapshot(&self) -> Option<mink::runtime::GoalSnapshot> {
+        if let Some(goal) = self.goal_handle().and_then(|handle| handle.goal_snapshot()) {
+            return Some(goal);
+        }
+        self.persisted_goal()
+    }
+
+    pub fn persisted_goal(&self) -> Option<mink::runtime::GoalSnapshot> {
+        mink::runtime::session::read_goal_snapshot(&self.goal_path())
+    }
+
+    fn goal_path(&self) -> std::path::PathBuf {
+        let directory = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.session_info().goal_path());
+        directory
+            .or_else(|| Some(self.goal_fallback_path()))
+            .unwrap_or_default()
+    }
+
+    fn goal_fallback_path(&self) -> std::path::PathBuf {
+        // Only reached once the runtime is dropped; the session directory is
+        // recovered from the projection's stored artifact root.
+        self.goal_dir.join("goal.json")
+    }
+
     pub fn inbox(&self) -> &Arc<mink::runtime::InputInbox> {
         &self.inbox
     }
@@ -191,13 +341,13 @@ impl SessionRuntime {
     }
     pub fn detail(&self) -> serde_json::Value {
         let p = self.projection.lock().unwrap_or_else(|e| e.into_inner());
-        serde_json::json!({"generation":p.generation,"current_turn":p.current_turn,"phase":p.phase,"capabilities":{"image_input":self.image_input},"last_final":p.last_final})
+        serde_json::json!({"generation":p.generation,"current_turn":p.current_turn,"phase":p.phase,"capabilities":{"image_input":self.image_input},"last_final":p.last_final,"goal":p.goal.as_ref().filter(|g| !g.hidden)})
     }
     pub fn snapshot_subscription(&self) -> (serde_json::Value, broadcast::Receiver<String>) {
         let p = self.projection.lock().unwrap_or_else(|e| e.into_inner());
         let rx = self.event_tx.subscribe();
         (
-            serde_json::json!({"type":"session_snapshot","generation":p.generation,"stream_sequence":p.watermark,"conversation":p.rows,"progress":p.progress,"current_turn":p.current_turn,"phase":p.phase,"running":matches!(p.phase,"running"|"cancelling"|"closing"),"inputs":self.inbox.outstanding(),"capabilities":{"image_input":self.image_input},"last_final":p.last_final,"resources":p.resources,"diagnostics":p.diagnostics,"activity":p.activity}),
+            serde_json::json!({"type":"session_snapshot","generation":p.generation,"stream_sequence":p.watermark,"conversation":p.rows,"progress":p.progress,"current_turn":p.current_turn,"phase":p.phase,"running":matches!(p.phase,"running"|"cancelling"|"closing"),"inputs":self.inbox.outstanding(),"goal":p.goal.as_ref().filter(|g| !g.hidden),"capabilities":{"image_input":self.image_input},"last_final":p.last_final,"resources":p.resources,"diagnostics":p.diagnostics,"activity":p.activity}),
             rx,
         )
     }
@@ -209,7 +359,12 @@ impl SessionRuntime {
             serde_json::json!({"type":"inputs_updated","inputs":self.inbox.outstanding()}),
         );
     }
-    pub fn start_turn(&self, input: String) -> Result<()> {
+    /// Start a turn that owns a capacity permit for its whole execution.
+    pub(crate) fn start_turn_with_permit(
+        &self,
+        input: String,
+        permit: Option<crate::session::admission::ExecutionPermit>,
+    ) -> Result<()> {
         self.submit(
             mink::runtime::HumanInput {
                 request_id: format!(
@@ -224,6 +379,7 @@ impl SessionRuntime {
                 attachment_ids: vec![],
             },
             None,
+            permit,
         )
         .map(|_| ())
     }
@@ -231,6 +387,7 @@ impl SessionRuntime {
         &self,
         input: mink::runtime::HumanInput,
         resume: Option<(&str, u64)>,
+        permit: Option<crate::session::admission::ExecutionPermit>,
     ) -> Result<mink::runtime::InputReceipt> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if resume.is_none()
@@ -287,6 +444,12 @@ impl SessionRuntime {
         let projection = self.projection.clone();
         let inbox = self.inbox.clone();
         state.turn_task = Some(tokio::spawn(async move {
+            // The permit is the turn's capacity claim: it is released exactly
+            // when this task ends, on every exit path.
+            if let Some(permit) = &permit {
+                permit.mark_running();
+            }
+            let _permit = permit;
             let guarded =
                 run_turn_guarded(&tx, &stream_sequence, &projection, &shared, stream, session)
                     .await;
@@ -551,9 +714,42 @@ fn publish(
     tx: &broadcast::Sender<String>,
     sequence: &AtomicU64,
     projection: &Arc<Mutex<Projection>>,
-    mut value: serde_json::Value,
+    value: serde_json::Value,
 ) {
     let mut p = projection.lock().unwrap_or_else(|e| e.into_inner());
+    publish_locked(tx, sequence, &mut p, value);
+}
+
+/// Publish a goal update and advance the mirrored goal in the same critical
+/// section, so `snapshot_subscription` and `detail` can render the goal
+/// without touching session state.
+///
+/// A cleared (`hidden`) goal is normalized to null here: the mirror, the
+/// session snapshot/detail projections and the `goal_updated` event must all
+/// agree that a cleared goal is gone, matching the REST read.
+fn publish_goal(
+    tx: &broadcast::Sender<String>,
+    sequence: &AtomicU64,
+    projection: &Arc<Mutex<Projection>>,
+    goal: Option<mink::runtime::GoalSnapshot>,
+) {
+    let goal = goal.filter(|goal| !goal.hidden);
+    let mut p = projection.lock().unwrap_or_else(|e| e.into_inner());
+    p.goal = goal.clone();
+    publish_locked(
+        tx,
+        sequence,
+        &mut p,
+        serde_json::json!({"type":"goal_updated","goal":goal}),
+    );
+}
+
+fn publish_locked(
+    tx: &broadcast::Sender<String>,
+    sequence: &AtomicU64,
+    p: &mut Projection,
+    mut value: serde_json::Value,
+) {
     value["generation"] = p.generation.clone().into();
     let seq = sequence.fetch_add(1, Ordering::Relaxed);
     value["stream_sequence"] = seq.into();
@@ -604,6 +800,8 @@ fn publish(
                 Some("cancelling") => "cancelling",
                 Some("closing") => "closing",
                 Some("closed") => "closed",
+                Some("running") => "running",
+                Some("idle") => "idle",
                 _ => p.phase,
             };
         }
@@ -898,6 +1096,38 @@ fn publish_forced_timeout_final(
     }
 }
 
+/// Forwards goal-driven turn events into the same ordered SSE projection that
+/// ordinary turns use.
+///
+/// It deliberately owns no lifecycle state: phase and idle time come from the
+/// core goal-turn signal through the session's own `RuntimeState`, so a second
+/// source of truth cannot drift from execution control.
+struct GoalTurnSink {
+    tx: broadcast::Sender<String>,
+    sequence: Arc<AtomicU64>,
+    projection: Arc<OnceLock<Arc<Mutex<Projection>>>>,
+}
+
+#[async_trait::async_trait]
+impl mink::runtime::EventSink for GoalTurnSink {
+    async fn on_event(&self, event: mink::runtime::AgentEvent) -> Result<(), String> {
+        let mut value = serde_json::to_value(&event)
+            .unwrap_or_else(|_| serde_json::json!({"type":"serialization_error"}));
+        if value["type"] == "final" {
+            value["type"] = "turn_final".into();
+        }
+        match self.projection.get() {
+            Some(projection) => publish(&self.tx, &self.sequence, projection, value),
+            None => {
+                let mut payload = value;
+                payload["stream_sequence"] = self.sequence.fetch_add(1, Ordering::SeqCst).into();
+                let _ = self.tx.send(payload.to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1027,6 +1257,192 @@ mod tests {
         finalize_shutdown(&state, &tx, &sequence, None, None);
         assert!(rx.try_recv().is_err());
     }
+    /// Regression for the audit's lock-order inversion: interrupt/shutdown
+    /// hold the state lock and then publish (projection), so snapshot/detail
+    /// must never hold the projection while waiting for state. The goal is
+    /// rendered from the mirrored projection instead of a live state read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn snapshot_and_detail_do_not_wait_for_the_state_lock() {
+        let dir =
+            std::env::temp_dir().join(format!("mink-server-runtime-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let runtime = Arc::new(
+            SessionRuntime::open(AgentOptions::new(&dir, &dir).with_api_key("synthetic"))
+                .await
+                .unwrap(),
+        );
+        // Simulate interrupt/shutdown owning the state lock.
+        let state = runtime.state.lock().unwrap();
+        let worker_runtime = runtime.clone();
+        let worker = std::thread::spawn(move || {
+            let (snapshot, _rx) = worker_runtime.snapshot_subscription();
+            let detail = worker_runtime.detail();
+            (snapshot, detail)
+        });
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while !worker.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let finished = worker.is_finished();
+        drop(state);
+        assert!(
+            finished,
+            "snapshot/detail must not wait on the state lock held by interrupt/shutdown"
+        );
+        let (snapshot, detail) = worker.join().unwrap();
+        assert_eq!(snapshot["type"], "session_snapshot");
+        assert!(detail.get("goal").is_some());
+        runtime.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn goal_mirror_rides_the_snapshot_watermark() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-server-runtime-goal-mirror-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let runtime = SessionRuntime::open(AgentOptions::new(&dir, &dir).with_api_key("synthetic"))
+            .await
+            .unwrap();
+        let goal = mink::runtime::GoalSnapshot {
+            version: 1,
+            draft_duration_secs: None,
+            needs_confirmation: false,
+            review_candidate: None,
+            review_generation: 0,
+            checker_evidence_versions: Vec::new(),
+            reviews: Vec::new(),
+            checker_passed_candidate: None,
+            checker_records: Vec::new(),
+            confirmed_after_iteration: 0,
+            draft_ready: true,
+            id: "goal-mirror".into(),
+            revision: 1,
+            contract_revision: 1,
+            spec: mink::runtime::GoalSpec::new("mirror the goal"),
+            status: mink::runtime::GoalStatus::Paused,
+            phase: mink::runtime::GoalPhase::Idle,
+            reason: None,
+            review_failure_reason: None,
+            review_failure_stage: None,
+            review_stage: None,
+            review_requires_full: false,
+            review_escalation_reason: None,
+            review_report: None,
+            continuations: Vec::new(),
+            continuation_fingerprint: None,
+            continuation_rounds: 0,
+            completion_basis: None,
+            iterations: vec![],
+            report: None,
+            report_repair_used: false,
+            usage_records: vec![],
+            usage: Default::default(),
+            pending_effects: vec![],
+            failure_fingerprint: None,
+            repeated_failures: 0,
+            blocked_rounds: 0,
+            blocker_rounds: 0,
+            blocker_fingerprint: None,
+            evidence_versions: vec![],
+            acceptance_conversation_seq: 0,
+            environment: "test".into(),
+            hidden: false,
+        };
+        publish_goal(
+            &runtime.event_tx,
+            &runtime.stream_sequence,
+            &runtime.projection,
+            Some(goal.clone()),
+        );
+        let (snapshot, _rx) = runtime.snapshot_subscription();
+        let watermark = runtime.projection.lock().unwrap().watermark;
+        assert_eq!(snapshot["stream_sequence"], watermark);
+        assert_eq!(snapshot["goal"]["id"], "goal-mirror");
+        assert_eq!(runtime.detail()["goal"]["id"], "goal-mirror");
+        // A cleared goal is normalized to null in the mirror, the snapshot and
+        // the published event alike.
+        let mut events = runtime.event_tx.subscribe();
+        let mut hidden = goal.clone();
+        hidden.hidden = true;
+        publish_goal(
+            &runtime.event_tx,
+            &runtime.stream_sequence,
+            &runtime.projection,
+            Some(hidden),
+        );
+        let mut goal_event = None;
+        while let Ok(message) = events.try_recv() {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&message)
+                && value["type"] == "goal_updated"
+            {
+                goal_event = Some(value);
+            }
+        }
+        let goal_event = goal_event.expect("goal_updated event");
+        assert!(
+            goal_event["goal"].is_null(),
+            "a cleared goal leaked into the event: {goal_event}"
+        );
+        let (snapshot, _rx) = runtime.snapshot_subscription();
+        assert!(snapshot["goal"].is_null());
+        assert!(runtime.detail()["goal"].is_null());
+        runtime.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The audit's second direction: interrupt takes state and then waits for
+    /// the projection, so a snapshot must be able to finish under the same
+    /// contention without ever waiting for state. Both operations are bounded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn snapshot_and_interrupt_finish_under_projection_contention() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-server-runtime-contention-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let runtime = Arc::new(
+            SessionRuntime::open(AgentOptions::new(&dir, &dir).with_api_key("synthetic"))
+                .await
+                .unwrap(),
+        );
+        // The interrupt path must actually publish, so mark the session as
+        // running before holding the projection it will wait for. No state
+        // lock may be taken while the projection is held, or this test would
+        // recreate the inversion it guards against.
+        runtime.state.lock().unwrap().phase = RuntimePhase::Running;
+        let projection = runtime.projection.lock().unwrap();
+        let snapshot_runtime = runtime.clone();
+        let snapshot = std::thread::spawn(move || snapshot_runtime.snapshot_subscription().0);
+        let interrupt_runtime = runtime.clone();
+        let interrupt = std::thread::spawn(move || interrupt_runtime.interrupt());
+        // Both are serialised behind this release; the old snapshot path would
+        // deadlock here, holding the projection while waiting for the state
+        // lock interrupt took first.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(projection);
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while !(snapshot.is_finished() && interrupt.is_finished()) && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            snapshot.is_finished(),
+            "snapshot must finish with the interrupt"
+        );
+        assert!(
+            interrupt.is_finished(),
+            "interrupt must finish with the snapshot"
+        );
+        let snapshot = snapshot.join().unwrap();
+        interrupt.join().unwrap();
+        assert_eq!(snapshot["type"], "session_snapshot");
+        assert_eq!(runtime.phase(), RuntimePhase::Cancelling);
+        runtime.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn resource_projection_applies_todo_deltas_without_losing_completed_items() {
         let mut resources = serde_json::json!({"plan":{"plan":null,"draft":null},"todo":{"revision":1,"items":[{"id":"done","content":"old","status":"completed"},{"id":"work","content":"new","status":"in_progress"}]}});

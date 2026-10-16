@@ -8,13 +8,19 @@ struct Fixture(PathBuf);
 
 impl Fixture {
     fn new() -> Self {
+        // Wall-clock nanoseconds collide between tests running in parallel:
+        // the system clock is coarse enough that two threads read the same
+        // value, and these tests share HOME and `server.toml` with their
+        // neighbours. Pair the timestamp with a monotonic sequence.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "mink-startup-{}-{}",
+            "mink-startup-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&path).unwrap();
         Self(path)

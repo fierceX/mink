@@ -1,3 +1,8 @@
+// The pool's phase/observability surface is exercised by its unit tests and
+// consumed by the draining wiring; the allow keeps the unused-until-then API
+// from failing the workspace's deny-warnings build.
+#[allow(dead_code)]
+pub mod admission;
 pub mod agent_config;
 pub mod config;
 pub mod registry;

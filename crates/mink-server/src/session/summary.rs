@@ -10,6 +10,9 @@ pub struct SessionSummary {
     pub id: String,
     pub alias: Option<String>,
     pub title: Option<String>,
+    /// First human input of the session, when one was recorded. The list uses it
+    /// as a label when the session has no title of its own.
+    pub first_prompt: Option<String>,
     pub cwd: String,
     pub created_at: String,
     pub updated_at: String,

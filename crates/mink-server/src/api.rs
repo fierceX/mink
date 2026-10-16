@@ -71,6 +71,7 @@ impl IntoResponse for ApiResponse {
 
 pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
+        .route("/api/version", get(api_version))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route(
             "/api/sessions/{id}",
@@ -102,6 +103,13 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/api/sessions/{id}/stream", get(stream_events))
         .route("/api/sessions/{id}/plan", get(get_plan))
         .route("/api/sessions/{id}/todo", get(get_todo))
+        .route("/api/sessions/{id}/goal", get(get_goal).post(create_goal))
+        .route("/api/sessions/{id}/goal/{action}", post(goal_action))
+        .route(
+            "/api/sessions/{id}/model",
+            get(get_session_model).post(set_session_model),
+        )
+        .route("/api/sessions/{id}/compact", post(compact_session))
         .route("/api/sessions/{id}/artifacts", get(list_artifacts))
         .route("/api/sessions/{id}/artifacts/{name}", get(get_artifact))
         .route("/api/sessions/{id}/files", get(get_files))
@@ -186,6 +194,30 @@ async fn list_sessions(State(state): State<Arc<ApiState>>) -> ApiResponse {
         Ok(sessions) => ApiResponse::ok(json!(sessions)),
         Err(e) => ApiResponse::err(500, e.to_string()),
     }
+}
+
+/// The workbench bundle this process serves, so a stale page can tell it is stale.
+///
+/// The embedded `index.html` names its script with a content hash: reading that
+/// name back gives the page a value to compare against the bundle it actually
+/// loaded (a phone that refreshed into an older build then says so, instead of
+/// looking like a half-working UI).
+async fn api_version() -> ApiResponse {
+    let index = crate::web_assets::FILES
+        .iter()
+        .find(|(path, _)| *path == "index.html")
+        .map(|(_, bytes)| String::from_utf8_lossy(bytes).to_string());
+    let bundle = index
+        .as_deref()
+        .and_then(|html| {
+            let marker = "/assets/";
+            let at = html.find(marker)?;
+            let rest = &html[at + marker.len()..];
+            let end = rest.find('"')?;
+            Some(rest[..end].to_string())
+        })
+        .unwrap_or_default();
+    ApiResponse::ok(json!({ "bundle": bundle }))
 }
 
 async fn create_session(
@@ -549,6 +581,108 @@ async fn interrupt_session(
     }
 }
 
+#[derive(Deserialize)]
+struct ModelBody {
+    /// An alias such as `flash`/`pro` or any real model name.
+    model: String,
+}
+
+/// Switch the session's active model, mirroring the terminal's `/model`.
+/// The session's model vocabulary plus the configured model.
+///
+/// The label a UI shows comes from the title-update path (and from this route's
+/// POST companion after a switch), because a switch is owned by the running
+/// orchestrator rather than by the configuration these fields describe.
+async fn get_session_model(
+    State(state): State<Arc<ApiState>>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
+) -> ApiResponse {
+    let runtime = match state.registry.active_runtime(&id, query.project.as_deref()) {
+        Ok(Some(runtime)) => runtime,
+        Ok(None) => return ApiResponse::err(409, "session is not open"),
+        Err(error) => return registry_error(error),
+    };
+    let Some(handle) = runtime.handle() else {
+        return ApiResponse::err(409, "session runtime is shutting down");
+    };
+    let choices = handle
+        .model_choices()
+        .into_iter()
+        .map(|(alias, model)| json!({ "alias": alias, "model": model }))
+        .collect::<Vec<_>>();
+    ApiResponse::ok(json!({
+        "model": handle.current_model(),
+        "resolved": handle.resolved_model(),
+        "choices": choices,
+    }))
+}
+
+async fn set_session_model(
+    State(state): State<Arc<ApiState>>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
+    Json(body): Json<ModelBody>,
+) -> ApiResponse {
+    let model = body.model.trim().to_string();
+    if model.is_empty() {
+        return ApiResponse::err(400, "model is required");
+    }
+    let runtime = match state.registry.active_runtime(&id, query.project.as_deref()) {
+        Ok(Some(runtime)) => runtime,
+        Ok(None) => return ApiResponse::err(404, "session is not open"),
+        Err(error) => return registry_error(error),
+    };
+    let Some(handle) = runtime.handle() else {
+        return ApiResponse::err(409, "session runtime is shutting down");
+    };
+    match handle.set_model_with_outcome(model.clone()).await {
+        Ok(outcome) => ApiResponse::ok(json!({
+            "model": model,
+            "label": outcome.label,
+            "stats": outcome.stats,
+        })),
+        Err(error) => ApiResponse::err(409, switch_error(&error)),
+    }
+}
+
+/// Manual context compaction, mirroring the terminal's `/compact`.
+async fn compact_session(
+    State(state): State<Arc<ApiState>>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
+) -> ApiResponse {
+    let runtime = match state.registry.active_runtime(&id, query.project.as_deref()) {
+        Ok(Some(runtime)) => runtime,
+        Ok(None) => return ApiResponse::err(404, "session is not open"),
+        Err(error) => return registry_error(error),
+    };
+    let Some(handle) = runtime.handle() else {
+        return ApiResponse::err(409, "session runtime is shutting down");
+    };
+    match handle.compact().await {
+        Ok(outcome) => ApiResponse::ok(json!({ "compacted": true, "outcome": outcome })),
+        Err(error) => ApiResponse::err(409, switch_error(&error)),
+    }
+}
+
+/// Report why a runtime control was refused in language the workbench can show.
+///
+/// A raw core error surfaces English identifiers in an otherwise Chinese
+/// interface, and the actionable ones need to say what to do next.
+fn switch_error(error: &mink::runtime::RuntimeError) -> String {
+    let text = format!("{error}");
+    if text.contains("goal") && text.contains("active") {
+        "当前目标执行中，先暂停目标再切换".to_string()
+    } else if text.contains("max_context_tokens") || text.to_lowercase().contains("disabled") {
+        "该会话未启用上下文压缩".to_string()
+    } else if text.contains("busy") || text.contains("turn") {
+        "本轮尚未结束，请稍后重试".to_string()
+    } else {
+        text
+    }
+}
+
 async fn events_history(
     State(state): State<Arc<ApiState>>,
     AxumPath(id): AxumPath<String>,
@@ -743,6 +877,398 @@ async fn get_todo(
     }
 }
 
+/// Read the goal, preferring the live runtime over the persisted file so a
+/// session the server is driving reports its real state instead of a stale disk
+/// read. Mutations go through the same runtime handle, so the core contract —
+/// lease ownership, revision checks and acceptance rules — stays authoritative.
+async fn get_goal(
+    State(state): State<Arc<ApiState>>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
+) -> ApiResponse {
+    if let Ok(Some(runtime)) = state.registry.active_runtime(&id, query.project.as_deref())
+        && let Some(goal) = runtime.goal_snapshot()
+    {
+        // A cleared (hidden) goal reads as null here exactly like it does in
+        // the session snapshot, the goal_updated event and the disk fallback:
+        // one normalization rule for every read surface.
+        let goal = (!goal.hidden).then_some(goal);
+        return ApiResponse::ok(
+            json!({ "goal": goal, "driven": true, "verifier": state.registry.verifier_configured() }),
+        );
+    }
+    let dir = match session_dir_or_err(&state, &id, query.project.as_deref()).await {
+        Ok(dir) => dir,
+        Err(response) => return response,
+    };
+    let Some(text) = read_optional(&dir.join("goal.json")).await else {
+        return ApiResponse::ok(
+            json!({ "goal": serde_json::Value::Null, "driven": false, "verifier": state.registry.verifier_configured() }),
+        );
+    };
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(value) => {
+            // `goal.json` stores {version, current, history}; the workbench only
+            // needs the live snapshot. A cleared (hidden) goal is normalized to
+            // null so the persisted path matches the live read.
+            let goal = value
+                .get("current")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let goal = if goal.get("hidden").and_then(serde_json::Value::as_bool) == Some(true) {
+                serde_json::Value::Null
+            } else {
+                goal
+            };
+            ApiResponse::ok(
+                json!({ "goal": goal, "driven": false, "verifier": state.registry.verifier_configured() }),
+            )
+        }
+        Err(e) => ApiResponse::err(500, format!("goal.json parse error: {e}")),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CreateGoalBody {
+    #[serde(default)]
+    protocol_version: Option<u32>,
+    #[serde(default)]
+    generate: Option<bool>,
+    #[serde(default)]
+    draft_spec: Option<mink::runtime::GoalDraftSpec>,
+    objective: String,
+    /// `agent_reviewed` (default), `verifier` or `human`.
+    #[serde(default)]
+    acceptance: String,
+    #[serde(default)]
+    max_turns: Option<u32>,
+    #[serde(default)]
+    max_minutes: Option<u64>,
+    #[serde(default)]
+    acceptance_criteria: Vec<String>,
+    #[serde(default)]
+    constraints: Vec<String>,
+}
+
+/// Create a draft on an open session; explicit confirmation activates execution.
+///
+/// The browser is a host here, not the model: limits and acceptance mode are
+/// validated by the core contract, and the model still cannot change them.
+async fn create_goal(
+    State(state): State<Arc<ApiState>>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
+    body: Option<axum::Json<CreateGoalBody>>,
+) -> ApiResponse {
+    let Some(body) = body else {
+        return ApiResponse::err(400, "goal body is required");
+    };
+    let runtime = match state.registry.active_runtime(&id, query.project.as_deref()) {
+        Ok(Some(runtime)) => runtime,
+        Ok(None) => {
+            return ApiResponse::err(409, "session is not open; open it before creating a goal");
+        }
+        Err(error) => return registry_error(error),
+    };
+    let handle = match runtime.goal_handle() {
+        Some(handle) => handle,
+        None => return ApiResponse::err(409, "session runtime is closing"),
+    };
+    if body.protocol_version != Some(2) {
+        return ApiResponse::err(
+            409,
+            "goal protocol upgraded; protocol_version 2 and draft confirmation are required",
+        );
+    }
+    let objective = body.objective.trim();
+    if objective.is_empty() {
+        return ApiResponse::err(400, "goal objective is empty");
+    }
+    let mut spec = mink::runtime::GoalSpec::new(objective);
+    if !body.acceptance_criteria.is_empty() {
+        spec.acceptance_criteria = body.acceptance_criteria.clone();
+        spec.criteria = body
+            .acceptance_criteria
+            .iter()
+            .enumerate()
+            .map(|(i, outcome)| mink::runtime::GoalCriterion {
+                id: format!("criterion-{}", i + 1),
+                subgoal_id: "subgoal-1".into(),
+                outcome: outcome.clone(),
+                required_evidence: "Concrete files or recorded verification results".into(),
+            })
+            .collect();
+    }
+    spec.constraints = body.constraints.clone();
+    spec.acceptance = match body.acceptance.as_str() {
+        "human" => mink::runtime::GoalAcceptance::Human,
+        "verifier" => match handle.goal_verifier_ids().into_iter().next() {
+            Some(id) => mink::runtime::GoalAcceptance::Verifier { id },
+            None => return ApiResponse::err(409, "no goal verifier is configured"),
+        },
+        "agent_reviewed" | "" => mink::runtime::GoalAcceptance::AgentReviewed,
+        other => return ApiResponse::err(400, format!("unknown acceptance mode {other}")),
+    };
+    if let Some(draft) = &body.draft_spec {
+        spec.objective = draft.objective.clone();
+        spec.scope = draft.scope.clone();
+        spec.constraints = draft.constraints.clone();
+        spec.subgoals = draft.subgoals.clone();
+        spec.criteria = draft.criteria.clone();
+        spec.suggested_actions = draft.suggested_actions.clone();
+        spec.acceptance_criteria = spec.criteria.iter().map(|c| c.outcome.clone()).collect();
+    }
+    spec.checker_id = handle.goal_verifier_ids().into_iter().next();
+    let mut limits = spec.limits.clone();
+    if let Some(turns) = body.max_turns {
+        limits.max_turns = turns;
+    }
+    if let Some(minutes) = body.max_minutes {
+        limits.deadline_unix_secs = now_unix().saturating_add(minutes.saturating_mul(60));
+    }
+    spec.limits = limits;
+    if let Err(error) = spec.validate() {
+        return ApiResponse::err(400, format!("{error:#}"));
+    }
+    // Arm the driver before creating: a goal created while scheduling is
+    // disabled would sit idle until the next explicit start. Arming never
+    // starts a run by itself — the leased activation below is the single
+    // owner of the run — so a refused create cannot leave an unleased run
+    // behind. The slot is taken first — goal turns never pass through
+    // `submit_input`, so without it a goal would run entirely outside
+    // `max_running`. Commands are serialised per session so a failure can
+    // release exactly the slot this attempt added, even under concurrent
+    // creations.
+    let _command = match state
+        .registry
+        .lock_goal_commands(&id, query.project.as_deref())
+        .await
+    {
+        Ok(guard) => guard,
+        Err(error) => return registry_error(error),
+    };
+    // An existing unfinished goal is refused before any capacity is taken and
+    // before the driver is armed, so a refused create never starts a goal the
+    // request was not about.
+    if handle
+        .goal_snapshot()
+        .is_some_and(|goal| !goal.status.is_terminal())
+    {
+        return ApiResponse::err(409, "session already has an unfinished goal");
+    }
+    let lease = match state
+        .registry
+        .reserve_goal_run(&id, query.project.as_deref())
+        .await
+    {
+        Ok(lease) => lease,
+        Err(error) => return registry_error(error),
+    };
+    let duration_secs = body.max_minutes.unwrap_or(60).saturating_mul(60);
+    let proposed = if body.generate == Some(false) {
+        handle.draft_goal(spec, duration_secs)
+    } else {
+        handle.request_goal_draft(spec, duration_secs)
+    };
+    let draft = match proposed {
+        Ok(draft) => draft,
+        Err(error) => return ApiResponse::err(409, error.to_string()),
+    };
+    if body.generate == Some(false) {
+        return ApiResponse::ok(json!({"goal":draft}));
+    }
+    drop(_command);
+    let task = tokio::spawn(async move {
+        let _lease = lease;
+        handle
+            .generate_goal_draft_at(&draft.id, draft.revision, "")
+            .await
+    });
+    match task.await {
+        Ok(Ok(draft)) => ApiResponse::ok(json!({"goal":draft})),
+        other => ApiResponse::err(
+            409,
+            format!("draft generation failed; proposal preserved: {other:?}"),
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct GoalActionBody {
+    #[serde(default)]
+    feedback: Option<String>,
+    /// Exact goal the caller believes it is acting on.
+    #[serde(default)]
+    goal_id: Option<String>,
+    #[serde(default)]
+    revision: Option<u64>,
+    /// Human evidence for `approve` and `reconcile`.
+    #[serde(default)]
+    evidence: Option<String>,
+    #[serde(default)]
+    max_turns: Option<u32>,
+    #[serde(default)]
+    max_minutes: Option<u64>,
+    #[serde(default)]
+    soft_token_limit: Option<u64>,
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Pause, resume, cancel, clear, re-budget, approve or reconcile a goal.
+///
+/// Every mutation is a compare-and-set on the caller's revision, so a stale
+/// workbench cannot undo a change another surface already made.
+async fn goal_action(
+    State(state): State<Arc<ApiState>>,
+    AxumPath((id, action)): AxumPath<(String, String)>,
+    Query(query): Query<ProjectQuery>,
+    body: Option<axum::Json<GoalActionBody>>,
+) -> ApiResponse {
+    let runtime = match state.registry.active_runtime(&id, query.project.as_deref()) {
+        Ok(Some(runtime)) => runtime,
+        Ok(None) => return ApiResponse::err(409, "session is not open"),
+        Err(error) => return registry_error(error),
+    };
+    let handle = match runtime.goal_handle() {
+        Some(handle) => handle,
+        None => return ApiResponse::err(409, "session runtime is closing"),
+    };
+    let body = match body {
+        Some(axum::Json(body)) => body,
+        None => GoalActionBody {
+            feedback: None,
+            goal_id: None,
+            revision: None,
+            evidence: None,
+            max_turns: None,
+            max_minutes: None,
+            soft_token_limit: None,
+        },
+    };
+    let current = match handle.goal_snapshot() {
+        Some(goal) => goal,
+        None => return ApiResponse::err(404, "session has no goal"),
+    };
+    let Some(revision) = body.revision else {
+        return ApiResponse::err(400, "revision is required for goal control");
+    };
+    // The client's expected identity is mandatory. Revisions restart at 1 for
+    // every goal, so a stale request for a replaced goal could otherwise match
+    // the replacement's revision and cancel it.
+    match body.goal_id.as_deref() {
+        None => return ApiResponse::err(400, "goal_id is required for goal control"),
+        Some(expected) if expected != current.id => {
+            return ApiResponse::err(409, "goal was replaced; reread it before acting");
+        }
+        Some(_) => {}
+    }
+    let result = match action.as_str() {
+        "refine" => {
+            if current.status != mink::runtime::GoalStatus::Draft || current.revision != revision {
+                return ApiResponse::err(409, "stale draft; reread before refining");
+            }
+            let lease = match state
+                .registry
+                .reserve_goal_run(&id, query.project.as_deref())
+                .await
+            {
+                Ok(lease) => lease,
+                Err(error) => return registry_error(error),
+            };
+            let feedback = body.feedback.unwrap_or_default();
+            let task = tokio::spawn(async move {
+                let _lease = lease;
+                handle
+                    .generate_goal_draft_at(&current.id, revision, &feedback)
+                    .await
+            });
+            return match task.await {
+                Ok(Ok(goal)) => ApiResponse::ok(json!({"goal":goal})),
+                other => ApiResponse::err(409, format!("draft refinement failed: {other:?}")),
+            };
+        }
+        "pause" => {
+            state
+                .registry
+                .mark_goal_draining(&id, query.project.as_deref());
+            handle.pause_goal(&current.id, revision)
+        }
+        "confirm" | "resume" => {
+            // A reopened session starts with scheduling disabled, so an
+            // explicit resume has to arm the driver or the goal sits active
+            // and never runs. Arming alone starts no run: the leased
+            // activation below is the single owner of the run, so a refused
+            // resume cannot issue provider requests or leak capacity. Capacity
+            // is checked before it can start, and a refused resume releases
+            // only a slot this attempt added.
+            let _command = match state
+                .registry
+                .lock_goal_commands(&id, query.project.as_deref())
+                .await
+            {
+                Ok(guard) => guard,
+                Err(error) => return registry_error(error),
+            };
+            let lease = match state
+                .registry
+                .reserve_goal_run(&id, query.project.as_deref())
+                .await
+            {
+                Ok(lease) => lease,
+                Err(error) => return registry_error(error),
+            };
+            if let Err(error) = handle.start_goal_driver() {
+                // The lease is dropped here: the driver could not be armed.
+                return ApiResponse::err(409, format!("{error}"));
+            }
+            if action == "confirm" {
+                handle.confirm_and_start_goal(&current.id, revision, Box::new(lease))
+            } else {
+                handle.resume_and_start_goal(&current.id, revision, Box::new(lease))
+            }
+        }
+        "cancel" => {
+            state
+                .registry
+                .mark_goal_draining(&id, query.project.as_deref());
+            handle.cancel_goal(&current.id, revision)
+        }
+        "clear" => handle.clear_goal(&current.id, revision),
+        "approve" => handle.approve_goal(
+            &current.id,
+            revision,
+            vec![body.evidence.unwrap_or_default()],
+        ),
+        "reconcile" => {
+            handle.reconcile_goal_effects(&current.id, revision, body.evidence.unwrap_or_default())
+        }
+        "budget" => {
+            let mut limits = current.spec.limits.clone();
+            if let Some(turns) = body.max_turns {
+                limits.max_turns = turns;
+            }
+            if let Some(minutes) = body.max_minutes {
+                limits.deadline_unix_secs = now_unix().saturating_add(minutes.saturating_mul(60));
+            }
+            if body.soft_token_limit.is_some() {
+                limits.soft_token_limit = body.soft_token_limit;
+            }
+            handle.update_goal_limits(&current.id, revision, limits)
+        }
+        other => return ApiResponse::err(404, format!("unknown goal action {other}")),
+    };
+    match result {
+        Ok(goal) => ApiResponse::ok(json!({ "goal": goal })),
+        Err(error) => ApiResponse::err(409, format!("{error}")),
+    }
+}
+
 async fn list_artifacts(
     State(state): State<Arc<ApiState>>,
     AxumPath(id): AxumPath<String>,
@@ -919,6 +1445,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
     use http_body_util::BodyExt;
+    use std::path::PathBuf;
     use tower::ServiceExt;
 
     struct MockRuntimeBackend;
@@ -951,6 +1478,12 @@ mod tests {
     /// 每个调用使用唯一 home（进程内并行测试共享同一 pid 的固定目录会
     /// 互相覆盖 artifact/会话文件，造成偶发竞态失败）。
     fn test_router() -> Router {
+        test_router_with_session_dir().0
+    }
+
+    /// Same fixture, but also hands back the session directory so a test can
+    /// seed authoritative state files before requesting them.
+    fn test_router_with_session_dir() -> (Router, PathBuf) {
         static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let home = std::env::temp_dir().join(format!(
             "mink-server-itest-{}-{}",
@@ -984,7 +1517,939 @@ mod tests {
             cwd: std::env::temp_dir(),
             shutdown,
         });
-        router(state)
+        (router(state), sess)
+    }
+
+    #[tokio::test]
+    async fn goal_endpoint_reports_the_persisted_snapshot_or_null() {
+        let (app, dir) = test_router_with_session_dir();
+        // No goal.json yet: the workbench marker must read as "no goal".
+        let (status, body) = req(&app, Method::GET, "/api/sessions/test-session/goal").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body["data"]["goal"].is_null(),
+            "sessions without a goal report null, got {body}"
+        );
+
+        // goal.json wraps the snapshot in {version, current, history}; only
+        // `current` is mirrored.
+        std::fs::write(
+            dir.join("goal.json"),
+            serde_json::json!({
+                "version": 1,
+                "current": {
+                    "id": "goal-1", "status": "active", "phase": "executing",
+                    "remaining_turns": 12, "hidden": false
+                },
+                "history": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (status, body) = req(&app, Method::GET, "/api/sessions/test-session/goal").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["goal"]["id"], "goal-1", "{body}");
+        assert_eq!(body["data"]["goal"]["status"], "active", "{body}");
+        assert_eq!(body["data"]["goal"]["remaining_turns"], 12, "{body}");
+        assert!(
+            body["data"]["goal"].get("history").is_none(),
+            "history is not mirrored: {body}"
+        );
+
+        // A cleared (hidden) goal is absent on the persisted path too: the
+        // workbench must read the same "no goal" as a live runtime reports.
+        std::fs::write(
+            dir.join("goal.json"),
+            serde_json::json!({
+                "version": 4,
+                "current": {
+                    "id": "goal-1", "status": "cancelled", "phase": "idle",
+                    "hidden": true
+                },
+                "history": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (status, body) = req(&app, Method::GET, "/api/sessions/test-session/goal").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body["data"]["goal"].is_null(),
+            "a cleared goal must not leak through the disk fallback: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_endpoint_normalizes_cleared_goals_to_null() {
+        let (app, home, sid) = open_goal_router().await;
+        let g = |suffix: &str| format!("/api/sessions/{sid}{suffix}");
+
+        let (status, body) = post_json(
+            &app,
+            &g("/goal"),
+            serde_json::json!({
+                "objective": "clear me",
+                "protocol_version": 2,
+                "generate": false
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let id = body["data"]["goal"]["id"].as_str().unwrap().to_string();
+        let revision = body["data"]["goal"]["revision"].as_u64().unwrap();
+
+        let (status, body) = post_json(
+            &app,
+            &g("/goal/cancel"),
+            serde_json::json!({"goal_id": id, "revision": revision}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["goal"]["status"], "cancelled", "{body}");
+        let revision = body["data"]["goal"]["revision"].as_u64().unwrap();
+
+        let (status, body) = post_json(
+            &app,
+            &g("/goal/clear"),
+            serde_json::json!({"goal_id": id, "revision": revision}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["goal"]["hidden"], true, "{body}");
+
+        // The live runtime still drives the session, but the cleared goal is
+        // gone from every read surface.
+        let (status, body) = req(&app, Method::GET, &g("/goal")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body["data"]["goal"].is_null(),
+            "a cleared goal must not leak through the live read: {body}"
+        );
+        assert_eq!(body["data"]["driven"], true, "{body}");
+
+        // The authenticated session snapshot agrees with the REST read.
+        let (status, snapshot) = post_json(&app, &g("/open"), serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{snapshot}");
+        assert!(
+            snapshot["data"]["snapshot"]["goal"].is_null(),
+            "the snapshot must not carry a cleared goal: {snapshot}"
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// A router holding one session that was created and opened through the
+    /// real API against a mock backend, so goal control has a live runtime to
+    /// drive. Returns the router and the fixture home for cleanup.
+    ///
+    /// The session is created through the API rather than hand-placed on disk:
+    /// the runtime derives the project key by hashing the working directory, so
+    /// a hand-written `projects/<name>` layout would never resolve.
+    async fn open_goal_router() -> (Router, PathBuf, String) {
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let home = std::env::temp_dir().join(format!(
+            "mink-server-goaltest-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let cwd = home.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let registry = Arc::new(Registry::with_llm_backend(
+            home.clone(),
+            "flash".to_string(),
+            4,
+            Arc::new(MockRuntimeBackend),
+        ));
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let app = router(Arc::new(ApiState {
+            registry,
+            cwd: cwd.clone(),
+            shutdown,
+        }));
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "name": "goaltest", "cwd": cwd.display().to_string() })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("create request must be served");
+        let status = created.status();
+        let bytes = created.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, StatusCode::OK, "create: {body}");
+        let session_id = body["data"]["id"].as_str().expect("session id").to_string();
+
+        let opened = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/sessions/{session_id}/open"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("open request must be served");
+        let status = opened.status();
+        let bytes = opened.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "open: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        (app, home, session_id)
+    }
+
+    async fn post_json(
+        app: &Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn goal_control_requires_an_open_session() {
+        // `test_router` never opens the session, so control must refuse rather
+        // than write a goal.json that no runtime would ever drive.
+        let (app, _dir) = test_router_with_session_dir();
+        let (status, body) = post_json(
+            &app,
+            "/api/sessions/test-session/goal",
+            serde_json::json!({ "protocol_version":2, "generate":false, "objective": "ship it" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    }
+
+    #[tokio::test]
+    async fn goal_control_rejects_a_blank_objective_with_a_host_error() {
+        let (app, home, sid) = open_goal_router().await;
+        let g = |suffix: &str| format!("/api/sessions/{sid}{suffix}");
+        let (status, body) = post_json(
+            &app,
+            &g("/goal"),
+            serde_json::json!({ "protocol_version":2, "generate":false, "objective": "   " }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("objective"),
+            "{body}"
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// The workbench reaches `/model` and `/compact` through the same session
+    /// runtime the terminal drives, so both must be host endpoints rather than
+    /// client-only behaviour.
+    #[tokio::test]
+    async fn server_switches_model_and_compacts_through_the_runtime() {
+        let (app, home, sid) = open_goal_router().await;
+        let g = |suffix: &str| format!("/api/sessions/{sid}{suffix}");
+
+        // A blank model is a host error, not a silent no-op.
+        let (status, body) =
+            post_json(&app, &g("/model"), serde_json::json!({ "model": "   " })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let (status, body) =
+            post_json(&app, &g("/model"), serde_json::json!({ "model": "pro" })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["model"], "pro", "{body}");
+        assert!(
+            body["data"]["label"].is_string(),
+            "the switch must resolve an alias to a real label: {body}"
+        );
+
+        let (status, body) = post_json(&app, &g("/compact"), serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["compacted"], true, "{body}");
+
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn server_creates_and_controls_a_goal_through_the_runtime() {
+        let (app, home, sid) = open_goal_router().await;
+        let g = |suffix: &str| format!("/api/sessions/{sid}{suffix}");
+
+        // Creating requires the session to be open; the fixture opened it.
+        let (status, body) = post_json(
+            &app,
+            &g("/goal"),
+            serde_json::json!({
+                "objective": "ship the parser",
+                "protocol_version": 2,
+                "generate": false,
+                "acceptance": "agent_reviewed",
+                "max_turns": 4,
+                "acceptance_criteria": ["parses fixtures"],
+                "constraints": ["no network"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let goal = &body["data"]["goal"];
+        assert_eq!(goal["status"], "draft", "{body}");
+        assert_eq!(
+            goal["spec"]["limits"]["max_turns"], 4,
+            "host-chosen limit is honoured"
+        );
+        let id = goal["id"].as_str().expect("goal id").to_string();
+        let revision = goal["revision"].as_u64().expect("goal revision");
+        let (status, confirmed) = post_json(
+            &app,
+            &g("/goal/confirm"),
+            serde_json::json!({"goal_id":id,"revision":revision}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{confirmed}");
+        let revision = confirmed["data"]["goal"]["revision"].as_u64().unwrap();
+
+        // The live runtime reports the same goal, not a stale disk read.
+        let (status, body) = req(&app, Method::GET, &g("/goal")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["driven"], true, "{body}");
+        assert_eq!(body["data"]["goal"]["id"], id, "{body}");
+
+        // Every mutation is a compare-and-set on the goal the caller means.
+        let (status, body) = post_json(
+            &app,
+            &g("/goal/pause"),
+            serde_json::json!({ "revision": revision + 99, "goal_id": id }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "stale revision must be refused: {body}"
+        );
+
+        // A missing goal id is a host error, not a silent default to the
+        // server's current goal: replacements restart revisions at 1, so
+        // substituting the current id would let a stale request act on it.
+        let (status, body) = post_json(
+            &app,
+            &g("/goal/pause"),
+            serde_json::json!({ "revision": revision }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // And a goal id that is not the current one is refused outright.
+        let (status, body) = post_json(
+            &app,
+            &g("/goal/pause"),
+            serde_json::json!({ "revision": revision, "goal_id": "goal-someone-else" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+        // The current revision pauses, and the state is observable afterwards.
+        let (status, body) = post_json(
+            &app,
+            &g("/goal/pause"),
+            serde_json::json!({ "revision": revision, "goal_id": id }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["goal"]["status"], "paused", "{body}");
+        let paused_revision = body["data"]["goal"]["revision"].as_u64().unwrap();
+
+        let (status, body) = post_json(
+            &app,
+            &g("/goal/resume"),
+            serde_json::json!({ "revision": paused_revision, "goal_id": id }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["goal"]["status"], "active", "{body}");
+
+        // Missing revision is a host error, not a silent no-op.
+        let (status, body) = post_json(&app, &g("/goal/cancel"), serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn goal_rejects_an_unknown_acceptance_mode() {
+        let (app, home, sid) = open_goal_router().await;
+        let g = |suffix: &str| format!("/api/sessions/{sid}{suffix}");
+        let (status, body) = post_json(
+            &app,
+            &g("/goal"),
+            serde_json::json!({ "protocol_version":2, "generate":false, "objective": "x", "acceptance": "wishful" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn legacy_goal_write_requires_explicit_protocol_upgrade() {
+        let (app, home, sid) = open_goal_router().await;
+        let (status, body) = post_json(
+            &app,
+            &format!("/api/sessions/{sid}/goal"),
+            serde_json::json!({"objective":"legacy request"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .contains("protocol_version 2")
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// Observable form of the `max_running` contract: how many provider
+    /// streams are in flight right now, and the high-water mark seen. A
+    /// sequence of host commands may never push the high-water mark above the
+    /// configured limit.
+    #[derive(Default)]
+    struct CapacityGauge {
+        active: std::sync::atomic::AtomicUsize,
+        max_active: std::sync::atomic::AtomicUsize,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CapacityGauge {
+        fn active(&self) -> usize {
+            self.active.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn max_active(&self) -> usize {
+            self.max_active.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// Backend whose stream waits for a signal, so an execution can hold its
+    /// capacity slot while the host makes competing decisions.
+    struct GatedBackend {
+        release: Arc<tokio::sync::watch::Sender<bool>>,
+        gauge: Arc<CapacityGauge>,
+    }
+
+    impl GatedBackend {
+        fn new(release: &Arc<tokio::sync::watch::Sender<bool>>) -> Self {
+            Self {
+                release: release.clone(),
+                gauge: Arc::new(CapacityGauge::default()),
+            }
+        }
+
+        fn with_gauge(
+            release: &Arc<tokio::sync::watch::Sender<bool>>,
+            gauge: Arc<CapacityGauge>,
+        ) -> Self {
+            Self {
+                release: release.clone(),
+                gauge,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl mink::runtime::LlmBackend for GatedBackend {
+        fn name(&self) -> &str {
+            "server-api-gated"
+        }
+
+        async fn stream(
+            &self,
+            _request: mink::runtime::LlmRequest,
+        ) -> anyhow::Result<mink::runtime::LlmResponseStream> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let in_flight = self.gauge.active.fetch_add(1, SeqCst) + 1;
+            self.gauge.max_active.fetch_max(in_flight, SeqCst);
+            self.gauge.calls.fetch_add(1, SeqCst);
+            let result: anyhow::Result<()> = async {
+                let mut released = self.release.subscribe();
+                while !*released.borrow() {
+                    released
+                        .changed()
+                        .await
+                        .map_err(|error| anyhow::anyhow!("{error}"))?;
+                }
+                Ok(())
+            }
+            .await;
+            self.gauge.active.fetch_sub(1, SeqCst);
+            result?;
+            Ok(mink::runtime::LlmResponseStream {
+                events: Box::pin(futures::stream::iter(vec![
+                    Ok(mink::runtime::LlmEvent::Text(mink::runtime::LlmTextEvent {
+                        content: "gated answer".into(),
+                    })),
+                    Ok(mink::runtime::LlmEvent::Stop(mink::runtime::LlmStopEvent {
+                        reason: "end_turn".into(),
+                    })),
+                ])),
+                attempt_count: 1,
+            })
+        }
+    }
+
+    async fn gated_router(
+        max_running: usize,
+        release: Arc<tokio::sync::watch::Sender<bool>>,
+    ) -> (Router, PathBuf, String, String) {
+        let home = std::env::temp_dir().join(format!(
+            "mink-server-gated-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cwd = home.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let registry = Arc::new(Registry::with_llm_backend(
+            home.clone(),
+            "flash".to_string(),
+            max_running,
+            Arc::new(GatedBackend::new(&release)),
+        ));
+        let first = registry.create("first", &cwd).await.unwrap();
+        let second = registry.create("second", &cwd).await.unwrap();
+        registry
+            .open(&first.id, Some(&first.project_key))
+            .await
+            .unwrap();
+        registry
+            .open(&second.id, Some(&second.project_key))
+            .await
+            .unwrap();
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let app = router(Arc::new(ApiState {
+            registry,
+            cwd,
+            shutdown,
+        }));
+        (app, home, first.id, second.id)
+    }
+
+    async fn wait_for_running(app: &Router, id: &str, expected: bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let (_, body) = req(app, Method::GET, &format!("/api/sessions/{id}")).await;
+            if body["data"]["running"].as_bool() == Some(expected) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "session {id} never reached running={expected}: {body}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Audit regression: a goal creation refused while an ordinary turn owns
+    /// the session reserved a capacity slot and never released it, so the
+    /// slot leaked even though no goal ever existed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refused_goal_creation_does_not_leak_a_capacity_slot() {
+        let release = Arc::new(tokio::sync::watch::Sender::new(false));
+        let (app, home, first, second) = gated_router(1, release.clone()).await;
+
+        // The ordinary turn is the only running turn and holds the slot.
+        let (status, body) = post_json(
+            &app,
+            &format!("/api/sessions/{first}/turn"),
+            serde_json::json!({ "input": "hold the capacity slot" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        wait_for_running(&app, &first, true).await;
+
+        let (status, body) = post_json(
+            &app,
+            &format!("/api/sessions/{first}/goal"),
+            serde_json::json!({ "protocol_version":2, "generate":false, "objective": "busy goal" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+        // Let the turn end, then a second session must be able to claim the
+        // released capacity: the refused attempt created no goal, so nothing
+        // may stay reserved for it.
+        release.send_replace(true);
+        wait_for_running(&app, &first, false).await;
+        let (status, body) = post_json(
+            &app,
+            &format!("/api/sessions/{second}/goal"),
+            serde_json::json!({ "protocol_version":2, "generate":false, "objective": "second goal", "max_turns": 1 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // Stop the driven goal before dropping the fixture home.
+        let goal = &body["data"]["goal"];
+        let _ = post_json(
+            &app,
+            &format!("/api/sessions/{second}/goal/cancel"),
+            serde_json::json!({ "goal_id": goal["id"], "revision": goal["revision"] }),
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// A repeat create must not free the slot its unfinished goal still holds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repeat_goal_create_keeps_the_running_goal_slot() {
+        let release = Arc::new(tokio::sync::watch::Sender::new(false));
+        let (app, home, first, second) = gated_router(1, release.clone()).await;
+
+        let (status, body) = post_json(
+            &app,
+            &format!("/api/sessions/{first}/goal"),
+            serde_json::json!({ "protocol_version":2, "generate":false, "objective": "first goal" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let draft = &body["data"]["goal"];
+        let (status, body) = post_json(
+            &app,
+            &format!("/api/sessions/{first}/goal/confirm"),
+            serde_json::json!({"goal_id":draft["id"],"revision":draft["revision"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // The repeat is refused but its rollback must observe the active goal
+        // and leave the slot alone.
+        let (status, body) = post_json(
+            &app,
+            &format!("/api/sessions/{first}/goal"),
+            serde_json::json!({ "protocol_version":2, "generate":false, "objective": "replacement must be refused" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        let (status, body) = post_json(
+            &app,
+            &format!("/api/sessions/{second}/goal"),
+            serde_json::json!({ "protocol_version":2, "generate":false, "objective": "second goal" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+
+        release.send_replace(true);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// Audit8 F1: a goal left `active` by a crash must never be driven by the
+    /// mere act of arming the driver. Reopening issues no provider request;
+    /// the leased resume is the activation that starts exactly one run, keeps
+    /// the single capacity slot, and refuses competing work while it runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restored_active_goal_starts_only_through_a_leased_resume() {
+        let home = std::env::temp_dir().join(format!(
+            "mink-server-restore-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cwd = home.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let release = Arc::new(tokio::sync::watch::Sender::new(false));
+        let gauge = Arc::new(CapacityGauge::default());
+        let registry = Arc::new(Registry::with_llm_backend(
+            home.clone(),
+            "flash".to_string(),
+            1,
+            Arc::new(GatedBackend::with_gauge(&release, gauge.clone())),
+        ));
+        let first = registry.create("restore-a", &cwd).await.unwrap();
+        let second = registry.create("restore-b", &cwd).await.unwrap();
+        registry
+            .open(&first.id, Some(&first.project_key))
+            .await
+            .unwrap();
+        registry
+            .open(&second.id, Some(&second.project_key))
+            .await
+            .unwrap();
+
+        // Create the goal while scheduling is disabled: the contract is on
+        // disk as `active` with no run behind it, which is exactly the state a
+        // hard-killed server reopens into (recovery leaves it active and
+        // idle; nothing arms the driver until an explicit activation).
+        let created = {
+            let runtime = registry
+                .active_runtime(&first.id, Some(&first.project_key))
+                .unwrap()
+                .unwrap();
+            let handle = runtime.goal_handle().unwrap();
+            let draft = handle
+                .draft_goal(mink::runtime::GoalSpec::new("restore then resume"), 3600)
+                .unwrap();
+            let goal = handle.confirm_goal(&draft.id, draft.revision).unwrap();
+            assert_eq!(goal.status, mink::runtime::GoalStatus::Active);
+            goal
+        };
+        assert_eq!(
+            gauge.calls(),
+            0,
+            "an armed-only runtime must issue no provider request"
+        );
+        assert_eq!(registry.capacity.occupied(), 0);
+
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let app = router(Arc::new(ApiState {
+            registry: registry.clone(),
+            cwd: cwd.clone(),
+            shutdown,
+        }));
+        let base = format!("/api/sessions/{}", first.id);
+        let (status, body) = req(&app, Method::GET, &format!("{base}/goal")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let restored = body["data"]["goal"].clone();
+        assert_eq!(restored["status"], "active", "{body}");
+        assert_eq!(restored["phase"], "idle", "{body}");
+        let goal_id = restored["id"].as_str().unwrap().to_string();
+        let revision = restored["revision"].as_u64().unwrap();
+
+        // The leased resume is the activation that owns the run.
+        let (status, body) = post_json(
+            &app,
+            &format!("{base}/goal/resume"),
+            serde_json::json!({ "goal_id": goal_id, "revision": revision }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let resumed_revision = body["data"]["goal"]["revision"].as_u64().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while gauge.active() != 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the resumed run never issued a provider request"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            registry.capacity.occupied(),
+            1,
+            "the admitted run holds the single slot"
+        );
+        assert!(
+            registry
+                .running(&first.id, Some(&first.project_key))
+                .unwrap()
+        );
+
+        // Competing work under `max_running = 1` is refused, not admitted.
+        let (status, body) = post_json(
+            &app,
+            &format!("/api/sessions/{}/goal", second.id),
+            serde_json::json!({ "protocol_version":2, "generate":false, "objective": "competing goal" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        let (status, body) = post_json(
+            &app,
+            &format!("/api/sessions/{}/turn", second.id),
+            serde_json::json!({ "input": "competing turn" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+
+        // A repeat resume while the run owns the slot adds no second run.
+        let (status, body) = post_json(
+            &app,
+            &format!("{base}/goal/resume"),
+            serde_json::json!({ "goal_id": goal_id, "revision": resumed_revision }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(
+            gauge.calls(),
+            1,
+            "a refused resume issued a provider request"
+        );
+        assert_eq!(gauge.active(), 1);
+        assert_eq!(
+            created.id, goal_id,
+            "the resumed goal is the restored contract"
+        );
+
+        // Cancel is a stop intent: the in-flight turn still owns the slot
+        // until it really exits, and only then is capacity released.
+        let (_, body) = req(&app, Method::GET, &format!("{base}/goal")).await;
+        let live_revision = body["data"]["goal"]["revision"].as_u64().unwrap();
+        let (status, body) = post_json(
+            &app,
+            &format!("{base}/goal/cancel"),
+            serde_json::json!({ "goal_id": goal_id, "revision": live_revision }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            registry.capacity.occupied(),
+            1,
+            "capacity stays occupied while the cancelled turn exits"
+        );
+        release.send_replace(true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while registry.capacity.occupied() != 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the cancelled run never released its slot"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            gauge.max_active() <= 1,
+            "max_running was exceeded: {}",
+            gauge.max_active()
+        );
+        registry.shutdown_all().await.unwrap();
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// A configuration refusal (no GoalReport in the resolved surface) also
+    /// rolls back the reservation it made before the contract check.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn configuration_refused_goal_creation_rolls_back_its_slot() {
+        let home = std::env::temp_dir().join(format!(
+            "mink-server-goal-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cwd = home.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        // The project layer removes GoalReport, so core refuses the contract.
+        std::fs::write(cwd.join(".minkrc"), "[tools]\nenabled_tools = [\"Read\"]\n").unwrap();
+        let release = Arc::new(tokio::sync::watch::Sender::new(false));
+        let registry = Arc::new(Registry::with_llm_backend(
+            home.clone(),
+            "flash".to_string(),
+            1,
+            Arc::new(GatedBackend::new(&release)),
+        ));
+        let session = registry.create("config", &cwd).await.unwrap();
+        registry
+            .open(&session.id, Some(&session.project_key))
+            .await
+            .unwrap();
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let app = router(Arc::new(ApiState {
+            registry: registry.clone(),
+            cwd,
+            shutdown,
+        }));
+
+        let (status, body) = post_json(
+            &app,
+            &format!("/api/sessions/{}/goal", session.id),
+            serde_json::json!({ "protocol_version":2, "generate":false, "objective": "must be refused" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("GoalRead"),
+            "the refusal names the missing capability: {body}"
+        );
+
+        // The refused attempt created no goal, so the sole capacity slot must
+        // be free: a second session without the restrictive layer can claim it.
+        let cwd2 = home.join("workspace2");
+        std::fs::create_dir_all(&cwd2).unwrap();
+        let other = registry.create("other", &cwd2).await.unwrap();
+        registry
+            .open(&other.id, Some(&other.project_key))
+            .await
+            .unwrap();
+        let (status, body) = post_json(
+            &app,
+            &format!("/api/sessions/{}/goal", other.id),
+            serde_json::json!({ "protocol_version":2, "generate":false, "objective": "capacity was released", "max_turns": 1 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        release.send_replace(true);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// A persistence failure during goal creation must release the slot too:
+    /// the goal never existed, so nothing may keep occupying `max_running`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_goal_persistence_rolls_back_its_slot() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let release = Arc::new(tokio::sync::watch::Sender::new(false));
+        let (app, home, first, second) = gated_router(1, release.clone()).await;
+        let projects = home.join(".mink").join("projects");
+        let session_dir = std::fs::read_dir(&projects)
+            .unwrap()
+            .flat_map(|entry| std::fs::read_dir(entry.unwrap().path()).unwrap())
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.file_name().is_some_and(|name| name == first.as_str()))
+            .expect("session directory");
+        let original = std::fs::metadata(&session_dir).unwrap().permissions();
+        std::fs::set_permissions(&session_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let (status, body) = post_json(
+            &app,
+            &format!("/api/sessions/{first}/goal"),
+            serde_json::json!({ "protocol_version":2, "generate":false, "objective": "persistence must fail", "max_turns": 1 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+        // Restore write permission before the fixture cleanup, then prove the
+        // slot is free by letting the second session claim it.
+        std::fs::set_permissions(&session_dir, original).unwrap();
+        let (status, body) = post_json(
+            &app,
+            &format!("/api/sessions/{second}/goal"),
+            serde_json::json!({ "protocol_version":2, "generate":false, "objective": "slot was released", "max_turns": 1 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        release.send_replace(true);
+        let _ = std::fs::remove_dir_all(home);
     }
 
     async fn req(app: &Router, method: Method, uri: &str) -> (StatusCode, serde_json::Value) {
@@ -1007,6 +2472,11 @@ mod tests {
 
     #[tokio::test]
     async fn resume_guidance_obeys_capacity_and_live_guidance_remains_idempotent() {
+        // This test builds its registry from ambient configuration, so it must
+        // hold the shared environment lock: otherwise a concurrent config test
+        // can leave `MODEL` set to a value that changes the resolved surface
+        // and the capacity expectations below no longer describe what runs.
+        let _env = crate::session::TEST_ENV_LOCK.lock().await;
         struct WaitingBackend;
         #[async_trait::async_trait]
         impl mink::runtime::LlmBackend for WaitingBackend {
