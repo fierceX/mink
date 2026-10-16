@@ -36,6 +36,8 @@ pub(crate) struct AgentRuntimeConfig {
     pub custom_tools: Vec<Arc<dyn crate::runtime::AgentTool>>,
     pub prefix_source: Option<Arc<dyn PrefixSource>>,
     pub post_init_hook: Option<Arc<dyn PostInitHook>>,
+    pub goal_verifiers: Vec<Arc<dyn crate::runtime::GoalVerifier>>,
+    pub goal_event_sink: Option<Arc<dyn EventSink>>,
 }
 
 #[cfg(test)]
@@ -69,6 +71,8 @@ impl AgentRuntimeConfig {
             custom_tools: Vec::new(),
             prefix_source: None,
             post_init_hook: None,
+            goal_verifiers: Vec::new(),
+            goal_event_sink: None,
         }
     }
 
@@ -166,6 +170,15 @@ impl SessionInfo {
             plan_draft_path: paths.plan_draft.clone(),
             todos_path: paths.todos.clone(),
         }
+    }
+
+    /// Authoritative goal snapshot for this session directory. Derived rather
+    /// than stored because `goal.json` only exists once a goal does; a missing
+    /// file simply means there is no goal.
+    pub fn goal_path(&self) -> PathBuf {
+        self.conversation_path
+            .parent()
+            .map_or_else(|| self.home.join("goal.json"), |dir| dir.join("goal.json"))
     }
 }
 

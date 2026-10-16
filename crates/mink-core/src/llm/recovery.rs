@@ -408,11 +408,11 @@ pub(crate) fn terminal_error(
     )))
 }
 
-/// Classify a reqwest transport error: connection/timeout failures are
+/// Classify a reqwest transport error: connection/timeout/body decode failures are
 /// retryable, everything else defaults to permanent with the diagnostic
 /// preserved.
 pub(crate) fn classify_transport_error(error: &reqwest::Error) -> UpstreamFailureKind {
-    if error.is_timeout() || error.is_connect() || error.is_body() {
+    if error.is_timeout() || error.is_connect() || error.is_body() || error.is_decode() {
         return UpstreamFailureKind::Recoverable;
     }
     let message = error.to_string().to_ascii_lowercase();

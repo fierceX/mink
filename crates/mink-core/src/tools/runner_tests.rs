@@ -1396,3 +1396,27 @@ async fn storm_suppression_preserves_format_provenance_across_batches() {
         "a repeated known-bad call keeps its format provenance"
     );
 }
+
+#[test]
+fn goal_effect_ledger_excludes_controls_but_records_retired_custom_names() {
+    let write =
+        ToolMetadata::new("Write", ApprovalTier::Write, ToolResultKind::FileWrite).mutating();
+    let read = ToolMetadata::new("Read", ApprovalTier::Read, ToolResultKind::FileWrite);
+    let report =
+        ToolMetadata::new("GoalReport", ApprovalTier::Write, ToolResultKind::Control).mutating();
+
+    // Mutating and unknown builtins are recorded.
+    assert!(records_goal_effect("Write", Some(&write), false));
+    assert!(records_goal_effect("Mystery", None, false));
+    // Read-only builtins are not side effects.
+    assert!(!records_goal_effect("Read", Some(&read), false));
+    // Retired names are ordinary custom effects; only current built-in
+    // goal controls are excluded from workspace side-effect accounting.
+    assert!(records_goal_effect("GoalReport", Some(&report), false));
+    assert!(records_goal_effect("GoalReport", None, true));
+    assert!(!records_goal_effect("GoalDraft", Some(&report), false));
+    assert!(!records_goal_effect("GoalReview", Some(&report), false));
+    // Unknown custom tools stay conservative even when they claim to be read-only.
+    assert!(records_goal_effect("MyTool", Some(&read), true));
+    assert!(records_goal_effect("MyTool", None, true));
+}

@@ -150,7 +150,7 @@ impl TurnGate {
             .clone()
     }
 
-    fn interrupt(&self) {
+    pub(crate) fn interrupt(&self) {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.active.is_some() {
             self.interrupt.store(true, Ordering::SeqCst);
@@ -174,7 +174,7 @@ impl TurnGate {
         had_active
     }
 
-    async fn wait_idle(&self) {
+    pub(crate) async fn wait_idle(&self) {
         loop {
             let notified = self.idle.notified();
             if self.active().is_none() {
@@ -185,7 +185,7 @@ impl TurnGate {
     }
 }
 
-struct TurnPermit {
+pub(crate) struct TurnPermit {
     gate: Arc<TurnGate>,
     turn_id: TurnId,
 }
@@ -279,6 +279,7 @@ impl Drop for AgentEventStream {
 
 pub struct AgentRuntime {
     pub(crate) ctx: Arc<AgentSharedContext>,
+    pub(crate) _lease: Arc<crate::session::lease::SessionLease>,
     pub(crate) orch_handle: JoinHandle<anyhow::Result<()>>,
     pub(crate) event_display: Arc<EventDisplay>,
     pub(crate) handle: AgentRuntimeHandle,
@@ -287,6 +288,8 @@ pub struct AgentRuntime {
 #[derive(Clone)]
 pub struct AgentRuntimeHandle {
     pub(crate) input_inbox: Arc<crate::session::input::InputInbox>,
+    pub(crate) goal_ctx: Arc<AgentSharedContext>,
+    pub(crate) goal_driver: Arc<crate::runtime::goal::GoalDriver>,
     pub(crate) image_input: crate::runtime::ImageInputCapability,
     pub(crate) cmd_tx: mpsc::UnboundedSender<OrchCmd>,
     pub(crate) session: SessionInfo,
@@ -296,7 +299,7 @@ pub struct AgentRuntimeHandle {
 }
 
 impl AgentRuntimeHandle {
-    fn next_turn_id(&self) -> TurnId {
+    pub(crate) fn next_turn_id(&self) -> TurnId {
         let counter = self.turn_counter.fetch_add(1, Ordering::Relaxed) + 1;
         TurnId(format!(
             "{}:{}:{counter}",
@@ -364,6 +367,45 @@ impl AgentRuntimeHandle {
         resume: Option<(&str, u64)>,
         register: bool,
     ) -> RuntimeResult<(crate::runtime::InputReceipt, Option<AgentEventStream>)> {
+        self.stream_input_inner_with_source(input, resume, register, None, None)
+    }
+    fn stream_input_inner_with_source(
+        &self,
+        mut input: crate::runtime::HumanInput,
+        resume: Option<(&str, u64)>,
+        register: bool,
+        goal_source: Option<usize>,
+        goal_draft: Option<crate::session::goal::GoalDraftDiscussion>,
+    ) -> RuntimeResult<(crate::runtime::InputReceipt, Option<AgentEventStream>)> {
+        let _admission = self
+            .goal_driver
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if self.is_closed() {
+            return Err(RuntimeError::Closed);
+        }
+        if goal_source.is_some() && !self.goal_iteration_allowed() {
+            // A stop decision latched while this iteration is being admitted:
+            // no new goal execution may start, only the run's settlement.
+            return Err(RuntimeError::Busy {
+                active_turn_id: TurnId::new("goal run is stopping; no new iteration"),
+            });
+        }
+        if goal_source.is_none()
+            && input.target_turn_id.is_none()
+            && self.goal_snapshot().is_some_and(|g| {
+                g.status == crate::runtime::GoalStatus::Active
+                    || (g.status == crate::runtime::GoalStatus::Blocked
+                        && g.phase == crate::session::goal::GoalPhase::Verifying)
+            })
+        {
+            return Err(RuntimeError::Busy {
+                active_turn_id: TurnId::new(
+                    "goal owns session; pause goal before an independent turn",
+                ),
+            });
+        }
         if register
             && resume.is_none()
             && let Some(receipt) = self
@@ -384,7 +426,61 @@ impl AgentRuntimeHandle {
             return Ok((receipt, None));
         }
         let turn_id = self.next_turn_id();
+        let turn_id = if goal_source.is_some() {
+            TurnId::new(format!("goal:{turn_id}"))
+        } else {
+            turn_id
+        };
         let permit = self.turn_gate.acquire(turn_id.clone())?;
+        let (source, goal_iteration) = if goal_source.is_some() {
+            let goal = self
+                .goal_ctx
+                .goal_store
+                .begin_iteration(turn_id.as_str(), goal_source.unwrap_or(0))
+                .map_err(|e| RuntimeError::Command(format!("{e:#}")))?;
+            let iteration = goal
+                .iterations
+                .last()
+                .map(|registered| registered.iteration)
+                .unwrap_or(0);
+            input.text = crate::session::goal::round_prompt(
+                &goal,
+                crate::runtime::goal::goal_projection_chars(
+                    self.goal_ctx.config.max_context_tokens,
+                ),
+            );
+            self.input_inbox
+                .begin_goal_turn(turn_id.as_str())
+                .map_err(|e| RuntimeError::Command(format!("{e:#}")))?;
+            let key = crate::session::goal::IterationKey {
+                goal_id: goal.id.clone(),
+                iteration,
+                turn_id: turn_id.to_string(),
+            };
+            (
+                Some(crate::runtime::GoalContinuation {
+                    goal_id: goal.id,
+                    contract_revision: goal.contract_revision,
+                    iteration,
+                }),
+                Some(key),
+            )
+        } else {
+            (None, None)
+        };
+        if let Some(source) = &goal_draft {
+            let goal = self
+                .goal_draft_snapshot()
+                .ok_or_else(|| RuntimeError::Command("goal is not a draft".into()))?;
+            if goal.id != source.goal_id || goal.revision != source.revision {
+                return Err(RuntimeError::Command(
+                    "draft changed before discussion".into(),
+                ));
+            }
+            self.input_inbox
+                .begin_goal_turn(turn_id.as_str())
+                .map_err(|e| RuntimeError::Command(format!("{e:#}")))?;
+        }
         let receipt = if !register {
             Ok(crate::runtime::InputReceipt::transient(
                 input.clone(),
@@ -412,6 +508,9 @@ impl AgentRuntimeHandle {
         let (done_tx, done_rx) = oneshot::channel();
         if let Err(error) = self.cmd_tx.send(OrchCmd::UserInput {
             input: input.text,
+            goal_source: source,
+            goal_draft,
+            goal_iteration,
             turn_id: turn_id.clone(),
             emitter: emitter.clone(),
             done: done_tx,
@@ -456,8 +555,23 @@ impl AgentRuntimeHandle {
     /// orchestrator reports completion: dropping this future only abandons
     /// waiting, it does not cancel the operation or release the gate early.
     pub async fn compact(&self) -> RuntimeResult<CompactOutcome> {
-        let operation_id = self.next_turn_id();
-        let permit = self.turn_gate.acquire(operation_id)?;
+        let permit = {
+            let _guard = self
+                .goal_driver
+                .admission
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if self.goal_snapshot().is_some_and(|g| {
+                g.status == crate::runtime::GoalStatus::Active
+                    || (g.status == crate::runtime::GoalStatus::Blocked
+                        && g.phase == crate::session::goal::GoalPhase::Verifying)
+            }) {
+                return Err(RuntimeError::Busy {
+                    active_turn_id: TurnId::new("goal owns session; pause before control commands"),
+                });
+            }
+            self.turn_gate.acquire(self.next_turn_id())?
+        };
         // No `.await` between acquiring the permit, sending the command and
         // handing the permit to the task: cancellation cannot interleave
         // while the operation is still owned by this future. A send failure
@@ -474,6 +588,36 @@ impl AgentRuntimeHandle {
                 .map_err(|e| RuntimeError::Command(format!("{e:#}")))
         });
         task.await.map_err(|e| RuntimeError::Join(e.to_string()))?
+    }
+
+    /// The model in force right now, preserving the accepted alias when present.
+    pub fn current_model(&self) -> String {
+        self.goal_ctx
+            .active_model
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .requested
+            .clone()
+    }
+
+    /// The concrete model in force right now.
+    pub fn resolved_model(&self) -> String {
+        self.goal_ctx
+            .active_model
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .actual
+            .clone()
+    }
+
+    /// Alias choices this runtime honours: the built-in pair plus the configured
+    /// aliases, each with the model it resolves to.
+    pub fn model_choices(&self) -> Vec<(String, String)> {
+        crate::config::model_resolver(&self.goal_ctx.config)
+            .aliases()
+            .iter()
+            .map(|(alias, model)| (alias.clone(), model.clone()))
+            .collect()
     }
 
     /// Switch the active model.
@@ -494,8 +638,23 @@ impl AgentRuntimeHandle {
         &self,
         model: impl Into<String>,
     ) -> RuntimeResult<ModelSwitchOutcome> {
-        let operation_id = self.next_turn_id();
-        let permit = self.turn_gate.acquire(operation_id)?;
+        let permit = {
+            let _guard = self
+                .goal_driver
+                .admission
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if self.goal_snapshot().is_some_and(|g| {
+                g.status == crate::runtime::GoalStatus::Active
+                    || (g.status == crate::runtime::GoalStatus::Blocked
+                        && g.phase == crate::session::goal::GoalPhase::Verifying)
+            }) {
+                return Err(RuntimeError::Busy {
+                    active_turn_id: TurnId::new("goal owns session; pause before control commands"),
+                });
+            }
+            self.turn_gate.acquire(self.next_turn_id())?
+        };
         let (done_tx, done_rx) = oneshot::channel();
         self.cmd_tx
             .send(OrchCmd::SetModel {
@@ -513,7 +672,100 @@ impl AgentRuntimeHandle {
         task.await.map_err(|e| RuntimeError::Join(e.to_string()))?
     }
 
+    pub(crate) fn begin_goal_verification(
+        &self,
+        id: &str,
+        revision: u64,
+    ) -> RuntimeResult<TurnPermit> {
+        let _guard = self
+            .goal_driver
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.ensure_goal_control_open()?;
+        if !self.goal_snapshot().is_some_and(|g| {
+            g.id == id && g.revision == revision && g.status == crate::runtime::GoalStatus::Active
+        }) {
+            return Err(RuntimeError::Command("goal acceptance superseded".into()));
+        }
+        self.turn_gate.acquire(TurnId::new(format!(
+            "goal-verification:{}",
+            self.next_turn_id()
+        )))
+    }
+    pub(crate) fn active_turn_id(&self) -> Option<TurnId> {
+        self.turn_gate.active()
+    }
+    pub(crate) fn is_closed(&self) -> bool {
+        self.turn_gate
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .closed
+    }
+    pub(crate) fn ensure_goal_control_open(&self) -> RuntimeResult<()> {
+        if self.is_closed() {
+            return Err(RuntimeError::Closed);
+        }
+        self.goal_ctx
+            .persistence_fault
+            .check()
+            .map_err(|e| RuntimeError::Command(format!("{e:#}")))
+    }
+    pub(crate) fn stream_goal_iteration(
+        &self,
+        conversation_start: usize,
+    ) -> RuntimeResult<AgentEventStream> {
+        let input = crate::runtime::HumanInput {
+            request_id: String::new(),
+            text: String::new(),
+            target_turn_id: None,
+            attachment_ids: Vec::new(),
+        };
+        self.stream_input_inner_with_source(input, None, false, Some(conversation_start), None)
+            .map(|(_, stream)| stream.expect("goal stream"))
+    }
+    pub(crate) fn stream_goal_draft_discussion(
+        &self,
+        prompt: String,
+        source: crate::session::goal::GoalDraftDiscussion,
+    ) -> RuntimeResult<AgentEventStream> {
+        let input = crate::runtime::HumanInput {
+            request_id: String::new(),
+            text: prompt,
+            target_turn_id: None,
+            attachment_ids: Vec::new(),
+        };
+        self.stream_input_inner_with_source(input, None, false, None, Some(source))
+            .map(|(_, stream)| stream.expect("draft discussion stream"))
+    }
     pub fn interrupt_current_turn(&self) {
+        let _guard = self
+            .goal_driver
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !self.is_closed()
+            && self
+                .goal_snapshot()
+                .is_some_and(|g| g.status == crate::runtime::GoalStatus::Active)
+        {
+            match self
+                .goal_ctx
+                .goal_store
+                .pause_if_active("paused by user interrupt")
+            {
+                Ok(Some(goal)) => self.announce_goal(&goal),
+                Ok(None) => {}
+                Err(error) => {
+                    // The stop intent could not be stored: latch the stop for
+                    // the current run so it cannot keep scheduling, and report
+                    // the failure instead of a silent pause.
+                    self.stop_run_after_failed_stop_intent(&format!("{error:#}"));
+                    self.goal_ctx.display.render_error(&format!("{error:#}"));
+                }
+            }
+        }
         self.turn_gate.interrupt();
     }
 
@@ -616,14 +868,33 @@ impl AgentRuntime {
     }
 
     pub async fn shutdown(self) -> RuntimeResult<()> {
+        self.handle.goal_driver.disable();
+        // Cancellation is the runtime's own stop signal and must land before the
+        // turn-gate interrupt: an in-flight goal round settles as a pause only
+        // when the gate was interrupted without the runtime being cancelled, and
+        // a normal shutdown must keep the goal's active intent for the next open
+        // (see `docs/reference/goals.md`).
+        self.ctx.cancel.cancel();
         let had_active = self.handle.turn_gate.close_and_interrupt();
         let turn_timed_out = had_active
             && tokio::time::timeout(Duration::from_secs(5), self.handle.turn_gate.wait_idle())
                 .await
                 .is_err();
-        self.ctx.cancel.cancel();
+        // Wait for the driver's actual exit, not for a disk status: a run that
+        // faulted before it could publish still counts as exited, while a
+        // running one must finish (or hit the bounded wait).
+        let goal_wait = if self.handle.goal_driver.is_active() {
+            tokio::time::timeout(Duration::from_secs(5), self.handle.wait_goal())
+                .await
+                .is_err()
+        } else {
+            false
+        };
+        // Late waiters observe the terminal lifecycle instead of hanging on a
+        // run that will never report again.
+        self.handle.goal_driver.close();
         let mut failures = Vec::new();
-        let mut shutdown_timed_out = turn_timed_out;
+        let mut shutdown_timed_out = turn_timed_out || goal_wait;
         let mut orchestrator = self.orch_handle;
         if turn_timed_out {
             orchestrator.abort();
@@ -688,6 +959,11 @@ impl AgentRuntime {
             &mut shutdown_timed_out,
         )
         .await;
+        self.ctx
+            .session_lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         if failures.is_empty() && !shutdown_timed_out {
             Ok(())
         } else if failures.is_empty() {

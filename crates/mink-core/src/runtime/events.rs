@@ -20,6 +20,12 @@ pub struct AgentEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEventKind {
     TurnStarted,
+    GoalUpdated {
+        goal: Box<crate::runtime::GoalSnapshot>,
+    },
+    GoalFinished {
+        goal: Box<crate::runtime::GoalSnapshot>,
+    },
     ConversationCommitted {
         conversation_seq: usize,
         message: serde_json::Value,

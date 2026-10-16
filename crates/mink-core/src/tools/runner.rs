@@ -92,6 +92,9 @@ pub trait ToolExec: Send + Sync {
 /// Built-in tool table, initialized once at first access.
 static TOOL_REGISTRY: LazyLock<Vec<Box<dyn ToolExec>>> = LazyLock::new(|| {
     vec![
+        Box::new(crate::tools::goal::GoalReadTool),
+        Box::new(crate::tools::goal::GoalDraftTool),
+        Box::new(crate::tools::goal::GoalReviewTool),
         Box::new(file::ReadTool),
         Box::new(file::WriteTool),
         Box::new(file::EditTool),
@@ -300,6 +303,23 @@ impl std::fmt::Display for FatalBatchError {
 
 impl std::error::Error for FatalBatchError {}
 
+/// Goal side-effect ledger: `GoalDraft` / `GoalReview` is a control record rather than a side
+/// effect, read-only builtins are safe, and custom tools are recorded
+/// conservatively because their declared metadata is host-supplied.
+///
+/// The goal-control exclusion is checked first so a custom tool registered under
+/// the same name cannot slip past it through the custom-tool branch.
+pub(crate) fn records_goal_effect(
+    name: &str,
+    metadata: Option<&ToolMetadata>,
+    is_custom: bool,
+) -> bool {
+    if matches!(name, "GoalDraft" | "GoalReview") {
+        return false;
+    }
+    is_custom || metadata.is_none_or(|m| m.approval != ApprovalTier::Read || m.mutating)
+}
+
 impl ToolRunner {
     pub fn new(ctx: Arc<ToolContext>) -> Self {
         Self {
@@ -339,6 +359,10 @@ impl ToolRunner {
         self.storm.lock().unwrap_or_else(|e| e.into_inner()).reset();
     }
 
+    pub(crate) fn goal_read_only(&self) -> bool {
+        self.ctx.goal_drafting || self.ctx.review_evidence().is_some()
+    }
+
     pub(crate) async fn execute_all(
         &self,
         calls: Vec<ToolCallEvent>,
@@ -373,7 +397,15 @@ impl ToolRunner {
             let custom_sequential = self.find_custom_tool(&call.name).is_some_and(|tool| {
                 tool.definition.execution == crate::runtime::ToolExecutionMode::Sequential
             });
-            if custom_sequential || requires_sequential_execution(metadata) {
+            if custom_sequential
+                || (self
+                    .ctx
+                    .goal_store
+                    .snapshot()
+                    .is_some_and(|g| g.phase == crate::session::goal::GoalPhase::Executing)
+                    && self.find_custom_tool(&call.name).is_some())
+                || requires_sequential_execution(metadata)
+            {
                 match self
                     .execute_read_batch(std::mem::take(&mut read_batch), &mut image_budget)
                     .await
@@ -683,6 +715,24 @@ impl ToolRunner {
             Ok(prepared) => prepared,
             Err(error) => return prepare_error(error),
         };
+        let review_capture = if let Some(review) = self.ctx.review_evidence() {
+            match review.capture_read(&call, &self.ctx) {
+                Ok(capture) => capture,
+                Err(error) => return prepare_error(error),
+            }
+        } else {
+            None
+        };
+        if let Some((_, _, hash)) = &review_capture {
+            use sha2::{Digest, Sha256};
+            let actual = Sha256::digest(&prepared.bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            if hash != &actual {
+                return prepare_error(anyhow::anyhow!("image evidence changed during read"));
+            }
+        }
         let bytes = prepared.bytes.len() as u64;
         // Per-`execute_all` admission (v7 §7.3): the budget starts at zero
         // for every `execute_all` call (shared across sequential-tool
@@ -734,6 +784,11 @@ impl ToolRunner {
             .unwrap_or_else(|error| error.into_inner())
             .insert(image_id.clone());
 
+        if let (Some(review), Some(captured)) = (self.ctx.review_evidence(), review_capture)
+            && let Err(error) = review.finish_read(captured)
+        {
+            return prepare_error(error);
+        }
         let attachment = crate::tools::image::ImageAttachment {
             image_id,
             format: prepared.info.format,
@@ -770,6 +825,13 @@ impl ToolRunner {
         match self.prepare_call(call) {
             PreparedCall::Immediate(result) => Ok(result),
             PreparedCall::Execute(call) => {
+                if records_goal_effect(
+                    &call.name,
+                    self.metadata_for(&call.name).as_ref(),
+                    self.find_custom_tool(&call.name).is_some(),
+                ) {
+                    self.ctx.goal_store.mark_effect(&call.id)?;
+                }
                 if let Some(tool) = self.find_custom_tool(&call.name).cloned() {
                     let result = execute_custom(&self.ctx, &call, tool).await?;
                     mark_format_confirmed(&self.storm, &call.name, &call.storm_identity(), &result);
@@ -806,17 +868,85 @@ impl ToolRunner {
             return PreparedCall::Immediate(blocked);
         }
 
+        if self.ctx.goal_drafting
+            && self.ctx.goal_review.is_none()
+            && (!matches!(
+                call.name.as_str(),
+                "Read" | "Glob" | "Grep" | "GoalRead" | "GoalDraft"
+            ) || self.find_custom_tool(&call.name).is_some())
+        {
+            return PreparedCall::Immediate(blocked_tool_result(call.id, call.name, call.fields,
+                "Goal draft is awaiting human confirmation; only read-only exploration and GoalDraft are allowed".into(), ToolBlocker::ToolSurface));
+        }
+        if self.ctx.goal_review.is_some()
+            && !matches!(call.name.as_str(), "Read" | "Glob" | "Grep" | "GoalRead")
+        {
+            return PreparedCall::Immediate(blocked_tool_result(
+                call.id,
+                call.name,
+                call.fields,
+                "read-only goal reviewer".into(),
+                ToolBlocker::ToolSurface,
+            ));
+        }
+        if self.ctx.goal_adjudication.is_some()
+            && (!matches!(
+                call.name.as_str(),
+                "Read" | "Glob" | "Grep" | "GoalRead" | "GoalReview"
+            ) || self.find_custom_tool(&call.name).is_some())
+        {
+            return PreparedCall::Immediate(blocked_tool_result(
+                call.id,
+                call.name,
+                call.fields,
+                "host adjudication only permits read-only inspection and GoalReview".into(),
+                ToolBlocker::ToolSurface,
+            ));
+        }
+        if (self.ctx.goal_drafting || self.ctx.goal_adjudication.is_some())
+            && call.name == "Read"
+            && call.input_json["path"].as_str().is_some_and(|p| {
+                p.contains("://")
+                    && !["artifact://", "skill://", "rule://", "session://"]
+                        .iter()
+                        .any(|scheme| p.starts_with(scheme))
+            })
+        {
+            return PreparedCall::Immediate(blocked_tool_result(
+                call.id,
+                call.name,
+                call.fields,
+                "draft exploration cannot invoke custom resource handlers".into(),
+                ToolBlocker::ToolSurface,
+            ));
+        }
         // Model-generated arguments that could not be parsed become an
         // ordinary failed tool result (ModelFormat provenance) instead of
         // failing the turn: the model sees the decode diagnostic and can
         // resend corrected arguments. Repaired payloads are never executed.
         if let Some(error) = call.parse_error.clone() {
+            if call.name == "GoalReview"
+                && let Some(session) = &self.ctx.goal_adjudication
+            {
+                session.record_rejection(format!("invalid tool arguments: {error}"));
+            }
             return PreparedCall::Immediate(model_format_failed_result(
                 call,
                 format!("invalid tool arguments: {error}"),
             ));
         }
 
+        if matches!(call.name.as_str(), "Read" | "Glob" | "Grep")
+            && let Some(review) = &self.ctx.goal_review
+            && let Err(error) = review.set_stage(crate::session::goal::GoalReviewStage::Inspecting)
+        {
+            return PreparedCall::Immediate(failed_tool_result(
+                call.id,
+                call.name,
+                call.fields,
+                format!("{error:#}"),
+            ));
+        }
         PreparedCall::Execute(call)
     }
 
@@ -825,7 +955,17 @@ impl ToolRunner {
         call: &ToolCallEvent,
         tool_fn: Option<&dyn ToolExec>,
     ) -> Result<ToolExecution> {
+        let captured = if let Some(review) = ctx.review_evidence() {
+            review.capture_read(call, ctx)?
+        } else {
+            None
+        };
         let raw = dispatch_tool(ctx, call, tool_fn);
+        if raw.status == ToolStatus::Succeeded
+            && let (Some(review), Some(captured)) = (ctx.review_evidence(), captured)
+        {
+            review.finish_read(captured)?;
+        }
         let mut result = format_dispatched_result(ctx, call, raw);
         ctx.plan_store.bind_transition(&mut result)?;
         Ok(result)

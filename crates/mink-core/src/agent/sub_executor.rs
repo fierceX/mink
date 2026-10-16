@@ -153,6 +153,44 @@ impl SubAgentExecutor {
         config: Config,
         cancel: crate::cancel::CancellationToken,
     ) -> Result<Self> {
+        Self::new_inner(parent_ctx, session_id, fork, config, cancel, None).await
+    }
+
+    pub(crate) async fn new_with_review(
+        parent_ctx: Arc<AgentSharedContext>,
+        session_id: String,
+        cancel: crate::cancel::CancellationToken,
+        review: Arc<crate::runtime::goal::review::GoalReviewSession>,
+    ) -> Result<Self> {
+        let mut config = parent_ctx.config.clone();
+        let active = parent_ctx
+            .active_model
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        config.model = active.alias.unwrap_or(active.actual);
+        config.enabled_tools = Some(
+            ["Read", "Glob", "Grep", "GoalRead"]
+                .into_iter()
+                .filter(|name| parent_ctx.tool_surface.has(name))
+                .map(str::to_string)
+                .collect(),
+        );
+        config
+            .tool_approval
+            .retain(|name, _| config.enabled_tools.as_ref().unwrap().contains(name));
+        config.sub_agent_timeout_secs = crate::runtime::goal::GOAL_REVIEW_TIMEOUT_SECS as i32;
+        Self::new_inner(parent_ctx, session_id, true, config, cancel, Some(review)).await
+    }
+
+    async fn new_inner(
+        parent_ctx: Arc<AgentSharedContext>,
+        session_id: String,
+        fork: bool,
+        config: Config,
+        cancel: crate::cancel::CancellationToken,
+        review: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
+    ) -> Result<Self> {
         let mut components = Path::new(&session_id).components();
         if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
             bail!("invalid sub-agent session id: {session_id}");
@@ -169,10 +207,25 @@ impl SubAgentExecutor {
             .ok_or_else(|| anyhow::anyhow!("parent conversation has no session directory"))?;
         let child_home = parent_session_dir.join("subagents").join(&session_id);
         prepare_child_home(parent_session_dir, &child_home, fork).await?;
+        let parent_lease = parent_ctx
+            .session_lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let child_lease = Arc::new(
+            crate::session::lease::SessionLease::acquire_directory(&child_home)?
+                .with_parent(parent_lease),
+        );
 
         let built = build_agent_context(AgentContextBuild {
+            goal_review: review.clone(),
+            session_lease: Some(child_lease),
             config,
             home: child_home,
+            // Mirror the parent session's `<environment>` heading: the child's
+            // own home would otherwise split the request head and stop a forked
+            // child from reusing the parent's cached prefix.
+            environment_home: Some(parent_ctx.environment_home.clone()),
             cwd: parent_ctx.cwd.clone(),
             session_id: session_id.clone(),
             session_layout: SessionLayout::Isolated,
@@ -191,10 +244,22 @@ impl SubAgentExecutor {
             runtime_skills: Vec::new(),
             skill_discovery_policy: crate::capabilities::SkillDiscoveryPolicy::Defaults,
             llm_backend: parent_ctx.llm_backend.clone(),
-            resource_router: Some(parent_ctx.resource_router.clone()),
+            resource_router: if review.is_some() {
+                None
+            } else {
+                Some(parent_ctx.resource_router.clone())
+            },
             capability_snapshot: Some(parent_ctx.capability_snapshot.clone()),
-            custom_tools: parent_ctx.custom_tools.as_ref().clone(),
-            prefix_source: parent_ctx.prefix_source.clone(),
+            custom_tools: if review.is_some() {
+                Vec::new()
+            } else {
+                parent_ctx.custom_tools.as_ref().clone()
+            },
+            prefix_source: if review.is_some() {
+                None
+            } else {
+                parent_ctx.prefix_source.clone()
+            },
         })
         .await?;
         let child_ctx = built.ctx;
@@ -221,6 +286,10 @@ impl SubAgentExecutor {
 
     /// Execute the sub-agent with the given prompt.
     pub async fn execute(self, prompt: String) -> SubAgentResult {
+        self.execute_turn(prompt).await
+    }
+
+    async fn execute_turn(&self, prompt: String) -> SubAgentResult {
         // 在 self 被 move 进 run_impl 之前，提取所有权字段
         let capture = self.capture.clone();
         let parent_display = self.parent_display.clone();
@@ -280,30 +349,21 @@ impl SubAgentExecutor {
                 (
                     SubAgentStatus::Failed,
                     captured_thinking.clone(),
-                    if captured_text.is_empty() {
-                        format!("Sub-agent failed: {detail}")
-                    } else {
-                        captured_text.clone()
-                    },
+                    with_terminal_detail(&captured_text, format!("Sub-agent failed: {detail}")),
                 )
             }
             RunOutcome::Done(Err(error)) => (
                 SubAgentStatus::Failed,
                 captured_thinking.clone(),
-                if captured_text.is_empty() {
-                    format!("Sub-agent failed: {error}")
-                } else {
-                    captured_text.clone()
-                },
+                with_terminal_detail(&captured_text, format!("Sub-agent failed: {error:#}")),
             ),
             RunOutcome::TimedOut => (
                 SubAgentStatus::TimedOut,
                 captured_thinking.clone(),
-                if captured_text.is_empty() {
-                    format!("Sub-agent timed out after {timeout_secs}s.")
-                } else {
-                    captured_text.clone()
-                },
+                with_terminal_detail(
+                    &captured_text,
+                    format!("Sub-agent timed out after {timeout_secs}s."),
+                ),
             ),
         };
 
@@ -363,6 +423,42 @@ impl SubAgentExecutor {
             }
             other => Ok((other, String::new(), String::new())),
         }
+    }
+}
+
+/// Reuses only a successful read-only reviewer, never an ordinary execution agent.
+pub(crate) struct ReviewAgentSession {
+    executor: SubAgentExecutor,
+    usable: bool,
+}
+impl Drop for ReviewAgentSession {
+    fn drop(&mut self) {
+        self.executor.child_ctx.cancel.cancel();
+    }
+}
+impl ReviewAgentSession {
+    pub(crate) fn new(executor: SubAgentExecutor) -> Self {
+        Self {
+            executor,
+            usable: true,
+        }
+    }
+    pub(crate) async fn execute(&mut self, prompt: String) -> SubAgentResult {
+        assert!(
+            self.usable,
+            "a failed reviewer cannot be restarted as a new turn"
+        );
+        let result = self.executor.execute_turn(prompt).await;
+        self.usable = result.status == SubAgentStatus::Succeeded;
+        result
+    }
+}
+
+fn with_terminal_detail(captured_text: &str, detail: String) -> String {
+    if captured_text.is_empty() {
+        detail
+    } else {
+        format!("{captured_text}\n\n{detail}")
     }
 }
 

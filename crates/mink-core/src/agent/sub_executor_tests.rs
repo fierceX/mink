@@ -304,3 +304,72 @@ async fn plan_store_is_stable_per_session_and_isolated_for_child() -> anyhow::Re
     );
     Ok(())
 }
+
+/// A child that forks the parent's history must keep the parent's
+/// `<environment>` heading, otherwise the child's request head differs from the
+/// parent's and the inherited history cannot reuse the provider's cached
+/// prefix (the head is compared from the first token).
+#[tokio::test]
+async fn child_environment_heading_matches_the_parent_for_prefix_reuse() -> anyhow::Result<()> {
+    let backend = Arc::new(MockLlmBackend::new("env-model", vec![]));
+    let parent = crate::regression::test_context_for_agent_with_config_and_backend(
+        "sub-environment-home",
+        |_| {},
+        backend,
+    )
+    .await?;
+    parent.store.add_user("parent turn").await?;
+
+    let parent_prompt = parent.build_system_prompt()?;
+    let child = SubAgentExecutor::new(
+        parent.clone(),
+        "sub-env-head".into(),
+        true,
+        parent.config.clone(),
+    )
+    .await?;
+    let child_prompt = child.child_ctx.build_system_prompt()?;
+
+    // The child really does run in its own isolated home...
+    assert!(
+        child.child_ctx.home.ends_with("subagents/sub-env-head"),
+        "{}",
+        child.child_ctx.home.display()
+    );
+    // ...but the model-visible environment line must be the parent's.
+    let parent_env = parent_prompt
+        .split_once("<environment>\n")
+        .and_then(|(_, rest)| rest.split_once("\n</environment>"))
+        .map(|(block, _)| block.to_string())
+        .expect("parent environment block");
+    let child_env = child_prompt
+        .split_once("<environment>\n")
+        .and_then(|(_, rest)| rest.split_once("\n</environment>"))
+        .map(|(block, _)| block.to_string())
+        .expect("child environment block");
+    assert_eq!(claim_home(&parent_env), claim_home(&child_env));
+    assert_eq!(parent_env, child_env);
+
+    // The shared head therefore extends past the environment section.
+    let common = parent_prompt
+        .chars()
+        .zip(child_prompt.chars())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let environment_end = parent_prompt
+        .find("</environment>")
+        .expect("environment section ends");
+    assert!(
+        common > environment_end,
+        "shared head {common} must pass the environment section ({environment_end})"
+    );
+    Ok(())
+}
+
+fn claim_home(block: &str) -> String {
+    block
+        .lines()
+        .find_map(|line| line.strip_prefix("home: "))
+        .unwrap_or_default()
+        .to_string()
+}

@@ -9,6 +9,24 @@ use tokio::net::TcpListener;
 
 #[tokio::test]
 #[ignore = "requires local loopback sockets"]
+async fn response_body_decode_error_is_a_recoverable_transport_failure() -> anyhow::Result<()> {
+    let (api_url, _, server) =
+        start_http_server(vec![http_response(200, &[], "invalid json")]).await?;
+    let response = AsyncLlClient::new("secret-key", &api_url)?
+        .send_once(br#"{"ping":true}"#.to_vec(), &CancellationToken::new())
+        .await?;
+    let error = response.json::<serde_json::Value>().await.unwrap_err();
+    server.abort();
+    assert!(error.is_decode(), "{error}");
+    assert_eq!(
+        crate::llm::recovery::classify_transport_error(&error),
+        UpstreamFailureKind::Recoverable
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local loopback sockets"]
 async fn send_once_classifies_429_and_keeps_structured_retry_after() -> anyhow::Result<()> {
     let responses = vec![
         http_response(429, &[("retry-after", "0")], "rate limited"),

@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub use crate::session::artifacts::{ArtifactManager, ArtifactRecord};
+pub use crate::session::goal::{GoalBudget, GoalSnapshot};
+pub use crate::session::goal::{
+    default_limits as default_goal_limits, read_snapshot as read_goal_snapshot,
+};
 pub use crate::session::metadata::{SessionMetadata, SessionReferenceError, SessionSeed};
 pub use crate::session::paths::Paths as SessionPaths;
 pub use crate::session::todo::{TodoSnapshot, TodoStatus};

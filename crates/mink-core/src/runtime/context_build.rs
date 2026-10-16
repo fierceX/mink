@@ -19,9 +19,17 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
-pub(crate) struct AgentContextBuild {
+pub struct AgentContextBuild {
+    pub goal_review: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
+    pub session_lease: Option<Arc<crate::session::lease::SessionLease>>,
     pub config: Config,
     pub home: PathBuf,
+    /// Value rendered as `home` in the model-visible `<environment>` block.
+    ///
+    /// Defaults to `home`. Sub-agents run in an isolated home of their own but
+    /// mirror the parent session's value here, so a forked child's request head
+    /// stays byte-identical to the parent's (provider prefix-cache reuse).
+    pub environment_home: Option<PathBuf>,
     pub cwd: PathBuf,
     pub session_id: String,
     pub session_layout: SessionLayout,
@@ -66,7 +74,13 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
     let (tool_resolution_context, tool_surface, tool_capabilities) =
         crate::context::resolve_tool_runtime(
             &tool_config,
-            params.is_sub_agent,
+            if params.goal_review.is_some() {
+                crate::tools::surface::AgentRole::GoalReviewer
+            } else if params.is_sub_agent {
+                crate::tools::surface::AgentRole::SubAgent
+            } else {
+                crate::tools::surface::AgentRole::Primary
+            },
             params.read_only_fs.is_some(),
             &params.custom_tools,
         )?;
@@ -100,6 +114,35 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         persistence_fault.clone(),
     )?);
     input_inbox.recover(&store).await?;
+    let goal_store = Arc::new(crate::session::goal::GoalStore::load(
+        &paths.session_dir,
+        persistence_fault.clone(),
+    )?);
+    if !params.is_sub_agent && goal_store.snapshot().is_some() {
+        let current = crate::runtime::goal::goal_environment(&params.cwd, &tool_surface);
+        let cwd = params
+            .cwd
+            .canonicalize()
+            .unwrap_or_else(|_| params.cwd.clone());
+        for fingerprint in [
+            tool_surface.goal_v2_fingerprint()?,
+            tool_surface.goal_v3_fingerprint()?,
+        ] {
+            let previous = format!("{}:{}", cwd.display(), fingerprint);
+            goal_store.migrate_review_environment(&previous, &current)?;
+        }
+        goal_store.reconcile_usage(&usage.all_records()?)?;
+    }
+    if !params.is_sub_agent
+        && goal_store
+            .snapshot()
+            .is_some_and(|g| !g.status.is_terminal())
+    {
+        goal_store.recover(
+            &crate::runtime::goal::goal_environment(&params.cwd, &tool_surface),
+            &store.lines().await?,
+        )?;
+    }
     let vfs_scope = VfsScope {
         resource_session_id: params.resource_session_id,
         agent_session_id: params.session_id.clone(),
@@ -150,7 +193,13 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
             params.llm_backend.clone(),
             event_log_writer.clone(),
         )?
-        .with_fault(persistence_fault.clone()),
+        .with_fault(persistence_fault.clone())
+        .with_goal_store(if params.is_sub_agent {
+            None
+        } else {
+            Some(goal_store.clone())
+        })
+        .with_review_session(params.goal_review.clone()),
     );
 
     // Session-scoped model capabilities: resolve once, freeze, persist, and
@@ -160,12 +209,21 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
     let image_cache = Arc::new(crate::session::image_cache::ImageCache::new(&params.home));
     let this_turn_image_ids = Arc::new(Mutex::new(std::collections::HashSet::new()));
     let warned_image_ids = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let environment_home = params
+        .environment_home
+        .clone()
+        .unwrap_or_else(|| params.home.clone());
 
     let ctx = Arc::new(AgentSharedContext {
+        active_model: Mutex::new(crate::config::model_resolver(&config).resolve(&config.model)),
+        goal_review: params.goal_review,
+        session_lease: Arc::new(Mutex::new(params.session_lease)),
         input_inbox,
+        goal_store,
         config: config.clone(),
         cwd: params.cwd,
         home: params.home,
+        environment_home,
         session_layout: params.session_layout,
         api_url: params.api_url,
         llm_backend: params.llm_backend,

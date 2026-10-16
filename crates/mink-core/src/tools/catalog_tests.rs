@@ -93,6 +93,18 @@ fn schemas_declare_exactly_the_runtime_accepted_fields() {
         ("PlanConfirm", &[]),
         ("PlanClear", &[]),
         ("SubAgent", &["prompt", "description", "fork"]),
+        ("GoalRead", &[]),
+        ("GoalDraft", &["draft_id", "revision", "spec"]),
+        (
+            "GoalReview",
+            &[
+                "decision",
+                "remaining_requirements",
+                "summary",
+                "next_step",
+                "blocker",
+            ],
+        ),
         (
             "PythonSandbox",
             &["script", "script_file", "timeout", "command", "code"],
@@ -247,10 +259,7 @@ fn explicit_only_activation_comes_from_declaration_not_tool_name() {
         "PythonSandbox must stay explicit-only whether or not its feature is compiled"
     );
     // Every other built-in tool keeps the default-enabled activation.
-    for tool in catalog
-        .iter()
-        .filter(|tool| tool.name.as_str() != "PythonSandbox")
-    {
+    for tool in catalog.iter().filter(|tool| tool.name != "PythonSandbox") {
         assert_eq!(
             tool.default_activation,
             ToolDefaultActivation::Enabled,

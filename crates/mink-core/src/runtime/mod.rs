@@ -57,10 +57,10 @@ pub use crate::tools::vfs::{
     validate_virtual_glob_request, validate_virtual_grep_request,
 };
 pub use crate::ui::{
-    ArtifactDisplay, PlanDisplay, PlanTransitionDisplay, PresentedToolResultDisplay, StatsSnapshot,
-    SubAgentStreamKind, SubAgentStreamSink, TodoChangeDisplay, TodoCountsDisplay, TodoDisplay,
-    TodoItemDisplay, TodoStatusDisplay, ToolCallDisplay, ToolPresentation, ToolResultDisplay,
-    llm_wait_heartbeat_message, parse_llm_wait_heartbeat_elapsed,
+    ArtifactDisplay, GoalDisplay, PlanDisplay, PlanTransitionDisplay, PresentedToolResultDisplay,
+    StatsSnapshot, SubAgentStreamKind, SubAgentStreamSink, TodoChangeDisplay, TodoCountsDisplay,
+    TodoDisplay, TodoItemDisplay, TodoStatusDisplay, ToolCallDisplay, ToolPresentation,
+    ToolResultDisplay, llm_wait_heartbeat_message, parse_llm_wait_heartbeat_elapsed,
 };
 pub(crate) use builder::build_runtime;
 pub use config::{SessionInfo, SessionPolicy};
@@ -115,3 +115,18 @@ pub use crate::agent::orchestrator::TurnStatus;
 pub fn reexec_in_sandbox(config: &SandboxConfig, exe: &std::path::Path, args: &[String]) {
     crate::sandbox::reexec_in_sandbox(config, exe, args);
 }
+
+pub use crate::session::lease::SessionLease;
+
+pub(crate) mod goal;
+pub use crate::session::goal::{
+    GOAL_MESSAGE_SOURCE, GoalAcceptance, GoalBudget, GoalCompletionBasis, GoalLimits, GoalMessage,
+    GoalMessageKind, GoalOutcome, GoalPhase, GoalReport, GoalReportKind, GoalSnapshot, GoalSpec,
+    GoalStatus, default_limits as default_goal_limits,
+};
+pub use goal::{
+    CommandGoalVerifier, GoalContinuation, GoalRunLease, GoalVerification, GoalVerificationContext,
+    GoalVerificationStatus, GoalVerifier,
+};
+
+pub use crate::session::goal_protocol::*;

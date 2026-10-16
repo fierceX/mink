@@ -162,6 +162,8 @@ pub struct AgentOptions {
     custom_tools: Vec<Arc<dyn crate::runtime::AgentTool>>,
     prefix_source: Option<Arc<dyn PrefixSource>>,
     post_init_hook: Option<Arc<dyn PostInitHook>>,
+    goal_verifiers: Vec<Arc<dyn crate::runtime::GoalVerifier>>,
+    goal_event_sink: Option<Arc<dyn EventSink>>,
 }
 
 impl AgentOptions {
@@ -201,6 +203,8 @@ impl AgentOptions {
             custom_tools: Vec::new(),
             prefix_source: None,
             post_init_hook: None,
+            goal_verifiers: Vec::new(),
+            goal_event_sink: None,
         }
     }
 
@@ -326,6 +330,15 @@ impl AgentOptions {
         self
     }
 
+    /// Reliable delivery for goal turns; ordinary turn streams retain their existing interface.
+    pub fn with_goal_event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
+        self.goal_event_sink = Some(sink);
+        self
+    }
+    pub fn with_goal_verifier(mut self, verifier: Arc<dyn crate::runtime::GoalVerifier>) -> Self {
+        self.goal_verifiers.push(verifier);
+        self
+    }
     pub fn with_llm_backend(mut self, backend: Arc<dyn LlmBackend>) -> Self {
         self.llm_backend = Some(backend);
         self
@@ -700,6 +713,8 @@ impl AgentOptions {
             custom_tools: self.custom_tools,
             prefix_source: self.prefix_source,
             post_init_hook: self.post_init_hook,
+            goal_verifiers: self.goal_verifiers,
+            goal_event_sink: self.goal_event_sink,
         }
     }
 }

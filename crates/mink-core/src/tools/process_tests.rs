@@ -15,13 +15,15 @@ use std::time::Instant;
 
 #[cfg(unix)]
 fn temp_dir(name: &str) -> std::path::PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "mink-process-tree-{}-{name}-{}",
+        "mink-process-tree-{}-{name}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
-            .unwrap_or(0)
+            .unwrap_or(0),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).expect("create test dir");
     dir

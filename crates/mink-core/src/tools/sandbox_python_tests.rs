@@ -12,13 +12,15 @@ fn synthetic_infinite_loop_wasm(path: &Path) {
 
 #[test]
 fn synthetic_wasm_timeout_and_cancel_terminate_execution() {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "mink-sandbox-synthetic-{}-{}",
+        "mink-sandbox-synthetic-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let wasm = dir.join("loop.wasm");

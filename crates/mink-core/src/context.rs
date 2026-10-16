@@ -76,7 +76,7 @@ impl ToolConfig {
 
 pub(crate) fn resolve_tool_runtime(
     config: &ToolConfig,
-    is_sub_agent: bool,
+    role: AgentRole,
     read_only_fs_present: bool,
     custom_tools: &[crate::runtime::RegisteredCustomTool],
 ) -> anyhow::Result<(
@@ -84,15 +84,7 @@ pub(crate) fn resolve_tool_runtime(
     Arc<ModelToolSurface>,
     Arc<ResolvedToolCapabilities>,
 )> {
-    let resolution = ToolResolutionContext::from_runtime(
-        if is_sub_agent {
-            AgentRole::SubAgent
-        } else {
-            AgentRole::Primary
-        },
-        config,
-        read_only_fs_present,
-    );
+    let resolution = ToolResolutionContext::from_runtime(role, config, read_only_fs_present);
     let surface = Arc::new(
         crate::tools::surface::ModelToolSurface::resolve_with_custom(
             crate::tools::catalog::ToolCatalog::builtin()?,
@@ -112,6 +104,11 @@ pub(crate) fn resolve_tool_runtime(
 /// 从 `AgentSharedContext` 通过 `From` trait 创建。
 #[derive(Clone)]
 pub struct ToolContext {
+    pub(crate) goal_drafting: bool,
+    pub(crate) goal_review: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
+    /// Present only in the host's candidate-bound adjudication turn.
+    pub(crate) goal_adjudication: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
+    pub(crate) _session_lease: Option<Arc<crate::session::lease::SessionLease>>,
     pub cwd: PathBuf,
     pub home: PathBuf,
     pub store: Arc<ConversationStore>,
@@ -122,6 +119,7 @@ pub struct ToolContext {
     pub snapshots: Arc<Mutex<FileSnapshotStore>>,
     pub plan_store: Arc<PlanStore>,
     pub todo_store: Arc<TodoStore>,
+    pub(crate) goal_store: Arc<crate::session::goal::GoalStore>,
     /// Session publish-fault latch (shared with `AgentSharedContext`): the
     /// tool runner refuses to dispatch any tool while latched.
     pub(crate) persistence_fault: crate::session::persistence::PersistenceFault,
@@ -146,6 +144,17 @@ pub struct ToolContext {
 impl From<&AgentSharedContext> for ToolContext {
     fn from(ctx: &AgentSharedContext) -> Self {
         Self {
+            goal_drafting: ctx
+                .goal_store
+                .snapshot()
+                .is_some_and(|g| g.status == crate::session::goal::GoalStatus::Draft),
+            goal_review: ctx.goal_review.clone(),
+            goal_adjudication: None,
+            _session_lease: ctx
+                .session_lease
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             cwd: ctx.cwd.clone(),
             home: ctx.home.clone(),
             store: ctx.store.clone(),
@@ -156,6 +165,7 @@ impl From<&AgentSharedContext> for ToolContext {
             snapshots: ctx.snapshots.clone(),
             plan_store: ctx.plan_store.clone(),
             todo_store: ctx.todo_store.clone(),
+            goal_store: ctx.goal_store.clone(),
             persistence_fault: ctx.persistence_fault.clone(),
             tool_config: ctx.tool_config.clone(),
             interrupt: ctx.interrupt.clone(),
@@ -175,6 +185,13 @@ impl From<&AgentSharedContext> for ToolContext {
 }
 
 impl ToolContext {
+    pub(crate) fn review_evidence(
+        &self,
+    ) -> Option<&Arc<crate::runtime::goal::review::GoalReviewSession>> {
+        self.goal_review
+            .as_ref()
+            .or(self.goal_adjudication.as_ref())
+    }
     /// When the file is byte-identical and an earlier read covers the requested
     /// range, return a short behavioral "reuse that content" response. This is
     /// engine-internal: it never references token budgets or memo mechanics.
@@ -273,16 +290,24 @@ fn display_tool_path(cwd: &Path, path: &Path) -> String {
 
 /// AgentSharedContext holds all shared resources accessible by every component.
 pub struct AgentSharedContext {
+    pub(crate) active_model: Mutex<crate::config::ResolvedModel>,
+    pub(crate) goal_review: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
+    pub(crate) session_lease: Arc<Mutex<Option<Arc<crate::session::lease::SessionLease>>>>,
     pub input_inbox: Arc<crate::session::input::InputInbox>,
     pub config: Config,
     pub cwd: PathBuf,
     pub home: PathBuf,
+    /// Value rendered in the model-visible `<environment>` block. Differs from
+    /// `home` for sub-agents, which run in an isolated home while keeping the
+    /// parent session's heading so forked request prefixes stay identical.
+    pub environment_home: PathBuf,
     pub session_layout: SessionLayout,
     pub api_url: String,
     pub llm_backend: Arc<dyn LlmBackend>,
     pub store: Arc<ConversationStore>,
     pub artifacts: Arc<ArtifactManager>,
     pub todo_store: Arc<TodoStore>,
+    pub(crate) goal_store: Arc<crate::session::goal::GoalStore>,
     /// Session-lifetime Plan store: one journal/transition lock per session.
     pub(crate) plan_store: Arc<PlanStore>,
     /// Session-wide publish-fault latch (see `session::persistence`).
@@ -355,9 +380,11 @@ impl AgentSharedContext {
     }
 
     pub fn model(&self) -> String {
-        crate::config::model_resolver(&self.config)
-            .resolve(&self.config.model)
+        self.active_model
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .actual
+            .clone()
     }
 
     /// Build the compiled-in Mink system prompt for the current context
@@ -366,7 +393,7 @@ impl AgentSharedContext {
     pub(crate) fn build_system_prompt(&self) -> anyhow::Result<String> {
         let system_prompt = crate::prompt::Builder {
             cwd: self.cwd.clone(),
-            home: self.home.clone(),
+            home: self.environment_home.clone(),
             skill_snapshot: Arc::new(self.capability_snapshot.skills.clone()),
             context_file_snapshot: Arc::new(self.capability_snapshot.context_files.clone()),
             rule_snapshot: Arc::new(self.capability_snapshot.rules.clone()),
@@ -379,6 +406,9 @@ impl AgentSharedContext {
             edit_fuzzy_threshold: self.tool_config.edit_fuzzy_threshold,
             edit_enforce_seen_lines: self.tool_config.edit_enforce_seen_lines,
             signal_policy: self.config.signal_policy,
+            skill_index_budget_chars: crate::prompt::skill_index_budget_chars(
+                self.config.max_context_tokens,
+            ),
         }
         .build_system_prompt()?;
         Ok(system_prompt)
@@ -401,7 +431,15 @@ impl AgentSharedContext {
     }
 
     pub fn usage_scope(&self, kind: UsageKind) -> UsageScope {
-        self.usage.scope(kind, self.config.session_id.clone())
+        let mut scope = self.usage.scope(kind, self.config.session_id.clone());
+        if let Some(review) = &self.goal_review {
+            scope.billing_turn_id = format!(
+                "goal-review:{}:{}",
+                review.goal.id,
+                review.goal.iterations.len()
+            );
+        }
+        scope
     }
 
     /// Reliable, deadline- and cancel-bounded commit for critical events.

@@ -25,7 +25,8 @@ fn main() {
             let name = path.file_name().unwrap().to_string_lossy().to_string();
             let content = fs::read_to_string(&skill_file).unwrap_or_default();
 
-            // Parse YAML frontmatter for description
+            // Parse YAML frontmatter for description (same subset the runtime
+            // parser supports, including `>` / `|` block scalars).
             let description = extract_frontmatter_field(&content, "description:")
                 .unwrap_or_else(|| format!("Skill: {name}"));
 
@@ -45,11 +46,13 @@ fn main() {
     code.push_str("pub fn all() -> Vec<Skill> {\n");
     code.push_str("    vec![\n");
     for (name, desc, _path) in &entries {
+        let name_literal = escape_rust_string(name);
+        let desc_literal = escape_rust_string(desc);
         code.push_str(&format!(
             "        Skill {{\n\
-             name: \"{name}\",\n\
-             description: \"{desc}\",\n\
-             content: include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/skills/{name}/SKILL.md\")),\n\
+             name: \"{name_literal}\",\n\
+             description: \"{desc_literal}\",\n\
+             content: include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/skills/{name_literal}/SKILL.md\")),\n\
          }},\n"
         ));
     }
@@ -72,21 +75,90 @@ fn main() {
 }
 
 fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.first()?.trim() != "---" {
+    let mut lines = content.lines().peekable();
+    if lines.next()?.trim() != "---" {
         return None;
     }
-    for line in &lines[1..] {
+    loop {
+        let line = lines.next()?;
         let trimmed = line.trim();
         if trimmed == "---" {
-            break;
+            return None;
         }
-        if let Some(value) = trimmed.strip_prefix(field) {
-            let val = value.trim().trim_matches('"').trim_matches('\'');
-            if !val.is_empty() {
-                return Some(val.to_string());
+        let Some(value) = trimmed.strip_prefix(field) else {
+            continue;
+        };
+        let value = value.trim();
+        // Block scalars (`>` folded / `|` literal) are joined for the embedded
+        // description; blank lines inside the block stay paragraph breaks.
+        if value.starts_with('>') || value.starts_with('|') {
+            let literal = value.starts_with('|');
+            let mut body: Vec<String> = Vec::new();
+            let mut pending_blanks = 0usize;
+            while let Some(peek) = lines.peek() {
+                let line = peek.trim_end_matches('\r');
+                if line.trim().is_empty() {
+                    pending_blanks += 1;
+                    lines.next();
+                    continue;
+                }
+                if !line.starts_with(' ') && !line.starts_with('\t') {
+                    break;
+                }
+                for _ in 0..pending_blanks {
+                    body.push(String::new());
+                }
+                pending_blanks = 0;
+                body.push(lines.next().unwrap().trim().to_string());
             }
+            let text = if literal {
+                body.join("\n")
+            } else {
+                let mut out = String::new();
+                let mut paragraph: Vec<&str> = Vec::new();
+                for line in &body {
+                    if line.is_empty() {
+                        if !paragraph.is_empty() {
+                            if !out.is_empty() {
+                                out.push('\n');
+                            }
+                            out.push_str(&paragraph.join(" "));
+                            paragraph.clear();
+                        }
+                    } else {
+                        paragraph.push(line.as_str());
+                    }
+                }
+                if !paragraph.is_empty() {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(&paragraph.join(" "));
+                }
+                out
+            };
+            let text = text.trim();
+            return (!text.is_empty()).then(|| text.to_string());
+        }
+        let val = value.trim_matches('"').trim_matches('\'');
+        if !val.is_empty() {
+            return Some(val.to_string());
         }
     }
-    None
+}
+
+/// Escape a value for interpolation into a generated Rust string literal.
+fn escape_rust_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }

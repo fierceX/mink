@@ -72,3 +72,5 @@ where
 
 #[cfg(test)]
 mod edit_alignment_tests;
+
+pub mod goal;

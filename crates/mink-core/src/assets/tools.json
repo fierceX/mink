@@ -409,5 +409,156 @@
       },
       "additionalProperties": false
     }
+  },
+  {
+    "name": "GoalRead",
+    "description": "Read the authoritative current goal or unconfirmed draft, full contract, identity, limits and review results. No goal returns null.",
+    "input_schema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "GoalDraft",
+    "description": "Replace the current unconfirmed goal proposal. Read GoalRead first and use its exact draft id and revision. Host-owned original request, limits and acceptance cannot be changed. Only the human host can confirm and start.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "draft_id": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "spec": {
+          "type": "object",
+          "properties": {
+            "objective": {
+              "type": "string"
+            },
+            "scope": {
+              "type": "string"
+            },
+            "constraints": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "subgoals": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "objective": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "objective"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "criteria": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "subgoal_id": {
+                    "type": "string"
+                  },
+                  "outcome": {
+                    "type": "string"
+                  },
+                  "required_evidence": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "subgoal_id",
+                  "outcome",
+                  "required_evidence"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "suggested_actions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "objective",
+            "scope",
+            "constraints",
+            "subgoals",
+            "criteria",
+            "suggested_actions"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "draft_id",
+        "revision",
+        "spec"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "GoalReview",
+    "description": "Submit the HOST decision based on the independent descriptive report. continue means necessary work remains (including after inspecting evidence); complete means the reviewer verified the whole contract; blocked means an objective external dependency prevents progress. The runtime binds the current candidate, report and inspected evidence. Do not reproduce a review table or candidate. On rejection, correct the diagnostic and call again. Only available during host adjudication.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "decision": {
+          "type": "string",
+          "enum": [
+            "continue",
+            "complete",
+            "blocked"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "description": "Explain the decision using the independent report."
+        },
+        "next_step": {
+          "type": "string",
+          "description": "Required for continue or blocked; concrete contract work or dependency resolution."
+        },
+        "remaining_requirements": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional requirement_ids from GoalRead; omit to conservatively track all requirements."
+        },
+        "blocker": {
+          "type": "string",
+          "description": "Only for blocked: the objective external dependency. Omit when there is no blocker."
+        }
+      },
+      "required": [
+        "decision",
+        "summary"
+      ],
+      "additionalProperties": false
+    }
   }
 ]

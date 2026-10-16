@@ -116,6 +116,12 @@ impl ModelResolver {
         Self { aliases }
     }
 
+    /// The alias table this resolver answers from: defaults plus the configured
+    /// custom aliases. Control surfaces list exactly what the runtime honours.
+    pub fn aliases(&self) -> &BTreeMap<String, String> {
+        &self.aliases
+    }
+
     pub fn resolve(&self, model: &str) -> ResolvedModel {
         let requested = model.trim();
         let requested = if requested.is_empty() {

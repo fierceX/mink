@@ -25,6 +25,9 @@ async fn send_user_input(
         None,
     ));
     tx.send(OrchCmd::UserInput {
+        goal_draft: None,
+        goal_source: None,
+        goal_iteration: None,
         input: input.into(),
         turn_id,
         emitter,
@@ -409,13 +412,15 @@ async fn manual_compaction_prefix_writer_failure_delivers_error_and_recovers() -
     // Real writer failure (no fault-injection flag): the events path lives in
     // a missing directory, so the prefix snapshot commit fails and manual
     // compaction must not fall back to a budget-less path.
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "mink-orch-prefix-{}-{}",
+        "mink-orch-prefix-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_nanos()
+            .as_nanos(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let events_path = dir.join("missing").join("events.jsonl");
     let writer = crate::session::event_log::EventLogWriter::start(events_path.clone());

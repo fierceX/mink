@@ -32,6 +32,8 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         custom_tools,
         prefix_source,
         post_init_hook,
+        goal_verifiers,
+        goal_event_sink,
     } = config;
 
     crate::config::validate_runtime_config(&config)?;
@@ -57,6 +59,9 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
             resolved_paths.metadata.display()
         );
     }
+    let lease = Arc::new(crate::session::lease::SessionLease::acquire_directory(
+        &resolved_paths.session_dir,
+    )?);
     config.session_id = sid.clone();
 
     let api_url_str = api_url(&config);
@@ -64,8 +69,11 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         llm_backend.unwrap_or_else(|| Arc::new(OpenAiCompatibleBackend::from_config(&config)));
     let resource_session_id = resource_session_id.unwrap_or_else(|| sid.clone());
     let built = build_agent_context(AgentContextBuild {
+        goal_review: None,
+        session_lease: Some(lease.clone()),
         config: config.clone(),
         home: home.clone(),
+        environment_home: None,
         cwd: cwd.clone(),
         session_id: sid.clone(),
         session_layout,
@@ -177,6 +185,11 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
     let session_info = SessionInfo::new(sid, session_ref, new_session, home, cwd, &spaths);
     let handle = crate::runtime::AgentRuntimeHandle {
         input_inbox: ctx.input_inbox.clone(),
+        goal_ctx: ctx.clone(),
+        goal_driver: Arc::new(crate::runtime::goal::GoalDriver::new(
+            goal_verifiers,
+            goal_event_sink,
+        )),
         image_input: ctx.model_capabilities.image_input.clone(),
         cmd_tx,
         session: session_info,
@@ -185,6 +198,7 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         turn_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
     Ok(AgentRuntime {
+        _lease: lease,
         ctx,
         orch_handle,
         event_display,

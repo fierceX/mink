@@ -411,8 +411,11 @@ async fn harness_inner(
     });
     let build = crate::runtime::context_build::build_agent_context(
         crate::runtime::context_build::AgentContextBuild {
+            goal_review: None,
+            session_lease: None,
             config: cfg,
             home: home.clone(),
+            environment_home: None,
             cwd: cwd.clone(),
             session_id: "regression".into(),
             session_layout: paths::SessionLayout::ProjectScoped,
@@ -492,6 +495,9 @@ async fn run_orchestrator_user_input(
         None,
     ));
     tx.send(OrchCmd::UserInput {
+        goal_draft: None,
+        goal_source: None,
+        goal_iteration: None,
         input: input.to_string(),
         turn_id,
         emitter,
