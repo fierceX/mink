@@ -61,6 +61,12 @@ impl ConversationStore {
         Ok(())
     }
 
+    pub(crate) async fn sync(&self) -> Result<()> {
+        let _guard = self.write_lock.lock().await;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || std::fs::File::open(path)?.sync_all()).await??;
+        Ok(())
+    }
     pub fn path(&self) -> &PathBuf {
         &self.path
     }

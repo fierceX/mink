@@ -6,6 +6,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+tokio::task_local! {
+    /// Host adjudication and its summaries share the independent review bill.
+    static GOAL_ADJUDICATION_BILLING: (PathBuf, String);
+}
+
 const USAGE_RECORD_VERSION: u32 = 1;
 static ID_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -189,15 +194,27 @@ recovering salvageable records",
 
     pub fn scope(&self, kind: UsageKind, origin_session_id: impl Into<String>) -> UsageScope {
         let active = self.active_turn.lock().unwrap_or_else(|e| e.into_inner());
-        let billing_turn_id = active
-            .as_ref()
-            .map(|turn| turn.billing_turn_id.clone())
+        let billing_turn_id = GOAL_ADJUDICATION_BILLING
+            .try_with(|(path, id)| (path == &self.path).then(|| id.clone()))
+            .ok()
+            .flatten()
+            .or_else(|| active.as_ref().map(|turn| turn.billing_turn_id.clone()))
             .unwrap_or_else(|| next_id("operation"));
         UsageScope {
             billing_turn_id,
             kind,
             origin_session_id: origin_session_id.into(),
         }
+    }
+
+    pub(crate) async fn with_goal_adjudication<F: std::future::Future>(
+        &self,
+        billing_turn_id: String,
+        future: F,
+    ) -> F::Output {
+        GOAL_ADJUDICATION_BILLING
+            .scope((self.path.clone(), billing_turn_id), future)
+            .await
     }
 
     pub fn capture(self: &Arc<Self>, scope: UsageScope, model: impl Into<String>) -> UsageCapture {

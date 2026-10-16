@@ -201,7 +201,27 @@ impl super::TurnExecutor {
                 .await;
         }
 
-        self.ctx.store.add_tool_results(&processed_results).await?;
+        if self
+            .ctx
+            .goal_store
+            .snapshot()
+            .is_some_and(|g| g.phase == crate::session::goal::GoalPhase::Executing)
+        {
+            let message =
+                crate::session::store::ConversationStore::tool_results_message(&processed_results);
+            self.ctx
+                .store
+                .append_runtime_message_durable(message)
+                .await?;
+            self.ctx.goal_store.close_effects(
+                &processed_results
+                    .iter()
+                    .map(|r| r.tool_use_id.clone())
+                    .collect::<Vec<_>>(),
+            )?;
+        } else {
+            self.ctx.store.add_tool_results(&processed_results).await?;
+        }
         for (tool_use_id, command) in plan_transitions {
             self.tools
                 .finish_plan_transition(&tool_use_id, command)

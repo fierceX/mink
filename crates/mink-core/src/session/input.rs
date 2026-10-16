@@ -111,6 +111,13 @@ impl InputInbox {
     pub fn outstanding(&self) -> Vec<InputReceipt> {
         self.changes.borrow().as_ref().clone()
     }
+    pub(crate) fn begin_goal_turn(&self, turn_id: &str) -> Result<()> {
+        self.fault.check()?;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        anyhow::ensure!(state.active.is_none(), "input inbox already owns a turn");
+        state.active = Some(turn_id.into());
+        Ok(())
+    }
     pub fn active_turn(&self) -> Option<String> {
         self.state
             .lock()
@@ -411,9 +418,14 @@ mod tests {
     struct TestDir(PathBuf);
     impl TestDir {
         fn new() -> Self {
+            // Wall-clock nanoseconds collide under parallel tests: the system
+            // clock is coarse enough that concurrent threads read identical
+            // values, which made unrelated tests share one conversation file.
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let path = std::env::temp_dir().join(format!(
-                "mink-inbox-{}-{}",
+                "mink-inbox-{}-{}-{}",
                 std::process::id(),
+                COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()

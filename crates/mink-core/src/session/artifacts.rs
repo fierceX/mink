@@ -136,6 +136,12 @@ impl ArtifactManager {
     }
 
     pub fn get(&self, id: &str) -> Result<ArtifactRecord> {
+        self.find(id)?
+            .ok_or_else(|| anyhow::anyhow!("Error: artifact not found: {id}"))
+    }
+
+    /// Distinguish a new artifact identity from damaged or unreadable metadata.
+    pub(crate) fn find(&self, id: &str) -> Result<Option<ArtifactRecord>> {
         validate_id(id)?;
         let index = match std::fs::read_to_string(&self.index_path) {
             Ok(text) => text,
@@ -148,10 +154,10 @@ impl ArtifactManager {
             }
             let record: ArtifactRecord = serde_json::from_str(line)?;
             if record.id == id {
-                return Ok(record);
+                return Ok(Some(record));
             }
         }
-        bail!("Error: artifact not found: {id}");
+        Ok(None)
     }
 
     fn next_id(&self, tool: &str) -> String {

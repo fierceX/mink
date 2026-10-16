@@ -1,0 +1,208 @@
+{
+  "name": "GoalReview",
+  "description": "Submit the host agent's candidate-bound goal conclusion after receiving an independent descriptive review. Only the host adjudication turn may call this tool. Include verdict and every requirement's status, reason and evidence. The runtime validates the conclusion before changing goal state. Use only evidence inspected by the reviewer or by a successful Read. If rejected, correct the reported fields and call again; do not abandon the conclusion because of a validation rejection. Never declare satisfied when the independent report found unmet requirements or unavailable evidence.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "verdict": {
+        "type": "string",
+        "enum": [
+          "satisfied",
+          "needs_work",
+          "blocked"
+        ]
+      },
+      "candidate": {
+        "type": "object",
+        "properties": {
+          "generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "goal_id": {
+            "type": "string"
+          },
+          "contract_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "iteration": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "conversation_seq": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "reviewer_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "generation",
+          "goal_id",
+          "contract_revision",
+          "iteration",
+          "conversation_seq",
+          "reviewer_id"
+        ],
+        "additionalProperties": false
+      },
+      "criteria": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "criterion_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pass",
+                "fail",
+                "unknown"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "description": "Explain the observed facts here; evidence holds references only."
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Only existing workspace file paths (relative or absolute), file:// paths, or artifact://ID references inspected with Read. Never put descriptions, command text, excerpts, line labels, or missing paths here. Use [] when evidence is unavailable; explain observations in reason/summary."
+            }
+          },
+          "required": [
+            "criterion_id",
+            "status",
+            "reason",
+            "evidence"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "constraints": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "constraint": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pass",
+                "fail",
+                "unknown"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "description": "Explain the observed facts here; evidence holds references only."
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Only existing workspace file paths (relative or absolute), file:// paths, or artifact://ID references inspected with Read. Never put descriptions, command text, excerpts, line labels, or missing paths here. Use [] when evidence is unavailable; explain observations in reason/summary."
+            }
+          },
+          "required": [
+            "constraint",
+            "status",
+            "reason",
+            "evidence"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "summary": {
+        "type": "string"
+      },
+      "next_step": {
+        "type": "string"
+      },
+      "blocker": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "criterion_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "dependency": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Only existing workspace file paths (relative or absolute), file:// paths, or artifact://ID references inspected with Read. Never put descriptions, command text, excerpts, line labels, or missing paths here. Use [] when evidence is unavailable; explain observations in reason/summary."
+          }
+        },
+        "required": [
+          "category",
+          "criterion_ids",
+          "dependency",
+          "evidence"
+        ],
+        "additionalProperties": false
+      },
+      "original_request": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "fail",
+              "unknown"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "description": "Explain the observed facts here; evidence holds references only."
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Only existing workspace file paths (relative or absolute), file:// paths, or artifact://ID references inspected with Read. Never put descriptions, command text, excerpts, line labels, or missing paths here. Use [] when evidence is unavailable; explain observations in reason/summary."
+          }
+        },
+        "required": [
+          "status",
+          "reason",
+          "evidence"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "required": [
+      "candidate",
+      "criteria",
+      "constraints",
+      "summary",
+      "next_step",
+      "blocker",
+      "original_request",
+      "verdict"
+    ],
+    "additionalProperties": false
+  }
+}

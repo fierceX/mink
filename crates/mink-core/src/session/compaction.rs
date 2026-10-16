@@ -404,6 +404,8 @@ struct CompactionState {
 }
 
 pub struct CompactionEngine {
+    goal_store: Option<Arc<crate::session::goal::GoalStore>>,
+    review_session: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
     store: Arc<ConversationStore>,
     summary_path: PathBuf,
     state_path: PathBuf,
@@ -590,6 +592,8 @@ impl CompactionEngine {
             )?;
         }
         Ok(Self {
+            goal_store: None,
+            review_session: None,
             store,
             summary_path,
             state_path,
@@ -615,8 +619,23 @@ impl CompactionEngine {
         })
     }
 
-    /// Attach the session-wide publish-fault latch (see
-    /// [`crate::session::persistence`]).
+    /// Attach the current goal's bounded checkpoint projection.
+    pub(crate) fn with_goal_store(
+        mut self,
+        store: Option<Arc<crate::session::goal::GoalStore>>,
+    ) -> Self {
+        self.goal_store = store;
+        self
+    }
+    /// Attach the parent budget owner when this compactor belongs to a Goal reviewer.
+    pub(crate) fn with_review_session(
+        mut self,
+        review: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
+    ) -> Self {
+        self.review_session = review;
+        self
+    }
+    /// Attach the session-wide publish-fault latch.
     pub(crate) fn with_fault(
         mut self,
         fault: crate::session::persistence::PersistenceFault,
@@ -776,8 +795,11 @@ impl CompactionEngine {
         Ok(())
     }
 
-    /// 动态 checkpoint 前缀（摘要 + 权威 plan 派生片段）。权威投影与候选验收必须共用
+    /// 动态 checkpoint 前缀（摘要 + 权威 plan/goal 派生片段）。权威投影与候选验收必须共用
     /// 同一实现，否则候选预算与实际请求会漂移。
+    ///
+    /// 只有压缩后的窗口才挂这些 checkpoint：未压缩时请求就是历史本身，
+    /// goal 的每轮事实走尾部追加的 round prompt，绝不改写已经发出的前缀。
     fn checkpoint_prefix(&self, summary: &str) -> Result<Vec<Value>> {
         let mut checkpoints = Vec::new();
         if !summary.trim().is_empty() {
@@ -787,6 +809,13 @@ impl CompactionEngine {
             read_active_plan_checkpoint(&self.summary_path, derived_display_tokens(&self.config))?
         {
             checkpoints.push(plan);
+        }
+        if let Some(goals) = &self.goal_store
+            && let Some(checkpoint) = goals.checkpoint(
+                crate::runtime::goal::goal_projection_chars(self.config.max_context_tokens),
+            )?
+        {
+            checkpoints.push(checkpoint);
         }
         Ok(checkpoints)
     }
@@ -1356,6 +1385,27 @@ impl CompactionEngine {
         loop {
             if request_cancel.is_cancelled() {
                 return Err(CompactionInterrupted::error());
+            }
+            if self.interrupt.load(Ordering::SeqCst) {
+                return Err(CompactionInterrupted::error());
+            }
+            if let Some(review) = &self.review_session {
+                review.check_budget()?;
+            }
+            if let Some(store) = &self.goal_store
+                && store
+                    .snapshot()
+                    .is_some_and(|g| g.phase == crate::session::goal::GoalPhase::Verifying)
+            {
+                store.reconcile_usage(&self.usage.all_records()?)?;
+                if let Some(reason) = store
+                    .snapshot()
+                    .and_then(|g| g.review_budget_reason().map(str::to_string))
+                {
+                    return Err(anyhow::Error::new(
+                        crate::runtime::goal::review::GoalReviewBudgetExhausted { reason },
+                    ));
+                }
             }
             self.fault.check()?;
             if retry.deadline_expired() {

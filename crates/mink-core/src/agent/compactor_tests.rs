@@ -111,13 +111,14 @@ async fn maybe_compact_success_refreshes_context_and_prefix() -> anyhow::Result<
     let (api_url, _server) = start_summary_server("Task focus: compacted\nLatest request: test\nProgress: done\nTool evidence: none\nReflections: none").await?;
     let ctx = crate::regression::test_context_for_agent_with_config("compactor-success", |cfg| {
         cfg.base_url = api_url.clone();
-        // 与其余 compaction 测试一致：热尾部目标压到 1，使小对话也能
-        // 通过"节省 ≥10%"门控（默认 256K 尾部对微型对话是恒等压缩）。
+        // Keep a small hot tail while the seeded history provides real net savings.
         cfg.context_compact_tail_tokens = 1;
     })
     .await?;
     for idx in 0..3 {
-        ctx.store.add_user(&format!("user {idx}")).await?;
+        ctx.store
+            .add_user(&format!("user {idx} {}", "context ".repeat(500)))
+            .await?;
         ctx.store
             .add_assistant(&format!("assistant {idx}"), "", &[])
             .await?;
@@ -182,4 +183,72 @@ async fn start_summary_server(
         let _ = socket.write_all(response.as_bytes()).await;
     });
     Ok((format!("http://{addr}/chat/completions"), handle))
+}
+
+#[tokio::test]
+async fn goal_checkpoint_survives_compaction_and_stays_out_of_immutable_prefix()
+-> anyhow::Result<()> {
+    let backend: Arc<dyn LlmBackend> =
+        Arc::new(MockLlmBackend::new("summary", vec![summary_script()]));
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "goal-compact",
+        |cfg| cfg.context_compact_tail_tokens = 1,
+        backend,
+    )
+    .await?;
+    let goal = ctx.goal_store.create(
+        crate::runtime::GoalSpec::new("GOAL-CONTRACT-MARKER"),
+        "env".into(),
+    )?;
+    // The goal checkpoint is mounted by the compaction itself; no durable
+    // projection row is written any more, so the head is the only goal state in
+    // the compacted window.
+    for n in 0..3 {
+        ctx.store
+            .add_user(&format!("user {n} {}", "context ".repeat(700)))
+            .await?;
+        ctx.store.add_assistant("ack", "", &[]).await?;
+    }
+    let prefix = PrefixManager::new(ctx.clone());
+    let (prompt_before, tools_before) = prefix.ensure().await?;
+    assert!(!prompt_before.contains("GOAL-CONTRACT-MARKER"));
+    let mut compactor = TurnCompactor::new(ctx.clone(), prefix);
+    let mut messages = ctx.compaction.active_messages().await?;
+    let mut prompt = String::new();
+    let mut tools = vec![];
+    let (compacted, detail) = compactor
+        .maybe_compact_bounded(
+            "manual",
+            &mut messages,
+            &mut prompt,
+            &mut tools,
+            LlmModelTarget::new("test-model", None),
+            None,
+        )
+        .await?;
+    assert!(compacted, "{detail}");
+    assert_eq!(prompt, prompt_before);
+    assert_eq!(tools, tools_before);
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| m["_mink"]["goal_id"] == goal.id)
+            .count(),
+        1
+    );
+    assert!(messages.iter().any(|m| {
+        m["content"]
+            .as_str()
+            .is_some_and(|s| s.contains("GOAL-CONTRACT-MARKER"))
+    }));
+    // The fold lives in the projection, not in the durable history: the oldest
+    // rows stay in `conversation.jsonl` while the active window starts after
+    // them.
+    let rows = ctx.store.lines().await?;
+    assert!(
+        !messages.iter().any(|m| m == &rows[0]),
+        "the compacted window must have folded the oldest durable row: {messages:#?}"
+    );
+    ctx.flush_event_log().await?;
+    Ok(())
 }

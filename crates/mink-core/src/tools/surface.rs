@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub enum AgentRole {
     Primary,
     SubAgent,
+    GoalReviewer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +119,9 @@ impl ModelToolSurface {
         let whitelist = config.enabled_tools.as_ref();
         for tool in custom_tools {
             let definition = &tool.definition;
+            if context.role == AgentRole::GoalReviewer {
+                continue;
+            }
             if whitelist
                 .as_ref()
                 .is_some_and(|names| !names.contains(&definition.name))
@@ -236,7 +240,19 @@ impl ModelToolSurface {
                     continue;
                 }
             }
-            if context.role == AgentRole::SubAgent && metadata.name == "SubAgent" {
+            if (metadata.name == "GoalReview" && context.role != AgentRole::Primary)
+                || (context.role == AgentRole::GoalReviewer
+                    && !matches!(
+                        metadata.name.as_ref(),
+                        "Read" | "Glob" | "Grep" | "GoalRead"
+                    ))
+            {
+                hidden.insert(tool.name.clone(), ToolHiddenReason::UnavailableForRole);
+                continue;
+            }
+            if context.role == AgentRole::SubAgent
+                && matches!(metadata.name.as_ref(), "SubAgent" | "GoalDraft")
+            {
                 hidden.insert(tool.name.clone(), ToolHiddenReason::UnavailableForRole);
                 continue;
             }
@@ -318,6 +334,23 @@ impl ModelToolSurface {
 
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+
+    /// Recognize exactly the prior GoalReview schema while keeping every other
+    /// resolved tool, permission and working-directory boundary unchanged.
+    pub(crate) fn goal_v2_fingerprint(&self) -> Result<String> {
+        let mut tools = self.ordered.clone();
+        if let Some(tool) = tools.iter_mut().find(|t| t.metadata.name == "GoalReview") {
+            tool.schema = serde_json::from_str(include_str!("../assets/goal-review-v2.json"))?;
+        }
+        Ok(surface_fingerprint(&tools))
+    }
+    pub(crate) fn goal_v3_fingerprint(&self) -> Result<String> {
+        let mut tools = self.ordered.clone();
+        if let Some(tool) = tools.iter_mut().find(|t| t.metadata.name == "GoalReview") {
+            tool.schema = serde_json::from_str(include_str!("../assets/goal-review-v3.json"))?;
+        }
+        Ok(surface_fingerprint(&tools))
     }
 }
 

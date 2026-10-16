@@ -134,13 +134,15 @@ async fn prefix_waits_for_real_writer_result_and_retries_after_recovery() -> any
     // Real writer failure (no fault-injection flag): the events path lives in
     // a missing directory, so every append fails to open. The prefix commit
     // must surface that error and must not populate the cache.
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "mink-prefix-writer-{}-{}",
+        "mink-prefix-writer-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_nanos()
+            .as_nanos(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let events_path = dir.join("missing").join("events.jsonl");
     let writer = crate::session::event_log::EventLogWriter::start(events_path.clone());

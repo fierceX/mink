@@ -21,6 +21,10 @@ pub struct OrchActor {
 pub enum OrchCmd {
     UserInput {
         input: String,
+        goal_source: Option<crate::runtime::GoalContinuation>,
+        goal_draft: Option<crate::session::goal::GoalDraftDiscussion>,
+        /// Identity of the admitted goal iteration, when this turn is one.
+        goal_iteration: Option<crate::session::goal::IterationKey>,
         turn_id: crate::runtime::TurnId,
         emitter: std::sync::Arc<crate::runtime::TurnEventEmitter>,
         done: oneshot::Sender<TurnRunResult>,
@@ -112,6 +116,62 @@ impl TurnRunResult {
 }
 
 impl OrchActor {
+    /// Record the goal boundary that opens this round.
+    ///
+    /// The first round is the goal starting and later rounds continue it. Both
+    /// carry `_mink.goal_message`, so a host renders a goal card instead of
+    /// recognising the model-visible sentence.
+    async fn publish_goal_boundary(
+        &self,
+        input: &str,
+        source: &crate::runtime::GoalContinuation,
+    ) -> anyhow::Result<()> {
+        use crate::session::goal::GoalSnapshot;
+        let Some(goal) = self.ctx.goal_store.snapshot() else {
+            return Ok(());
+        };
+        let kind = GoalSnapshot::boundary_kind(source.iteration);
+        let message = serde_json::json!({
+            "role": "user",
+            "content": input,
+            "_mink": {
+                "internal": true,
+                "source": crate::session::goal::GOAL_MESSAGE_SOURCE,
+                "goal": source,
+                "goal_message": goal.message(kind, source.iteration),
+            }
+        });
+        self.ctx.store.append_runtime_message_durable(message).await
+    }
+
+    async fn publish_goal_draft_discussion(
+        &self,
+        input: &str,
+        source: &crate::session::goal::GoalDraftDiscussion,
+    ) -> anyhow::Result<()> {
+        use crate::session::goal::{GoalMessageKind, GoalStatus};
+        let goal = self
+            .ctx
+            .goal_store
+            .snapshot()
+            .ok_or_else(|| anyhow::anyhow!("goal draft missing"))?;
+        anyhow::ensure!(
+            goal.id == source.goal_id
+                && goal.revision == source.revision
+                && goal.status == GoalStatus::Draft,
+            "draft changed before discussion"
+        );
+        let mut message = goal.message(GoalMessageKind::Draft, 0);
+        message.objective = goal.spec.original_request.clone();
+        message.feedback = Some(source.feedback.clone());
+        self.ctx.store.append_runtime_message_durable(serde_json::json!({
+            "role":"user", "content":input,
+            "_mink":{"internal":true,"source":"goal_draft","goal_draft":source,"goal_message":message}
+        })).await
+    }
+}
+
+impl OrchActor {
     /// 当前活跃投影（含即将出现的 TodoSync）是否超过主请求输入预算。
     async fn projection_over_budget(
         ctx: &AgentSharedContext,
@@ -155,6 +215,9 @@ impl OrchActor {
                 cmd = self.cmd_rx.recv() => match cmd {
                     Some(OrchCmd::UserInput {
                         input,
+                        goal_source,
+                        goal_draft,
+                        goal_iteration,
                         turn_id,
                         emitter,
                         done,
@@ -163,7 +226,48 @@ impl OrchActor {
                         self.ctx.log_event(crate::events::EventLog::RuntimeTurnStarted {
                             turn_id: turn_id.to_string(),
                         });
-                        let result = self.handle_user_input(input).await;
+                        let prepared = match goal_source {
+                            Some(source) => self.publish_goal_boundary(input.as_str(), &source).await,
+                            None => match goal_draft {
+                                Some(source) => self.publish_goal_draft_discussion(input.as_str(), &source).await,
+                                None => Ok(()),
+                            },
+                        };
+                        let result = match prepared {
+                            Ok(()) => self.handle_user_input(input).await,
+                            Err(error) => {
+                                let finish_error = self.ctx.input_inbox.finish().err();
+                                TurnRunResult::failed(match finish_error {
+                                    Some(finish) => format!("{error:#}; inbox settlement failed: {finish:#}"),
+                                    None => format!("{error:#}"),
+                                })
+                            }
+                        };
+                        let mut result = result;
+                        if let Some(key) = &goal_iteration {
+                            // Settlement is identity-bound and idempotent: the
+                            // admitted iteration is the only row it may touch.
+                            let facts = crate::session::goal::SettlementFacts {
+                                interrupted_pause: result.status == TurnStatus::Interrupted
+                                    && !self.ctx.cancel.is_cancelled(),
+                            };
+                            let committed = async {
+                                self.ctx.store.sync().await?;
+                                self.ctx
+                                    .goal_store
+                                    .settle_iteration(key, &result, &facts)
+                                    .map(|_| ())
+                            }
+                            .await;
+                            if let Err(error) = committed {
+                                let error = self.ctx.persistence_fault.raise(
+                                    self.ctx.store.path(),
+                                    format!("goal iteration publication failed: {error:#}"),
+                                );
+                                result.status = TurnStatus::Failed;
+                                result.error = Some(format!("{error:#}"));
+                            }
+                        }
                         let _ = done.send(result);
                     }
                     Some(OrchCmd::SetModel { model, done }) => {
@@ -355,6 +459,19 @@ impl OrchActor {
     async fn handle_user_input(&mut self, input: String) -> TurnRunResult {
         let started_at = Instant::now();
         let billing_turn_id = self.ctx.usage.begin_turn();
+        if self.ctx.goal_store.snapshot().is_some_and(|g| {
+            g.phase == crate::session::goal::GoalPhase::Executing
+                && g.iterations.last().is_some_and(|i| !i.finished)
+        }) && let Err(error) = self
+            .ctx
+            .goal_store
+            .associate_iteration_billing(&billing_turn_id)
+        {
+            return self.finish_usage(
+                TurnRunResult::failed(format!("goal billing association failed: {error:#}")),
+                &billing_turn_id,
+            );
+        }
         // Session-level publish fault: refuse the operation up front instead
         // of requesting the model, touching history or executing tools.
         if let Err(error) = self.ctx.persistence_fault.check() {
@@ -412,6 +529,11 @@ impl OrchActor {
 
     fn prepare_turn(&mut self) -> (String, TurnExecutor) {
         let resolved = self.resolve_active();
+        *self
+            .ctx
+            .active_model
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = resolved.clone();
 
         self.ctx.log_event(crate::events::EventLog::TurnStart {
             model: resolved.actual.clone(),
@@ -573,6 +695,11 @@ impl OrchActor {
         // 由 CLI/TUI 适配层自行渲染（不在适配层重新解析模型别名）。
         let stats = crate::ui::title_snapshot(&self.ctx, self.belief.belief()).await;
         self.ctx.display.render_title_update(&label, &stats);
+        *self
+            .ctx
+            .active_model
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = self.resolve_active();
         Ok(crate::runtime::ModelSwitchOutcome { label, stats })
     }
 

@@ -189,7 +189,7 @@ impl super::TurnExecutor {
     /// 成功返回子代理文本；不可用或失败返回 None（调用方降级为既有响应）。
     /// `belief` 为当前信念度，如实写入报告（禁止用占位值误导子代理）。
     async fn run_replan(&mut self, belief: f64) -> Result<Option<String>> {
-        if !self.ctx.config.signal_policy.allows_restart() {
+        if !self.ctx.config.signal_policy.allows_restart() || self.tools.goal_read_only() {
             return Ok(None);
         }
         let s = self.ctx.config.signal.clone();

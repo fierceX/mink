@@ -106,6 +106,7 @@ struct TurnLocalState {
 ///   Stream (LLM response) → Persist → Tools → Decide (continue/stop)
 pub struct TurnExecutor {
     ctx: Arc<AgentSharedContext>,
+    goal_adjudication: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
     model_name: String,
     model_alias: Option<String>,
     tools: Arc<ToolRunner>,
@@ -160,6 +161,7 @@ impl TurnExecutor {
         }
         Self {
             ctx: ctx.clone(),
+            goal_adjudication: None,
             model_name: resolved.actual,
             model_alias: resolved.alias,
             tools,
@@ -180,6 +182,25 @@ impl TurnExecutor {
                     .expect("built-in tool catalog was validated during context construction"),
             ),
         }
+    }
+
+    /// Use the main agent, store and fixed tool schema to commit a conclusion.
+    /// The turn-local dispatch scope permits only inspection and GoalReview.
+    pub(crate) fn new_for_goal_adjudication(
+        ctx: Arc<AgentSharedContext>,
+        session: Arc<crate::runtime::goal::review::GoalReviewSession>,
+    ) -> Self {
+        let active = ctx
+            .active_model
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mut executor = Self::new_for_model(ctx.clone(), active);
+        let mut tools = crate::context::ToolContext::from(ctx.as_ref());
+        tools.goal_adjudication = Some(session.clone());
+        executor.tools = Arc::new(ToolRunner::new(Arc::new(tools)));
+        executor.goal_adjudication = Some(session);
+        executor
     }
 
     fn model_label(&self) -> &str {
@@ -249,6 +270,9 @@ impl TurnExecutor {
         tools_json: &mut Vec<serde_json::Value>,
         round_deadline: Option<std::time::Instant>,
     ) -> Result<(Vec<serde_json::Value>, usize)> {
+        if let Some(session) = &self.goal_adjudication {
+            session.check_budget()?;
+        }
         // Phase 0: 上下文压缩（auto 按压力阈值触发，可多次）。可选提前压缩失败不得
         // 阻断本来可以发送的请求：只有摘要不可用类错误被放行并继续。
         match self
@@ -413,7 +437,12 @@ impl TurnExecutor {
 
         let mut messages = self.ctx.compaction.active_messages().await?;
         self.reconcile_todo_state(&mut messages).await?;
-        if self.ctx.input_inbox.active_turn().is_some() {
+        if let Some(session) = &self.goal_adjudication {
+            self.ctx.store.append_runtime_message(serde_json::json!({
+                "role":"user", "content":user_input, "internal":true,
+                "_mink":{"internal":true,"source":"goal_adjudication","candidate":session.goal.review_candidate}
+            })).await?;
+        } else if self.ctx.input_inbox.active_turn().is_some() {
             self.ctx
                 .input_inbox
                 .apply_pending(&self.ctx.store, || {
@@ -423,11 +452,13 @@ impl TurnExecutor {
         } else {
             self.ctx.store.add_user(user_input).await?;
         }
-        self.ctx.stats.record_turn().await;
-        self.ctx.log_event(crate::events::EventLog::UserInput {
-            version: None,
-            content: user_input.to_string(),
-        });
+        if self.goal_adjudication.is_none() {
+            self.ctx.stats.record_turn().await;
+            self.ctx.log_event(crate::events::EventLog::UserInput {
+                version: None,
+                content: user_input.to_string(),
+            });
+        }
 
         let mut turn = 0;
         let mut effects = Vec::new();
@@ -456,14 +487,15 @@ impl TurnExecutor {
                 self.ctx.display.render_stop("interrupted");
                 return Ok((TurnDecision::Interrupted, effects));
             }
-            if self
-                .ctx
-                .input_inbox
-                .apply_pending(&self.ctx.store, || {
-                    self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst)
-                })
-                .await?
-                > 0
+            if self.goal_adjudication.is_none()
+                && self
+                    .ctx
+                    .input_inbox
+                    .apply_pending(&self.ctx.store, || {
+                        self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst)
+                    })
+                    .await?
+                    > 0
             {
                 messages = self.ctx.compaction.active_messages().await?;
             }
@@ -802,6 +834,16 @@ impl TurnExecutor {
                     TurnDecision::Failed(self.format_exhausted_reason()),
                     effects,
                 ));
+            }
+            if let Some(session) = &self.goal_adjudication {
+                if session.has_submission() {
+                    return Ok((TurnDecision::Stop, effects));
+                }
+                if matches!(kind, RoundKind::Complete) {
+                    self.ctx.store.add_runtime_user("<goal-conclusion-required>The independent review is available, but no valid host conclusion has been recorded. Submit GoalReview for the bound candidate. If a previous call was rejected, correct its specific tool-result diagnostic and call again. Do not end this adjudication with a prose-only declaration.</goal-conclusion-required>").await?;
+                }
+                messages = self.ctx.compaction.active_messages().await?;
+                continue;
             }
             match &kind {
                 RoundKind::ConsumeCalls => {

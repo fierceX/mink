@@ -270,8 +270,8 @@ async fn read_image_captures_and_materializes_in_wire_body() {
     let snapshot = read_capability_snapshot(&home).unwrap();
     assert!(snapshot.contains("open_ai_chat_image_url"), "{snapshot}");
 
-    // Drop the runtime so the next turn starts from the persisted session.
-    drop(runtime);
+    // Finish the writer before another runtime acquires the same session lease.
+    runtime.shutdown().await.unwrap();
 
     // Second turn: `image://` reference read re-injects the cached object.
     let image_id = extract_image_id(&raw);

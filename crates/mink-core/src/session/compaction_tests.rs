@@ -2746,3 +2746,98 @@ async fn emergency_checkpoint_keeps_long_request_ends_in_projection() -> anyhow:
     );
     Ok(())
 }
+
+/// 未压缩时请求就是耐久历史本身：goal 状态一旦插到头部，每轮都会改写 provider 已经
+/// 见过的前缀，命中率随之归零。
+#[tokio::test]
+async fn goal_state_is_not_mounted_before_a_compaction() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "goal-no-head",
+        |config| {
+            config.max_context_tokens = 64_000;
+            config.context_reserve_tokens = 8_000;
+            config.context_compact_tail_tokens = 1;
+        },
+        summary_backend(),
+    )
+    .await?;
+    ctx.goal_store.create(
+        crate::runtime::GoalSpec::new("GOAL-CONTRACT-MARKER"),
+        "env".into(),
+    )?;
+    add_tool_history(&ctx).await?;
+
+    let rows = ctx.store.lines().await?;
+    assert_eq!(
+        ctx.compaction.active_messages().await?,
+        rows,
+        "an uncompacted request is the durable history, with nothing mounted in front"
+    );
+    Ok(())
+}
+
+/// 压缩后的契约 checkpoint 挂在请求前缀里，必须逐字节稳定：只有每轮事实走尾部追加。
+#[tokio::test]
+async fn goal_contract_checkpoint_is_byte_stable_across_rounds() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "goal-contract-stable",
+        |config| {
+            config.max_context_tokens = 64_000;
+            config.context_reserve_tokens = 8_000;
+            config.context_compact_tail_tokens = 1;
+        },
+        summary_backend(),
+    )
+    .await?;
+    let goal = ctx.goal_store.create(
+        crate::runtime::GoalSpec::new("GOAL-CONTRACT-MARKER"),
+        "env".into(),
+    )?;
+    add_tool_history(&ctx).await?;
+    add_follow_up_turn(&ctx).await?;
+
+    let (compacted, detail) = compact(&ctx, "manual", 40_000).await?;
+    assert!(compacted, "{detail}");
+    let checkpoint = |messages: &[Value]| -> Value {
+        messages
+            .iter()
+            .find(|message| message["_mink"]["goal_state_kind"] == "contract")
+            .cloned()
+            .expect("the compacted window carries the goal contract")
+    };
+    let before = checkpoint(&ctx.compaction.active_messages().await?);
+    let text = before["content"].as_str().unwrap_or_default();
+    assert!(text.contains("GOAL-CONTRACT-MARKER"), "{text}");
+    for per_round in ["Round:", "Remaining turns", "Phase:", "Decision:"] {
+        assert!(
+            !text.contains(per_round),
+            "the mounted checkpoint must stay byte-stable across rounds: {per_round} in\n{text}"
+        );
+    }
+
+    // Only per-round state moves between rounds.
+    ctx.goal_store.change(&goal.id, goal.revision, |goal| {
+        goal.iterations.push(crate::session::goal::GoalIteration {
+            iteration: 1,
+            turn_id: "turn-1".into(),
+            billing_turn_id: None,
+            finished: true,
+            conversation_start: 0,
+            outcome_status: None,
+            outcome_error: None,
+        });
+        goal.phase = crate::session::goal::GoalPhase::Executing;
+        goal.reason = Some("round one finished".into());
+        goal.blocked_rounds = 2;
+        Ok(())
+    })?;
+
+    let after = checkpoint(&ctx.compaction.active_messages().await?);
+    // `_mink` is engine metadata that never reaches the provider, so the wire
+    // bytes are the content (see `llm::transport::convert_messages_to_openai`).
+    assert_eq!(
+        after["content"], before["content"],
+        "the goal contract checkpoint changed with per-round state"
+    );
+    Ok(())
+}

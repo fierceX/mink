@@ -7,6 +7,53 @@ fn resolve(config: &ToolConfig, role: AgentRole, vfs: bool) -> Result<ModelToolS
 }
 
 #[test]
+fn reviewer_role_is_closed_even_with_a_broad_whitelist() {
+    let mut config = ToolConfig::from_config(&Config::default());
+    config.enabled_tools = Some(
+        [
+            "Read",
+            "Write",
+            "Bash",
+            "GoalRead",
+            "GoalDraft",
+            "GoalReview",
+            "SubAgent",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+    );
+    assert!(
+        resolve(&config, AgentRole::Primary, false)
+            .unwrap()
+            .has("GoalReview")
+    );
+    assert!(
+        !resolve(&config, AgentRole::SubAgent, false)
+            .unwrap()
+            .has("GoalReview")
+    );
+    let surface = resolve(&config, AgentRole::GoalReviewer, false).unwrap();
+    assert!(surface.has_all(&["Read", "GoalRead"]));
+    assert!(!surface.has("GoalReview"));
+    assert!(
+        surface
+            .names()
+            .all(|name| matches!(name, "Read" | "GoalRead"))
+    );
+    assert!(
+        resolve(&config, AgentRole::Primary, false)
+            .unwrap()
+            .get("GoalReview")
+            .unwrap()
+            .schema["input_schema"]["properties"]
+            .get("decision")
+            .is_some(),
+        "only the host agent submits the goal decision"
+    );
+}
+
+#[test]
 fn whitelist_and_dependency_are_resolved_in_two_passes() {
     let mut config = ToolConfig::from_config(&Config::default());
     config.enabled_tools = Some(vec!["Edit".into(), "Read".into()]);
