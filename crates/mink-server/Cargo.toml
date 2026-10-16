@@ -15,7 +15,7 @@ futures.workspace = true
 http-body-util.workspace = true
 http-body.workspace = true
 fs2.workspace = true
-mink = { package = "mink-core", version = "0.6.7", path = "../mink-core", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.7.0", path = "../mink-core", default-features = false, features = ["runtime"] }
 serde.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
