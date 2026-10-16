@@ -1,0 +1,28 @@
+/* Model seat menu (mink-owned): the copied InputBar sheet styles the seat itself,
+   the menu's contents follow the copied Menu contract. */
+
+.list {
+  min-width: 220px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.alias {
+  font-family: var(--ds-font-family-code);
+  font-size: 13px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.target {
+  margin-left: 8px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}
+
+/* The seat's menu when the vocabulary has not answered: a line, not an empty box. */
+.status {
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}

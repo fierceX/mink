@@ -1,0 +1,10 @@
+/* Rail layout: the copied sheet styles the rail's spacing only — the source's
+   AttachmentRail lays its items out as a row, so that part lives here rather
+   than in the copied file (design parity enforces the copy stays untouched). */
+
+.rail {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  overflow: hidden;
+}

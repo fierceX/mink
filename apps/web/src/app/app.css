@@ -1,0 +1,192 @@
+/* mink-specific shell rules only: the frame, sidebar and row stylesheets are
+   copied from the DSH client packages, and the theme sheets supply every
+   color/radius token. Lengths stay literal px, as in the copied modules. */
+
+/* The shell fills what the device actually shows. The copied sheet sizes it from
+   percentages, which on a phone keeps the LAYOUT viewport's height: iOS Safari's
+   toolbar then covers the composer (taps land on the toolbar, so nothing sends)
+   and a rubber-band scroll exposes blank space below the app. The dynamic unit
+   follows the visual viewport, and hiding the document's own overflow keeps the
+   page from scrolling behind the frame (the legacy workbench's own rule). */
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+/* The shell is pinned to the VISIBLE box. An in-flow shell is positioned against
+   the layout viewport, and a phone browser that pans its visual viewport (the
+   on-screen keyboard focusing a field, a URL bar collapsing mid-swipe) then shows
+   whatever lies at that offset — for a short transcript, empty space. Pinning with
+   the measured height and offset keeps the app exactly under the reader's window. */
+#root {
+  position: fixed;
+  top: var(--mk-viewport-top, 0px);
+  left: 0;
+  width: 100%;
+  height: var(--mk-viewport-height, 100dvh);
+  overflow: hidden;
+}
+
+@supports not (height: 100dvh) {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+}
+
+/* Mobile reading chrome: the reveal control is the only chrome left while the
+   reader is in the transcript, and it sits where the header's corner was. */
+.mk-reveal {
+  /* A row of the reading stack (TurnNavigator's `.ops`), never a floater of its
+     own: the controls share one corner and cannot cover each other. */
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  corner-shape: round;
+  background: var(--dsw-alias-bg-elevated);
+  color: var(--dsw-alias-label-secondary);
+  box-shadow: var(--dsw-elevation-prominent);
+  cursor: pointer;
+}
+
+@media (pointer: coarse) {
+  .mk-reveal {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+/* The copied composer sheet assumes the source's global form reset and draws a
+   contenteditable, which fills its box on its own. A textarea does not: without
+   an explicit width it keeps the browser's default `cols` and wraps in a narrow
+   column, so the card grows tall on a few lines. Scoped here instead of editing
+   the copied module (design parity check enforces that). */
+[data-mink-composer] textarea {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  resize: none;
+  overflow: hidden;
+}
+
+/* The composer region keeps clear of the viewport's bottom edge (and of a phone's
+   home indicator) so the stat pills under the card stay visible. */
+[data-mink-composer-seat] {
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
+}
+
+/* Hiding the reading chrome is layout-free: the header and the input region keep
+   their boxes and only stop painting. Taking the composer out of the flow (which
+   the earlier attempt did) changes the scroller's height mid-gesture — a scrollable
+   flex column then loses the reachability of its own content, which is exactly the
+   empty, unresponsive screen the field reported.
+
+   Only the two regions step aside. The transcript must keep both its box and its
+   events: a blanket rule on the conversation root also disabled pointer events on
+   the scroller, which is what made every gesture after the chrome hid do nothing. */
+header[data-chrome-hidden],
+[data-mink-composer-seat][data-chrome-hidden] {
+  display: none;
+}
+
+/* The reading area takes the input region's height back while the reader is in the
+   transcript. The seat leaves the flow (its box is what the transcript needs), and
+   the transcript keeps a gutter for the floating reveal control; nothing here uses
+   an auto margin, which is what made a scrollable column lose its own content. */
+/* Two attributes on purpose: the seat's own module sets `display: flex` from a
+   class, and a bare attribute selector ties with it — losing the tie keeps the card
+   in the flow, which is how the first attempt at this silently did nothing. */
+[data-mink-composer-seat][data-chrome-collapsed] {
+  display: none;
+}
+
+[data-conversation-scroll]:has(+ [data-chrome-collapsed]) {
+  /* The reading stack lives in this corner: the gutter keeps the last line clear of
+     it (reveal + return + jump, 8px apart). */
+  padding-bottom: calc(124px + env(safe-area-inset-bottom));
+}
+
+/* Phone layout (the legacy workbench's ≤767px numbers): tighter composer chrome
+   and a 16px textarea, which is also what keeps iOS from zooming on focus. */
+@media (max-width: 767px) {
+  /* A phone reads edge to edge: the transcript keeps an explicit 16px gutter
+     instead of the composer-clearance arithmetic, so no block can sit flush
+     against (or past) the screen's edge. */
+  [data-conversation-scroll] {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+  [data-mink-composer] textarea,
+  [data-mink-composer] input {
+    font-size: 16px;
+  }
+
+  [data-mink-composer] {
+    border-radius: 20px;
+  }
+
+  [data-mink-composer-seat] {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+}
+
+/* The command surface reads the draft, so its own search box is redundant — and
+   two search fields fought over the caret (deleting in one re-seeded the other).
+   The copied card keeps its rows, highlight and dismissal; only its input leaves
+   the screen. */
+[data-mink-composer] input[type='text'] {
+  display: none;
+}
+
+/* Coarse pointers get the legacy workbench's touch sizes: a glyph needs 36px to
+   be tappable, and a list row 44px. */
+@media (pointer: coarse) {
+  button[aria-label] {
+    min-width: 36px;
+    min-height: 36px;
+  }
+
+  [data-row-key] {
+    min-height: 44px;
+  }
+}
+
+/* A page older than the bundle the server serves: one line, one action, above
+   everything else in the frame. */
+.mk-stale {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border-radius: var(--dsw-radius-lg);
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-elevation-prominent);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.mk-stale button {
+  border: 0;
+  padding: 2px 8px;
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  cursor: pointer;
+}

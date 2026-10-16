@@ -1,0 +1,69 @@
+/* Settings dialog body: the sections stack with the source's own row rhythm
+   (AppearanceRow/FontSizeRow keep their own stylesheets); this module spaces the
+   sections, styles the process-display copy, and widens the dialog so the three
+   preference cubes share one row the way they do in the source's 800px panel
+   (the copied cube keeps its 180px flex basis, which wraps in a 380px modal). */
+
+/* The card never grows past the viewport, whatever the screen's aspect: the modal
+   sizes against its own padding box, so the cap is 100% of that, and the body
+   scrolls inside it while the header (and its close button) stays put. */
+.dialogSize {
+  width: min(640px, 100%);
+  max-height: 100%;
+}
+
+/* The scrollport: the copied content column is a flex column, so it has to give
+   the body a shrinking child before the body can scroll. */
+.dialogContent {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sections {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+  min-height: 0;
+  /* The body is the card's flexible row: it takes what is left under the header
+     and scrolls from there, so a short screen scrolls instead of clipping. */
+  flex: 1 1 auto;
+  overflow-y: auto;
+  /* The card's own padding is on the content column; the scrollport keeps the
+     sections' first and last rows clear of the rounded edge. */
+  padding: 2px 0 4px;
+}
+
+/* Narrow screens get the appearance cubes side by side as compact tiles: three
+   full-width cards cost more height than a phone has. */
+@media (max-width: 480px) {
+  .sections [aria-label='外观'] > div {
+    flex-wrap: nowrap;
+  }
+
+  .sections [aria-label='外观'] button {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 10px 6px;
+  }
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sectionTitle {
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.sectionDesc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}

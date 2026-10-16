@@ -1,0 +1,55 @@
+/* Empty state: the hero's own brand mark over the composer's column width, with
+   one action. Tokens come from the copied theme sheets. */
+
+.root {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  padding: 24px;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-width: var(--dsh-chat-content-width);
+  text-align: center;
+}
+
+.mark {
+  display: inline-flex;
+  margin-bottom: 4px;
+}
+
+.title {
+  margin: 0;
+  font-size: 18px;
+  line-height: 28px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+
+.note {
+  margin: 0;
+  max-width: 460px;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.start {
+  margin-top: 4px;
+}
+
+.notice {
+  margin: 0;
+  max-width: 460px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-state-error-primary);
+  overflow-wrap: anywhere;
+}

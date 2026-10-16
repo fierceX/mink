@@ -1,0 +1,63 @@
+/* Hover preview for one changed file: the path, its counts and the recorded
+   hunks. The card chrome is the copied HoverCard; this only lays out its body. */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.path {
+  font-family: var(--ds-font-family-code);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.counts {
+  flex: none;
+  display: inline-flex;
+  gap: 6px;
+  font-family: var(--ds-font-family-code);
+  font-size: 12px;
+}
+
+.added {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.deleted {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.body {
+  margin: 0;
+  max-height: 220px;
+  overflow: hidden;
+  font-family: var(--ds-font-family-code);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.add {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.more {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}

@@ -1,0 +1,45 @@
+/* Design-review page chrome: a plain column so the sections read top to bottom
+   in a full-page screenshot. Tokens come from the copied theme sheets. */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 24px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--dsw-font-family);
+}
+
+.heading {
+  margin: 0;
+  font-size: 15px;
+  line-height: 24px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 920px;
+}
+
+/* The command menu anchors above its container (bottom: 100% + 4px), so the
+   gallery gives it a box with room above to float into. */
+.menuStage {
+  position: relative;
+  min-height: 200px;
+  padding-top: 140px;
+  border: 0.5px dashed var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+}
+
+/* Gallery captions: each section names itself, so nothing on this page reads as
+   an app-level notice. */
+.caption {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-tertiary);
+}

@@ -1,0 +1,38 @@
+/* Narrow-frame top bar: the drawer button, the brand and the settings entry.
+   It sits above the conversation so a phone can always reach the sidebar. */
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  min-height: 44px;
+  padding: max(4px, env(safe-area-inset-top)) 12px 4px;
+  background: var(--dsw-alias-bg-base);
+  border-bottom: 0.5px solid var(--dsw-alias-border-l3);
+}
+
+.action {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.action:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  margin-right: auto;
+  color: var(--dsw-alias-label-primary);
+}
