@@ -2,11 +2,11 @@
 
 > 更新日期：2026-10-16
 
-Goal 是 Session 内版本化、有边界的跨 turn 目标。v2 将目标形成、执行与独立审核分开；GoalStore 是唯一权威状态，`goal.json` 与 `goal-transaction.json` 通过 journal 和原子发布保持一致。普通 turn 不隐式创建或确认目标。
+Goal 是 Session 内版本化、有边界的跨 turn 目标：目标形成、执行与独立审核分离；GoalStore 是唯一权威状态，`goal.json` 与 `goal-transaction.json` 通过 journal 和原子发布保持一致。普通 turn 不隐式创建或确认目标。
 
 ## 契约与草案
 
-`GoalSpec::new(objective)` 创建 v2 契约：保留 `original_request`，默认一个 `subgoals` 条目与一个 `criteria` 条目，默认验收 `AgentReviewed`。每个子目标有稳定 `id`、`objective`；每个验收项有 `id`、`subgoal_id`、`outcome`、`required_evidence`。子目标只组织契约，不独立调度或分配预算。`acceptance_criteria` 是 criteria.outcome 的兼容展示，必须一致；简单契约可用 `set_acceptance_criteria()` 更新。`scope`、`constraints` 与 `suggested_actions` 分别记录范围、全局约束与建议动作；建议动作不成为完成条件或 Todo 权威状态。
+`GoalSpec::new(objective)` 创建契约：保留 `original_request`，默认一个 `subgoals` 条目与一个 `criteria` 条目，默认验收 `AgentReviewed`。每个子目标有稳定 `id`、`objective`；每个验收项有 `id`、`subgoal_id`、`outcome`、`required_evidence`。子目标只组织契约，不独立调度或分配预算。`acceptance_criteria` 是 criteria.outcome 的兼容展示，必须一致；简单契约可用 `set_acceptance_criteria()` 更新。`scope`、`constraints` 与 `suggested_actions` 分别记录范围、全局约束与建议动作；建议动作不成为完成条件或 Todo 权威状态。
 
 `/goal` 的子命令为 `confirm` / `refine` / `pause` / `resume` / `cancel` / `clear` / `approve` / `reconcile` / `human` / `verified` / `budget`。参数首词（包括带参数的调用，如 `confrim g12`）与某个子命令只差一次插入、删除、替换或相邻换位时（如 `cancal`、`cancle`、`cance`、`refne`），解析器拒绝并给出建议，不把该词当作目标正文；首词不接近任何子命令的文本（如 `refactor`、`fix the cancal bug`）仍作为正文创建目标。终端与 `apps/web` 两个解析器共用 `crates/mink-cli/src/tui/slash_commands.json` 契约，新增用例两处同时生效。
 
@@ -69,9 +69,9 @@ GoalRead 无必填参数，返回 `{ goal, draft }`，当前草案单独置于 d
 
 确认后的首轮在尾部携带稳定契约与动态 round 事实；后续轮尾部只追加当前轮状态和审核反馈。压缩后挂载稳定契约 checkpoint，轮数/阶段/决策不进入前缀；契约被有损省略时明确提示 GoalRead。system/tools 不随目标状态改变，审核者有独立固定工具面，不承诺与主代理共享完整工具前缀缓存。conversation 只追加，不重写历史。
 
-持久化容器与快照为 v4，确认契约仍为 v2。读取 v1/v2/v3/v4 快照；旧候选恢复时继续完整审核，新增记录与计数默认空，不重置额度或要求 v2 契约重确认。仅识别已知 v2/v3 GoalReview schema 导致的环境指纹变化并精确迁移；其他工具、权限或工作目录变化仍拒绝恢复。成功报告与内容 SHA-256、证据版本、引用映射和历史水位持久化；宿主提交失败后可复用报告，避免重跑已结束任务。重复继续引起的升级在续审前持久化强制完整审核标志；进程重启后可新建审核子会话继承有效材料。轻量记录与调度决策同次原子发布，恢复不重报、不重复累计。
+持久化容器、快照与契约都带格式编号，未知编号拒绝读取为可执行状态。旧候选恢复时继续完整审核，新增记录与计数默认空，不重置额度。工具面或工作目录变化会阻止恢复并要求人工对账，不做自动迁移。成功报告与内容 SHA-256、证据版本、引用映射和历史水位持久化；宿主提交失败后可复用报告，避免重跑已结束任务。重复继续引起的升级在续审前持久化强制完整审核标志；进程重启后可新建审核子会话继承有效材料。轻量记录与调度决策同次原子发布，恢复不重报、不重复累计。
 
-v1 已结束目标保持原状态与 completion basis。v1 未结束目标在可写 runtime 恢复时迁移为待确认草案，保留 ID、历史、已用额度、截止时间与 pending effects；默认自报改为 AgentReviewed，旧候选失效。重确认不重置预算，额度不足先由宿主明确调整；未知副作用先对账。未知持久化版本拒绝读取为可执行状态。
+恢复保留已用额度与 pending effects：额度不足先由宿主明确调整，未知副作用先对账。未知持久化版本拒绝读取为可执行状态。
 
 core SessionLease 在恢复前获取；停止意图发布失败进入 Stopping 并中断，实际执行退出后才 Faulted；不能按磁盘旧 active 自动重启。正常 shutdown 保留已确认 active 意图供恢复。Rust 默认不自动驱动，终端在 UI 接入后接起已确认 active；server 只有显式确认或 resume 才启动带容量的 run。未完成只读审核可针对仍有效候选重启，历史审核结果可幂等复用。
 

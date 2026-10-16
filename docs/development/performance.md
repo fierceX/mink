@@ -15,7 +15,7 @@ Goal 调度与可靠性模拟记录见 [2026-10-09](benchmarks/goal-2026-10-09.m
 
 Goal 真实模型小样本对照见 [2026-10-09](benchmarks/goal-real-2026-10-09.md)：两组编码任务、报告格式纠错、独立验收拒绝与预算停止；保留输出截断失败和未完成验收，不据此推断整体成功率提升。
 
-Goal v2 真实审核与两轮草案讨论见 [2026-10-12](benchmarks/goal-acceptance-2026-10-12.md)：保留首次六个无效审核、格式反馈修正后的六个样本、延迟/Token/缓存及未测量项。固定执行者与预制证据只测审核判别，不等价于真实编码成功率；开发快照没有运行前源码哈希，不作为最终工作树基准。复现入口为 `scripts/evaluate-goal-review.py`，日常输出仍在 target/bench。
+Goal 真实审核与两轮草案讨论见 [2026-10-12](benchmarks/goal-acceptance-2026-10-12.md)：保留首次六个无效审核、格式反馈修正后的六个样本、延迟/Token/缓存及未测量项。固定执行者与预制证据只测审核判别，不等价于真实编码成功率；开发快照没有运行前源码哈希，不作为最终工作树基准。复现入口为 `scripts/evaluate-goal-review.py`，日常输出仍在 target/bench。
 
 历史报告保留其原始 commit 与 dirty 标记，不作为当前 HEAD 的性能承诺。不同用例顺序、feature、工具链、fd 上限和 RSS 采样方式的结果不能直接归因于代码改动。
 
@@ -101,7 +101,7 @@ make bench-quick       # 缩减性能矩阵；仍会写磁盘、创建多会话
 
 [JSON](benchmarks/data/runtime-2026-10-04-smoke/runtime-e7fb6f2+dirty-20261004T153004Z.json)、[日志](benchmarks/data/runtime-2026-10-04-smoke/runtime-e7fb6f2+dirty-20261004T153004Z.txt)和[来源/源码摘要](benchmarks/data/runtime-2026-10-04-smoke/provenance.json)保留 `e7fb6f2+dirty`，未改为纳入后的提交号。
 
-Goal v2 验收边界修复后复测见 [2026-10-12](benchmarks/goal-acceptance-fixes-2026-10-12.md)：运行前源码哈希、六个真实审核样本与两轮草案讨论；测量为 dirty 修复快照，保留初次编译失败和未测量项，不据此宣称一般准确率改善。
+Goal 验收边界修复后复测见 [2026-10-12](benchmarks/goal-acceptance-fixes-2026-10-12.md)：运行前源码哈希、六个真实审核样本与两轮草案讨论；测量为 dirty 修复快照，保留初次编译失败和未测量项，不据此宣称一般准确率改善。
 
 Goal 两阶段审核对照见 [2026-10-14](benchmarks/goal-two-stage-2026-10-14.md)：同一开发 runtime 的两种提示策略、真实审核与宿主提交，保留初次预算截断、一个宿主提交失败和逐任务 Token/缓存/工具调用。文件检查减少，但未观察到该部分完成样本的耗时或总 Token 改善。
 

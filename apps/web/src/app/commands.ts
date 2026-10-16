@@ -37,7 +37,7 @@ export interface CommandResult {
 export interface CommandContext {
   session: SessionSummary
   state: SessionState | undefined
-  /** Creates a Goal v2 draft; host confirmation starts execution. */
+  /** Creates a goal draft; host confirmation starts execution. */
   createGoal: (body: Parameters<typeof api.createGoal>[1]) => Promise<CommandResult>
 }
 

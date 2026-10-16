@@ -157,7 +157,7 @@ export const api = {
   /** Manual context compaction, mirroring the terminal's `/compact`. */
   compact: (id: string, project?: string) =>
     request<{ compacted: boolean; outcome: unknown }>(sessionUrl(id, '/compact', project), { method: 'POST' }),
-  /** Create a Goal v2 draft; execution starts only after the host confirms it. */
+  /** Create a goal draft; execution starts only after the host confirms it. */
   createGoal: (
     id: string,
     body: {

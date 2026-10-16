@@ -141,7 +141,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 
 - `failed` 表示本 run 已结束，禁止自动调度；宿主显式 resume 可以重试同一目标，不按异常文字或历史版本分流。重试保留契约、iteration、用量、失败/阻断记录与原截止时间；过期或执行轮耗尽必须先明确调整预算，未决副作用先人工对账。completed/cancelled 禁止恢复和改预算；draft 须确认。审核阶段恢复仍复核原候选，最后一个执行轮允许续审；执行阶段恢复开启新轮，不重放已提交工具。当前 runtime 的 Faulted、持久化闩锁、关闭、执行未退出、容量和环境门槛不能被显式重试绕过。
 
-- 独立审核先读取已提交的执行轮最终结论；明确部分完成且有契约内下一步可轻量继续，完成声明、空白/含糊/矛盾或外部阻断必须核对证据。轻量继续只写 continuations，不修改 reviews、验收项通过状态或完成依据；连续三轮相同剩余要求升级检查，指纹不取自然语言措辞。强制检查标志先落盘，同一进程复用原只读子会话；所有阶段共用验收 deadline 与 usage。持久快照 v4、契约 v2，旧候选恢复仍完整审核，不重置历史或额度。
+- 独立审核先读取已提交的执行轮最终结论；明确部分完成且有契约内下一步可轻量继续，完成声明、空白/含糊/矛盾或外部阻断必须核对证据。轻量继续只写 continuations，不修改 reviews、验收项通过状态或完成依据；连续三轮相同剩余要求升级检查，指纹不取自然语言措辞。强制检查标志先落盘，同一进程复用原只读子会话；所有阶段共用验收 deadline 与 usage。旧候选恢复仍完整审核，不重置历史或额度。
 
 - GoalStore 是唯一权威状态；模型可 GoalRead、只修改未确认 proposal 的 GoalDraft；正常执行结束由宿主调度只读审核。审核子代理只有读取工具，自然返回描述性报告，不得调用 GoalReview 或修改 GoalStore；宿主 agent 在原会话的候选绑定内部提交轮调用 GoalReview 统一提交 decision=continue/complete/blocked、summary、未完成时的 next_step；客观阻断才提供 blocker 字符串，可选 remaining_requirements。runtime 绑定候选、报告与证据后发布；不要求模型复制候选或重写逐项表。描述性结论保留 report，不制造逐项 findings；旧完整提交仅保留解码。GoalReview 固定在主代理工具 schema 中，只有提交轮可执行；已解码的结论校验拒绝返回具体工具失败供同轮纠正，不计入格式恢复窗口。模型不能确认草案、修改已确认契约、额度或运行时状态文件。 typed continuation 不得伪装人类输入；普通 turn 不得绕过活动目标与验收所有权。
 - 驱动故障是稳定终态：不可恢复错误停止本 run 的调度并最多尝试一次落盘 `failed`，不得因磁盘仍为 `active` 自动重启（即使 failed无法发布）；`wait_goal` 返回运行时错误，`start_goal_driver`/`confirm_goal` 拒绝新激活，仅重开会话恢复。仍有工具/检查器未退出时先停止中，待其实际退出后才成为稳定故障；暂停/取消无法持久化（含未闩锁的发布前失败）时命令只按当前 run 身份记录带原始错误的 `Stopping` 并 interrupt，禁止继续调度与提交成功，由唯一 run 结算在 turn gate 空闲后发布 `Faulted`，不得提前发布稳定故障或把随后正常返回改写成 Idle。激活在任何状态写入前确认调度执行器与 readiness，拒绝返回错误且不写 active 契约；已写出的契约若仍无法启动 run 同样返回错误并闩锁 Faulted，不静默留下无人驱动的 active。

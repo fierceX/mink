@@ -1,4 +1,4 @@
-# Goal v2 验收边界修复后复测：2026-10-12
+# Goal 验收边界修复后复测：2026-10-12
 
 维护测量，不进入官网发布产物。数据见 [脱敏 JSON](data/goal-acceptance-fixes-2026-10-12/results.json)。
 

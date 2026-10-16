@@ -29,7 +29,7 @@ resolved capabilities）、执行门禁（surface 校验 → StormBreaker → To
 
 - `enabled_tools` 是唯一工具启用输入；`ModelToolSurface` 在 session/prefix 构造前
   一次解析，`ToolRunner::execute_all()` 在执行前校验同一 surface
-- Goal v2 使用 `GoalRead` 按需读取权威契约，草案讨论另有 `GoalDraft`，独立只读审核返回描述性报告，宿主 agent 通过固定的 `GoalReview` 工具提交候选绑定的轻量继续或完整审核结论；不存在模型自报完成的默认 `GoalReport` 工具。草案确认、验收与生命周期状态由宿主控制
+- Goal 使用 `GoalRead` 按需读取权威契约，草案讨论另有 `GoalDraft`，独立只读审核返回描述性报告，宿主 agent 通过固定的 `GoalReview` 工具提交候选绑定的轻量继续或完整审核结论；不存在模型自报完成的默认 `GoalReport` 工具。草案确认、验收与生命周期状态由宿主控制
 - 只读工具按连续批次并发执行；写入、执行、控制和 SubAgent 工具按调用顺序串行执行
 - 工具结果统一经过 `format_tool_result()`：`tool_result_max_bytes` 截断 + artifact 落盘、
   Bash noise filter、Read/Write 行数摘要、Edit 新 header + diff
