@@ -325,7 +325,14 @@ test("nested links, source paths, Chinese duplicate headings and images resolve 
 
 test("mobile navigation traps keyboard focus and restores its trigger; TOC is independent", async t => {
   const w = await page(t, { hash: '#docs/start/overview.md' });
+  // jsdom keeps a fixed 1024x768 viewport (resizeTo is not implemented) and the
+  // narrow-viewport visibility of the toggles lives in the site stylesheet,
+  // which this unit test does not load; the browser lane verifies that CSS, so
+  // simulate the mobile viewport explicitly before focusing the trigger.
   Object.defineProperty(w, 'innerWidth', {value:390, configurable:true});
+  const mobileStyle = w.document.createElement('style');
+  mobileStyle.textContent = '#doc-nav-toggle,#doc-toc-toggle{display:block}';
+  w.document.head.append(mobileStyle);
   const trigger = w.document.getElementById('doc-nav-toggle'); trigger.focus(); trigger.click();
   const first = w.document.querySelector('#doc-sidebar button');
   assert.equal(w.document.activeElement, first);
