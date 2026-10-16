@@ -1,6 +1,6 @@
 # Python 集成
 
-> 更新日期：2026-10-05
+> 更新日期：2026-10-10
 
 子进程调用、流式接口与磁盘会话复用。
 
@@ -135,6 +135,10 @@ Rust core 会在 `conversation.jsonl` 中完整保留历史，并通过 `context
 
 清理资源。会话目录保留在磁盘上，可供查阅。
 
+
+## Goal
+
+Python SDK 不提供 Goal 的产品入口，也不自动驱动恢复出的目标：活动目标期间独立 `run`/`stream` 提交返回 busy，目标只能由终端或 Web 工作台显式创建、暂停与恢复（见 [Goal 契约](../reference/goals.md)）。
 
 ## 支持平台
 

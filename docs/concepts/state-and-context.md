@@ -1,6 +1,6 @@
 # 持久化与上下文
 
-> 更新日期：2026-10-06
+> 更新日期：2026-10-10
 
 投影、原子发布、压缩和状态恢复。
 
@@ -107,6 +107,8 @@ TUI 的运行中 Enter 直接以当前 turn 身份准入 Inbox，不能排成下
 
 承载 system prompt 和工具定义。一旦构建，在 session 期间应保持不变。变更会触发 fingerprint 失效，导致下一次 LLM 调用丢失前缀缓存。
 
+前缀缓存按「已发出的 token 前缀」命中，因此请求只能追加、不能改写：goal 的每轮事实（`Round: N/M`、剩余轮次、阶段、决策）随 round prompt 追加到尾部，只有压缩后才会在活跃窗口头部挂一份不含每轮字段的稳定契约 checkpoint（plan 同理，Todo 则始终尾部追加）。
+
 ```rust
 pub struct ImmutablePrefix {
     system_prompt: String,
@@ -163,7 +165,12 @@ assistant 消息使用 content 数组承载多种内容类型（thinking/text/to
 - `plan.draft` 和 `plan.md` 由 `PlanStore` 管理，确认/清除通过 append-only 内部 user
   transition 表达；历史压缩后活动计划投影为 `<active-plan-checkpoint>`；
 - `todos.json` 保存 Todo 的权威完整快照，conversation 只追加成功变更事件、紧凑 active
-  投影和必要的 TodoSync。
+  投影和必要的 TodoSync；
+- `goal.json`/`goal-transaction.json` 保存权威 Goal 契约、迭代、阻断识别
+  （`blocker_fingerprint`/`blocker_rounds`）与恢复 journal；模型可见状态为每轮追加的
+  internal user `<current-goal>` round prompt，加上压缩后挂载的低频稳定契约 checkpoint
+  （不含轮次计数/阶段/决策）与终态一次事实行；都不进入 `ImmutablePrefix`、不改写
+  `conversation.jsonl`。
 
 这些状态不进入 `ImmutablePrefix`，也不改写 `conversation.jsonl` 中的既有消息。Plan/Todo 状态文件
 通过同目录临时文件、rename 或受控 unlink 提交；持久化成功后才更新进程内状态。

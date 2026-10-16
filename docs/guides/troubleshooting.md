@@ -1,6 +1,6 @@
 # 故障排查
 
-> 更新日期：2026-10-04
+> 更新日期：2026-10-10
 
 定位模型、编辑、恢复和持久化失败。
 
@@ -52,6 +52,13 @@ tools 与历史消息前缀字节级稳定。计划确认/清除通过 append-on
 压缩后的活动计划 checkpoint 位于稳定动态前缀中；
 `prefix_snapshot` 事件（events.jsonl）可用于离线重建请求前缀并归因
 "这次为什么 cache miss"。
+
+### Goal 相关现象
+
+- 目标一直 active 但不动：终端在 UI 就绪后自动接起；server 不会自动续跑，需在界面显式「恢复」（先预约容量许可，再由 core 启动唯一 run）；恢复出的目标被拒绝时不会发出 provider 请求。
+- 暂停/取消报错而不是显示已保存：停止意图无法写盘时 run 先进入 stopping，执行实际退出后发布 faulted（`goal stop intent could not be persisted`）。核对磁盘/权限后重开会话恢复，不要反复重试同一命令。
+- 模型自报 blocked 未结束目标：同一阻断（按报告 `summary`/`next_step` 指纹识别）需连续达到 `blocked_after_consecutive_rounds`（默认 3）轮；不同阻断会重置计数，可见 `blocked_rounds`（连续 blocked 轮数）与预算视图的阻断门槛（同一阻断连续轮数）。
+- 检查器验收不可用：部署未配置 `MINK_GOAL_CHECK` 时，`GET /api/sessions/{id}/goal` 的 `verifier` 为 false，工作台禁用该选项并隐藏 `/goal verified`。
 
 ## 下一步
 

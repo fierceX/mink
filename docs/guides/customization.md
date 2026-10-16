@@ -39,9 +39,39 @@ mink --list-skills
 3. `~/.claude/skills/<name>/SKILL.md` — 用户全局
 4. **内置** — 编译时嵌入，兜底
 
+### Frontmatter 字段
+
+`SKILL.md` 顶部可选 YAML frontmatter（按 Agent Skills 最小子集解析）：
+
+| 字段 | 作用 |
+|------|------|
+| `name` | 规范技能名；合法时优先于目录名（不一致会在 `skill://list/all` 的 Warnings 中提示） |
+| `description` | 发现描述；缺省时回退正文首个非空行 |
+| `when_to_use` | 附加触发语，拼接在 `description` 之后 |
+| `hide` / `disable-model-invocation` | `true` 时不进入 skill index，仅可按名读取或 `--skill` 选中 |
+
+单行值（可带引号）与块标量 `>`（折叠）/ `|`（保留换行）都支持；未闭合的 frontmatter 视为不存在。
+
+### 索引渲染（模型可见面）
+
+system prompt 的 skill index 与 `skill://list` 对技能名与描述做统一硬化：去控制字符、折叠为单行、转义尖括号（描述不能伪造 section 标记）；描述额外按 1,536 字符截断；条目总量有预算——有限窗口取 1%（clamp 2,000–8,000 字符），窗口不限时为 8,000，`MINK_SKILL_INDEX_BUDGET_CHARS` 可覆盖。超预算时保留全部技能名，按来源降级删除描述：用户级 → runtime → 项目 `.claude/skills` → 项目 `skills/` → 内置最后。`skill://list/all` 与 CLI/TUI 仍显示完整描述（诊断/宿主面）。
+
 ### 能力视图
 
 每次 runtime 启动构建 `CapabilitySnapshot`。system prompt 的 skill index、selected skills、instruction files、rules 以及 `Read skill://` / `Read rule://` 都读取这份统一视图。CLI、Rust runtime、Python SDK 和子代理不各自重新扫描。
+
+### 触发（推荐做法）
+
+索引只是清单，不会自己触发。要让 agent 主动加载，把“时机→技能”写进项目常驻规则（如项目根 `AGENTS.md`，每个任务都会注入），例如：
+
+```markdown
+### 技能纪律
+
+- **先看技能再动手**：任务与 skill-index 中某技能的适用场景匹配时，先 `Read skill://<name>` 并遵循其步骤执行，不要等用户提醒。
+- **时机对应**（技能须在 skill-index 中可见）：编辑代码前核查调用点与假设 → `pre-code-check`；出现 bug、测试失败或异常行为 → `debugging`；实现新功能或修 bug → `tdd`；声称完成、commit 前 → `verification`。
+```
+
+备选：`.minkrc` 的 `[tools].skills = ["verification"]` 会在每次请求预载整段正文（无发现过程，适合强制执行的少数技能）。
 
 ## MISSION（自定义系统提示词）
 

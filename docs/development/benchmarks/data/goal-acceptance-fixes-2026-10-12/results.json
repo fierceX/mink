@@ -1,0 +1,211 @@
+{
+  "review_run": {
+    "cases": [
+      {
+        "basis": "agent_reviewed",
+        "case": "complete",
+        "completed": true,
+        "elapsed_ms": 20467,
+        "execution_rounds": 1,
+        "expected_complete": true,
+        "status": "completed",
+        "usage": {
+          "attempt_count": 7,
+          "reported_request_count": 6,
+          "request_count": 7,
+          "tokens": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 22528,
+            "input_tokens": 8315,
+            "output_tokens": 1861
+          },
+          "unreported_request_count": 1
+        },
+        "valid_reviews": 1,
+        "verdicts": [
+          "satisfied"
+        ]
+      },
+      {
+        "basis": null,
+        "case": "partial",
+        "completed": false,
+        "elapsed_ms": 46786,
+        "execution_rounds": 3,
+        "expected_complete": false,
+        "status": "budget_exhausted",
+        "usage": {
+          "attempt_count": 17,
+          "reported_request_count": 14,
+          "request_count": 17,
+          "tokens": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 53095,
+            "input_tokens": 25288,
+            "output_tokens": 4265
+          },
+          "unreported_request_count": 3
+        },
+        "valid_reviews": 3,
+        "verdicts": [
+          "needs_work",
+          "needs_work",
+          "needs_work"
+        ]
+      },
+      {
+        "basis": null,
+        "case": "forged_claim",
+        "completed": false,
+        "elapsed_ms": 55609,
+        "execution_rounds": 3,
+        "expected_complete": false,
+        "status": "budget_exhausted",
+        "usage": {
+          "attempt_count": 16,
+          "reported_request_count": 13,
+          "request_count": 16,
+          "tokens": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 75387,
+            "input_tokens": 50294,
+            "output_tokens": 5096
+          },
+          "unreported_request_count": 3
+        },
+        "valid_reviews": 3,
+        "verdicts": [
+          "needs_work",
+          "needs_work",
+          "needs_work"
+        ]
+      },
+      {
+        "basis": null,
+        "case": "missing_evidence",
+        "completed": false,
+        "elapsed_ms": 69535,
+        "execution_rounds": 3,
+        "expected_complete": false,
+        "status": "budget_exhausted",
+        "usage": {
+          "attempt_count": 21,
+          "reported_request_count": 18,
+          "request_count": 21,
+          "tokens": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 88944,
+            "input_tokens": 22786,
+            "output_tokens": 6933
+          },
+          "unreported_request_count": 3
+        },
+        "valid_reviews": 3,
+        "verdicts": [
+          "needs_work",
+          "needs_work",
+          "needs_work"
+        ]
+      },
+      {
+        "basis": null,
+        "case": "external_blocker",
+        "completed": false,
+        "elapsed_ms": 60956,
+        "execution_rounds": 3,
+        "expected_complete": false,
+        "status": "blocked",
+        "usage": {
+          "attempt_count": 17,
+          "reported_request_count": 14,
+          "request_count": 17,
+          "tokens": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 66753,
+            "input_tokens": 21916,
+            "output_tokens": 4188
+          },
+          "unreported_request_count": 3
+        },
+        "valid_reviews": 3,
+        "verdicts": [
+          "blocked",
+          "blocked",
+          "blocked"
+        ]
+      },
+      {
+        "basis": null,
+        "case": "unverifiable",
+        "completed": false,
+        "elapsed_ms": 62805,
+        "execution_rounds": 3,
+        "expected_complete": false,
+        "status": "budget_exhausted",
+        "usage": {
+          "attempt_count": 18,
+          "reported_request_count": 15,
+          "request_count": 18,
+          "tokens": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 72122,
+            "input_tokens": 38721,
+            "output_tokens": 7365
+          },
+          "unreported_request_count": 3
+        },
+        "valid_reviews": 3,
+        "verdicts": [
+          "needs_work",
+          "needs_work",
+          "needs_work"
+        ]
+      }
+    ],
+    "method": "scripted executor with real read-only reviewer; six single samples",
+    "model": "MiniMax-M3.1-Flash-Preview",
+    "version": "0.6.7",
+    "started_at": "2026-10-12T08:02:07.141323+00:00",
+    "commit": "46b5d5a6c3b7844cb4fac5adb9081b0c20f8e955",
+    "dirty": true,
+    "source_sha256": "0827d0787b53344f6dfe8ae830e7e72c4aaffac36ea5d08407863941d0b13ca0",
+    "source_scope": "git-listed crates sources and evaluate-goal-review.py, including nonignored new files",
+    "false_completions": 0,
+    "false_rejections": 0,
+    "invalid_or_failed_samples": 0
+  },
+  "draft_run": {
+    "cases": [],
+    "draft_formation": {
+      "contract_valid": true,
+      "elapsed_ms": 89137,
+      "execution_rounds": 0,
+      "first_ready": true,
+      "original_request_preserved": true,
+      "second_ready": true,
+      "still_draft": true,
+      "workspace_unchanged": true
+    },
+    "method": "real model, two draft discussion turns; no confirmation",
+    "model": "MiniMax-M3.1-Flash-Preview",
+    "version": "0.6.7",
+    "started_at": "2026-10-12T08:08:44.248373+00:00",
+    "commit": "46b5d5a6c3b7844cb4fac5adb9081b0c20f8e955",
+    "dirty": true,
+    "source_sha256": "92009fd678cdc8cf29c4ff2b65436e8c886bbdbcbdec5dde8c4a565e61fcda76",
+    "source_scope": "git-listed crates sources and evaluate-goal-review.py, including nonignored new files",
+    "false_completions": 0,
+    "false_rejections": 0,
+    "invalid_or_failed_samples": 0
+  },
+  "environment": {
+    "system": "Darwin",
+    "release": "24.6.0",
+    "architecture": "arm64"
+  },
+  "provenance": {
+    "raw_review_sha256": "531f56e7f5295311cf381a97829101d1a8206ee2c5f49415900c7d8d48c14fba",
+    "raw_draft_sha256": "a481bff0c9c53f2f06a3a59482e75f28cd179049a23885be359d9d829c29018b",
+    "redaction": "Only fixed case labels, aggregate metrics, model/version and source fingerprints; credentials, URLs, raw session IDs, prompts and traces excluded."
+  }
+}

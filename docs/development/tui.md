@@ -1,6 +1,6 @@
 # TUI 实现与维护
 
-> 更新日期：2026-10-05
+> 更新日期：2026-10-10
 
 仅供仓库维护，不进入官网发布产物。
 
@@ -163,6 +163,67 @@ Inline 写入不额外插入 item 间空行；Markdown parser 只保留原始内
 - Artifact 详情最多读取 256 KiB。
 - Plan/Todo/Artifact 详情必须先折行再计算垂直滚动边界。
 - 输入 cursor 始终位于 grapheme/UTF-8 char boundary；粘贴整次撤销，迟到准入回执不覆盖新草稿。
+- 目标标记与目标卡片必须来自结构化数据（`GoalUpdated`/`GoalSnapshot` 与 `_mink.goal_message`），不得从展示文本反解析。
+
+## 消息类型 × TUI 呈现矩阵
+
+每条消息家族在三种输入下的结论：**live**（`TuiSignal`/`Display` 流）、**restore**（`conversation.jsonl` 行重放）、**events**（`events.jsonl` 重放）。“隐藏”是有结论的呈现方式，不是未处理；卡片字段一律来自结构化载荷。
+
+| 家族 | 结构化来源 | live | restore | events | 锚点 |
+|---|---|---|---|---|---|
+| 用户正文 | `role=user` 字符串行 | `> 预览` | `> 预览` | `user_input` → `> 预览` | `tui/inbox.rs`、`tui/replay.rs` |
+| 引导输入 | `_mink.guidance` + `input_id` | 等 `ConversationCommitted` 才 `GuidanceApplied`；`[Added to context]` | 同 live | 同 live | `tui/signal.rs:GuidanceApplied`、`tui/replay.rs` |
+| assistant thinking/text | `thinking`/`text` 块 | 流式 item | 流式 item | `thinking`/`text` 事件 | `tui/signal.rs`、`tui/replay.rs` |
+| 工具 call/result | `tool_use`/`tool_result` + `_mink.status`/`presentation`/`artifacts` | 同一工具卡（`tool_use_id` 合并） | 同一工具卡 | `tool_call`/`tool_result` 事件 | `tui/render/content.rs:build_tool_card_segments` |
+| plan 迁移行 | `_mink.plan_transaction_id` | 隐藏 | 隐藏（详情读 `plan.md`） | 不存在 | `tui/replay.rs:is_internal_row` |
+| todo 同步行 | `_mink.todo_state_kind`/`todo_revision` | 隐藏 | 隐藏（状态来自 `todos.json` + Todo presentation） | 不存在 | 同上 |
+| 压缩 checkpoint | 行级 `internal:true`，内容含 `<compacted-summary>` | 隐藏（live 有 `Context compacted (reason).` 提示） | 隐藏（不同展示摘要正文） | `compact`/`retry` 事件→Info | `tui/replay.rs`、`cli.rs:render_agent_event` |
+| goal 契约 checkpoint | `_mink.goal_state_kind=contract` | 隐藏（`/goals` 读契约） | 隐藏 | 不存在 | `tui/replay.rs`、`tui/render.rs:goal_detail_lines` |
+| goal 边界 draft/start/continuation | `_mink.goal_message` | **goal 卡** | **goal 卡** | 不存在（行只在 conversation） | `tui/render/content.rs:build_goal_card_segments` |
+| `<current-goal>` round prompt | `_mink.internal` + 同一 `goal_message` | 不渲染正文 | 由 goal 卡代替，不渲染正文 | 不存在 | `tui/replay.rs:classify_row` |
+| goal ended 事实行 | `_mink.goal_state_kind=ended` | 无该行：以 `announce_goal` 的 `Goal <id>: …` 提示行呈现 | `Goal <id> ended (revision N)` 事实行（含 id/revision，指向 `/goals`） | 不存在 | `tui/signal.rs:GoalEnded` |
+| goal adjudication | `_mink.source=goal_adjudication` | 隐藏 | 隐藏（结论见目标快照/详情） | 不存在 | `tui/replay.rs:is_internal_row` |
+| 子代理 | `SubAgentStatus/Output/Stream` | 卡片 + 详情入口 | 卡片（ledger 恢复） | `sub_agent_*` 事件 | `tui/signal.rs`、`tui/state.rs:open_sub_agent` |
+| 错误/信号/retry/compact | Error/Info/Signal 信号 | 类型化行（清洗后） | events 路径重建 | `error`/`retry`/`stop` | `tui/signal.rs`、`crates/mink-cli/src/ui/replay.rs` |
+| artifact 引用 | `ToolResult.artifacts`/`_mink.artifacts` | 卡片尾部 `artifact://ID`，点击/`/artifact` 进详情 | 同 live | `tool_result` 事件 | `tui/render/content.rs`、`tui/state.rs:open_artifact` |
+| goal 生命周期事件 | `goal_updated` 行 | `GoalUpdated`→状态标记/详情 | — | `ReplayEventKind::GoalLifecycle`（显式分类，不渲染） | `crates/mink-cli/src/replay.rs` |
+
+### 本轮缺口与结论
+
+| 缺口 | 严重度 | 结论 | criterion |
+|---|---|---|---|
+| `_mink.internal=true` 行在 restore 时回显为用户正文（`> <current-goal>…`） | P1 | 已修：按结构化键分类为卡片/隐藏 | c3 |
+| goal 边界完全没有卡片（与 `_mink.goal_message` 文档不变式不符） | P1 | 已修：draft/start/continuation 三类卡片，live+restore 同一 reducer | c5、c7 |
+| `goal_updated` 在 events.jsonl 被归为 `Unknown` 静默丢弃 | P2 | 已修：显式 `GoalLifecycle` 分类 | c4 |
+| goal ended 事实行无呈现 | P2 | 已修：restore 渲染 `Goal <id> ended (revision N)` 事实行（live 无此行，由 `announce_goal` 提示行覆盖） | c5 |
+| 压缩 checkpoint/todo 同步/plan 迁移/契约 checkpoint/adjudication 无卡片 | P3 | 显式隐藏（状态另有权威来源），理由见上表 | c8 |
+| goal 卡无交互 | P3 | 已加：点击/`Ctrl+G`→目标详情；`Ctrl+O` 折叠最新卡片；Inline 无可展开标识 | c6 |
+| 恢复会话不显示目标标记（`goal.json` 镜像在历史载入时被丢弃） | P1 | 已修：`HistoryLoaded` 接管背景状态读到的 goal 镜像 | c3、c10 |
+
+没有未分类家族：上表每行都给出 live/restore/events 三列结论。
+
+“hidden 目标不显示”指当前目标镜像：hidden（已清除）的目标不显示状态栏标记、不打开详情，也不存在新的边界卡。历史边界卡是已提交的对话内容，仍按行族呈现（与 human 轮次同理，不因后续 clear 改写历史）。
+
+覆盖用例（`cargo test -p mink-cli --features tui`）：
+
+- 用户/引导/内部行：`session_fixture_restores_goal_cards_and_never_echoes_internal_rows`（临时会话目录写入 core 形状的 `conversation.jsonl`（含 `<current-goal>`/`<compacted-summary>`/`<todo-sync>`+`<current-todos>`/plan 迁移/`<goal-review>`/ended/contract 行）后调 `load_session` 并以 TestBackend 断言：内部载荷不出现在屏幕、`> please do the thing` 与 `[Added to context]` 仍然可分、三类边界卡与 ended 事实行均渲染；`internal_rows_do_not_replay_as_user_prose` 补充行级断言）。
+- assistant text/thinking：`apply_switches_stream_kinds_and_collapses_thinking`。
+- 工具卡：`shared_tool_card_renderer_colors_tools_by_result_kind`、`tool_result_signal_preserves_tool_name_for_summaries`、`full_tui_restores_mouse_toggle_for_collapsible_cards`。
+- todo：`todo_delta_preserves_items_not_mentioned_by_the_update`；压缩提示：`compact_error_then_stop_is_visible_and_restores_input`。
+- goal 边界卡（两种路径同一 reducer）：`goal_boundary_cards_render_from_the_structured_payload`、`live_goal_card_kinds_render_on_screen`（三类 kind 的屏幕断言）、`session_fixture_restores_goal_cards_and_never_echoes_internal_rows`（恢复路径三类 kind）、`goal_boundary_rows_decode_to_typed_signals`、`goal_lifecycle_events_are_classified_not_unknown`。
+- goal 卡交互：`clicking_a_goal_card_opens_the_goal_view`、`goal_card_keyboard_collapses_the_newest_card_and_opens_the_detail`、`inline_goal_card_output_is_stable_across_renders`、`goal_card_fold_and_unfold_render_the_screen_marker`。
+- 恢复路径目标镜像：`history_load_adopts_the_goal_mirror_without_overwriting_a_live_one`。
+- 子代理：`sub_agent_detail_tracks_session_after_output_update`、`sub_agent_status_updates_existing_line`。
+- 错误/信号：`status_spans_color_error_state_as_error`、`terminal_signal_seals_orphan_tool_calls`。
+- artifact：`collapsed_artifact_card_keeps_the_artifact_id_visible`、`unrelated_subagent_progress_preserves_artifact_layout`。
+- 端到端：`scripts/verify-tui-pty.py` 本地 lane（full+inline）输出 `{"goal_scene": true, "mode": ..., "restored": true}`；脚本还从 provider 的 `/counters` 断言四个阶段（draft_discussion / execution / review / adjudication）至少各发生一次。
+
+### 实测记录
+
+- 命令：`python3 scripts/verify-tui-pty.py target/debug/mink`（mock provider 为确定性 SSE，无真实账单；`--tmux`/`--ssh` 只跑基础场景）。
+- 夹具：脚本在临时目录里让真实二进制的 goal 驱动自己生成会话（`conversation.jsonl` + `goal.json`），不依赖入库的用户会话；行族含 draft/start/continuation 边界、`<current-goal>` round prompt、审核与结束事实行。
+- 观察（两种模式各一次）：首轮实时渲染出现“目标草案讨论”→“开始目标”，完成后状态标记为 `goal:completed`；`> <current-goal>` 与原始 round prompt 未出现；同一会话 `--continue` 重启后重新渲染“开始目标”与 `Goal <id> ended (revision N)`，且标记仍为 `goal:completed`；Ctrl+G 在两个模式下都打开同一目标详情视图。
+- 发现并修复：重启恢复后目标标记曾缺失（`HistoryLoaded` 丢弃了背景状态读到的 `goal.json` 镜像），已修并补用例 `history_load_adopts_the_goal_mirror_without_overwriting_a_live_one`。
 
 ## 验证
 
@@ -177,6 +238,8 @@ cargo build -p mink-cli --no-default-features --features tui
 python3 scripts/verify-tui-pty.py target/debug/mink
 python3 scripts/verify-tui-pty.py target/debug/mink --tmux
 ```
+
+本地 PTY lane 除基础场景外会驱动一次完整目标生命周期（草案讨论 → 确认 → 执行轮 → 审核 → 结束），断言边界卡文案存在、内部行未以用户正文回显、父子 system prompt 的公共前缀越过 `<environment>`（前缀缓存共享），并在同一会话上重启后断言卡片与结束事实行从磁盘恢复；`--tmux` 与 `--ssh` lane 保留基础场景。
 
 测试至少覆盖：
 

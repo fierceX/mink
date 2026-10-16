@@ -2,6 +2,172 @@
 
 ## Unreleased
 
+- 移除上一代 Vue 工作台：`crates/mink-server/web`（含其 npm 项目、e2e 与测试）已从仓库删除，CI、文档组装/官网脚本与发布版本一致性检查改用唯一的服务前端 `apps/web`（`MINK_SERVER_DEV_WEB` 保留为从磁盘服务前端产物的开发入口）；`docs/` 与 `AGENTS.md` 中关于双前端的说明同步为单前端。
+- 子代理 prompt 的 `<environment>` 块改为镜像父会话的 home：子代理仍在隔离 home 里运行（会话、租约、资源不变），但请求头不再因为各自的隔离子目录而在 1.3k 字符处分叉，fork 继承的历史得以与父会话共享同一段 provider 前缀缓存（剩余差异是工具面决定的 `<tool-inventory>`）；PTY lane 新增父子 system prompt 公共前缀的测量与断言。
+
+- TUI 转录补齐 goal 卡片与内部行归类：`conversation.jsonl` 的 goal 边界行（`_mink.goal_message` 的 draft/start/continuation）在实时与恢复两条路径渲染为同一张结构化卡片（草案卡显示修改意见，执行卡显示轮次与契约版本）；`goal_state_kind=ended` 渲染为带目标 id 与 revision 的事实行。`<current-goal>`、`<compacted-summary>`、`<current-todos>`、plan 迁移行与目标审核提示等运行时内部行不再作为用户正文回显。卡片点击或用 `Ctrl+G`/`Ctrl+O` 打开目标详情/折叠最新卡片（与状态栏标记、`/goals` 同一 `View::Goal` 数据源），Inline 只输出自动折叠后的稳定形态。`events.jsonl` 的 `goal_updated` 归类为显式的目标生命周期事件。恢复会话现在会在历史载入后显示 `goal.json` 的目标标记（此前只在活运行事件后出现）。
+
+- 修复 Goal 审计发现的解析与展示缺陷：`/goal` 拼写守卫补上 `confirm`/`refine`（`/goal confrim`、`/goal refne g12` 不再创建以误拼为目标正文的目标），参数首词与子命令近似即拒绝，三个解析器与共享夹具同步新增用例；`/goal` help 去除已退役的 model-reported 并列出 reconcile，新增 help 与子命令表一致性测试。
+- 修复已清除（hidden）目标经 REST 与 SSE 泄露：`GET /api/sessions/{id}/goal`、`goal_updated` 事件、会话快照/详情与落盘回退路径一致归一为 null；`publish_goal` 与打开会话时的镜像种子在同一处归一。
+- 修复新版工作台的目标控制与展示：斜杠命令/目标条动作后消费 `refreshGoal` 立即按权威快照刷新（REST 读受会话身份、runtime generation 与投影水位保护，不覆盖更新的流事件）；草案讨论边界卡按 `kind="draft"` 显示“目标草案讨论”并按契约显示修改意见；`GET /goal` 的 verifier 能力接入命令面板（未配置检查器时 `/goal verified` 标为不可用并说明原因）；重试禁用判定纳入 Token 软限额；active 且审核失败的目标也可从目标条重试；目标条动作的网络/失败回执显示错误行而非静默。
+- 新增 Goal 回归：身份守卫对抗用例（旧执行存活期间拒绝对换契约、迟到副作用不落到替换目标）、中断置位时驱动收敛（轮次结束为 interrupted 并暂停目标，不再接纳新执行）、工作台 reducer 的 REST 目标读入顺序与 App 层网络失败/409 回执可见用例；`tests/invariants.rs` 新增 Goal 契约 CAS 与重开恢复用例。
+
+- 统一 Goal 失败恢复：failed 停止自动运行，宿主可显式重试原目标；不依赖错误文字、错误分类字段或历史兼容分支。重试保留契约、历史、用量与期限，仍受执行权、故障闩锁、预算和副作用对账约束。新版 Web 提供“重试目标”及显式预算调整，completed/cancelled 不可恢复；暂停或失败后的最后一轮审核可续审，不新增执行轮。响应体解码错误纳入请求内暂时传输故障。
+
+- 简化 Goal 宿主更新协议：独立代理返回描述性报告，宿主只提交继续、完成或外部阻断及原因/下一步；runtime 自动绑定候选、报告和证据版本，避免重复填表导致的格式恢复耗尽或提交死循环；阻断计数绑定稳定依赖事实，避免措辞与本轮 artifact 变化不断重置。证据检查后未完成也可用同一接口继续；报告已保存时仅恢复宿主提交，Web 区分失败阶段并提供报告入口。快照 v4 兼容已知 v2/v3 环境迁移，完成仍受独立读取证据、检查器和人工验收约束。
+
+- Goal 独立审核改为两阶段：明确部分完成时由只读审核者轻量分流，宿主通过 GoalReview 的 continue 模式提交下一步；完成声明与不明确结论仍检查证据。相同剩余要求连续三轮升级为完整检查，复用原审核子会话；成功报告可在宿主提交失败及恢复后复用。CLI/TUI 与新版 Web 区分分流、检查、宿主提交，并分开展示轻量记录与所属轮次的完整审核；快照升级为 v3，契约仍为 v2。
+
+- 修复 Goal 独立审核在首个请求前检查 Token 限额、但续审/摘要/重试仍可继续发请求的问题。每次 reviewer 主请求与压缩摘要请求准入前均对账已知用量；达到软限额后停止后续请求、保留候选并记录 `BudgetExhausted`，调整限额后可只恢复审核。新增 runtime 回归确认限额已耗尽时不会继续调用 reviewer。
+- 修复新版 Web 的 Goal 详情错误与隔离：Goal 操作的网络错误和非成功 API 回执现在可见，CAS 冲突会刷新当前快照；详情数据和动作状态绑定完整会话身份及 runtime generation；模型查询/切换按发起顺序与视图生命周期结算，成功切换后重读运行时模型。验收方式展示配置的检查器 ID，并将契约验收方式与最终完成依据分开；详情补齐范围、建议动作和基于当前候选审核的子目标进度。
+- 扩展隔离 Web E2E：覆盖服务端生成草案、工作台修改意见、按 revision 确认、独立审核完成，以及审核基础设施失败后只重试审核和人工批准。provider 使用确定性本地 fixture，不产生真实模型账单。
+- 修正 Goal 文档中的旧 `GoalReport` 默认工具与模型自述完成描述，统一记录 v2 的 `GoalRead`/`GoalDraft`/`GoalReview`、宿主审核和完成依据。
+- 补回新版 Web 运行中鲸鱼动画使用的上游 PNG 资源，并登记其 deepseek-harness 来源，确保生产构建打包动画遮罩。
+
+- Web 目标栏与目标详情页签从 GoalSnapshot 的契约限额和执行记录派生轮数、时限及阻断进度，兼容 REST 与实时事件返回的原始快照，避免依赖未序列化的 budget 方法。
+
+- 修复 Goal 审核职责未落实的问题：只读子代理自然返回描述性报告，宿主 agent 在原会话调用 GoalReview 提交逐项状态和总 verdict；提交校验拒绝返回具体失败供宿主同轮纠正，不再因重复校验失败耗尽通用格式恢复额度。候选与宿主提交后的历史水位分别绑定，保留证据版本、预算、取消和恢复门槛。
+
+- Goal 独立审核单次默认时限从 60 秒提高到 10 分钟，并统一子代理与 Goal 验收编排两层期限；Goal 的绝对截止时间和 Token 预算仍优先约束审核。
+
+- 修复 Goal 独立审核超时的恢复与 Web 提示：审核服务不可用或超时现在记录独立审核失败并保留候选，显式恢复会重试同一轮审核而不重新执行；审核预算耗尽后调整额度也保留审核阶段。新版 Web 的目标条与详情明确展示审核中、审核未完成和重试入口。
+
+- 新工作台（`apps/web`）异步状态层第二轮加固：上轮修复只在“会话名称相等”这一层做保护，扩展“离开后返回 / runtime 更换 / 清空与新建”边界后仍会回退。本轮把职责拆开：
+  - **提交身份属于会话，不随视图销毁**：未确定（回执丢失）的提交按 `(project_key,id)` 记录（`mink.pending:<project>:<id>`，与草稿同存），离开去 B 再回 A、或刷新页面后，用同一内容重试仍用原 request ID 先查回执再幂等重试；请求发出前先落记录，服务器明确受理或拒绝才删除。
+  - **UI 应用资格带版本**：发送与停止的完成必须在发起时的会话身份、视图 epoch、投影 runtime generation 与当前 turn 都不变时才更新 running/错误；旧的 HTTP 失败不再回滚新 `session_snapshot`（服务端重启恢复后新 runtime 已在运行）。回执合并保持身份 + revision 双重护栏；App 的命令副作用仍按身份丢弃。
+  - **模型读取/切换有序**：模型查询与已接受切换共享单调 request revision（与视图生命周期绑定），只有最新一次可写；A→B→A 的旧响应、以及“已接受切换后返回的旧查询”都不会覆盖当前模型；菜单切换与 `/model`、`/flash`、`/pro` 共用同一状态所有者。
+  - **目标详情按投影顺序定新旧**：目标页签的 REST seed 在发起时记下投影目标更新计数（按 id/revision/status/hidden 识别发布，不因重渲染误计），计数变化则丢弃 seed，清空（null）与新建目标不再靠 null/ID 猜顺序；revision 相等时仍独立更新 `driven` 元数据。
+  - 回归：新增 9 项 vitest 用例（`useSessionView` 离开返回/刷新/新 runtime generation，`useModelChoices` 切换后旧读/ABA，`useDetails` 清空与新建顺序/相等 revision 的 driven，`sessionDraft` 提交记录存取与容错）；第二轮审核的 6 项新反例与上轮 8 项反例全部通过。
+
+- 新工作台（`apps/web`）补齐会话级正确性并恢复新建任务的工作目录入口：
+  - **会话级异步身份**：发送、运行中引导、回执合并、模型查询与切换、详情加载（目标 REST seed 与 SSE 按 `revision` 同一入口合并）、历史分页与斜杠命令副作用只在发起它们的会话仍是当前视图时落地。此前 A 会话挂起的发送在切到 B 后失败会清掉 B 的“运行中”状态、晚到的模型读取会覆盖 B 的模型、晚到的命令回执会在 B 打开详情或清空草稿。
+  - **草稿按 key 在渲染期同步读取**：切换会话的那一次渲染就返回目标会话的草稿，两个空会话之间通过侧栏切换时不再把 A 的正文显示给 B（此前靠 effect 延后换内容，子级已用旧值初始化自己的状态）。
+  - **历史分页不再丢新消息**：以投影 `messages` 为唯一已提交集合按 `seq` 合并、去重、排序后重建视图，加载旧页不会移除快照之后 committed 的消息；分页响应同样带会话身份，迟到页不会拼入另一个会话。
+  - **提交幂等**：一次答复丢失时保留原 request ID 与正文/附件/目标轮，下一次相同内容先查回执（已受理即视为成功，不再当作失败恢复草稿），未受理则以同一 ID 重试；服务端明确拒绝才丢弃该 ID（`SubmitOutcome` 区分 accepted/refused/unknown）。
+  - **附件与待处理输入的错误可见**：服务器以非 200 码拒绝（如 413）或网络失败时附件条目进入 failed 并显示原因，不再因为 `.then(onSuccess, onFailure)` 捕不到 success 内的 throw 而永久停在“上传中”并阻塞发送；`PendingInputs` 的编辑/撤回/续发改为单一 async 错误路径并显示业务拒绝。
+  - **新建任务面板**：接受任意 server 可达工作目录（名称可选，已发现项目作候选），空目录也能创建第一个会话，被拒绝时保留用户输入（此前只能选已发现项目，未发现时提示去终端；旧 Vue 版有工作目录输入）。
+  - 回归：新增 15 项 vitest 用例（`useSessionView`/`useModelChoices`/`useDetails`/`useAttachments`/`sessionDraft`/`App.sessions`，含上述反例）与 e2e「按输入目录新建任务」；同时把 `GoalSnapshot` 收敛为 `data/types.ts` 的单一权威定义，并补上 `npm run e2e` 脚本（文档已有此入口）。
+
+- 斜杠命令拼写守卫：`/goal` 后与子命令只差一次插入/删除/替换或相邻换位的单个词（`cancal`、`cancle`、`cance`）现在被拒绝并提示正确的子命令，不再被当作目标正文创建——此前 `/goal cancal` 会静默创建一个名为 “cancal” 的目标，看起来像“取消没有生效”。多词文本与不接近任何子命令的单词仍是正文；终端会在拒绝行里显示建议，三个解析器（mink-cli、`crates/mink-server/web`、`apps/web`）共用 `slash_commands.json` 契约，新增 5 条用例三处同时生效。
+- 前端换代：服务器默认服务新工作台 `apps/web`（React 18，设计层与原子组件逐字节拷自
+  deepseek-harness 客户端包，来源与许可见 `apps/web/THIRD_PARTY_NOTICES.md`；
+  `npm run check:design` 比对 147 个拷贝文件的漂移，CI 执行）。`crates/mink-server` 的 build.rs
+  改为构建 `apps/web` 并按字节嵌入产物（`include_bytes!` + 按扩展名给 Content-Type，字体等非 UTF-8
+  资源由此可服务）；上一代 Vue 前端（`crates/mink-server/web`）保留在树内，经
+  `MINK_SERVER_DEV_WEB=<dir>/dist` 从磁盘服务，不再进入二进制。
+  迁移完成的能力：会话目录（筛选/搜索四种范围、新建/删除）、历史与 `before_seq` 分页（翻页保持阅读位置）、
+  SSE 实时投影（与 Vue 版共用 reducer/SSE 客户端，`/open` 的 snapshot 提议优先）、composer
+  （发送/停止/运行中引导/附件与图片/斜杠命令，含与终端共用的 `slash_commands.json` 契约）、
+  工具卡家族与逐轮「已编辑 N 个文件」摘要卡、消息 chrome（复制与该轮用量，旧轮次悬停显现）、
+  目标条与目标边界卡（暂停/恢复/取消/清除按 revision compare-and-set）、详情面板五页签
+  （任务/目标/文件/输出/诊断，诊断与 TUI StatsSnapshot 同口径）、轮次选择器与「返回最新内容」、
+  设置与偏好（外观/字号/过程展示）、窄屏阅读 chrome（仅用户明确滚动触发；运行中、待处理引导或
+  被拒提交时保持可见；隐藏只改展示，不 close、不 interrupt）。
+  按「mink 没有的功能不抄」排除：插件面板、Pin/Archive、权限 pill、Standard mode 标签、
+  Chat/Trajectory 页签、消息时间戳。对照与迁移说明见 `docs/development/web-and-site.md`。
+
+- 工作台交互细节补齐：composer 的模型位改为可点击菜单（服务端新增 `GET /api/sessions/{id}/model`
+  返回运行时解析器认可的别名清单，切换走既有 `POST`，座位标签以运行时接受的 label 为准）；「+」改为
+  命令面板（添加图片 + 共享命令契约，选中只把命令写入草稿，不直接执行）；图标控件（+/停止/发送/展开详情/
+  轮次跳转/消息复制）接入 Tooltip，hover 与键盘聚焦都会显示名称；打开失败的错误行带「重试」。
+- 工具卡补全与预览：新增委派卡（`SubAgent` 的 `tasks[]` 一行一个任务）、待办卡（清单逐行，含状态词）、
+  计划卡（计划正文与回答行）、目标报告卡（类型/轮次/摘要/下一步/验收条件与证据），解析失败一律回退
+  通用卡；变更文件卡每一行 hover 显示该文件的 hunks；设计核对页为每个家族提供样本并纳入视觉基线。
+- 草稿与附件按会话身份保存：`Conversation` 以会话身份为 key，草稿与已上传附件 id 随会话保存/恢复，
+  切换会话不串、返回可继续；浏览器拒绝存储时退化为内存草稿。
+
+- 修复 Goal 独立审核的恢复与验收边界：恢复已结算审核不重复累计 blocked 轮数；人工验收拒绝过期批准；检查器改变证据后用新候选在同一执行轮重新只读审核，已知通过且证据未变的检查器不重放。外部阻断必须引用实际读取的事实证据，新审核请求受同一 Token 预算约束；已知检查器结果的证据读取失败不再留下未知副作用标记。审核者读取自身生成的长 GoalRead 产物后，由宿主导入并重绑定到父会话，避免有效长契约被错误拒绝；界面不把旧候选的审核通过计入新候选进度。
+
+- Goal 升级为 v2：CLI/Web 先只读形成分层契约草案，再由宿主确认确切版本启动；新增 GoalRead、GoalDraft 与内部 GoalReview，退休执行者 GoalReport。正常执行轮结束后由继承上下文的只读审核者逐项核对证据，完成依据为 agent_reviewed，配置的检查器与人工门槛仍须满足。新目标期限从确认开始，审核共用期限与用量；旧未结束目标保留历史和预算并要求重确认，旧直接激活 API 明确报升级错误。
+
+- 修复 Goal 每轮改写请求前缀导致前缀缓存失效：goal 状态曾被投影为请求的第 1 条消息（含 `Completed rounds`/`GoalReport iteration`/`Remaining turns`/`Phase`/`Decision`），每个轮次边界都会改写已经发出的前缀，provider 前缀缓存从消息段头部断开（实测轮边界仅 82 字节可复用；仓库真实样本命中率 91%→81%、未缓存输入/请求 +117%）。现在模型可见状态只走两处：每轮追加的 `<current-goal>` round prompt（`Round: N/M`、剩余轮次、绝对截止、blocked 门槛、报告迭代号）与压缩后挂载的**低频稳定契约 checkpoint**（不含任何每轮字段），终态再追加一次事实行；未压缩时请求重新等于 `conversation.jsonl` 行前缀，goal 全程 `prefix_snapshot` 恰一条、system/tools 全程一致。新增 `tests/goal_prefix_cache.rs`（跨轮请求必须互为严格前缀扩展）与渲染分层、压缩后字节稳定、未压缩不挂 head、终态幂等单测；删除按 revision 去重的耐久投影行与 `GoalStore::sync_projection`。
+- 正常 `shutdown()` 先取消 runtime token 再中断 turn gate：此前在飞的 goal round 会被结算成用户暂停（`interrupted_pause`），与 `docs/reference/goals.md` 的「正常关闭保留 active 意图」矛盾；审计回归 `audit9_blocker_streak_survives_restart` 不再依赖轮次边界的竞态。
+- 修复第九轮审计确认的控制边界缺陷：
+  - **失败停止后验收仍可提交 Completed（P1）**：`accept_goal` 现在携带 run_id，并在与停止命令共享的 `admission` 边界内、以 `run_scheduled(run_id)` 重新确认该 run 仍 Running 后才应用验收结果——停止决定与成功提交因此线性化，任一先取得边界者胜出，失败停止不可能与 Completed 共存；检查器成功、Human 等候转换、验收失败更新与证据变更都走同一门控。迭代准入同样在共享边界内拒绝 `Stopping` 后的新执行（不再启动新 iteration），已运行的执行仍由 run 结算在 turn gate 空闲后发布 Faulted。新增“立即放行检查器 vs 失败停止”的 20 轮并发回归与既有停止语义回归。
+  - **不同阻断被累计为同一阻断（P2）**：模型自报 blocked 现在按报告 `summary`/`next_step` 的持久化指纹（`blocker_fingerprint`）识别“同一阻断”，新增同一阻断连续轮次 `blocker_rounds` 作为门槛计数：身份变化重置为 1，因此 A/B/C 这类不同阻断不会提前结束目标；`blocked_rounds` 保留为连续 blocked 报告轮数（统计/展示），Continue/Complete 清零身份与两个计数，预算视图与前端“阻断门槛”取 `blocker_rounds`。新增不同阻断、Continue 重置、重启后指纹/计数存活回归，审计 `changing-blockers.rs` 复现转绿。
+
+- 修复第八轮复审确认的控制协议问题（准入—持久化—停止—实际退出闭合）：
+  - **暂停/取消发布前写盘失败不停止 run**：`GoalStore::change_classified` 区分命令拒绝（stale revision、非法转换，不影响 run）与发布失败；停止意图发布失败（含未闩锁的权限/临时文件错误）时按当前 run 身份记录带原始错误的 `Stopping` 并 interrupt，`drive_goal` 不再接纳新迭代、验收结果不再提交，由 run 结算在 turn gate 空闲后发布稳定 `Faulted`。用户中断（`interrupt_current_turn`）的暂停发布失败同样闩锁。
+  - **host activation 吞掉启动错误**：`create_and_start_goal`/`resume_and_start_goal`（及启用调度时的 `create_goal`/`resume_goal`）在任何状态写入前确认调度执行器可用与 readiness；拒绝返回错误、不写 active 契约，租约立即销毁。已写出的契约若仍因竞态无法启动 run，同样返回错误并闩锁 Faulted，`wait_goal` 不再把无 worker 的 active 当成功快照返回。
+  - **失败停止意图过早发布稳定 Faulted**：命令层只发布 `Stopping`（保留原因），唯一 run 在 turn gate 空闲后才发布 `Faulted`，随后正常返回也不会被改写成 Idle。新增真实持有 turn gate 的回归（预发布失败、闩锁失败、无 executor 激活、stale revision 不影响 run）与手动状态测试的新停止语义断言。
+
+- 修复第八轮发布审计确认的容量所有权与迟到回执问题：
+  - **F1 恢复路径先 arm 驱动再取 run**：`start_goal_driver()` 现在只启用调度、不再隐含 `schedule_goal`；无容量账本的生命周期宿主改用 `start_goal_driver_and_run()` 启用并接起恢复出的 active 目标。宿主容量 run 只能经 `create_and_start_goal`/`resume_and_start_goal` 携带 `GoalRunLease` 启动，`resume` 也接受恢复出的 active goal（服务重启后的续跑入口）——被拒绝的 resume 不启动 run、不发出 provider 请求、不释放不属于本次尝试的容量。新增 core 回归（arm 不启动 run、租约随 resume 存活与释放）与 server 回归（active goal 只经带许可 resume 启动、竞争 create/turn 被 429、并发 provider 请求恒 ≤ `max_running`）。
+  - **F2 暂停/取消时检查器仍在退出的容量提前归还**：`RunGuard` 的租约释放改为与 turn gate 空闲绑定：run 结算后若仍有检查器/工具持有 gate，租约由 holder 任务在 gate 空闲后销毁；`wait_goal` 不等待检查器、继续立即返回。新增回归断言暂停后检查器未退出期间容量保持、退出后释放。
+  - **F3 斜杠命令迟到回执不校验 runtime generation**：命令提交统一以发起尝试的 pending 上下文（`identity`/`generation`/draft `revision`）为判据，runtime 被替换后旧 generation 的成功回执不再打开目标详情或清空草稿；新增组件回归（generation 变化丢弃迟到回执）与 `PendingCommand` 字段消费守卫测试。
+
+- 工作台命令提交上下文：每会话视图新增 `draftRevision`（每次草稿写入递增，改回原文也算编辑）与单条 `pendingCommand`（requestId/identity/generation/revision）；斜杠命令返回结构化 `CommandOutcome`（success/rejected/uncertain + message/detail）而不再自行 flash/openDetail，由提交路径在发起视图仍当前时统一应用，成功且 revision 未变才清空草稿；同一视图在途命令不重复提交，传输失败释放 pending 并保留草稿供重试。新增重复 Enter、改后改回原文、切会话后迟到面板丢弃、失败后重试、A→B→A 回归。
+- 容量账本接线（单一 `max_running` 计数）：普通输入、恢复旧输入与目标驱动统一走 `session/admission.rs` 的 `CapacityPool`；普通 turn 的 permit 随 turn 任务结束释放并显式标记 running，目标 run 的 permit 由 `PermitLease` 随 RunGuard 存活；registry 记录 session 实例 generation（关闭即递增），陈旧 permit 释放不影响重开实例；创建/恢复 API 改为 registry 预约 + core `create_and_start_goal`/`resume_and_start_goal`，删除 `goal_slots`/`GoalReservation`/`release_goal`/回滚辅助与旧的 running 计数，暂停后立即恢复会短暂等待上一 run 退出而不是并发占用。审计复现 capacity-leak/concurrency/snapshot 与 server 端到端保持通过。
+- 宿主容量租约 API：`GoalRunLease` 与 `create_and_start_goal`/`resume_and_start_goal` 让宿主把容量 permit 随目标 run 转移给 core——租约存活于对应 run（RunGuard），run 结束或激活被拒时立即销毁；驱动未启用、已有 run、合同/持久化拒绝都在写入前失败并销毁租约，不留下无人调度的 active 目标。新增租约存活与拒绝销毁回归。
+- 容量账本预备模块：新增 `session/admission.rs`（SessionInstanceKey+generation、PermitId、Reserved/Running/Draining 三态、ExecutionPermit Drop 按 (instance,id) 精确释放、唯一锁内检查+预约），含并发/重复实例/陈旧释放/阶段转换单测，并提供宿主侧 `PermitLease`（把 permit 包成 `GoalRunLease`，随 run 生命周期释放）；接线由后续提交覆盖全部入口后删除旧 goal_slots 计数。
+- 目标创建先固化合同再启动调度：被拒绝的创建（已有未结束目标、配置/持久化拒绝）不再先 `start_goal_driver`，因此不会把与该请求无关的既有 active 目标启动；合同已创建但驱动无法启动时取消该目标并回滚名额。
+- 模块拆分（结构性）：`runtime/goal.rs` 拆为 `runtime/goal/{mod,control,driver,verification}.rs`——控制面（合同生命周期/租约/准入）、驱动（run_goal_worker/drive_goal/结算收尾/等待期限）与验收/证据版本/验收失败写回各自独立成模块（跨模块入口提升为 `pub(crate)`，公开面与行为不变）。
+- Draining 阶段消费：`CapacityPool::mark_draining` 把停止请求对应的会话实例条目标记 draining（仍占容量直到执行真正退出，不复活/清除任何条目），registry `mark_goal_draining` 与 pause/cancel API 在调用 core 前标记并配有单测。
+- 迭代准入类型化：`begin_iteration` 把「可调度校验 + phase/report/evidence 重置 + 迭代行」收进一次原子提交，`stream_goal_iteration` 不再使用通用 `update`。
+- 结算内决策（续）：Continue 报告的 blocked 计数清零并入 `settle_iteration`；运行中迭代的账单关联与用户中断的暂停改为类型化入口（`associate_iteration_billing`、`pause_if_active`），通用 `update` 降级为文档化的维护入口（恢复/对账/投影），回合决策只允许 `update_if_current` 或类型化方法。
+- 结算内决策：complete 报告在 `settle_iteration` 的同一次原子提交里把目标置为 `Verifying` 并清零 blocked 计数；blocked 报告累计连续轮次并按阈值决定 Blocked 或保留提示原因；缺报告的一次修复轮与修复后仍缺报告转 Blocked 也在同一提交里落定。驱动只读结算后的快照并广播/验收，不再二次写回。
+- 驱动决策写回身份化：`drive_goal` 的验收/预算/blocked/缺报告/报告修复等写回全部经 `update_if_current` 绑定本轮 goal，结算后目标被替换时旧结果不再修改替代目标（与迭代结算、验收失败同一口径）。
+- 身份化 goal 迭代结算：准入时产生 `IterationKey`（goal_id/iteration/turn_id）并经 OrchCmd 传到正式历史 sync 之后的唯一结算入口 `settle_iteration`。同事实重复幂等（不增 revision/usage），同身份不同事实报错而非覆盖，未登记身份拒绝结算；failed/interrupted 决策与 finished/billing/usage 在同一次原子提交落盘；驱动不再重复合并用量，验收失败写回绑定被验收的 goal，替换目标不受旧验收影响。新增幂等/冲突/历史归档回归。
+- 重构 Goal 驱动的故障退出协议：
+  - 删除“错误后凭 on-disk active 自动重启”的外层循环。调度改为单次 run：控制状态带 run_id（Idle/Running/Stopping/Faulted/Closed），每个 run 由 RunGuard 持有；不可恢复错误最多尝试一次落盘 `failed`，发布失败也停止，不再热循环；仍有工具/检查器未退出时先进入停止中，待其实际退出后才成为稳定故障。
+  - `wait_goal` 改为 watch 驱动的生命周期：故障返回运行时错误（不再丢唤醒或用 Goal.status 冒充完成信号），`start_goal_driver`/`create_goal` 在故障后拒绝新激活，需重开会话恢复；暂停/取消无法持久化时停止本 run 并返回错误，不显示为已保存；shutdown 按实际 run/执行退出有界等待后关闭生命周期。
+  - 新增回归：journal 发布失败后 `wait_goal` 在限时内返回错误且驱动仅尝试一次（无重启）、sink 故障不被伪装为已落盘失败且阻止重激活、旧 run 的迟到收尾不清新 run、未持久化的停止意图停止本 run。所有现有 Goal 回归与 server 端到端脚本保持通过。
+- 修复第六轮发布审计确认的六项问题：
+  - **F1 初始快照/详情与停止、关闭的锁顺序反转**：`snapshot_subscription` / `detail` 曾在持有投影锁时读取会话状态，而 interrupt/shutdown 持状态锁后发布投影，并发刷新/重连与停止/关闭可形成 projection → state → projection 环。Goal 现在与 `stream_sequence` 在同一投影临界区镜像，快照与详情渲染不再获取会话状态锁；新增回归测试要求「持状态锁时快照/详情有界返回」，审计的 lock-order 复现通过。
+  - **F2 Goal 创建失败不释放预留名额**：预约现在带明确所有权（本次新增 vs 观察已有），创建/恢复失败只回滚本次新增的名额，会话忙、配置拒绝、持久化失败都不再留下永久的 `max_running` 占用；同一会话的创建/恢复命令串行执行，重复创建不会释放已有活动目标的名额。Busy 回滚与重复创建均有 API 级回归；审计的 capacity-leak 复现从「C 被 429」变为「C 正常创建」。
+  - **F3/F4/F5 工作台命令输入**：清理命令草稿前同时核对会话身份与提交时的草稿内容，同一会话里继续输入的新草稿不再被迟到回执清空；服务器拒绝的 Goal 命令保留正文供重试，不再把「识别到命令」当作「命令成功」；删除使 `/details` 成为空操作的重复 `switch` 分支。三项均有组件回归测试（先在旧代码上确认失败）。
+  - **F6 发布验证判据**：真实模型预算用例严格断言 admitted iterations `<= max_turns`，完成用例必须 `completed` 并独立读取交付文件核验内容，`blocked` 不再被当作通过；`scripts/verify-server-goal-e2e.py` 新增「必定续跑」的可控假模型场景，要求 `budget_exhausted`、按 `max_turns` 停下且停止后零新增 provider 请求（实测 2 轮、4 次请求、后续 0 次）。
+- 新增 Goal：core/Rust API 与 CLI、REPL、Full/Inline TUI 支持跨轮目标、默认 20 轮/60 分钟绝对期限、暂停恢复、三种验收依据及未知副作用对账；journal/快照恢复与 core 会话租约防止并发接管，Web/Python 保持单轮入口。
+- 修复端到端暴露的目标轮次编号歧义：`<current-goal>` 投影此前显示 `Round: N+1`（下一轮），而续跑提示写 `iteration N`、`GoalReport` 校验要求 `N`。模型如实回填投影里的数字会被判 `stale goal report`，反复失败后信念系统以 `signal handover` 中止目标。投影现在只给一个数字：`Completed rounds: N/M` 与 `GoalReport iteration: N`。
+- 新增 `scripts/verify-server-goal-e2e.py`：对真实 mink-server 起合成 SSE provider，经 HTTP 创建会话与目标、让驱动跑真实轮次，断言 `goal_updated` 事件到达 SSE 且按 `stream_sequence` 严格有序、模型自述验收能真正完成目标。
+- 修复外部审计（`goal-audit-2026-10-09`）确认的三个 server 侧问题：Goal 控制请求必须同时携带并校验 `goal_id`，此前服务端用当前目标 ID 替代客户端预期身份，而替换目标的 revision 从 1 重启，陈旧请求因此能取消新目标；创建目标与显式恢复现在纳入 `max_running` 容量准入（目标轮次不经 `submit_input`，此前完全跑在预算外）；重开会话后显式恢复会启用 driver，此前目标变 active 却永不执行。
+- 补齐第五轮审计的发布验证缺口：Goal HTTP E2E 现在**真正跨轮**——此前 fixture 在单轮内反复提交 GoalReport，40 次 provider 请求只产生 1 个 iteration，证明不了调度；改为每个 iteration 报告一次后结束该轮，并断言至少 3 个不同 iteration、各自独立的 turn_id 与全部 finished。默认并行 server 回归的环境污染已消除（依赖环境派生能力的测试此前未持共享环境锁）。目标卡片类名不再与详情面板复用（两个组件共用一个类名会同时影响样式与选择器）。文档补齐能力声明：控制请求需 `goal_id` + `revision`、检查器验收依赖 `MINK_GOAL_CHECK` 且未配置时工作台不对齐终端。
+- 修复第五轮发布审计的四项阻塞与两项缺口：
+  - **并发准入非原子**：目标预约在快照上检查、稍后再插入，8 个会话并发创建在 max_running=1 下拿到 6 个 200 与 6 次模型请求。现在检查与预约在同一把准入锁内原子完成，且创建失败会回收预约；实测变为 1 个 200、1 次请求。失效预约的判定也不再把「正在创建、目标尚未落盘」误判为已结束。
+  - **发送按钮绕过命令解析**：Enter 走命令分流、按钮走 `send`，同一段 `/goal …` 文本因入口不同变成两种协议，鼠标与触屏用户无法创建目标。按钮与 Enter 现在共用同一入口。
+  - **迟到命令响应清空他人草稿**：命令响应回来后清理的是「当前视图」而非发起时的视图，切到另一会话会清掉那边的输入框。现在结果只作用于发起时的会话与视图。
+  - **初始快照缺目标**：重开会话后 `session_snapshot` 不含 goal，而 goal 只在变化时推送，导致状态栏与 `/goal pause` 失效。目标现随初始快照在同一水位发布，reducer 同步采用。
+  - **检查器验收范围闭合**：server 此前没有 verifier 配置路径，却提供该验收选项并把 `/goal verified` 标为可用，标准部署请求必然 409。server 现在读取与终端相同的 `MINK_GOAL_CHECK`，并在 goal 接口上报能力；未配置时选项禁用并说明原因，命令列表也不再宣称可用。
+  - **发布源码不完整**：`commands.ts`、共享 fixture 与两个测试从未进入版本库，干净归档构建报 `UNRESOLVED_IMPORT`。已补齐并从 `git archive HEAD` 重新验证构建通过。
+- 目标边界消息有了类型，不再靠识别英文句子：core 新增 `GoalMessageKind`（start/continuation）与结构化 `GoalMessage`（goal_id、contract_revision、iteration、objective、验收条目、约束、上次决策），目标开始与每轮续跑都以 `_mink.goal_message` 写入正式历史。`_mink.source` 保持 `goal_continuation` 不变，以免破坏已有消费方；start 与 continuation 由 `kind` 区分。工作台把这条消息渲染为目标卡片（目标正文、验收、约束、查看目标入口），不再把 `Continue explicit goal …` 当正文显示。顺带修正工作台只认顶层 `internal` 标记、漏判 core 写在 `_mink.internal` 的内部消息，导致计划检查点等被当作用户输入显示。
+- Web 顶栏新增目标标记 `目标 <状态> <剩余>/<上限>`，与终端状态栏的 `goal:` 标记对应：此前目标只能靠打开详情面板才能发现，现在在主视图始终可见，点击直接进入目标页签。
+- 斜杠命令补全改为**遇到空格即停止**：`/goal` 仍列出子命令以便发现，但 `/goal ` 之后是自由文本（目标正文或批准说明），不再继续提示，也不再显示「没有匹配的命令」——空建议不是错误。Tab 仅在唯一匹配时补全，`/goal` 这种多义命令不猜测，由点击选择。
+- 命令提示改为纵向列表（命令与说明分列对齐、等宽字体、超长省略），替换原先横向堆叠的按钮墙。
+- 新增 `POST /api/sessions/{id}/model` 与 `POST /api/sessions/{id}/compact`：core 早已提供 `set_model_with_outcome` 与 `compact`，工作台却无法触达，导致 `/model`、`/flash`、`/pro`、`/compact` 只能标注不可用。现在这两个控制经会话 runtime 暴露，四个命令全部可用，`/model` 回显**解析后的真实模型名**而非用户输入的别名。被拒绝时给出可执行的中文说明（目标执行中、未启用压缩、本轮未结束），不再把 core 的英文错误直接透出到中文界面。
+- Web 输入区新增斜杠命令模式，与终端对齐：输入框以 `/` 开头即进入命令模式，按子命令逐级补全（`/goal ` 只列目标子命令，不会混进 `/goals`），Tab 补全首条，Enter 执行，Esc 退出，**命令非法时保留草稿**并给出用法提示。命令集与终端共用 `crates/mink-cli/src/tui/slash_commands.json` 这一份契约，Rust 与 TypeScript 两侧解析器都对同一 fixture 做测试，防止漂移。工作台无法执行的命令（`/compact`、`/flash`、`/pro`、`/model`）明确标注不可用而非静默失效。
+- 修复第四轮审计的 5 项问题，其中三项是本项目前一轮修复引入的回归：
+  - **F1** 旧 Goal 的错误收尾把替代 Goal 标为 Failed：上一轮的 `update_if_current` 只覆盖 `drive_goal` 的正常结算，`schedule_goal` 的错误处理仍对当前目标无身份更新。现在每次驱动都绑定其启动时的 goal id。
+  - **F2** 动态验收期限循环取消了 60 秒检查器上限：每轮循环重置剩余时间，导致 deadline 远时永不到期。改为固定单调的尝试截止时间，并独立监听可变的 Goal 绝对期限，任一到期即结束等待。
+  - **F3** 空白证据修复反而放行空数组：上一轮把 `is_empty` 换成 `iter().any(blank)`，而空数组的 `any` 为 false。现在同时要求非空且元素非空白。
+  - **F4** 迟到的控制/创建响应仍被当作最新观察：只有读取请求在发起时捕获观测序号。现在创建与控制同样在发起时捕获，避免旧 Goal 的控制回执覆盖流已显示的新 Goal。
+  - **F5** 清理预约槽后仍使用清理前的占用数：只对请求自身减一，导致其他会话仍按已释放的容量被拒，首次合法创建仍返回 429。现在按存活预约与实际执行的并集重新计数。
+- 修正面板中「core normally ships budget」的不实暗示：`GoalSnapshot` 只承载权威 limits，派生预算在前端计算，避免重复数据与 `spec.limits`、`iterations` 分叉；测试不再手工注入生产接口不返回的字段。
+- 修复第三轮审计的 8 项问题（4 P1 + 4 P2），并把审计复现转为常驻回归测试（core 5 项、web 11 项）：
+  - **F1** 旧轮次结算污染替代 Goal：driver 结算改为经`update_if_current` 绑定启动该轮次的 goal id，目标被替换后不再把旧用量与决策写入新目标（revision 每个目标从 1 重启，旧数字本可匹配新目标）。
+  - **F2** 崩溃窗口丢失已提交的完成报告：`drive_goal` 先发布「轮次完成 + phase=Idle」再单独发布 Verifying，两次提交之间崩溃会让完成报告永远搁置在 Idle 而无法验收。恢复路径现在幂等地把这类「已结束轮次 + Complete 报告」重新送入验证。
+  - **F3** 容量满时清不掉已暂停/结束 Goal 的预约槽：清理原本发生在容量检查返回之后，满额时永远走不到。改为同一临界区内先释放失效占用再检查预约，且同会话已有预约按幂等准入处理。
+  - **F4** Stop 后 server 内部永久停在 Cancelling：目标轮次结束时只把 Running 转 Idle，保留 Cancelling，使会话长期占用额度且不被回收。现在Running 与 Cancelling 一并收敛为 Idle（Closing/Closed 仍受保护）。
+  - **F5** 验收期间修改截止时间不生效：验收从旧快照算一次 delay。改为订阅权威截止时间变化，宿主缩短时限即刻生效，同时保留未退出检查器的执行 permit。
+  - **F6** 不同 Goal 的迟到 HTTP 覆盖新 Goal：仅按 id 放行无法区分「替代 Goal」与「迟到旧 Goal」。改为共享的观测序号（发起时记录、接受时比较），跨 Goal 的迟到响应不再回退界面。
+  - **F7** EventSink 报错后 `turn_active` 永久为 true：错误路径的 `?` 会跳过清理。改为退出守卫，覆盖错误与取消路径。
+  - **F8** 人工批准接受空白证据：core 现拒绝 `vec![""]` / 空白说明，API 不再把缺失字段包装成有效证据。
+- 修复第二轮审计的「Goal 轮次未接入 server 完整生命周期」：目标轮次现在直接写入会话自身的 `RuntimeState.phase` 与 `last_idle`（此前是一个与执行控制分离的并行布尔量，导致 interrupt、idle_for 与 reaper 都看不见目标轮次），并安装 goal event sink，把目标轮次的正文、工具、正式历史与final 送进与普通轮次相同的 SSE 投影。实测：目标执行中 detail 的 `phase` 为 running、`current_turn` 为 `goal:…`；`POST /interrupt` 会把目标置为paused；空闲回收器不再关闭执行中的会话（此前 32 秒后 `open=false`）；SSE 从只有 `goal_updated` 变为含 `turn_started`、`conversation_committed`、`text`、`stop`。
+- 修复第二轮审计的容量重复计数：`Registry::reserve_goal` 过去把 `running` 与 `goal_slots` 相加，而执行中的目标会话同时出现在两者里，一个目标驱动因此占用两份预算（max_running=2 时第二个目标被误拒 429）。现按会话身份合并计数；同一函数还改为先把 runtime 句柄复制出 `active` 锁再检查，避免持锁调用 runtime 造成锁序反转。
+- 修复第二轮审计的两个 Web 问题：目标 revision 水位改为绑定 goal 身份（替换目标的 revision 从 1 重启，此前裸 revision 会把新目标当旧快照丢弃）；目标预算改为在服务端未下发时从权威 limits 推导，而不是把剩余轮数与剩余时间写死为 0（写死的 0 读起来像「已用尽」）。
+- 修复外部审计剩余两个 Web 问题：切换会话会重置目标的快照、草稿、错误与在途操作（此前 A、B 都停在目标页签时切到 B 仍显示 A 的目标，按钮会用 B 的 sessionId 配 A 的 revision 提交）；目标快照统一按会话身份与 revision 合并，丢弃身份不符或比已显示更旧的回执（此前迟到的 HTTP 加载会覆盖更新的 SSE 修订号）。同时修复 Web 目标控制未发送 `goal_id`——服务端已要求携带客户端预期身份，前端漏发导致所有控制请求 400。
+- core 新增 `GoalBudget` 派生态与 `AgentRuntimeHandle::subscribe_goal_turns()`：停止条件（20 轮、60 分钟绝对期限、阻断门槛、剩余轮数/秒数）由 core 单一推导，TUI 与 Web 渲染同一组数字，不再各自从原始 unix 时间戳推算；宿主据此把执行中的目标回合计入会话 phase。
+- **修复：Web 目标界面此前是死代码。** 目标 tab 写在 `ContextPanel.vue` 里，而该组件从未被任何应用组件导入，只有它自己的测试引用它；真正挂载的是 `DetailPanel.vue`（详情面板的 task/files/outputs/diagnostics 页签）。7 个组件测试全绿是因为它们直接 mount 了那个孤儿组件，用户在浏览器里根本看不到任何目标入口。目标 UI 已迁入 `DetailPanel` 的「目标」页签，`ContextPanel.vue` 及其测试删除，测试改挂真实组件。仅靠单元与组件测试无法发现这类问题。
+- 目标页签在详情面板直接打开时会空白：加载 watch 是非 immediate 的，面板首次渲染就停在目标页签时永远不触发。已改为 immediate。
+- Web 目标能力与终端对齐：工作台「目标」tab 新增创建（模型自述/人工验收/检查器验收，可设轮数与分钟上限）与暂停、恢复、调整额度、批准完成、对账副作用、取消、清除七个动作，一律按当前 `revision` 提交；SSE `goal_updated` 由工作台 reducer 镜像进会话状态，`hidden` 与 `null` 都归一为「无目标」。修正 `api.goal` 那条声称「server 从不驱动目标」的过时注释与类型定义。
+- server 支持目标功能，Web 不再只是状态镜像：`POST /api/sessions/{id}/goal` 创建目标并启动驱动，`POST /api/sessions/{id}/goal/{action}` 支持 pause/resume/cancel/clear/budget/approve/reconcile，每次变更要求当前 `revision` 做 compare-and-set，一律经 `AgentRuntimeHandle` 落到 core，server 不直接写 `goal.json`；SSE 新增 `goal_updated` 事件与回合事件共用 `stream_sequence` 排序。会话未打开、正文为空、验收模式未知或未注册检查器时明确拒绝，不写入半成品契约。server 只在显式创建时启用驱动，关闭后不自动续跑。
+- 目标在终端与 Web 有了状态标记：终端状态栏显示 `goal:<状态> <剩余>/<上限>`（完成后显示验收依据，用户 clear 的目标不再出现），点击该标记或 `/goals` 打开只读目标详情，会话打开时从 `goal.json` 恢复、运行中由 `GoalUpdated` 更新；Web 新增 `GET /api/sessions/{id}/goal` 只读镜像与上下文面板「目标」tab。界面只呈现权威快照，不修改契约、额度或状态。
+- 修复一次性 `mink "/goal …"`：先解析命令再决定是否启动驱动，`/goal` 状态查询与pause/cancel/clear/budget/approve/reconcile 等纯控制命令不再触发目标执行也不再阻塞等待；无目标的状态查询正常退出码 0。此前状态查询会真实发起 LLM 轮次并阻塞至目标结束，无目标时则在打印状态后以 “no goal” 错误退出。
+- 借鉴 deepseek-harness 的 goal 设计补两处：模型自报 blocked 不再立即结束目标，需 `blocked_after_consecutive_rounds`（默认 3）轮同一阻断才生效，未达门槛时继续下一轮并要求模型把阻断条件说具体，complete/continue 会清零计数；模型可见的 `<current-goal>` 投影不再把 Rust `Debug` 转储（`GoalLimits { … }`、`Some(…)`、`["a"]`）塞进提示词，改为逐行可读字段并显示 `Round: N/M`、剩余轮次、截止与阻断门槛。
+- 修复 mink-server 启动集成测试的并行撞名：`Fixture::new()` 只按纳秒命名临时目录，导致并行测试共用 HOME 与 `server.toml`，偶发 TOML 解析失败。
+- Goal 副作用记账不再因运算符优先级漏掉 GoalReport 排除：原条件 `a && b || c` 使同名自定义工具绕过显式排除，现改为先判定 GoalReport，再合并自定义工具与只读判定。
+- 修复并行测试的偶发互相污染：测试临时目录原先只按 `SystemTime::now().as_nanos()` 命名，而系统时钟粒度很粗（连续 20 万次读取中约 17 万次重复），并行测试会拿到同一路径并共享 `conversation.jsonl` 与 session 目录及其 advisory lock，表现为 `session::input` 投递计数与租约用例随机失败。全部测试 helper 改为 nanoseconds 加进程级单调序号。
+
+- Skill：frontmatter 支持 `>`/`|` 块标量和 `when_to_use`/`name` 字段（`name` 合法时优先于目录名，目录不一致在 `skill://list/all` 提示），未闭合 header 视为不存在；system prompt 的 skill index 与 `skill://list` 统一清洗（去控制字符、尖括号转义、单行化、1,536 字符截断）并引入按来源降级的字符预算（窗口 1%，clamp 2,000–8,000，`MINK_SKILL_INDEX_BUDGET_CHARS` 可覆盖），`skill://list/all`/CLI/TUI 保留完整描述。
 - 修复并行 core 回归中的日志应答与 shutdown 偶发超时：正常测试沿用生产期限，短期限仅注入 writer 停摆和收尾超时单测；补充延迟应答、满队列恢复及阻塞 flush 回归，生产预算不变。
 - 修复 Linux headless Chromium 下手机阅读 E2E 的触摸手势未实际滚动：显式发送可信触摸序列，保留阅读锚点、内部滚动、停止和引导可见性断言。
 - 修复 Web E2E 在 Linux CI 中因 macOS 固定截图路径失败：截图改用 Playwright 独立测试产物目录，支持 `--output`；隔离 server 启动遵循 `CARGO_TARGET_DIR`。

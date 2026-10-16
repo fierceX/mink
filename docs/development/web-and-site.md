@@ -1,12 +1,25 @@
 # Web 与官网维护
 
-> 更新日期：2026-10-05
+> 更新日期：2026-10-16
 
 仅供仓库维护，不进入官网发布产物。
 
+## 前端
+
+服务器只服务一个前端：`apps/web`（React 18 + Vite + TS）。
+
+| 项 | 说明 |
+| --- | --- |
+| 设计来源 | 逐字节拷贝 deepseek-harness 客户端包（`src/theme`、`src/ui/primitives`、各屏 CSS module） |
+| 数据层 | `/api` REST + SSE；事件投影 `reducer`/`toolFormat`/`transcriptProjection`/`sse` 为纯模块，供工作台与测试共用 |
+| 服务方式 | `cargo build -p mink-server` 构建并嵌入二进制（`build.rs` → `include_bytes!`，字体等非 UTF-8 资源按字节服务）；开发时可用 `MINK_SERVER_DEV_WEB=<dir>/dist` 从磁盘服务 |
+| 校验 | `npm run test`（vitest）/`npm run typecheck`/`npm run build`；`npx playwright test` 分两条车道：`fixtures`（仅 dev server 的设计核对页）与 `live`（`e2e/global-setup.ts` 自建临时 home + 确定性 provider + `target/debug/mink-server`，从磁盘服务刚构建的 dist；端口冲突直接失败而不是误连旧服务）；`fixtures` 车道还含整页视觉守则（`e2e/visual.spec.ts`，与已提交基线逐像素比较，阈值 0.002，基线按平台存放，无基线平台跳过）；设计核对页覆盖每个卡片家族（终端/文件/差异/搜索/待办/计划/委派/报告）+ 变更文件卡与其 hover 预览 |
+
+`apps/web` 的拷贝清单与来源见该目录 `README.md` 与 `THIRD_PARTY_NOTICES.md`：拷贝文件除导入落点外保持逐字节一致，改动时必须对照上游同名文件。设计核对页 `apps/web/fixtures.html` 只在 dev server 存在（生产构建不包含），用固定 transcript 一次渲染工具卡各家族供截图比对。
+
 ## 发布候选检查
 
-`python3 scripts/check-release.py --tag v0.6.7` 核对 Cargo、Python、Web、锁文件、当前安装示例、官网版本和发布记录；历史回放与性能记录保留原版本。`python3 -m unittest discover -s scripts -p 'test_release.py'` 检查版本漂移及 registry/发布错误分支，不发送真实发布请求。
+`python3 scripts/check-release.py --tag v0.6.7` 核对 Cargo、Python、锁文件、当前安装示例、官网版本和发布记录；历史回放与性能记录保留原版本。`python3 -m unittest discover -s scripts -p 'test_release.py'` 检查版本漂移及 registry/发布错误分支，不发送真实发布请求。
 
 CI 在 Rust 1.99 上检查 workspace/all-features 与精简 runtime/SDK，Web 运行单元、类型及隔离 provider E2E；文档 job 使用统一组装命令与五档宽度验收。publish 必须等待 binaries、wheels、pages-check 和 msrv，全渠道版本须与 tag 一致。
 
@@ -59,25 +72,25 @@ resize 后恢复可容纳字段，模型与工作状态优先保留。Python 模
 
 ## 会话工作台与人类输入
 
-`mink-server` 继续复用 Axum、Registry lease 与 `AgentRuntime`，Vue/Vite 产物嵌入二进制。Web 数据流为 REST/SSE → SessionController / CatalogController → 会话模型 → 纯轮次投影 → 展示组件。`workbench.ts` 单独保存按 `(project_key, session_id)` 隔离的草稿、附件引用、展开选择和阅读锚点；异步操作捕获原会话身份，过期响应不能写入当前视图。
+`mink-server` 继续复用 Axum、Registry lease 与 `AgentRuntime`，前端产物由 `build.rs` 构建并嵌入二进制。Web 数据流为 REST/SSE → `src/data` 的纯投影（reducer / SSE 客户端）→ 会话视图 hook → 展示组件；草稿、附件引用、展开选择与阅读锚点按 `(project_key, session_id)` 隔离保存，异步操作捕获原会话身份，过期响应不能写入当前视图。
 
-`catalogFilter.ts` 是已发现目录的纯匹配投影：按项目名称、会话标题/别名/ID、完整工作目录分别匹配；SessionSidebar 持有关键词与范围，不改 CatalogController 的稳定顺序或当前会话身份。
+会话筛选只搜索已发现目录：项目名称（路径末段）、会话标题/别名/ID、完整项目路径分档匹配；切换范围保留关键词，不改变当前会话身份或已发现目录的顺序。
 
 App 以 URL 的 `session` / `project` 作为刷新目标；根地址直接显示首页，不恢复旧的 localStorage 会话选择。启动时记录 SessionController 导航 revision，目录响应不得覆盖中途明确导航；指定会话在目录读取期间显示中性加载界面。当前视图通过 replaceState 同步完整 URL 身份，离开时清除会话参数。
 
-`SettingsDialog.vue` 使用原生模态 dialog，设置由顶栏菜单按需打开；菜单先恢复触发器焦点，模态面板随后捕获焦点。设置与会话生命周期分离，偏好仍由 `workbench.ts` 持久化。
+设置由顶栏菜单按需打开模态面板：菜单先恢复触发器焦点，面板随后捕获焦点。设置与会话生命周期分离，偏好持久保存。
 
-Web 的 `ActionMenu.vue` 和 `IconButton.vue` 分别封装 Reka UI DropdownMenu / Tooltip，使用 Lucide 图标；组件库负责菜单定位、碰撞避让、方向键、外部点击和焦点交接。输入区将草稿、附件与操作收进单一容器，轮次跳转浮于对话内；`useOverlay.ts` 维护响应式媒体条件与移动覆盖层焦点范围。可视窗口 resize 只更新布局高度，不触发会话命令。详情请求以会话身份和加载 revision 丢弃过期结果，目录与文件正文互斥显示。
+操作菜单与图标按钮使用拷贝的上游原子组件（定位、方向键、外部点击与焦点交接由组件库负责）。输入区把草稿、附件与操作收进单一容器，轮次跳转浮于对话内；窄屏覆盖层维护焦点范围，可视窗口 resize 只更新布局高度、不触发会话命令。详情请求以会话身份和加载 revision 丢弃过期结果，目录与文件正文互斥显示。
 
 `clipboard.ts` 为对话和文件路径提供统一文本复制：优先 Clipboard API，不可用或拒绝时使用用户点击中的选区复制兼容路径；完成后恢复输入焦点、光标与文本选区，只有真实复制成功才显示成功。
 
-`ToolInput.vue` 按工具语义展示命令、脚本、文件内容、子任务与参数字段，`EditCall.vue` 同时处理 Replace 和 Hashline；原始参数仅在独立折叠入口查看。Plan/Todo 结果优先读取类型化 presentation，普通文本结果与对话共用 Markdown 渲染，PythonSandbox 归入命令视图。调用与结果分别展示，不以结果覆盖调用参数，不改工具执行与输出保护。
+工具卡按工具语义展示命令、脚本、文件内容、子任务与参数字段；Replace 与 Hashline 都支持，原始参数仅在独立折叠入口查看。Plan/Todo 结果优先读取类型化 presentation，普通文本结果与对话共用 Markdown 渲染，PythonSandbox 归入命令视图。调用与结果分别展示，不以结果覆盖调用参数。
 
-`ActionMenu` 的轮次变体使用单列弹层，宽度不超过 300px、高度不超过 260px/40dvh 和可用空间；条目保留独立行、截断长标题并支持键盘滚动定位。
+轮次选择器使用单列弹层，宽度不超过 300px、高度不超过 260px/40dvh 和可用空间；条目保留独立行、截断长标题并支持键盘滚动定位。
 
 阅读区与过程组使用 `minmax(0,1fr)` 和明确的最小/最大宽度约束；`preferences.wrapText` 持久保存并发布 `data-wrap`，代码/工具/文件正文和 Markdown 表格的换行只改变 CSS，不改源文本。换行切换保留消息阅读锚点。
 
-手机阅读模式由 App 的临时 UI 状态驱动：Transcript 在外层用户滚动达到方向阈值后请求隐藏，布局/流式滚动与内层卡片滚动不参与；顶栏和输入卡片使用 `v-show` 保留组件，输入区发布锁定状态。焦点输入、附件、待处理/失败输入和恢复操作优先保持可见，阅读锚点在控件高度变化时恢复。
+手机阅读模式由外层用户滚动驱动：对话区在外层滚动达到方向阈值后请求隐藏顶栏与输入区，布局/流式滚动与内层卡片滚动不参与；控件以显示切换保留组件，输入区发布锁定状态。输入焦点、附件、待处理/失败输入和恢复操作优先保持可见，阅读锚点在控件高度变化时恢复。
 
 Registry 的扫描入口统一排除目录名或 metadata.id 带 `sub_`/`replan_` 前缀、或 metadata.parent 存在的子代理；列表与会话查找复用同一规则，旧子代理元数据缺失、损坏或继承父身份时仍按目录排除。
 
@@ -87,7 +100,9 @@ Core 的 `session/input.rs` 拥有 session 唯一 `InputInbox`。`AgentRuntimeHa
 
 Full/Inline TUI 通过 `TuiRuntime` 调用同一 `stream_input`；引导准入不经过等待当前 turn 的 broker 工作队列。新任务返回的 stream 交给 broker 可靠消费，正式引导提交转成 `GuidanceApplied`，权威 outcome 转成 `TurnFinished`，共用 TuiState reducer。输入上方只读映射 Inbox 状态；`/inputs`、`/resume ID`、`/withdraw ID` 调用公开接口。含引导的历史窗口经公开 SessionReader 读取完整正式轮次后走相同 reducer，保留引导顺序和工具元数据。
 
-server `Projection` 是可重建只读镜像：启动经公开 `SessionReader` 读取历史、Plan、Todo、Artifact；运行中消费可靠 `AgentEventStream` 更新。快照与广播订阅在同一 mirror 发布锁下建立，不使用 best-effort EventSink 作为事实来源。`diagnostics.ts` 按 TUI `StatsSnapshot` 口径展示完整状态栏指标；镜像单独保持可靠 activity（工作阶段和等待秒数），快照重连不必依赖历史文本猜测正在执行的动作。新版 SSE 使用 runtime generation 与传输水位；正式消息接管暂态文本，Plan/Todo presentation 增量合并，终态由 `turn_final` 决定。
+server `Projection` 是可重建只读镜像：启动经公开 `SessionReader` 读取历史、Plan、Todo、Artifact；运行中消费可靠 `AgentEventStream` 更新。快照与广播订阅在同一 mirror 发布锁下建立，不使用 best-effort EventSink 作为事实来源。Goal 也在该镜像内与水位同一临界区更新，`snapshot_subscription` / `detail` 渲染目标时不获取会话状态锁（唯一锁序为 state → projection），因此刷新/重连与 interrupt/close 不会形成等待环。`diagnostics.ts` 按 TUI `StatsSnapshot` 口径展示完整状态栏指标；镜像单独保持可靠 activity（工作阶段和等待秒数），快照重连不必依赖历史文本猜测正在执行的动作。新版 SSE 使用 runtime generation 与传输水位；正式消息接管暂态文本，Plan/Todo presentation 增量合并，终态由 `turn_final` 决定。
+
+工作台命令结果绑定提交上下文：清理草稿前同时核对会话身份、runtime generation 与提交时的草稿内容，同一视图里更新的草稿与服务器拒绝的命令都保留正文以便重试；`draftRevision` 记录编辑历史（改回原文也不算未改），`pendingCommand` 让每个视图同时只有一条在途命令，斜杠命令返回结构化结果（成功/拒绝/传输不确定 + 提示/详情动作），由提交路径在发起视图与 runtime generation 仍当前时统一应用，失效则丢弃（运行实例被替换后的迟到回执不打开面板、不清草稿）。
 
 `session/attachments.rs` 是 CLI/TUI/Web 共享的内容寻址存储。Web 上传保存原始字节到 session `attachments/`，校验真实格式、完整解码、尺寸、能力、大小、权限和校验和。附件预览是 session 限定接口；输入只携带绝对路径，模型图片仍由 `Read` 捕获。
 
@@ -121,10 +136,10 @@ CLI、Python、Rust、Server 示例共用可键盘操作的标签页，复制保
 ## 9. 测试
 
 ```bash
-cd crates/mink-server/web
-npm run e2e             # 真实浏览器 + 真实 server + 本地模拟模型
-npm run test            # reducer/controller/SSE/组件状态测试
+cd apps/web
+npm run test            # reducer/SSE/组件状态测试（vitest）
 npm run typecheck && npm run build
+npx playwright test     # fixtures（设计核对页）+ live（隔离 home + 真实 mink-server）
 cargo test -p mink-core -p mink-cli -p mink-server
 ```
 
@@ -161,7 +176,17 @@ trace/error-context 供定位。截图通过 `testInfo.outputPath()` 写入每�
 
 手机外层上滑达到 48px 时可隐藏操作栏，下滑、轻点正文、恢复入口或 Esc 重新显示；保留草稿和消息锚点，运行中停止始终可达。待处理/失败输入、附件和断线/停止/恢复状态禁用隐藏；该 UI 状态不改变 SSE 订阅和 runtime 生命周期。
 
-页面可见且有运行任务时目录每 2s 对账，否则每 15s；隐藏停止轮询，恢复可见立即刷新，只当前会话保持正文 SSE。新建任务在应用内填写 server 工作目录并生成唯一 alias；删除失败留在原位报告。
+页面可见且有运行任务时目录每 2s 对账，否则每 15s；隐藏停止轮询，恢复可见立即刷新，只当前会话保持正文 SSE。新建任务在面板里填写 server 工作目录（已发现项目作为候选，名称可选），目录还没有会话时也能创建第一个，被拒绝时保留输入；删除失败留在原位报告。
+
+### 会话身份与迟到回执
+
+新工作台的异步完成统一按完整会话身份（`project_key:id`）校验：发送、运行中引导、回执合并、模型查询与切换、详情加载、历史分页与斜杠命令副作用，都只在发起它的会话仍是当前视图时落地；否则只把结果交回已卸载的发起方，不改当前会话的投影、错误、模型标签或面板。
+
+身份相等并不等于请求仍有效，所以每个请求还带上发起时的版本：发送与停止捕获视图 epoch + 投影 runtime generation + 当前 turn（新的 `session_snapshot` 是更新的真相，旧 HTTP 失败不得回滚新 runtime 的 running）；模型读取与已接受切换共享单调 request revision，只有最新一次可写（A→B→A 与“先切换后回来”的旧响应作废）；目标页签的 REST seed 在发起时记下投影目标的发布计数（按 id/revision/status/hidden 识别），计数变化即丢弃 seed，清空与新建不再靠 null 或 ID 猜先后，revision 相等时仍独立更新 `driven`。
+
+草稿按 key 在渲染期同步读取：切换会话的那一次渲染就返回目标会话的草稿，keyed composer 首次挂载即拿到自己的正文（不靠 effect 补写）。未确定的提交与草稿同生命周期：记录在 `mink.pending:<project>:<id>`，离开会话或刷新后重试仍是同一个 request ID，先查回执再幂等重试，服务器明确受理或拒绝才删除。历史分页以投影中的 `messages` 为唯一已提交集合，按 `seq` 合并、去重、排序后重建视图，快照之后收到的 committed 消息不会被旧页覆盖；分页响应同时携带会话身份与 generation，迟到页不会拼入另一个会话。
+
+提交以稳定 request ID 表示准入：一次答复丢失（网络失败）时保留该 ID 与原文/附件/目标轮，下一次相同内容先查回执（已受理即视为成功，不再恢复草稿），未受理则以同一 ID 重试；服务端明确拒绝才丢弃该 ID。附件上传的拒绝（非 200 码）与网络失败都落到失败条目及原因，不再停在“上传中”。
 
 
 ## 本轮验证记录（2026-10-04）
@@ -175,3 +200,20 @@ trace/error-context 供定位。截图通过 `testInfo.outputPath()` 写入每�
 - 真实 Chromium 在根地址及 Pages `/mink/` 子路径验收 320/390/768/1024/1440px：总览与长配置页无页面级溢出；导航/目录、Esc/Tab 焦点与恢复、跨目录中文锚点、刷新/前后历史、Clipboard API 原字节复制通过。截图在 `target/docs-browser/`，未入库。复制拒绝/兼容回退由 jsdom 回归覆盖。
 
 预览：先 `make docs-site`，再 `python3 -m http.server 8026 --bind 127.0.0.1 --directory target/docs-site`，打开 `http://127.0.0.1:8026/#docs/start/overview.md`。`make docs-browser` 对该预览运行验收；可用 `MINK_DOCS_URL` 指定 Pages 子路径预览。
+
+## 与上游界面的对照
+
+先在本机运行 `dsh web`，再用
+
+```bash
+cd apps/web && npm run dsh:snapshot -- --url "<dsh web 打印的带 token URL>" [--out 目录] [--session 标题]
+```
+
+抓取上游的主页、会话、composer、工具卡与设置面板：脚本打印清单与脱敏后的 URL，截图可能含私有会话，
+默认写入临时目录，不入库。对照结论再落到本仓自己的界面与基线（见「校验」一行的视觉守则）。
+
+## 迁移与排除项
+
+上一代 Vue 工作台已从树中移除：`crates/mink-server/web` 不再存在，CI 与文档链路（npm/typecheck/build/e2e、版本一致性检查）一并删除，服务器只服务 `apps/web`。其产品行为已由 `apps/web` 承接：目录与打开、新建任务（输入 server 工作目录，已有项目作候选）、历史与分页、实时投影、composer（发送/停止/引导/附件/斜杠命令）、工具卡与改动文件卡、目标条与目标边界卡、详情面板五页签、轮次选择器、设置与偏好、窄屏阅读 chrome。
+
+按「只抄 mink 具有的功能」的口径，上游以下的界面不在前端出现：插件面板、Pin/Archive、权限 pill、Standard mode 标签、Chat/Trajectory 页签、消息时间戳。设计层仍逐字节同步，用 `npm run check:design` 守住；视觉对照用 `dsh web` + 浏览器自动化（截图与 `data-slot`）。

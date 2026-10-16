@@ -1,0 +1,386 @@
+{
+  "date": "2026-10-12",
+  "source_boundary": "development snapshots at the reported base commit + dirty; source diff hashes were not captured at run start; not an exact final-tree benchmark",
+  "environment_observed_after_runs": {
+    "os": "Darwin 24.6.0",
+    "architecture": "arm64",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)"
+  },
+  "runs": {
+    "initial": {
+      "cases": [
+        {
+          "basis": null,
+          "case": "complete",
+          "completed": false,
+          "elapsed_ms": 20087,
+          "execution_rounds": 1,
+          "expected_complete": true,
+          "status": "blocked",
+          "usage": {
+            "attempt_count": 8,
+            "reported_request_count": 7,
+            "request_count": 8,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 32000,
+              "input_tokens": 7529,
+              "output_tokens": 3536
+            },
+            "unreported_request_count": 1
+          },
+          "valid_reviews": 0,
+          "verdicts": [],
+          "cache_read_percentage": 80.95
+        },
+        {
+          "basis": null,
+          "case": "partial",
+          "completed": false,
+          "elapsed_ms": 28911,
+          "execution_rounds": 1,
+          "expected_complete": false,
+          "status": "blocked",
+          "usage": {
+            "attempt_count": 9,
+            "reported_request_count": 8,
+            "request_count": 9,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 43264,
+              "input_tokens": 9950,
+              "output_tokens": 5182
+            },
+            "unreported_request_count": 1
+          },
+          "valid_reviews": 0,
+          "verdicts": [],
+          "cache_read_percentage": 81.3
+        },
+        {
+          "basis": null,
+          "case": "forged_claim",
+          "completed": false,
+          "elapsed_ms": 39059,
+          "execution_rounds": 1,
+          "expected_complete": false,
+          "status": "blocked",
+          "usage": {
+            "attempt_count": 13,
+            "reported_request_count": 12,
+            "request_count": 13,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 123904,
+              "input_tokens": 22725,
+              "output_tokens": 6560
+            },
+            "unreported_request_count": 1
+          },
+          "valid_reviews": 0,
+          "verdicts": [],
+          "cache_read_percentage": 84.5
+        },
+        {
+          "basis": null,
+          "case": "missing_evidence",
+          "completed": false,
+          "elapsed_ms": 40092,
+          "execution_rounds": 1,
+          "expected_complete": false,
+          "status": "blocked",
+          "usage": {
+            "attempt_count": 13,
+            "reported_request_count": 12,
+            "request_count": 13,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 101376,
+              "input_tokens": 17012,
+              "output_tokens": 6954
+            },
+            "unreported_request_count": 1
+          },
+          "valid_reviews": 0,
+          "verdicts": [],
+          "cache_read_percentage": 85.63
+        },
+        {
+          "basis": null,
+          "case": "external_blocker",
+          "completed": false,
+          "elapsed_ms": 50053,
+          "execution_rounds": 1,
+          "expected_complete": false,
+          "status": "blocked",
+          "usage": {
+            "attempt_count": 11,
+            "reported_request_count": 10,
+            "request_count": 11,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 85504,
+              "input_tokens": 16239,
+              "output_tokens": 8822
+            },
+            "unreported_request_count": 1
+          },
+          "valid_reviews": 0,
+          "verdicts": [],
+          "cache_read_percentage": 84.04
+        },
+        {
+          "basis": null,
+          "case": "unverifiable",
+          "completed": false,
+          "elapsed_ms": 60162,
+          "execution_rounds": 1,
+          "expected_complete": false,
+          "status": "blocked",
+          "usage": {
+            "attempt_count": 1,
+            "reported_request_count": 0,
+            "request_count": 1,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            },
+            "unreported_request_count": 1
+          },
+          "valid_reviews": 0,
+          "verdicts": [],
+          "cache_read_percentage": null
+        }
+      ],
+      "method": "scripted executor with real read-only reviewer; six single samples",
+      "model": "deepseek-flash",
+      "version": "0.6.7",
+      "commit": "509b6fb22ca6150cb0c1f2f341c4f9ec775af2df",
+      "dirty": true,
+      "false_completions": 0,
+      "false_rejections": 0,
+      "invalid_or_failed_samples": 6
+    },
+    "corrected": {
+      "cases": [
+        {
+          "basis": "agent_reviewed",
+          "case": "complete",
+          "completed": true,
+          "elapsed_ms": 6422,
+          "execution_rounds": 1,
+          "expected_complete": true,
+          "status": "completed",
+          "usage": {
+            "attempt_count": 5,
+            "reported_request_count": 4,
+            "request_count": 5,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 14848,
+              "input_tokens": 6146,
+              "output_tokens": 965
+            },
+            "unreported_request_count": 1
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "satisfied"
+          ],
+          "cache_read_percentage": 70.72
+        },
+        {
+          "basis": null,
+          "case": "partial",
+          "completed": false,
+          "elapsed_ms": 20099,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 14,
+            "reported_request_count": 11,
+            "request_count": 14,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 41344,
+              "input_tokens": 18024,
+              "output_tokens": 3297
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "needs_work",
+            "needs_work",
+            "needs_work"
+          ],
+          "cache_read_percentage": 69.64
+        },
+        {
+          "basis": null,
+          "case": "forged_claim",
+          "completed": false,
+          "elapsed_ms": 25926,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 14,
+            "reported_request_count": 11,
+            "request_count": 14,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 44160,
+              "input_tokens": 20351,
+              "output_tokens": 4267
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "needs_work",
+            "needs_work",
+            "needs_work"
+          ],
+          "cache_read_percentage": 68.45
+        },
+        {
+          "basis": null,
+          "case": "missing_evidence",
+          "completed": false,
+          "elapsed_ms": 32664,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 15,
+            "reported_request_count": 12,
+            "request_count": 15,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 55424,
+              "input_tokens": 22906,
+              "output_tokens": 5142
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "needs_work",
+            "needs_work",
+            "needs_work"
+          ],
+          "cache_read_percentage": 70.76
+        },
+        {
+          "basis": null,
+          "case": "external_blocker",
+          "completed": false,
+          "elapsed_ms": 35884,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "status": "blocked",
+          "usage": {
+            "attempt_count": 16,
+            "reported_request_count": 13,
+            "request_count": 16,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 66432,
+              "input_tokens": 24477,
+              "output_tokens": 5774
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "blocked",
+            "blocked",
+            "blocked"
+          ],
+          "cache_read_percentage": 73.08
+        },
+        {
+          "basis": null,
+          "case": "unverifiable",
+          "completed": false,
+          "elapsed_ms": 92019,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 17,
+            "reported_request_count": 14,
+            "request_count": 17,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 67584,
+              "input_tokens": 23775,
+              "output_tokens": 14742
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "needs_work",
+            "needs_work",
+            "needs_work"
+          ],
+          "cache_read_percentage": 73.98
+        }
+      ],
+      "method": "scripted executor with real read-only reviewer; six single samples",
+      "model": "deepseek-flash",
+      "version": "0.6.7",
+      "commit": "509b6fb22ca6150cb0c1f2f341c4f9ec775af2df",
+      "dirty": true,
+      "false_completions": 0,
+      "false_rejections": 0,
+      "invalid_or_failed_samples": 0
+    },
+    "draft": {
+      "cases": [],
+      "draft_formation": {
+        "contract_valid": true,
+        "elapsed_ms": 37909,
+        "execution_rounds": 0,
+        "first_ready": true,
+        "original_request_preserved": true,
+        "second_ready": true,
+        "still_draft": true,
+        "workspace_unchanged": true
+      },
+      "method": "real model, two draft discussion turns; no confirmation",
+      "model": "deepseek-flash",
+      "version": "0.6.7",
+      "commit": "509b6fb22ca6150cb0c1f2f341c4f9ec775af2df",
+      "dirty": true,
+      "false_completions": 0,
+      "false_rejections": 0,
+      "invalid_or_failed_samples": 0
+    }
+  },
+  "provenance": [
+    {
+      "run": "initial",
+      "source_label": "target/bench/goal-review-first-run.json",
+      "source_sha256": "bcb78f04844274a1237a7d50161cbca14367c8f293d6aa2066a3b386abf33e92",
+      "redaction": "numeric result JSON only; raw conversations, configuration, provider addresses and credentials are excluded"
+    },
+    {
+      "run": "corrected",
+      "source_label": "target/bench/goal-review-second-run/results.json",
+      "source_sha256": "6b93114d3a7128e139ccad1a76fa99d7f88ae834caaf21bdf060df4312b307a5",
+      "redaction": "numeric result JSON only; raw conversations, configuration, provider addresses and credentials are excluded"
+    },
+    {
+      "run": "draft",
+      "source_label": "target/bench/goal-draft-real/results.json",
+      "source_sha256": "883db45991e2188cd8ba45ea990431ef74cb31b6fedc2d4d283dd24c512394a5",
+      "redaction": "numeric result JSON only; raw conversations, configuration, provider addresses and credentials are excluded"
+    }
+  ]
+}

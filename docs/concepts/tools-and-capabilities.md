@@ -1,6 +1,6 @@
 # 工具与能力
 
-> 更新日期：2026-10-04
+> 更新日期：2026-10-14
 
 surface、资源、提示词与能力解析。
 
@@ -29,6 +29,7 @@ resolved capabilities）、执行门禁（surface 校验 → StormBreaker → To
 
 - `enabled_tools` 是唯一工具启用输入；`ModelToolSurface` 在 session/prefix 构造前
   一次解析，`ToolRunner::execute_all()` 在执行前校验同一 surface
+- Goal v2 使用 `GoalRead` 按需读取权威契约，草案讨论另有 `GoalDraft`，独立只读审核返回描述性报告，宿主 agent 通过固定的 `GoalReview` 工具提交候选绑定的轻量继续或完整审核结论；不存在模型自报完成的默认 `GoalReport` 工具。草案确认、验收与生命周期状态由宿主控制
 - 只读工具按连续批次并发执行；写入、执行、控制和 SubAgent 工具按调用顺序串行执行
 - 工具结果统一经过 `format_tool_result()`：`tool_result_max_bytes` 截断 + artifact 落盘、
   Bash noise filter、Read/Write 行数摘要、Edit 新 header + diff
@@ -129,7 +130,7 @@ OpenAI SSE parser 在生成 `ToolCallEvent` 前合并碎片化 arguments，并�
 handler 拥有，不能把 `skill://`、`rule://` 等协议视为 `Read` 工具自身合同：
 
 - `artifact://<id>`：读取被截断工具输出。
-- `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>`：通过当前 `Read` provider 列出、诊断或读取可用 skill；列表、正文和子资源读取来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；只有 filesystem-backed skill 支持 `<relative-path>` 子资源。
+- `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>`：通过当前 `Read` provider 列出、诊断或读取可用 skill；列表、正文和子资源读取来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；只有 filesystem-backed skill 支持 `<relative-path>` 子资源。列表描述经模型可见面硬化（去控制字符、尖括号转义、单行化、1,536 截断）；`skill://list/all` 保留完整描述供诊断。
 - `rule://list` / `rule://<name>`：列出或读取可用 rule。
 - `session://current`：读取当前 session 摘要。
 - `session://current/stats`：读取当前 session stats JSON。
@@ -618,6 +619,11 @@ MISSION 不能覆盖 runtime-owned tool/workflow section；普通自定义 secti
 selected skill 正文独立于资源读取 provider，由 `SkillSnapshot.selected` 直接进入 prompt。
 skill index 和子资源访问由已解析的 `ResourceRead` binding 提供；具体工具可以提供该能力，
 但不拥有 Skill 协议。
+
+skill index 为有损渲染：frontmatter（`name`/`description`/`when_to_use`/`hide`/`disable-model-invocation`，
+含 `>`/`|` 块标量；未闭合 header 视为不存在）解析后，描述与技能名经清洗（控制字符、尖括号转义、
+单行化）并按字符预算（有限窗口 1%，clamp 2,000–8,000；`MINK_SKILL_INDEX_BUDGET_CHARS` 可覆盖）
+按来源降级删除描述，技能名始终保留；`skill://list/all` 与 CLI/TUI 保留完整描述。
 
 ## 七、运行时复用、安全与缓存
 

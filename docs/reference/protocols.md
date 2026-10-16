@@ -1,6 +1,6 @@
 # 机器协议
 
-> 更新日期：2026-10-04
+> 更新日期：2026-10-10
 
 Stream-JSON 与 Agent JSONL v3。
 
@@ -323,3 +323,7 @@ SubAgent 的执行记录仍在父会话工具结果中展示；其独立 session
 | `error` | `Option<String>` |
 | `usage_records` | `Vec<crate::session::usage::UsageRecord>` |
 | `usage` | `crate::session::usage::UsageSummary` |
+
+## Goal 事件兼容
+
+Rust AgentEventKind 增加 GoalUpdated/GoalFinished，携带权威 GoalSnapshot；每轮 Final 语义不变。目标边界消息在 conversation 标记 `_mink.internal`、`_mink.source=goal_continuation`，并同时携带 `_mink.goal`（GoalContinuation：goal_id/contract_revision/iteration）与 typed `_mink.goal_message`（GoalMessage：kind/objective/验收条目/约束/上次决策），宿主据此渲染目标卡片，不解析模型可见句子；不生成伪造的人类输入回执。stream-json 日志追加 goal_updated 派生事件。Agent JSONL/Python 不增加 Goal 入口或自动驱动，活动目标期间独立提交返回 busy。

@@ -1,0 +1,102 @@
+{
+  "provider": "deterministic local SSE; no real model",
+  "results": [
+    {
+      "surface": "repl",
+      "completed": true,
+      "basis": "verified",
+      "iterations": 2,
+      "usage": {
+        "request_count": 6,
+        "reported_request_count": 6,
+        "unreported_request_count": 0,
+        "attempt_count": 6,
+        "tokens": {
+          "input_tokens": 600,
+          "cache_read_tokens": 0,
+          "cache_creation_tokens": 0,
+          "output_tokens": 60
+        }
+      },
+      "manual_continuations": 0,
+      "incorrect_completion": false,
+      "limit_stops": 0,
+      "pause_zero_new_requests": true,
+      "active_reopen_resumed": true,
+      "paused_reopen_idle": true
+    },
+    {
+      "surface": "full",
+      "completed": true,
+      "basis": "verified",
+      "iterations": 2,
+      "usage": {
+        "request_count": 6,
+        "reported_request_count": 6,
+        "unreported_request_count": 0,
+        "attempt_count": 6,
+        "tokens": {
+          "input_tokens": 600,
+          "cache_read_tokens": 0,
+          "cache_creation_tokens": 0,
+          "output_tokens": 60
+        }
+      },
+      "manual_continuations": 0,
+      "incorrect_completion": false,
+      "limit_stops": 0,
+      "pause_zero_new_requests": true,
+      "active_reopen_resumed": true,
+      "paused_reopen_idle": true
+    },
+    {
+      "surface": "inline",
+      "completed": true,
+      "basis": "verified",
+      "iterations": 2,
+      "usage": {
+        "request_count": 6,
+        "reported_request_count": 6,
+        "unreported_request_count": 0,
+        "attempt_count": 6,
+        "tokens": {
+          "input_tokens": 600,
+          "cache_read_tokens": 0,
+          "cache_creation_tokens": 0,
+          "output_tokens": 60
+        }
+      },
+      "manual_continuations": 0,
+      "incorrect_completion": false,
+      "limit_stops": 0,
+      "pause_zero_new_requests": true,
+      "active_reopen_resumed": true,
+      "paused_reopen_idle": true
+    },
+    {
+      "surface": "ordinary",
+      "completed": true,
+      "basis": "external_file_check",
+      "iterations": 2,
+      "manual_continuations": 1,
+      "requests": 4,
+      "reported_tokens": 440,
+      "incorrect_completion": false,
+      "limit_stops": 0
+    }
+  ],
+  "meta": {
+    "date": "2026-10-09",
+    "commit": "c5d4d71",
+    "dirty": true,
+    "version": "0.6.7",
+    "provider": "deterministic local SSE",
+    "sampling": "one two-step fixture per terminal; one ordinary fixture; stop/reopen checks per terminal",
+    "real_model": false,
+    "failed_runs": 2,
+    "failure_reasons": [
+      "test harness used unsupported REPL /exit command",
+      "ignored compaction fixture lacked enough history for net-benefit gate; fixture expanded without weakening gate"
+    ]
+  }
+}

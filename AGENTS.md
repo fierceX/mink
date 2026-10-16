@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-10-06
+> 更新日期：2026-10-16
 
 ## 项目概览
 
@@ -9,6 +9,7 @@ Mink 是用 Rust 1.99+ 实现的轻量 AI coding agent，面向 DeepSeek/OpenAI-
 - LLM 流式请求 → 工具执行 → 决策的内循环；REPL / TUI 两种终端模式，`AgentRuntime::start() → run_turn()/stream_turn() → shutdown()` 无需子进程
 - 信号驱动的信念系统：轨迹证据注入（`[trajectory]`/`[detector]`）、编辑循环快照回滚、恢复首步守卫；`SignalPolicy` 分档，阈值/超参为内部常量，`MINK_SIGNAL_POLICY=off` 关闭
 - 上下文自适应压缩：显式阈值/响应预留/热尾部/摘要预算，摘要以 `<compacted-summary>` checkpoint 投影；Todo（`todos.json` 权威快照 + revision/稳定 ID）、Artifact（超长输出落盘）、轻量资源读取（artifact/skill/rule/session URL）
+- Goal：草案确认、独立只读审核、按需读取，显式跨轮目标、默认 20 turn/60 分钟绝对期限、三种验收、持久恢复与未知副作用对账；core SessionLease 覆盖所有可写 runtime
 - 工具元数据与审批策略；Edit 双模式（Hashline snapshot / Replace exact+fuzzy，启动后固定）；子代理（isolated home，可目录级 fork）；TUI `Ctrl+V` 粘贴图片（session `attachments/` 传输副本 + 绝对路径，图片仍由 `Read` 捕获）
 
 ---
@@ -16,6 +17,11 @@ Mink 是用 Rust 1.99+ 实现的轻量 AI coding agent，面向 DeepSeek/OpenAI-
 ## Agent 工作规范
 
 本文件每个任务都会注入；以下是本仓库对 agent 的行为约束，与「关键不变式」互补，违反任一条都需修正。
+
+### 技能纪律
+
+- **先看技能再动手**：任务与 skill-index 中某技能的适用场景匹配时，先 `Read skill://<name>` 并遵循其步骤执行，不要等用户提醒。
+- **时机对应**（技能须在 skill-index 中可见）：编辑代码前核查调用点与假设 → `pre-code-check`；出现 bug、测试失败或异常行为 → `debugging`；实现新功能或修 bug → `tdd`；声称完成、commit 前 → `verification`；结构性、调用关系或影响面问题 → `ripwire` / `codegraph`；处理 Office 文档 → `officecli`。
 
 ### 改动纪律
 
@@ -81,6 +87,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - `context-state.json` 必须同目录临时文件 + rename 原子替换，成功后更新内存并按新 `active_start` 裁剪缓存；JSONL 续写前修复未换行尾记录、以含换行的单缓冲区追加、append 经内部写锁串行化，读盘只容忍文件末尾半截记录。
 - 状态发布区分**发布前失败**（旧文件不变）与“已发布但目录同步失败”：后者必须重读并比对**完整预期快照**、重做目录同步；无法恢复时闩锁 session（拒绝后续状态变更、以 fatal 结束当前 turn），禁止按旧 revision 重试。闩锁后 turn/压缩入口、同批工具派发与 `publish_state*` 一律拒绝（低层 `atomic_replace` 仅供显式恢复路径）；启动期写入与 telemetry/外观元数据（stats、session title）不在此列。
 - 投影边界必须位于完整历史内、不得拆开 tool call/result 协议；cut point 优先保留最近 ≥2 条真实 user 消息（优先于纯 token 预算）。当请求已经超出输入预算、而严格规则找不到任何边界（热尾部目标吞掉整个窗口，或窗口只剩最近两个用户轮次），或严格候选（保留两条 user）装不进预算时，允许退化为「折到最新安全边界之前」的最后手段（`_cut=degraded`，当前请求仅以摘要文本保留）；仍然无边界时才 fail-closed 结束该轮，调用方应以下一条输入续跑。
+- Goal 的自动注入状态只有两处（按需 GoalRead 另返回完整快照，审核者读候选绑定快照）：每轮追加的 `<current-goal>` round prompt（逐行可读、显式给出 `Round: N/M`、剩余轮次、绝对截止与 blocked 门槛）与压缩后挂载的低频稳定契约 checkpoint（不含任何每轮字段）；禁止把每轮变化的 Goal 状态挂进请求前缀（命令式 round prompt 文本、轮次计数与 `Decision` 只走尾部追加）。
 - plan/todo 的**模型可见派生展示**必须按额度有损（`输入预算/8`，头尾保留 + 省略标记）：权威 `plan.md`/`todos.json`、revision 与计数不得被改写；候选验收与真实发送共用同一渲染函数（`checkpoint_prefix` / `sync_message_bounded`），禁止「预演短版、发送长版」。
 - 应急 checkpoint（`trigger=emergency`、`_mode=emergency`）：仅在上一条与 LLM 摘要都不能让请求装下时提交；提交前必须①检查 runtime cancel 与 interrupt（入锁后、每次收缩前、提交前各一次，映射为 `Interrupted`）②验证活跃窗口没有未完成的工具交换（否则以 `incomplete tool exchange` 原样失败）③收缩每步严格变小并在到达地板后返回「无法继续」（不得原样返回同一文本）。候选验收（普通摘要与应急共用）必须把「候选折走 revision 后随之上场的 TodoSync」计入预算，材料优先级为固定有损标记 → 当前用户请求摘录 → 上一份摘要片段 → 最近已完成工具交换的结构化事实；`active_start` 推进到历史末尾（尾部为空），`conversation.jsonl` 只追加不重写；候选投影（摘录 + plan 派生片段 + 预演 TodoSync）必须过一遍 `estimate_openai_context_tokens` 才算提交，连最小摘录都装不下时返回 `Ok(false)`，由上层以「最小工作空间不可用」诊断 fail-closed。权威 plan/todo/conversation 不被改写。
 - 正常路径的压缩统一调用 LLM 摘要，以唯一 internal user `<compacted-summary>` checkpoint 投影，不修改 immutable system/tools prefix；`context_compact_input_reduction=true` 只精简摘要请求，不改写完整历史或热尾部。当请求已经超出输入预算、而摘要侧不可用（输入装不下、调用/超时/重试耗尽、输出不合格、候选发布前验收不通过）时，允许**不调用 LLM 的确定性应急 checkpoint** 提交同一投影（有损摘录，见下一条）；取消、持久化 fault、正式历史协议损坏不得转为应急成功。
@@ -100,10 +107,21 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 
 ### 人类输入与 Web 工作台
 
+- **服务器默认前端是 `apps/web`（React 工作台）**：`crates/mink-server` 的 build.rs 构建 `apps/web` 并把 `dist` 按字节嵌入二进制（资源含字体等非 UTF-8 文件，不得改回 `include_str!`）；开发时可用 `MINK_SERVER_DEV_WEB=<dir>/dist` 从磁盘服务，前端热迭代不重启 server。
+- **新前端的设计层逐字节拷自 deepseek-harness**：`apps/web/src/{theme,ui/primitives,util,store}` 与各屏拷贝的 CSS module 除导入落点外不得手改，样式只消费拷贝的 `--dsw-*` token 层；来源与许可见 `apps/web/THIRD_PARTY_NOTICES.md`。改动这些文件时必须保持与上游同步（改前先看上游同名文件）。
+- **控制面细节**：composer 的模型位是可点击菜单（清单来自运行时解析器，经 `GET/POST /api/sessions/{id}/model`，切换以运行时接受的 label 为准）；「+」打开命令面板（添加图片 + 契约里的全部命令，选中只写入草稿而不直接执行）；图标控件经拷贝 `Tooltip` 在 hover/聚焦时显示名称；打开失败的错误行带「重试」（只重跑打开，不重建 turn 动作）。
+- **卡片家族与预览**：工具卡覆盖终端/文件/差异/搜索/待办/计划/委派（`tasks[]` 一行一个任务）/目标报告（类型、轮次、摘要、下一步、验收条件与证据），解析失败一律回退通用 in/out 卡；变更文件卡的每一行 hover 显示该文件的 hunks（取自转录，不二次请求）；设计核对页对每个家族都有样本。
+- **草稿与附件按会话身份隔离**：`Conversation` 以会话身份为 key，草稿（`mink.draft:<project>:<id>`）与已上传附件 id（`mink.attachments:<project>:<id>`）随会话保存与恢复，切换会话不串、返回即可继续；存储不可用时退化为内存草稿。草稿必须按 key 在渲染期同步读取（keyed composer 首次挂载即拿到目标会话正文），不得靠 effect 延后换内容。
+- **会话级异步身份与提交幂等**：投影、草稿、附件与在途提交按完整会话身份维护，提交记录（`mink.pending:<project>:<id>`）与草稿同生命周期：离开会话、刷新页面都不丢，只有服务端明确受理或拒绝才删除。发送/引导/回执合并/详情加载/历史分页/命令副作用只在发起它的会话仍是当前视图时落地；发送与 stop 的完成还必须验发起时的视图 epoch + 投影 runtime generation + 当前 turn（新的 `session_snapshot` 是更新的真相，旧 HTTP 失败不得回滚 running/写旧错误）。历史以投影 `messages` 为唯一已提交集合，按 `seq` 合并去重排序，分页不得覆盖快照之后的 committed 消息。提交以稳定 request ID 对账：答复丢失（网络）时先查回执或以同一 ID 重试，已受理不得再当失败恢复草稿；附件上传的非 200 拒绝与网络失败都落到失败条目及原因。
+- **模型座位与目标详情的版本顺序**：模型读取与切换共享单调 request revision（每次 refresh、每次已接受切换与每次视图生命周期都推进），只有最新一次可写，A→B→A 与“先切换后回来”的旧响应一律作废；`/model`、`/flash`、`/pro` 成功后重读运行时。目标页签的 REST seed 在发起时记录投影目标更新计数，计数变化则丢弃 seed（清空/新建也不靠 null 或 ID 猜顺序），revision 相等时仍独立更新 `driven`。
+- **新建任务面板**：接受任意 server 可达的工作目录（名称可选，已发现项目作候选），空目录也能创建第一个会话；`createSession(cwd)` 仍是服务端权威，被拒绝时保留用户输入。
+- **新前端已实现的契约**：会话目录与打开（筛选/搜索四种范围、切换保留关键词、新建与删除）、`/conversation` 历史 + SSE 实时投影（`src/data` 的纯 reducer/SSE 客户端，`/open` 的 snapshot 提议优先）、历史分页（`before_seq` 回溯，翻页保持阅读位置）、composer 的 `/turn` 与 `/interrupt`、运行中引导（`/inputs` 队列：按 revision 编辑/撤回/续发，未取得 turn id 时拒绝并保留草稿）、附件与图片（粘贴/拖放/选择 → `/attachments` 会话副本，id 随输入提交，图片仍只经 Read 进上下文）、斜杠命令（与终端共用 `crates/mink-cli/src/tui/slash_commands.json` 契约）、工具卡家族（终端/文件/差异/搜索/通用）与逐轮「已编辑 N 个文件」摘要卡、消息 chrome（复制与该轮用量；旧轮次悬停显现）、目标条与目标边界卡（拷贝的 GoalBar 样式，暂停/恢复/取消/清除全部按 revision CAS）、详情面板五页签（任务/目标/文件/输出/诊断，诊断与 TUI StatsSnapshot 同口径）、轮次选择器与「返回最新内容」、移动端阅读 chrome（仅用户明确滚动触发，运行中/待处理强制可见，隐藏不 close/interrupt）、设置与偏好（外观/字号/过程展示）。
+- **设计对照与校验**：`npm run check:design` 逐字节比对 `apps/web/src/{theme,ui,util,store}` 与 deepseek-harness 源码（`--source` 指定仓库根）；允许的差异只有登记过的导入落点改写，漂移即失败，CI 执行。与上游界面的视觉对照用 `dsh web` 起本地服务后由浏览器自动化截图/读取 `data-slot` 结构；对照图可能含用户私有会话，不得入库。
+- **按「mink 没有的功能不抄」排除**：插件面板、Pin/Archive、权限 pill、`Standard mode` 模式标签、`Chat/Trajectory` 页签、消息时间戳（mink 对话行没有时间数据）。新增这类能力时先补运行时契约，再对齐界面。
 - `InputInbox` 是 session 唯一持久输入准入边界；request ID 绑定原始内容，编辑/撤回比较 revision，仅 pending/unapplied 可修改。applying 先发布，正式历史以 `_mink.input_id` 接管，追加不确定或历史已写但回执发布失败必须闩锁；恢复核对完整预期消息，禁止重复追加。
 - 引导绑定父 turn，在已接受工具交换完整持久化后、下一请求压缩检查前顺序消费；Stop 与准入共享锁。取消/故障/恢复耗尽/轮次上限优先，引导不重置格式窗口、账单 turn 或请求期限，不自动传给子代理；未应用项仅由用户明确续发。
-- server 全局运行会话上限覆盖所有新 turn（含恢复旧引导）；当前运行 turn 的引导与既有 request ID 的幂等重试不额外占用名额。配置路径是首个可选位置参数，未知 flag/多余参数须拒绝。
-- Web mirror 经公开 Reader 初始化、可靠 runtime 事件更新，快照与订阅位置在同一发布锁建立；generation/水位拒绝旧事件。离开视图只断订阅，不调用 close。草稿/附件/展开/阅读锚点按完整会话身份隔离，迟到响应不得污染当前视图。
+- server 全局运行会话上限由唯一容量账本（`CapacityPool`）覆盖所有新 turn（含恢复旧引导）与目标驱动：普通 turn 的 permit 随 turn 任务结束释放，目标 run 的 permit 随 `GoalRunLease`/RunGuard 释放，且只在 run 结束且 turn gate 空闲后归还（暂停/取消后仍在退出的检查器或工具继续占容量）；同一 session 实例同时只有一个 permit，被拒绝的创建不占容量也不启动无关旧目标；等待人工验收没有执行任务时释放容量，恢复须重新申请。当前运行 turn 的引导与既有 request ID 的幂等重试不额外占用名额。配置路径是首个可选位置参数，未知 flag/多余参数须拒绝。
+- Web mirror 经公开 Reader 初始化、可靠 runtime 事件更新，快照与订阅位置在同一发布锁建立；generation/水位拒绝旧事件。Goal 随投影与水位同一临界区镜像，快照/详情渲染不得在持有投影锁时获取会话状态锁（锁序固定为 state → projection）。离开视图只断订阅，不调用 close。草稿/附件/展开/阅读锚点按完整会话身份隔离，迟到响应不得污染当前视图；草稿写入必须递增 revision（改回原文不算未改），每个视图同时只允许一条在途命令，结果与提示/详情副作用只从发起尝试的 pending 上下文（identity/generation/revision）取判据并仅在视图与 runtime generation 仍当前时应用，成功且 revision 未变才清空草稿，服务器拒绝或传输失败保留正文供重试。
 - Web 会话筛选只搜索已发现目录，项目名称（路径末段）与完整项目路径必须区分；会话范围包含标题、别名和 ID，切换范围保留关键词，不改变当前执行或会话排序。
 - Web 根地址默认首页，会话刷新目标来自完整 URL 身份，不回退旧的本地选择；启动请求不得覆盖期间的明确导航，返回首页只断订阅。
 - Web 设置使用按需打开的模态面板，菜单焦点交接完成后再捕获焦点；关闭须恢复入口，偏好修改不得重启任务或重置阅读状态。
@@ -118,6 +136,22 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - Web 会话扫描与查找共用子代理过滤：目录名或 metadata.id 为 sub_/replan_ 前缀、或 metadata.parent 存在时排除；不能因缺失、损坏或继承 metadata 将旧子代理展示为用户会话。
 - CLI/TUI/Web 共用 core AttachmentStore：上传仅保存 session attachments 原始字节与绝对路径，图片上下文唯一入口仍为 Read。会话限定预览不得扩大工作目录文件访问范围。
 - Full/Inline TUI 任务与运行中 Enter 引导均走 stream_input，准入不排到下一轮；仅正式 ConversationCommitted 才回显引导，Final 才结束轮次。尚未应用输入由 Inbox 保留，/resume ID 明确续发，/withdraw ID 按 revision 撤回；拒绝提交保留草稿及图片，不封口当前流。
+
+### Goal
+
+- `failed` 表示本 run 已结束，禁止自动调度；宿主显式 resume 可以重试同一目标，不按异常文字或历史版本分流。重试保留契约、iteration、用量、失败/阻断记录与原截止时间；过期或执行轮耗尽必须先明确调整预算，未决副作用先人工对账。completed/cancelled 禁止恢复和改预算；draft 须确认。审核阶段恢复仍复核原候选，最后一个执行轮允许续审；执行阶段恢复开启新轮，不重放已提交工具。当前 runtime 的 Faulted、持久化闩锁、关闭、执行未退出、容量和环境门槛不能被显式重试绕过。
+
+- 独立审核先读取已提交的执行轮最终结论；明确部分完成且有契约内下一步可轻量继续，完成声明、空白/含糊/矛盾或外部阻断必须核对证据。轻量继续只写 continuations，不修改 reviews、验收项通过状态或完成依据；连续三轮相同剩余要求升级检查，指纹不取自然语言措辞。强制检查标志先落盘，同一进程复用原只读子会话；所有阶段共用验收 deadline 与 usage。持久快照 v4、契约 v2，旧候选恢复仍完整审核，不重置历史或额度。
+
+- GoalStore 是唯一权威状态；模型可 GoalRead、只修改未确认 proposal 的 GoalDraft；正常执行结束由宿主调度只读审核。审核子代理只有读取工具，自然返回描述性报告，不得调用 GoalReview 或修改 GoalStore；宿主 agent 在原会话的候选绑定内部提交轮调用 GoalReview 统一提交 decision=continue/complete/blocked、summary、未完成时的 next_step；客观阻断才提供 blocker 字符串，可选 remaining_requirements。runtime 绑定候选、报告与证据后发布；不要求模型复制候选或重写逐项表。描述性结论保留 report，不制造逐项 findings；旧完整提交仅保留解码。GoalReview 固定在主代理工具 schema 中，只有提交轮可执行；已解码的结论校验拒绝返回具体工具失败供同轮纠正，不计入格式恢复窗口。模型不能确认草案、修改已确认契约、额度或运行时状态文件。 typed continuation 不得伪装人类输入；普通 turn 不得绕过活动目标与验收所有权。
+- 驱动故障是稳定终态：不可恢复错误停止本 run 的调度并最多尝试一次落盘 `failed`，不得因磁盘仍为 `active` 自动重启（即使 failed无法发布）；`wait_goal` 返回运行时错误，`start_goal_driver`/`confirm_goal` 拒绝新激活，仅重开会话恢复。仍有工具/检查器未退出时先停止中，待其实际退出后才成为稳定故障；暂停/取消无法持久化（含未闩锁的发布前失败）时命令只按当前 run 身份记录带原始错误的 `Stopping` 并 interrupt，禁止继续调度与提交成功，由唯一 run 结算在 turn gate 空闲后发布 `Faulted`，不得提前发布稳定故障或把随后正常返回改写成 Idle。激活在任何状态写入前确认调度执行器与 readiness，拒绝返回错误且不写 active 契约；已写出的契约若仍无法启动 run 同样返回错误并闩锁 Faulted，不静默留下无人驱动的 active。
+- 默认 20 turn/60 分钟从新草案确认时启动，暂停不重置；正常结束无需报告或补全轮。独立审核 blocked 需 `blocked_after_consecutive_rounds`（默认 3）轮*同一阻断*才结束目标，描述性结论的阻断身份为 `category`/契约版本/受影响验收 ID/依赖事实版本的持久化指纹（`blocker_fingerprint`）；自然语言依赖描述、新产物 ID 及本轮结论不参与身份，旧逐项审核保持原指纹，身份变化把同一阻断计数（`blocker_rounds`）重置为 1；`blocked_rounds` 仅记录连续 blocked 轮数，非 blocked 审核清零身份与两个计数。blocked 必须有实际读取的非空事实证据，审核与轮决策同次发布，恢复同一审核不增加阻断轮数。永久/格式/信号/持久化故障停止当前 run，不自动用新 turn 清空恢复计数；宿主明确重试保留 Goal 的持久计数，单个请求的自动重试与格式恢复上限不变。
+- 正常 `shutdown()` 先取消 runtime token 再中断 turn gate：在飞的 goal round 只有在「gate 被中断且 runtime 未被取消」时才会结算为用户暂停，而正常关闭必须保留 active 意图供下一次打开恢复（`docs/reference/goals.md`）。
+- 完成依据必须区分 agent_reviewed/verified/human_approved（model_reported 只保留旧终态历史）；验收前后核对声明证据、revision 与 conversation 序号。检查器缺失不得降级；证据变更用新 generation 在同一执行轮内重审，已知结果按返回时的证据版本复用，不重复执行检查器。新审核请求核对 Token 预算；人工批准核对绝对期限；审核者实际读取的新产物经宿主 ArtifactManager 导入父会话并保持 SHA-256 与引用一致。
+- 独立审核的基础设施失败、无效输出或超时不得记为目标证据失败；持久化审核失败原因与 review_failure_stage 并保留候选；报告有效时只重试宿主提交，显式 resume 只重试审核且不消耗执行轮数。Web 目标条与详情显示审核进行中或可重试状态。
+- 审核报告通过 artifact 保护并交给宿主 agent，主会话只追加带 goal_adjudication 身份的内部消息；宿主提交轮不消费人类输入、不接纳任务执行工具，不额外消耗 Goal 执行轮数，与只读审核共用验收期限和 usage。无有效提交时返回真实宿主终止原因，不把子代理普通文字当成结论。候选绑定执行边界，acceptance_conversation_seq 绑定宿主提交后的历史水位；完成与恢复均核对水位，新引导令完成失效。
+- core SessionLease 在恢复前获取，工具/检查器实际退出前不释放；未知副作用恢复必须 blocked，不能合成成功或自动重放。`start_goal_driver` 只启用调度、不启动 run；宿主容量 run 只能经 `confirm_and_start_goal`/`resume_and_start_goal` 携带许可启动，恢复出的 active goal 只能由显式 resume 重新启动（无容量账本的生命周期宿主用 `start_goal_driver_and_run`）；被拒绝的 resume 不启动 run、不发出 provider 请求，停止意图的发布失败不读作已保存。Rust/Web/Python 默认不自动驱动，终端只在 UI 接入后启动 active。宿主容量随目标 run 转移：`GoalRunLease` 只在对应 run（RunGuard）内存活，且只在 run 结束且 turn gate 空闲后释放；驱动未启用、已有 run、合同/持久化拒绝时激活返回错误且立即销毁租约，不得先启动旧 active 目标或留下无人调度的 active 目标。
+- Goal 在界面只呈现：TUI 状态栏 `goal:<状态> <剩余>/<上限>` 标记可点击打开只读详情（`/goals` 等效），会话打开从 `goal.json` 恢复、运行中由 `GoalUpdated` 更新；Web 经 `GET /api/sessions/{id}/goal` 读取当前快照（活运行时优先，回退 `goal.json` 的 `current`，不含 history），经 `POST .../goal` 与 `POST .../goal/{action}` 以宿主身份创建与控制，每次变更必须是当前 `revision` 的 compare-and-set，且一律经 `AgentRuntimeHandle` 落到 core；SSE 转发 `goal_updated`。界面不得绕过 core 修改契约、额度或状态。
 
 ### Plan 与 Todo
 
@@ -167,7 +201,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - 嵌入式 runtime 注入同步只读 VFS 仅替换 Read/Glob/Grep 后端，未注入时严格保持本地执行路径；VFS 调用同时携带继承的 `resource_session_id` 与当前 `agent_session_id`；虚拟 Read 不生成 snapshot，Edit/Write 始终本地。
 - prompt 资产纪律：每个 `<critical>` 3-6 条战术 bullet、每条 ≤12 英文词且单一主张；示例置尾；禁 token/budget 措辞；不写引擎内部机制（`tests/prompt_discipline.rs` 机械执行）。
 - `tool-inventory` 内容必须与当前 `ModelToolSurface` 名称集一致，空 surface 才用 `runtime-capabilities`；MISSION 只能覆盖 allowlisted core，runtime-owned section fail fast；普通自定义规则不得使用 reserved 的 `# rules`。
-- skill index、selected skills、`skill://`/`rule://` 必须来自同一 `CapabilitySnapshot`；selected skill 正文不依赖资源读取 provider。
+- skill index、selected skills、`skill://`/`rule://` 必须来自同一 `CapabilitySnapshot`；selected skill 正文不依赖资源读取 provider。frontmatter 按 Agent Skills 最小子集解析（`name` 合法时优先于目录名、`description`、`when_to_use`、`hide`/`disable-model-invocation`，支持 `>`/`|` 块标量；未闭合 header 视为不存在）；skill index 与 `skill://list` 为有损渲染（描述去控制字符、折叠单行、转义尖括号、1,536 字符截断；总量超预算按来源降级删除描述，技能名始终保留），`skill://list/all` 与 CLI/TUI 保留完整描述。
 
 ### Display 与 TUI
 

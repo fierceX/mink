@@ -187,5 +187,19 @@
     "group": "版本记录",
     "description": "根目录 CHANGELOG 是权威来源。",
     "source": "CHANGELOG.md"
+  },
+  {
+    "path": "guides/goals.md",
+    "title": "跨轮目标",
+    "group": "使用指南",
+    "description": "创建、暂停、恢复和验收有边界的目标。",
+    "source": "docs/guides/goals.md"
+  },
+  {
+    "path": "reference/goals.md",
+    "title": "Goal 契约",
+    "group": "参考",
+    "description": "目标类型、状态、限额、验收与恢复的权威定义。",
+    "source": "docs/reference/goals.md"
   }
 ]

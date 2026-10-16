@@ -1,10 +1,12 @@
 # 运行时执行
 
-> 更新日期：2026-10-05
+> 更新日期：2026-10-16
 
 完整进程隔离由 worker 的 sandbox re-exec 提供；macOS 写入规则须覆盖声明目录、临时目录与会话存储的字面/真实路径，以适配内核按真实路径判断的行为。运行时本身不隔离宿主进程，平台边界见[安全指南](../guides/security.md)。
 
 turn、并发、取消与子代理。
+
+Goal 执行失败与 finished/billing/usage 原子结算为 failed，停止本 run 的自动调度；宿主可显式 resume 原目标，不按错误文本或历史版本分流。预算调整与重试各自按 ID/revision 发布，重试保留契约、历史、用量、持久失败/阻断记录和原期限。verifying 继续原候选审核并允许最后一轮续审，其余阶段进入 idle 后开启下一执行轮；未决副作用、容量、环境、Faulted 与持久化闩锁仍拒绝越过。控制边界和完整状态表见 [Goal 契约](../reference/goals.md)。
 
 ## 核心数据流
 
@@ -341,3 +343,9 @@ if let Some(message) = child_store.last_assistant_message().await? {
 | Tokio Mutex | server 操作/创建互斥 | 无中毒机制；取消一致性由既有 gate/取消测试覆盖 | Tokio 锁不具备 poisoning 语义 |
 
 新增锁必须归入上表某一类并配对应测试；缓存类恢复需说明数据为何自洽，状态类不得静默继续。
+
+## 跨轮目标执行
+
+GoalRunner 在 TurnExecutor 外按 run 身份协调迭代。Goal v2 先形成并由宿主确认结构化契约；每轮正常结束后进入独立只读分流，明确部分完成时由宿主提交轻量继续；完成声明或不明确结论进入证据审核，执行者不能自行提交完成。审核子代理自然返回描述性报告，不提供 GoalReview 工具；宿主 agent 在原会话内部提交轮根据报告调用 GoalReview 提交结论，宿主统一提交 decision、summary 和未完成时的 next_step，runtime 自动绑定并校验候选、报告与证据版本后更新 Goal，不要求重写逐项审核表。提交校验失败作为具体工具结果返回宿主供同轮纠正，不计入通用格式恢复窗口。全部验收项满足且配置的宿主门槛通过后，core 才提交 completed。审核与宿主提交共用同一验收时限和 usage，宿主提交不消耗 Goal 执行轮数；内部 goal_adjudication 消息只追加历史，不消费人类引导，acceptance_conversation_seq 记录宿主提交后的水位。审核或宿主提交失败、输出无效或超时会持久化原因和失败阶段并保留候选；有效报告可只恢复宿主提交；显式 resume 以 verifying 阶段重试该候选，不接纳新的执行 turn。typed GoalContinuation 保存启动记录，`IterationKey`（goal/iteration/turn）随 turn 进入 orchestrator；正式历史 sync 之后由唯一入口 `settle_iteration` 按身份结算（同事实重复幂等、冲突报错、未知身份拒绝），failed/interrupted 决策与 finished/billing/usage 同一次原子提交。GoalStore 的 journal/快照和副作用标记负责恢复，验收期间占用同一 turn gate。不可恢复故障停止本 runtime 的调度且不自动重启（wait_goal 返回错误、拒绝新的激活直至重开会话）；停止意图无法发布时 run 先进入 stopping 并 interrupt，执行实际退出后由 run 结算发布 faulted。`start_goal_driver` 只启用调度、不启动 run；宿主容量以 `GoalRunLease` 随真实 run 存活，且只在 run 结束且 turn gate 空闲后归还。压缩投影最新 Goal checkpoint，保持 immutable prefix 不变。机制契约见 [Goal 契约](../reference/goals.md)。
+
+Goal 两阶段审核使用固定工具面和同一只读子会话。轻量继续记录与完整审核记录分离；相同剩余要求连续三轮升级检查，强制检查标志先持久化。成功描述性报告绑定候选、证据版本及宿主历史水位，提交失败后可恢复宿主提交，调度不重跑执行轮。所有阶段和续审共用一次验收编排的 600 秒上限、绝对 Goal 期限与 usage；动态阶段和反馈仅走尾部，稳定契约 checkpoint 不变。

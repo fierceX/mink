@@ -1,0 +1,508 @@
+{
+  "method": "scripted executor claims and isolated fixtures; real independent reviewer and real host submission",
+  "verified": {
+    "cases": [
+      {
+        "basis": "agent_reviewed",
+        "case": "complete",
+        "completed": true,
+        "elapsed_ms": 13397,
+        "execution_rounds": 1,
+        "expected_complete": true,
+        "lightweight_continuations": 0,
+        "review_failure": false,
+        "status": "completed",
+        "usage": {
+          "attempt_count": 5,
+          "reported_request_count": 4,
+          "request_count": 5,
+          "tokens": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 6528,
+            "input_tokens": 13021,
+            "output_tokens": 793
+          },
+          "unreported_request_count": 1
+        },
+        "valid_reviews": 1,
+        "verdicts": [
+          "satisfied"
+        ],
+        "workspace_read_requests": {
+          "reviewer": 1,
+          "host": 0
+        },
+        "inspection_requests": {
+          "Read": 1,
+          "Glob": 1,
+          "Grep": 1
+        },
+        "host_submissions": 1,
+        "host_rejections": 0,
+        "blocker_rounds": 0
+      },
+      {
+        "basis": null,
+        "case": "forged_claim",
+        "completed": false,
+        "elapsed_ms": 65167,
+        "execution_rounds": 3,
+        "expected_complete": false,
+        "lightweight_continuations": 0,
+        "review_failure": false,
+        "status": "budget_exhausted",
+        "usage": {
+          "attempt_count": 19,
+          "reported_request_count": 16,
+          "request_count": 19,
+          "tokens": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 91520,
+            "input_tokens": 90132,
+            "output_tokens": 5704
+          },
+          "unreported_request_count": 3
+        },
+        "valid_reviews": 3,
+        "verdicts": [
+          "needs_work",
+          "needs_work",
+          "needs_work"
+        ],
+        "workspace_read_requests": {
+          "reviewer": 1,
+          "host": 0
+        },
+        "inspection_requests": {
+          "Read": 3,
+          "Glob": 12,
+          "Grep": 2
+        },
+        "host_submissions": 3,
+        "host_rejections": 0,
+        "blocker_rounds": 0
+      },
+      {
+        "basis": null,
+        "case": "external_blocker",
+        "completed": false,
+        "elapsed_ms": 28358,
+        "execution_rounds": 3,
+        "expected_complete": false,
+        "lightweight_continuations": 0,
+        "review_failure": false,
+        "status": "blocked",
+        "usage": {
+          "attempt_count": 13,
+          "reported_request_count": 10,
+          "request_count": 13,
+          "tokens": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 39808,
+            "input_tokens": 32150,
+            "output_tokens": 2353
+          },
+          "unreported_request_count": 3
+        },
+        "valid_reviews": 3,
+        "verdicts": [
+          "blocked",
+          "blocked",
+          "blocked"
+        ],
+        "workspace_read_requests": {
+          "reviewer": 3,
+          "host": 0
+        },
+        "inspection_requests": {
+          "Read": 3,
+          "Glob": 5,
+          "Grep": 0
+        },
+        "host_submissions": 3,
+        "host_rejections": 0,
+        "blocker_rounds": 3
+      },
+      {
+        "basis": null,
+        "case": "partial_admission",
+        "completed": false,
+        "elapsed_ms": 25870,
+        "execution_rounds": 3,
+        "expected_complete": false,
+        "lightweight_continuations": 2,
+        "review_failure": false,
+        "status": "budget_exhausted",
+        "usage": {
+          "attempt_count": 11,
+          "reported_request_count": 8,
+          "request_count": 11,
+          "tokens": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 28928,
+            "input_tokens": 30780,
+            "output_tokens": 2654
+          },
+          "unreported_request_count": 3
+        },
+        "valid_reviews": 1,
+        "verdicts": [
+          "needs_work"
+        ],
+        "workspace_read_requests": {
+          "reviewer": 1,
+          "host": 0
+        },
+        "inspection_requests": {
+          "Read": 1,
+          "Glob": 1,
+          "Grep": 1
+        },
+        "host_submissions": 3,
+        "host_rejections": 0,
+        "blocker_rounds": 0
+      }
+    ],
+    "force_full": false,
+    "method": "scripted execution; real independent reviewer and real host adjudication; ten single samples; forced-full baseline uses prompt policy on the same implementation",
+    "model": "MiniMax-M3.1-Flash-Preview",
+    "version": "0.6.7",
+    "started_at": "2026-10-15T10:31:35.603534+00:00",
+    "commit": "27026a4f17f3a4fde69b7a01cd57e574e5463d7f",
+    "dirty": true,
+    "source_sha256": "ef244b20abcd9dff5d32ab1d6d1d9c7e261e299615b80f83a9fbfd10ce194a40",
+    "source_scope": "git-listed crates sources and evaluate-goal-review.py, including nonignored new files",
+    "false_completions": 0,
+    "false_rejections": 0,
+    "invalid_or_failed_samples": 0,
+    "source_sha256_after_run": "ef244b20abcd9dff5d32ab1d6d1d9c7e261e299615b80f83a9fbfd10ce194a40",
+    "source_changed_during_run": false
+  },
+  "initial_transport_trial": {
+    "cases": [
+      {
+        "basis": null,
+        "case": "complete",
+        "completed": false,
+        "elapsed_ms": 7388,
+        "execution_rounds": 1,
+        "expected_complete": true,
+        "lightweight_continuations": 0,
+        "review_failure": true,
+        "status": "blocked",
+        "usage": {
+          "attempt_count": 5,
+          "reported_request_count": 0,
+          "request_count": 5,
+          "tokens": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+            "input_tokens": 0,
+            "output_tokens": 0
+          },
+          "unreported_request_count": 5
+        },
+        "valid_reviews": 0,
+        "verdicts": [],
+        "workspace_read_requests": {
+          "reviewer": 0,
+          "host": 0
+        },
+        "inspection_requests": {
+          "Read": 0,
+          "Glob": 0,
+          "Grep": 0
+        },
+        "review_failure_category": "other_review_failure"
+      },
+      {
+        "basis": null,
+        "case": "forged_claim",
+        "completed": false,
+        "elapsed_ms": 7149,
+        "execution_rounds": 1,
+        "expected_complete": false,
+        "lightweight_continuations": 0,
+        "review_failure": true,
+        "status": "blocked",
+        "usage": {
+          "attempt_count": 5,
+          "reported_request_count": 0,
+          "request_count": 5,
+          "tokens": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+            "input_tokens": 0,
+            "output_tokens": 0
+          },
+          "unreported_request_count": 5
+        },
+        "valid_reviews": 0,
+        "verdicts": [],
+        "workspace_read_requests": {
+          "reviewer": 0,
+          "host": 0
+        },
+        "inspection_requests": {
+          "Read": 0,
+          "Glob": 0,
+          "Grep": 0
+        },
+        "review_failure_category": "other_review_failure"
+      },
+      {
+        "basis": null,
+        "case": "external_blocker",
+        "completed": false,
+        "elapsed_ms": 7608,
+        "execution_rounds": 1,
+        "expected_complete": false,
+        "lightweight_continuations": 0,
+        "review_failure": true,
+        "status": "blocked",
+        "usage": {
+          "attempt_count": 5,
+          "reported_request_count": 0,
+          "request_count": 5,
+          "tokens": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+            "input_tokens": 0,
+            "output_tokens": 0
+          },
+          "unreported_request_count": 5
+        },
+        "valid_reviews": 0,
+        "verdicts": [],
+        "workspace_read_requests": {
+          "reviewer": 0,
+          "host": 0
+        },
+        "inspection_requests": {
+          "Read": 0,
+          "Glob": 0,
+          "Grep": 0
+        },
+        "review_failure_category": "other_review_failure"
+      },
+      {
+        "basis": null,
+        "case": "partial_admission",
+        "completed": false,
+        "elapsed_ms": 7790,
+        "execution_rounds": 1,
+        "expected_complete": false,
+        "lightweight_continuations": 0,
+        "review_failure": true,
+        "status": "blocked",
+        "usage": {
+          "attempt_count": 5,
+          "reported_request_count": 0,
+          "request_count": 5,
+          "tokens": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+            "input_tokens": 0,
+            "output_tokens": 0
+          },
+          "unreported_request_count": 5
+        },
+        "valid_reviews": 0,
+        "verdicts": [],
+        "workspace_read_requests": {
+          "reviewer": 0,
+          "host": 0
+        },
+        "inspection_requests": {
+          "Read": 0,
+          "Glob": 0,
+          "Grep": 0
+        },
+        "review_failure_category": "other_review_failure"
+      }
+    ],
+    "force_full": false,
+    "method": "scripted execution; real independent reviewer and real host adjudication; ten single samples; forced-full baseline uses prompt policy on the same implementation",
+    "model": "MiniMax-M3.1-Flash-Preview",
+    "version": "0.6.7",
+    "started_at": "2026-10-15T10:17:33.846354+00:00",
+    "commit": "27026a4f17f3a4fde69b7a01cd57e574e5463d7f",
+    "dirty": true,
+    "source_sha256": "0671a27412566fe291c5a0fe0992c88f04b2da575cb6d286f0aff44f2cb9efde",
+    "source_scope": "git-listed crates sources and evaluate-goal-review.py, including nonignored new files",
+    "false_completions": 0,
+    "false_rejections": 0,
+    "invalid_or_failed_samples": 4
+  },
+  "before_dependency_identity_fix": {
+    "cases": [
+      {
+        "basis": "agent_reviewed",
+        "case": "complete",
+        "completed": true,
+        "elapsed_ms": 17108,
+        "execution_rounds": 1,
+        "expected_complete": true,
+        "lightweight_continuations": 0,
+        "review_failure": false,
+        "status": "completed",
+        "usage": {
+          "attempt_count": 5,
+          "reported_request_count": 4,
+          "request_count": 5,
+          "tokens": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 3840,
+            "input_tokens": 15523,
+            "output_tokens": 815
+          },
+          "unreported_request_count": 1
+        },
+        "valid_reviews": 1,
+        "verdicts": [
+          "satisfied"
+        ],
+        "workspace_read_requests": {
+          "reviewer": 1,
+          "host": 0
+        },
+        "inspection_requests": {
+          "Read": 1,
+          "Glob": 2,
+          "Grep": 0
+        }
+      },
+      {
+        "basis": null,
+        "case": "forged_claim",
+        "completed": false,
+        "elapsed_ms": 69456,
+        "execution_rounds": 3,
+        "expected_complete": false,
+        "lightweight_continuations": 0,
+        "review_failure": false,
+        "status": "budget_exhausted",
+        "usage": {
+          "attempt_count": 19,
+          "reported_request_count": 16,
+          "request_count": 19,
+          "tokens": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 107648,
+            "input_tokens": 57341,
+            "output_tokens": 7735
+          },
+          "unreported_request_count": 3
+        },
+        "valid_reviews": 3,
+        "verdicts": [
+          "needs_work",
+          "needs_work",
+          "needs_work"
+        ],
+        "workspace_read_requests": {
+          "reviewer": 11,
+          "host": 0
+        },
+        "inspection_requests": {
+          "Read": 11,
+          "Glob": 7,
+          "Grep": 1
+        }
+      },
+      {
+        "basis": null,
+        "case": "external_blocker",
+        "completed": false,
+        "elapsed_ms": 50661,
+        "execution_rounds": 3,
+        "expected_complete": false,
+        "lightweight_continuations": 0,
+        "review_failure": false,
+        "status": "budget_exhausted",
+        "usage": {
+          "attempt_count": 19,
+          "reported_request_count": 16,
+          "request_count": 19,
+          "tokens": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 100480,
+            "input_tokens": 39731,
+            "output_tokens": 4245
+          },
+          "unreported_request_count": 3
+        },
+        "valid_reviews": 3,
+        "verdicts": [
+          "blocked",
+          "blocked",
+          "blocked"
+        ],
+        "workspace_read_requests": {
+          "reviewer": 3,
+          "host": 3
+        },
+        "inspection_requests": {
+          "Read": 8,
+          "Glob": 9,
+          "Grep": 2
+        }
+      },
+      {
+        "basis": null,
+        "case": "partial_admission",
+        "completed": false,
+        "elapsed_ms": 31704,
+        "execution_rounds": 3,
+        "expected_complete": false,
+        "lightweight_continuations": 2,
+        "review_failure": false,
+        "status": "budget_exhausted",
+        "usage": {
+          "attempt_count": 13,
+          "reported_request_count": 10,
+          "request_count": 13,
+          "tokens": {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 50432,
+            "input_tokens": 32633,
+            "output_tokens": 2729
+          },
+          "unreported_request_count": 3
+        },
+        "valid_reviews": 1,
+        "verdicts": [
+          "needs_work"
+        ],
+        "workspace_read_requests": {
+          "reviewer": 1,
+          "host": 0
+        },
+        "inspection_requests": {
+          "Read": 1,
+          "Glob": 2,
+          "Grep": 0
+        }
+      }
+    ],
+    "force_full": false,
+    "method": "scripted execution; real independent reviewer and real host adjudication; ten single samples; forced-full baseline uses prompt policy on the same implementation",
+    "model": "MiniMax-M3.1-Flash-Preview",
+    "version": "0.6.7",
+    "started_at": "2026-10-15T10:18:41.700395+00:00",
+    "commit": "27026a4f17f3a4fde69b7a01cd57e574e5463d7f",
+    "dirty": true,
+    "source_sha256": "6c9c2aaeddbad6d35b1ef4f01445324bb5f07baacbf2918c817cf34dbb1c25ef",
+    "source_scope": "git-listed crates sources and evaluate-goal-review.py, including nonignored new files",
+    "false_completions": 0,
+    "false_rejections": 0,
+    "invalid_or_failed_samples": 0
+  },
+  "limitations": [
+    "Four synthetic cases, one sample each; not a coding success-rate or general performance benchmark.",
+    "Initial transport trial failed DNS in the sandbox and produced no effective review.",
+    "Before-fix trial is a development snapshot whose sources changed during iteration; not a final-tree performance baseline.",
+    "Duplicate intermediate development runs remain local under target/bench."
+  ],
+  "sanitization": "No model transcripts, credentials, provider URLs or absolute workspace/session paths; local journals were reduced to aggregate submission/rejection counts."
+}

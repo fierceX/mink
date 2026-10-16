@@ -1,6 +1,6 @@
 # HTTP 与 SSE API
 
-> 更新日期：2026-10-04
+> 更新日期：2026-10-10
 
 持久输入、快照与服务生命周期。
 
@@ -18,7 +18,7 @@ Core 的新增 `AgentEventKind::ConversationCommitted {conversation_seq,message}
 
 `mink-server` 延续 Mink 的轻量定位：单二进制、低运行时依赖，把同一个 runtime 暴露为 Web 服务——与 CLI/TUI/Python SDK 共享内核，多端行为一致：
 
-- **REST API**：会话管理（列表/创建/删除/打开/关闭/中断）、conversation/plan/todo/artifacts/files 读取
+- **REST API**：会话管理（列表/创建/删除/打开/关闭/中断）、conversation/plan/todo/goal/artifacts/files 读取，goal 的创建与控制，以及工作台的模型切换与手动压缩（`POST /api/sessions/{id}/model`、`POST /api/sessions/{id}/compact`）。控制请求**同时要求 `goal_id` 与 `revision`**：替换目标的 revision 从 1 重启，只有 id 能区分二者，缺 `goal_id` 返回 400、id 不匹配返回 409。`resume` 可继续 paused/blocked/budget_exhausted，也用于接起服务重启后恢复出的 active goal：先按容量账本预约许可、再 arm 驱动，由 core 携带租约启动唯一 run；被拒绝的 resume 不启动 run、不发出 provider 请求、也不释放不属于本次尝试的容量。读取响应带 `verifier` 表示该部署是否配置检查器。
 - **SSE 实时流**：`/api/sessions/{id}/stream` 转发 core `AgentEvent` envelope（带 `stream_sequence` 传输序号、心跳与 gap 对账）
 - **嵌入前端**：Vue SPA 构建产物直接嵌入二进制，单文件分发
 - **共享会话布局**：与 TUI/CLI 使用同一 `~/.mink/projects` 目录，终端与浏览器无缝交接
@@ -53,11 +53,17 @@ Core 的新增 `AgentEventKind::ConversationCommitted {conversation_seq,message}
 | POST | `/api/sessions/{id}/attachments` | 原始图片字节上传，返回 session 限定描述 |
 | GET | `/api/sessions/{id}/attachments/{attachment_id}` | session 限定的图片预览 |
 | POST | `/api/sessions/{id}/interrupt` | 中断当前 turn |
+| GET / POST | `/api/sessions/{id}/goal` | 读取目标快照（活运行时优先，回退 `goal.json` 的 `current`）/ 创建目标并启用驱动 |
+| POST | `/api/sessions/{id}/goal/{action}` | 目标控制（pause/resume/cancel/clear/budget/approve/reconcile），必须带 `goal_id` + `revision` |
+| POST | `/api/sessions/{id}/model` | 切换会话模型，返回解析后的标签与统计快照 |
+| POST | `/api/sessions/{id}/compact` | 手动压缩当前上下文 |
 | GET | `/api/sessions/{id}/events` | events.jsonl 分页（`from_seq`/`limit`/`tail`/`before_seq`） |
 | GET | `/api/sessions/{id}/conversation` | conversation.jsonl 轮次历史（同分页参数） |
 | GET | `/api/sessions/{id}/plan` / `todo` / `artifacts` | 计划/Todo/Artifacts 读取 |
+| GET | `/api/sessions/{id}/artifacts/{name}` | 单个 artifact 正文（1 MiB 读取上限） |
 | GET | `/api/sessions/{id}/files?path=...&raw=true` | 文件树/内容（raw 取正文） |
 | GET | `/api/sessions/{id}/stream` | **SSE 实时事件流** |
+| GET | `/health` | 健康检查 |
 
 - **project 消歧**：所有 session 路由接受可选 `?project=`（0.4.0 起，用于跨项目同名 session）；不传时按 id 唯一匹配。
 - **分页约束**：`limit` 必须在 `1..=2000`，超出返回 400；`tail`/`before_seq` 取“最接近目标”的末尾段，`from_seq` 前向读取保留开头；响应注入真实行号 `seq` 作为稳定 key。
@@ -105,7 +111,7 @@ Core 的新增 `AgentEventKind::ConversationCommitted {conversation_seq,message}
 
 ### 新版原子快照订阅
 
-`GET /stream?snapshot=true` 首帧 `session_snapshot` 与订阅位置在同一 mirror 发布锁下建立，包含 generation、stream_sequence、conversation（最近 20 个真实用户轮次）、progress、current_turn、phase、running、inputs、capabilities、resources（Plan、完整 Todo、Artifact）、diagnostics、activity 与 last_final。activity 为 `{work_state,wait_elapsed_secs:null|number,active_sub_agents:[]}`，由可靠事件更新并与快照同时发布；active_sub_agents 是未结束子代理 ID 列表，单个子任务结束不抹掉其他活动任务，主动中断后工作状态回到 idle。旧客户端可忽略。diagnostics 保留完整 `title_update.stats`，包括轮次、请求数和独立缓存读取/创建计数。打开时镜像经公开 SessionReader 重建，运行中消费可靠 runtime 事件；best-effort EventSink 不用于权威恢复。
+`GET /stream?snapshot=true` 首帧 `session_snapshot` 与订阅位置在同一 mirror 发布锁下建立，包含 generation、stream_sequence、conversation（最近 20 个真实用户轮次）、progress、current_turn、phase、running、inputs、capabilities、resources（Plan、完整 Todo、Artifact）、diagnostics、activity 与 last_final。`goal` 也来自该镜像：与 `stream_sequence` 在同一临界区更新，渲染快照不获取会话状态锁（锁序固定为 state → projection），`hidden` 目标归一为 `null`。activity 为 `{work_state,wait_elapsed_secs:null|number,active_sub_agents:[]}`，由可靠事件更新并与快照同时发布；active_sub_agents 是未结束子代理 ID 列表，单个子任务结束不抹掉其他活动任务，主动中断后工作状态回到 idle。旧客户端可忽略。diagnostics 保留完整 `title_update.stats`，包括轮次、请求数和独立缓存读取/创建计数。打开时镜像经公开 SessionReader 重建，运行中消费可靠 runtime 事件；best-effort EventSink 不用于权威恢复。
 
 后续新增 `conversation_committed {conversation_seq,message}`、`inputs_updated {inputs}`、`phase_updated {phase}`，与既有 AgentEvent 均携带 generation、stream_sequence 和 after_conversation_seq。正式历史接管暂态 text/thinking，稳定身份为物理 `(seq,block_index)` 或 input_id；诊断保持相邻时序。旧 generation 与重复水位丢弃，gap 后立即重取 snapshot，无需等待 turn 空闲。旧 SSE 模式过滤新增输入/commit/phase 控制事件，仍转发原有协议。运行态、成功与失败由 turn_final/outcome 决定，stop 与 HTTP 成功均不提前完成任务。
 

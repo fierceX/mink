@@ -1,6 +1,6 @@
 # 终端操作
 
-> 更新日期：2026-10-04
+> 更新日期：2026-10-10
 
 REPL、Full TUI、Inline TUI 与快捷键。
 
@@ -57,6 +57,7 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) [idle]
 | `I:200K` | 输入 tokens | 总输入 tokens，括号内为缓存命中率 |
 | `O:20K` | 输出 tokens | 总输出 tokens |
 | `C:400K` | 上下文 | 当前上下文 tokens，括号内为使用率 |
+| `goal:active 18/20` | 目标标记 | 存在未结束目标时显示（完成后为 `goal:<状态> <验收依据>`）；可点击或 `/goals` 打开只读详情，不修改契约或额度 |
 | `[idle]` | 工作状态 | idle / waiting / thinking / generating / tool / sub-agent / compacting / error |
 | `·30s` | 等待心跳 | LLM 流式/首事件等待的精简标签（仅状态栏瞬时显示，流恢复/结束即清除） |
 
@@ -94,11 +95,13 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) [idle]
 | `Shift+Enter` | 输入框内换行（需终端支持 Kitty keyboard protocol） |
 | `Ctrl+J` / `Alt+Enter` | 换行（不依赖终端协议的兜底键） |
 | `/flash` / `/pro` | 切换模型 |
+| `/model NAME` | 切换到指定模型名或别名（`/flash`、`/pro` 为别名快捷方式） |
 | `/compact` | 手动触发上下文压缩 |
 | `/help` / `/status`（TUI） | 打开本地帮助/完整统计面板，不向对话追加正文 |
 | `/details`（TUI） | 键盘选择卡片折叠、Plan/Todo/Artifact/子代理详情 |
 | `/skills` | 显示 skill 列表 |
 | `/plan` / `/todos` | 打开 Plan/Todo 详情 |
+| `/goals`（TUI） | 打开只读目标详情，等效于点击状态栏 `goal:` 标记 |
 | `/artifact ID` | 打开最多 256 KiB 的 Artifact 预览 |
 | `/sub-agent ID` | 打开子代理详情 |
 | `/exit` / `/quit` / `/q` | 退出 |
@@ -166,3 +169,7 @@ AppleScript 通知回退。
 ## 下一步
 
 查看[配置参考](../reference/configuration.md)、[工具参考](../reference/tools.md)或返回[文档总览](../start/overview.md)。
+
+## Goal
+
+`/goal TEXT` 创建有边界的跨轮目标；状态、暂停、预算、恢复和验收命令在三种终端共享。详见 [跨轮目标](goals.md)。

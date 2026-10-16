@@ -1,0 +1,537 @@
+{
+  "meta": {
+    "date": "2026-10-09",
+    "commit": "c5d4d71c4621586399ba49873fdc4ab9ea261690",
+    "dirty": true,
+    "version": "0.6.7",
+    "os": "macOS 15.7.7",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "provider": "DeepSeek OpenAI-compatible API",
+    "resolved_model": "deepseek-v4.1-flash-expires-on-0910",
+    "real_model": true,
+    "binary_sha256": "6a77629d3b1c9b149ef30a31859bfc0730759335d56148bb98982265f3bac102",
+    "sampling": "two synthetic coding tasks x ordinary/verified Goal, one sample each; four rejection controls; one failed pilot and one interrupted pilot",
+    "ordering": "ledger ordinary, ledger Goal, dependency ordinary, dependency Goal, unguided rejection-once, unguided rejection-always, guided rejection-once, guided rejection-always",
+    "raw_data_location": "target/bench/goal-real-2026-10-09/",
+    "credentials_retained": false
+  },
+  "config": {
+    "reasoning_effort": "low",
+    "max_tokens": 32768,
+    "max_tool_rounds_per_turn": 24,
+    "goal_max_turns_normal": 4,
+    "goal_max_turns_negative": 2,
+    "goal_deadline_minutes": 10,
+    "goal_soft_token_limit": 200000,
+    "request_max_retries": 1,
+    "request_timeout_secs": 180,
+    "tool_timeout_secs": 30,
+    "checker_timeout_secs": 60,
+    "ordinary_max_manual_continuations": 3,
+    "enabled_tools": [
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep",
+      "Bash",
+      "GoalReport"
+    ],
+    "signal_policy": "default",
+    "temperature": "provider default",
+    "session_isolation": "separate home and work directory per case",
+    "skills": "no user/project skills; four embedded skills remain discoverable",
+    "cache": "provider cache; runs sequential; no cache reset"
+  },
+  "results": [
+    {
+      "task": "ledger",
+      "mode": "ordinary",
+      "control": null,
+      "status": "accepted",
+      "external_tests_passed": true,
+      "checker_unchanged": true,
+      "manual_continuations": 0,
+      "elapsed_secs": 46.91,
+      "requests": 14,
+      "tokens": {
+        "input_tokens": 13670,
+        "cache_read_tokens": 144640,
+        "cache_creation_tokens": 0,
+        "output_tokens": 9162
+      },
+      "process_exits": [
+        0
+      ],
+      "watchdog_timeout": false,
+      "suite": "low",
+      "total_reported_tokens": 167472,
+      "terminal_false_completion": false,
+      "reported_requests": 14,
+      "unreported_requests": 0,
+      "resolved_models": [
+        "deepseek-v4.1-flash-expires-on-0910"
+      ],
+      "billing_turns": 1,
+      "report_attempts": [],
+      "criteria_rejection_observed": false,
+      "invalid_path_rejection_observed": false,
+      "control_rejection_observed": false,
+      "raw_usage_sha256": [
+        "04ee5b764e8218c351718905d2b6641d8163eb3506fb1176741432825fb02011"
+      ],
+      "raw_acceptance_sha256": "e7868349f80d90e9674de9c2df12e50a116d24331e4cdf921e14d11d317a3981",
+      "checker_sha256": "93341a704c192b03097355df93362716c75ec52e96ec0eb6f274abbe9ad3316a"
+    },
+    {
+      "task": "ledger",
+      "mode": "goal",
+      "control": null,
+      "status": "completed",
+      "external_tests_passed": true,
+      "checker_unchanged": true,
+      "manual_continuations": 0,
+      "elapsed_secs": 44.3,
+      "requests": 16,
+      "tokens": {
+        "input_tokens": 33868,
+        "cache_read_tokens": 142976,
+        "cache_creation_tokens": 0,
+        "output_tokens": 7756
+      },
+      "process_exits": [
+        0
+      ],
+      "watchdog_timeout": false,
+      "iterations": 3,
+      "completion_basis": "verified",
+      "suite": "low",
+      "total_reported_tokens": 184600,
+      "terminal_false_completion": false,
+      "reported_requests": 16,
+      "unreported_requests": 0,
+      "resolved_models": [
+        "deepseek-v4.1-flash-expires-on-0910"
+      ],
+      "billing_turns": 3,
+      "report_attempts": [
+        {
+          "iteration": 1,
+          "kind": "complete",
+          "criteria_count": 11,
+          "evidence_count": 4
+        },
+        {
+          "iteration": 2,
+          "kind": "complete",
+          "criteria_count": 1,
+          "evidence_count": 4
+        },
+        {
+          "iteration": 3,
+          "kind": "complete",
+          "criteria_count": 1,
+          "evidence_count": 3
+        }
+      ],
+      "criteria_rejection_observed": true,
+      "invalid_path_rejection_observed": true,
+      "control_rejection_observed": false,
+      "raw_usage_sha256": [
+        "548f3bec8db060f6b024e7ac9e99004bbd967627884f92056cf28b116a98187c"
+      ],
+      "raw_acceptance_sha256": "e7868349f80d90e9674de9c2df12e50a116d24331e4cdf921e14d11d317a3981",
+      "checker_sha256": "93341a704c192b03097355df93362716c75ec52e96ec0eb6f274abbe9ad3316a"
+    },
+    {
+      "task": "dependency",
+      "mode": "ordinary",
+      "control": null,
+      "status": "accepted",
+      "external_tests_passed": true,
+      "checker_unchanged": true,
+      "manual_continuations": 0,
+      "elapsed_secs": 22.6,
+      "requests": 12,
+      "tokens": {
+        "input_tokens": 8554,
+        "cache_read_tokens": 76800,
+        "cache_creation_tokens": 0,
+        "output_tokens": 3697
+      },
+      "process_exits": [
+        0
+      ],
+      "watchdog_timeout": false,
+      "suite": "low",
+      "total_reported_tokens": 89051,
+      "terminal_false_completion": false,
+      "reported_requests": 12,
+      "unreported_requests": 0,
+      "resolved_models": [
+        "deepseek-v4.1-flash-expires-on-0910"
+      ],
+      "billing_turns": 1,
+      "report_attempts": [],
+      "criteria_rejection_observed": false,
+      "invalid_path_rejection_observed": false,
+      "control_rejection_observed": false,
+      "raw_usage_sha256": [
+        "db4110e8e91fb0c1c642105c280c2cf6d092eafa56318d3e215b500115b76205"
+      ],
+      "raw_acceptance_sha256": "0d73e89437e0616983e7792e7c92c662313275149178d798d21fb72dc7e39ae7",
+      "checker_sha256": "fd0a3a3dda0f1ef0e8211b324b77d605fdb27f22264a8351532cfb53323b1963"
+    },
+    {
+      "task": "dependency",
+      "mode": "goal",
+      "control": null,
+      "status": "completed",
+      "external_tests_passed": true,
+      "checker_unchanged": true,
+      "manual_continuations": 0,
+      "elapsed_secs": 34.96,
+      "requests": 16,
+      "tokens": {
+        "input_tokens": 22661,
+        "cache_read_tokens": 114176,
+        "cache_creation_tokens": 0,
+        "output_tokens": 5140
+      },
+      "process_exits": [
+        0
+      ],
+      "watchdog_timeout": false,
+      "iterations": 3,
+      "completion_basis": "verified",
+      "suite": "low",
+      "total_reported_tokens": 141977,
+      "terminal_false_completion": false,
+      "reported_requests": 16,
+      "unreported_requests": 0,
+      "resolved_models": [
+        "deepseek-v4.1-flash-expires-on-0910"
+      ],
+      "billing_turns": 3,
+      "report_attempts": [
+        {
+          "iteration": 1,
+          "kind": "complete",
+          "criteria_count": 11,
+          "evidence_count": 6
+        },
+        {
+          "iteration": 2,
+          "kind": "complete",
+          "criteria_count": 1,
+          "evidence_count": 6
+        },
+        {
+          "iteration": 3,
+          "kind": "complete",
+          "criteria_count": 1,
+          "evidence_count": 3
+        }
+      ],
+      "criteria_rejection_observed": true,
+      "invalid_path_rejection_observed": true,
+      "control_rejection_observed": false,
+      "raw_usage_sha256": [
+        "28342070482d0821be9e6dcb2149c52689fb3aa2164e709ad253e86c00382bff"
+      ],
+      "raw_acceptance_sha256": "88268c8c2e49b602a4c3bdf8990145ed8423cb82194eee48a9a220ca2fd6eb37",
+      "checker_sha256": "fd0a3a3dda0f1ef0e8211b324b77d605fdb27f22264a8351532cfb53323b1963"
+    },
+    {
+      "task": "dependency",
+      "mode": "goal",
+      "control": "reject_once",
+      "status": "budget_exhausted",
+      "external_tests_passed": true,
+      "checker_unchanged": true,
+      "manual_continuations": 0,
+      "elapsed_secs": 45.2,
+      "requests": 20,
+      "tokens": {
+        "input_tokens": 34294,
+        "cache_read_tokens": 173952,
+        "cache_creation_tokens": 0,
+        "output_tokens": 7349
+      },
+      "process_exits": [
+        0
+      ],
+      "watchdog_timeout": false,
+      "iterations": 4,
+      "completion_basis": null,
+      "suite": "low",
+      "total_reported_tokens": 215595,
+      "terminal_false_completion": false,
+      "reported_requests": 20,
+      "unreported_requests": 0,
+      "resolved_models": [
+        "deepseek-v4.1-flash-expires-on-0910"
+      ],
+      "billing_turns": 4,
+      "report_attempts": [
+        {
+          "iteration": 1,
+          "kind": "complete",
+          "criteria_count": 8,
+          "evidence_count": 4
+        },
+        {
+          "iteration": 2,
+          "kind": "complete",
+          "criteria_count": 1,
+          "evidence_count": 4
+        },
+        {
+          "iteration": 3,
+          "kind": "complete",
+          "criteria_count": 1,
+          "evidence_count": 3
+        },
+        {
+          "iteration": 4,
+          "kind": "complete",
+          "criteria_count": 1,
+          "evidence_count": 4
+        }
+      ],
+      "criteria_rejection_observed": true,
+      "invalid_path_rejection_observed": true,
+      "control_rejection_observed": true,
+      "raw_usage_sha256": [
+        "1209a7c186988abb07ad0adda452de9074077586b810e195ddbee0b708c04cd7"
+      ],
+      "raw_acceptance_sha256": "88268c8c2e49b602a4c3bdf8990145ed8423cb82194eee48a9a220ca2fd6eb37",
+      "checker_sha256": "fd0a3a3dda0f1ef0e8211b324b77d605fdb27f22264a8351532cfb53323b1963"
+    },
+    {
+      "task": "dependency",
+      "mode": "goal",
+      "control": "reject_always",
+      "status": "budget_exhausted",
+      "external_tests_passed": true,
+      "checker_unchanged": true,
+      "manual_continuations": 0,
+      "elapsed_secs": 25.17,
+      "requests": 9,
+      "tokens": {
+        "input_tokens": 16911,
+        "cache_read_tokens": 60160,
+        "cache_creation_tokens": 0,
+        "output_tokens": 4523
+      },
+      "process_exits": [
+        0
+      ],
+      "watchdog_timeout": false,
+      "iterations": 2,
+      "completion_basis": null,
+      "suite": "low",
+      "total_reported_tokens": 81594,
+      "terminal_false_completion": false,
+      "reported_requests": 9,
+      "unreported_requests": 0,
+      "resolved_models": [
+        "deepseek-v4.1-flash-expires-on-0910"
+      ],
+      "billing_turns": 2,
+      "report_attempts": [
+        {
+          "iteration": 1,
+          "kind": "complete",
+          "criteria_count": 13,
+          "evidence_count": 5
+        },
+        {
+          "iteration": 2,
+          "kind": "complete",
+          "criteria_count": 1,
+          "evidence_count": 5
+        }
+      ],
+      "criteria_rejection_observed": true,
+      "invalid_path_rejection_observed": true,
+      "control_rejection_observed": true,
+      "raw_usage_sha256": [
+        "d71bc797ee995be88d2539c1df761bf7598305eb7bd9d6d05a9ed02abe03e248"
+      ],
+      "raw_acceptance_sha256": "059bd6d7db1b73a6afad61c3880cc112c6f98eeb1adf5b17e0335d18f506a258",
+      "checker_sha256": "fd0a3a3dda0f1ef0e8211b324b77d605fdb27f22264a8351532cfb53323b1963"
+    },
+    {
+      "task": "dependency_guided",
+      "mode": "goal",
+      "control": "reject_once",
+      "status": "completed",
+      "external_tests_passed": true,
+      "checker_unchanged": true,
+      "manual_continuations": 0,
+      "elapsed_secs": 29.01,
+      "requests": 14,
+      "tokens": {
+        "input_tokens": 19766,
+        "cache_read_tokens": 114816,
+        "cache_creation_tokens": 0,
+        "output_tokens": 4976
+      },
+      "process_exits": [
+        0
+      ],
+      "watchdog_timeout": false,
+      "iterations": 2,
+      "completion_basis": "verified",
+      "suite": "guided",
+      "total_reported_tokens": 139558,
+      "terminal_false_completion": false,
+      "reported_requests": 14,
+      "unreported_requests": 0,
+      "resolved_models": [
+        "deepseek-v4.1-flash-expires-on-0910"
+      ],
+      "billing_turns": 2,
+      "report_attempts": [
+        {
+          "iteration": 1,
+          "kind": "complete",
+          "criteria_count": 1,
+          "evidence_count": 3
+        },
+        {
+          "iteration": 2,
+          "kind": "complete",
+          "criteria_count": 1,
+          "evidence_count": 3
+        }
+      ],
+      "criteria_rejection_observed": false,
+      "invalid_path_rejection_observed": false,
+      "control_rejection_observed": true,
+      "raw_usage_sha256": [
+        "fc1190099f84b23b41d5aa1b0e41edd1b120413541bf5b1aef9dfeacfee58b89"
+      ],
+      "raw_acceptance_sha256": "a212702e8df4bf9d111bb18e41011ce2cd88af93561ff43571cdaac3ad64b539",
+      "checker_sha256": "fd0a3a3dda0f1ef0e8211b324b77d605fdb27f22264a8351532cfb53323b1963"
+    },
+    {
+      "task": "dependency_guided",
+      "mode": "goal",
+      "control": "reject_always",
+      "status": "budget_exhausted",
+      "external_tests_passed": true,
+      "checker_unchanged": true,
+      "manual_continuations": 0,
+      "elapsed_secs": 26.1,
+      "requests": 9,
+      "tokens": {
+        "input_tokens": 18981,
+        "cache_read_tokens": 72192,
+        "cache_creation_tokens": 0,
+        "output_tokens": 5341
+      },
+      "process_exits": [
+        0
+      ],
+      "watchdog_timeout": false,
+      "iterations": 2,
+      "completion_basis": null,
+      "suite": "guided",
+      "total_reported_tokens": 96514,
+      "terminal_false_completion": false,
+      "reported_requests": 9,
+      "unreported_requests": 0,
+      "resolved_models": [
+        "deepseek-v4.1-flash-expires-on-0910"
+      ],
+      "billing_turns": 2,
+      "report_attempts": [
+        {
+          "iteration": 1,
+          "kind": "complete",
+          "criteria_count": 1,
+          "evidence_count": 3
+        },
+        {
+          "iteration": 2,
+          "kind": "complete",
+          "criteria_count": 1,
+          "evidence_count": 3
+        }
+      ],
+      "criteria_rejection_observed": false,
+      "invalid_path_rejection_observed": false,
+      "control_rejection_observed": true,
+      "raw_usage_sha256": [
+        "dc079fc7f4dc6f396278a75de89b8361f5b65d55bfdef4dd808559f8674cacd7"
+      ],
+      "raw_acceptance_sha256": "dcf57e3d66f00c8be7204cbcf07a32e09de1065248649a87b23688e2d5c29c6f",
+      "checker_sha256": "fd0a3a3dda0f1ef0e8211b324b77d605fdb27f22264a8351532cfb53323b1963"
+    }
+  ],
+  "pilots": [
+    {
+      "task": "ledger",
+      "mode": "ordinary",
+      "control": null,
+      "status": "failed",
+      "external_tests_passed": false,
+      "checker_unchanged": true,
+      "manual_continuations": 0,
+      "elapsed_secs": 160.11,
+      "requests": 6,
+      "tokens": {
+        "input_tokens": 5570,
+        "cache_read_tokens": 23808,
+        "cache_creation_tokens": 0,
+        "output_tokens": 33105
+      },
+      "process_exits": [
+        1
+      ],
+      "watchdog_timeout": false,
+      "failure_class": "format_recovery_exhausted",
+      "max_tokens": 8192,
+      "total_reported_tokens": 62483,
+      "reasoning_effort": "max (CLI default)"
+    },
+    {
+      "task": "ledger",
+      "mode": "goal",
+      "status": "experimenter_interrupted",
+      "max_tokens": 8192,
+      "reason": "stopped after ordinary pilot proved output cap inadequate; not scored",
+      "recorded_requests": 5,
+      "recorded_tokens": {
+        "input_tokens": 8949,
+        "cache_read_tokens": 20480,
+        "cache_creation_tokens": 0,
+        "output_tokens": 10530
+      },
+      "inflight_usage": "unknown: experimenter interrupt may leave the last request unjournaled",
+      "raw_usage_sha256": [
+        "c9fa21b544d1c18188dcd3cc6ed1ba504a5b2f8fe784728f2dc276e51b9e9926"
+      ],
+      "reasoning_effort": "max (CLI default)"
+    }
+  ],
+  "fixture_sha256": "aee5f967f9e52d7623d8ddbd47e9affbbd1c90768d94a524a06fbd4f665582ad",
+  "harness_sha256": "55ccc7cd617a71d355ed4f4046b3c144e4c949944225cfd7cc04abc3d9f23d42",
+  "raw_summary_sha256": {
+    "low": "60adb5a3914133d9abb36f0b15f1ab8690093341fadd87de5aebfc836efe8027",
+    "guided": "4c5b7221b4b382946e589bd60181bbfb52d8272b304c36a763a7f4e3d5bca0ca"
+  },
+  "excluded": [
+    "real network smoke: successful pong after sandbox DNS failure; connectivity only"
+  ],
+  "limitations": [
+    "n=1 per coding task and mode; no statistical inference",
+    "all tasks synthetic, no long-running repository work or real external side effects",
+    "ordinary subprocess exit and interactive REPL exit are not acceptance; external checker and goal snapshot determine outcome",
+    "soft tokens may overshoot within a turn; reported tokens include cache reads",
+    "raw trajectories remain ignored local artifacts; only aggregate metrics and synthetic fixtures stored in docs",
+    "initial sandbox DNS failure log was overwritten by successful smoke; failure retained as metadata, no fabricated hash"
+  ]
+}

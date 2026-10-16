@@ -1,0 +1,1557 @@
+{
+  "measurement": "scripted execution, real reviewer and real host; paired prompt policies on the same development runtime",
+  "initial_limit": 100000,
+  "expanded_limit": 500000,
+  "raw_location": "target/bench/goal-two-stage-2026-10-14/",
+  "reports": {
+    "adaptive": {
+      "cases": [
+        {
+          "basis": "agent_reviewed",
+          "case": "complete",
+          "completed": true,
+          "elapsed_ms": 14867,
+          "execution_rounds": 1,
+          "expected_complete": true,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "completed",
+          "usage": {
+            "attempt_count": 8,
+            "reported_request_count": 7,
+            "request_count": 8,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 29330,
+              "input_tokens": 14907,
+              "output_tokens": 1961
+            },
+            "unreported_request_count": 1
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "satisfied"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 2,
+            "host": 1
+          },
+          "inspection_requests": {
+            "Read": 3,
+            "Glob": 3,
+            "Grep": 0
+          }
+        },
+        {
+          "basis": null,
+          "case": "partial",
+          "completed": false,
+          "elapsed_ms": 35276,
+          "execution_rounds": 2,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": true,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 13,
+            "reported_request_count": 11,
+            "request_count": 13,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 76741,
+              "input_tokens": 23275,
+              "output_tokens": 5014
+            },
+            "unreported_request_count": 2
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 2,
+            "host": 2
+          },
+          "inspection_requests": {
+            "Read": 4,
+            "Glob": 1,
+            "Grep": 4
+          },
+          "review_failure_category": "token_budget"
+        },
+        {
+          "basis": null,
+          "case": "forged_claim",
+          "completed": false,
+          "elapsed_ms": 28766,
+          "execution_rounds": 2,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": true,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 15,
+            "reported_request_count": 13,
+            "request_count": 15,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 81951,
+              "input_tokens": 26787,
+              "output_tokens": 3791
+            },
+            "unreported_request_count": 2
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 2,
+            "host": 2
+          },
+          "inspection_requests": {
+            "Read": 9,
+            "Glob": 7,
+            "Grep": 0
+          },
+          "review_failure_category": "token_budget"
+        },
+        {
+          "basis": null,
+          "case": "missing_evidence",
+          "completed": false,
+          "elapsed_ms": 36366,
+          "execution_rounds": 2,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": true,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 15,
+            "reported_request_count": 13,
+            "request_count": 15,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 72541,
+              "input_tokens": 33675,
+              "output_tokens": 5112
+            },
+            "unreported_request_count": 2
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 4,
+            "host": 1
+          },
+          "inspection_requests": {
+            "Read": 6,
+            "Glob": 8,
+            "Grep": 2
+          },
+          "review_failure_category": "token_budget"
+        },
+        {
+          "basis": null,
+          "case": "external_blocker",
+          "completed": false,
+          "elapsed_ms": 22127,
+          "execution_rounds": 2,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": true,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 13,
+            "reported_request_count": 11,
+            "request_count": 13,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 76902,
+              "input_tokens": 32909,
+              "output_tokens": 3769
+            },
+            "unreported_request_count": 2
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "blocked"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 2,
+            "host": 2
+          },
+          "inspection_requests": {
+            "Read": 4,
+            "Glob": 5,
+            "Grep": 1
+          },
+          "review_failure_category": "token_budget"
+        },
+        {
+          "basis": null,
+          "case": "partial_admission",
+          "completed": false,
+          "elapsed_ms": 28689,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 2,
+          "review_failure": true,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 13,
+            "reported_request_count": 10,
+            "request_count": 13,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 61344,
+              "input_tokens": 35488,
+              "output_tokens": 4263
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 0,
+          "verdicts": [],
+          "workspace_read_requests": {
+            "reviewer": 2,
+            "host": 1
+          },
+          "inspection_requests": {
+            "Read": 5,
+            "Glob": 1,
+            "Grep": 0
+          },
+          "review_failure_category": "token_budget"
+        },
+        {
+          "basis": null,
+          "case": "ambiguous",
+          "completed": false,
+          "elapsed_ms": 27460,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": true,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 15,
+            "reported_request_count": 12,
+            "request_count": 15,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 66565,
+              "input_tokens": 31846,
+              "output_tokens": 3987
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 2,
+          "verdicts": [
+            "needs_work",
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 3,
+            "host": 2
+          },
+          "inspection_requests": {
+            "Read": 5,
+            "Glob": 5,
+            "Grep": 0
+          },
+          "review_failure_category": "token_budget"
+        },
+        {
+          "basis": "agent_reviewed",
+          "case": "optional_next_step",
+          "completed": true,
+          "elapsed_ms": 18224,
+          "execution_rounds": 1,
+          "expected_complete": true,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "completed",
+          "usage": {
+            "attempt_count": 8,
+            "reported_request_count": 7,
+            "request_count": 8,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 39656,
+              "input_tokens": 17432,
+              "output_tokens": 3064
+            },
+            "unreported_request_count": 1
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "satisfied"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 1,
+            "host": 1
+          },
+          "inspection_requests": {
+            "Read": 2,
+            "Glob": 3,
+            "Grep": 0
+          }
+        },
+        {
+          "basis": null,
+          "case": "contradictory",
+          "completed": false,
+          "elapsed_ms": 31982,
+          "execution_rounds": 2,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": true,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 12,
+            "reported_request_count": 10,
+            "request_count": 12,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 68737,
+              "input_tokens": 28892,
+              "output_tokens": 4595
+            },
+            "unreported_request_count": 2
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 2,
+            "host": 2
+          },
+          "inspection_requests": {
+            "Read": 4,
+            "Glob": 3,
+            "Grep": 0
+          },
+          "review_failure_category": "token_budget"
+        },
+        {
+          "basis": null,
+          "case": "unverifiable",
+          "completed": false,
+          "elapsed_ms": 33656,
+          "execution_rounds": 2,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": true,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 14,
+            "reported_request_count": 12,
+            "request_count": 14,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 72112,
+              "input_tokens": 38214,
+              "output_tokens": 4887
+            },
+            "unreported_request_count": 2
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 0,
+            "host": 0
+          },
+          "inspection_requests": {
+            "Read": 3,
+            "Glob": 6,
+            "Grep": 3
+          },
+          "review_failure_category": "token_budget"
+        }
+      ],
+      "force_full": false,
+      "method": "scripted execution; real independent reviewer and real host adjudication; ten single samples; forced-full baseline uses prompt policy on the same implementation",
+      "model": "MiniMax-M3.1-Flash-Preview",
+      "version": "0.6.7",
+      "started_at": "2026-10-13T16:23:53.357354+00:00",
+      "commit": "8254233685164ea488ca9d7f57bc4b8845dc0273",
+      "dirty": true,
+      "source_sha256": "e09cfdaefd27a6af29355651c7f65e470addd2d896dd6500a9d7eab1ff70b2af",
+      "source_scope": "git-listed crates sources and evaluate-goal-review.py, including nonignored new files",
+      "false_completions": 0,
+      "false_rejections": 0,
+      "invalid_or_failed_samples": 8,
+      "postprocessing_source_sha256": "895094239c4ef7e4880e248e31023f3ca82794dddccf4605c5fbe0c4502fe400"
+    },
+    "full-policy": {
+      "cases": [
+        {
+          "basis": "agent_reviewed",
+          "case": "complete",
+          "completed": true,
+          "elapsed_ms": 31923,
+          "execution_rounds": 1,
+          "expected_complete": true,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "completed",
+          "usage": {
+            "attempt_count": 10,
+            "reported_request_count": 9,
+            "request_count": 10,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 53283,
+              "input_tokens": 16128,
+              "output_tokens": 3323
+            },
+            "unreported_request_count": 1
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "satisfied"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 2,
+            "host": 2
+          },
+          "inspection_requests": {
+            "Read": 4,
+            "Glob": 3,
+            "Grep": 1
+          }
+        },
+        {
+          "basis": null,
+          "case": "partial",
+          "completed": false,
+          "elapsed_ms": 26159,
+          "execution_rounds": 2,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": true,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 13,
+            "reported_request_count": 11,
+            "request_count": 13,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 72264,
+              "input_tokens": 31062,
+              "output_tokens": 3874
+            },
+            "unreported_request_count": 2
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 2,
+            "host": 2
+          },
+          "inspection_requests": {
+            "Read": 4,
+            "Glob": 3,
+            "Grep": 0
+          },
+          "review_failure_category": "token_budget"
+        },
+        {
+          "basis": null,
+          "case": "forged_claim",
+          "completed": false,
+          "elapsed_ms": 23937,
+          "execution_rounds": 1,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": true,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 12,
+            "reported_request_count": 11,
+            "request_count": 12,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 76041,
+              "input_tokens": 32326,
+              "output_tokens": 3614
+            },
+            "unreported_request_count": 1
+          },
+          "valid_reviews": 0,
+          "verdicts": [],
+          "workspace_read_requests": {
+            "reviewer": 0,
+            "host": 2
+          },
+          "inspection_requests": {
+            "Read": 3,
+            "Glob": 7,
+            "Grep": 3
+          },
+          "review_failure_category": "token_budget"
+        },
+        {
+          "basis": null,
+          "case": "missing_evidence",
+          "completed": false,
+          "elapsed_ms": 42724,
+          "execution_rounds": 1,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": true,
+          "status": "blocked",
+          "usage": {
+            "attempt_count": 11,
+            "reported_request_count": 10,
+            "request_count": 11,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 59724,
+              "input_tokens": 17495,
+              "output_tokens": 4548
+            },
+            "unreported_request_count": 1
+          },
+          "valid_reviews": 0,
+          "verdicts": [],
+          "workspace_read_requests": {
+            "reviewer": 1,
+            "host": 1
+          },
+          "inspection_requests": {
+            "Read": 2,
+            "Glob": 6,
+            "Grep": 1
+          },
+          "review_failure_category": "format_recovery_exhausted"
+        },
+        {
+          "basis": null,
+          "case": "external_blocker",
+          "completed": false,
+          "elapsed_ms": 30291,
+          "execution_rounds": 2,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": true,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 13,
+            "reported_request_count": 11,
+            "request_count": 13,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 65481,
+              "input_tokens": 31783,
+              "output_tokens": 4726
+            },
+            "unreported_request_count": 2
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "blocked"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 2,
+            "host": 2
+          },
+          "inspection_requests": {
+            "Read": 5,
+            "Glob": 7,
+            "Grep": 0
+          },
+          "review_failure_category": "token_budget"
+        },
+        {
+          "basis": null,
+          "case": "partial_admission",
+          "completed": false,
+          "elapsed_ms": 31582,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": true,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 15,
+            "reported_request_count": 12,
+            "request_count": 15,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 68862,
+              "input_tokens": 33150,
+              "output_tokens": 4311
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 2,
+          "verdicts": [
+            "needs_work",
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 3,
+            "host": 2
+          },
+          "inspection_requests": {
+            "Read": 7,
+            "Glob": 3,
+            "Grep": 0
+          },
+          "review_failure_category": "token_budget"
+        },
+        {
+          "basis": null,
+          "case": "ambiguous",
+          "completed": false,
+          "elapsed_ms": 31996,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": true,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 15,
+            "reported_request_count": 12,
+            "request_count": 15,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 64398,
+              "input_tokens": 37688,
+              "output_tokens": 4594
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 2,
+          "verdicts": [
+            "needs_work",
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 3,
+            "host": 2
+          },
+          "inspection_requests": {
+            "Read": 5,
+            "Glob": 6,
+            "Grep": 0
+          },
+          "review_failure_category": "token_budget"
+        },
+        {
+          "basis": "agent_reviewed",
+          "case": "optional_next_step",
+          "completed": true,
+          "elapsed_ms": 13253,
+          "execution_rounds": 1,
+          "expected_complete": true,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "completed",
+          "usage": {
+            "attempt_count": 7,
+            "reported_request_count": 6,
+            "request_count": 7,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 27051,
+              "input_tokens": 13997,
+              "output_tokens": 1870
+            },
+            "unreported_request_count": 1
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "satisfied"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 2,
+            "host": 1
+          },
+          "inspection_requests": {
+            "Read": 4,
+            "Glob": 2,
+            "Grep": 0
+          }
+        },
+        {
+          "basis": null,
+          "case": "contradictory",
+          "completed": false,
+          "elapsed_ms": 28776,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": true,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 16,
+            "reported_request_count": 13,
+            "request_count": 16,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 65383,
+              "input_tokens": 35349,
+              "output_tokens": 3896
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 2,
+          "verdicts": [
+            "needs_work",
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 3,
+            "host": 2
+          },
+          "inspection_requests": {
+            "Read": 5,
+            "Glob": 10,
+            "Grep": 3
+          },
+          "review_failure_category": "token_budget"
+        },
+        {
+          "basis": null,
+          "case": "unverifiable",
+          "completed": false,
+          "elapsed_ms": 35203,
+          "execution_rounds": 2,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": true,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 14,
+            "reported_request_count": 12,
+            "request_count": 14,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 69744,
+              "input_tokens": 32353,
+              "output_tokens": 5898
+            },
+            "unreported_request_count": 2
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 0,
+            "host": 0
+          },
+          "inspection_requests": {
+            "Read": 3,
+            "Glob": 7,
+            "Grep": 2
+          },
+          "review_failure_category": "token_budget"
+        }
+      ],
+      "force_full": true,
+      "method": "scripted execution; real independent reviewer and real host adjudication; ten single samples; forced-full baseline uses prompt policy on the same implementation",
+      "model": "MiniMax-M3.1-Flash-Preview",
+      "version": "0.6.7",
+      "started_at": "2026-10-13T16:23:59.298106+00:00",
+      "commit": "8254233685164ea488ca9d7f57bc4b8845dc0273",
+      "dirty": true,
+      "source_sha256": "e09cfdaefd27a6af29355651c7f65e470addd2d896dd6500a9d7eab1ff70b2af",
+      "source_scope": "git-listed crates sources and evaluate-goal-review.py, including nonignored new files",
+      "false_completions": 0,
+      "false_rejections": 0,
+      "invalid_or_failed_samples": 8,
+      "postprocessing_source_sha256": "895094239c4ef7e4880e248e31023f3ca82794dddccf4605c5fbe0c4502fe400"
+    },
+    "adaptive-expanded": {
+      "cases": [
+        {
+          "basis": "agent_reviewed",
+          "case": "complete",
+          "completed": true,
+          "elapsed_ms": 19008,
+          "execution_rounds": 1,
+          "expected_complete": true,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "completed",
+          "usage": {
+            "attempt_count": 10,
+            "reported_request_count": 9,
+            "request_count": 10,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 52305,
+              "input_tokens": 13774,
+              "output_tokens": 2814
+            },
+            "unreported_request_count": 1
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "satisfied"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 2,
+            "host": 1
+          },
+          "inspection_requests": {
+            "Read": 3,
+            "Glob": 2,
+            "Grep": 0
+          }
+        },
+        {
+          "basis": null,
+          "case": "partial",
+          "completed": false,
+          "elapsed_ms": 44848,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 21,
+            "reported_request_count": 18,
+            "request_count": 21,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 154636,
+              "input_tokens": 47188,
+              "output_tokens": 6404
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "needs_work",
+            "needs_work",
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 3,
+            "host": 4
+          },
+          "inspection_requests": {
+            "Read": 7,
+            "Glob": 8,
+            "Grep": 0
+          }
+        },
+        {
+          "basis": null,
+          "case": "forged_claim",
+          "completed": false,
+          "elapsed_ms": 67823,
+          "execution_rounds": 1,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": true,
+          "status": "blocked",
+          "usage": {
+            "attempt_count": 19,
+            "reported_request_count": 18,
+            "request_count": 19,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 185856,
+              "input_tokens": 33093,
+              "output_tokens": 11762
+            },
+            "unreported_request_count": 1
+          },
+          "valid_reviews": 0,
+          "verdicts": [],
+          "workspace_read_requests": {
+            "reviewer": 4,
+            "host": 0
+          },
+          "inspection_requests": {
+            "Read": 5,
+            "Glob": 7,
+            "Grep": 1
+          },
+          "review_failure_category": "host_submission_round_limit"
+        },
+        {
+          "basis": null,
+          "case": "missing_evidence",
+          "completed": false,
+          "elapsed_ms": 47081,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 22,
+            "reported_request_count": 19,
+            "request_count": 22,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 164826,
+              "input_tokens": 44795,
+              "output_tokens": 6862
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "needs_work",
+            "needs_work",
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 3,
+            "host": 3
+          },
+          "inspection_requests": {
+            "Read": 6,
+            "Glob": 13,
+            "Grep": 0
+          }
+        },
+        {
+          "basis": null,
+          "case": "external_blocker",
+          "completed": false,
+          "elapsed_ms": 43328,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 20,
+            "reported_request_count": 17,
+            "request_count": 20,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 139842,
+              "input_tokens": 71428,
+              "output_tokens": 6712
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "needs_work",
+            "needs_work",
+            "blocked"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 4,
+            "host": 3
+          },
+          "inspection_requests": {
+            "Read": 8,
+            "Glob": 9,
+            "Grep": 2
+          }
+        },
+        {
+          "basis": null,
+          "case": "partial_admission",
+          "completed": false,
+          "elapsed_ms": 44409,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 2,
+          "review_failure": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 22,
+            "reported_request_count": 19,
+            "request_count": 22,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 250490,
+              "input_tokens": 47786,
+              "output_tokens": 6516
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 1,
+            "host": 1
+          },
+          "inspection_requests": {
+            "Read": 3,
+            "Glob": 2,
+            "Grep": 0
+          }
+        },
+        {
+          "basis": null,
+          "case": "ambiguous",
+          "completed": false,
+          "elapsed_ms": 34363,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 17,
+            "reported_request_count": 14,
+            "request_count": 17,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 92845,
+              "input_tokens": 38531,
+              "output_tokens": 5132
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "needs_work",
+            "needs_work",
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 3,
+            "host": 3
+          },
+          "inspection_requests": {
+            "Read": 6,
+            "Glob": 4,
+            "Grep": 0
+          }
+        },
+        {
+          "basis": "agent_reviewed",
+          "case": "optional_next_step",
+          "completed": true,
+          "elapsed_ms": 12734,
+          "execution_rounds": 1,
+          "expected_complete": true,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "completed",
+          "usage": {
+            "attempt_count": 7,
+            "reported_request_count": 6,
+            "request_count": 7,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 27613,
+              "input_tokens": 16036,
+              "output_tokens": 1817
+            },
+            "unreported_request_count": 1
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "satisfied"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 1,
+            "host": 1
+          },
+          "inspection_requests": {
+            "Read": 2,
+            "Glob": 2,
+            "Grep": 0
+          }
+        },
+        {
+          "basis": null,
+          "case": "contradictory",
+          "completed": false,
+          "elapsed_ms": 32063,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 14,
+            "reported_request_count": 11,
+            "request_count": 14,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 57872,
+              "input_tokens": 32428,
+              "output_tokens": 4866
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "needs_work",
+            "needs_work",
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 3,
+            "host": 0
+          },
+          "inspection_requests": {
+            "Read": 3,
+            "Glob": 4,
+            "Grep": 0
+          }
+        },
+        {
+          "basis": null,
+          "case": "unverifiable",
+          "completed": false,
+          "elapsed_ms": 55157,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 23,
+            "reported_request_count": 20,
+            "request_count": 23,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 161107,
+              "input_tokens": 57581,
+              "output_tokens": 7894
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "needs_work",
+            "needs_work",
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 2,
+            "host": 0
+          },
+          "inspection_requests": {
+            "Read": 4,
+            "Glob": 9,
+            "Grep": 5
+          }
+        }
+      ],
+      "force_full": false,
+      "method": "scripted execution; real independent reviewer and real host adjudication; ten single samples; forced-full baseline uses prompt policy on the same implementation",
+      "model": "MiniMax-M3.1-Flash-Preview",
+      "version": "0.6.7",
+      "started_at": "2026-10-13T16:37:38.041888+00:00",
+      "commit": "8254233685164ea488ca9d7f57bc4b8845dc0273",
+      "dirty": true,
+      "source_sha256": "f81b6c5a33d3541528c8867d1f530cfc0cfdd19a87d66033246d9b733a31d7c3",
+      "source_scope": "git-listed crates sources and evaluate-goal-review.py, including nonignored new files",
+      "false_completions": 0,
+      "false_rejections": 0,
+      "invalid_or_failed_samples": 1,
+      "postprocessing_source_sha256": "895094239c4ef7e4880e248e31023f3ca82794dddccf4605c5fbe0c4502fe400"
+    },
+    "full-expanded": {
+      "cases": [
+        {
+          "basis": "agent_reviewed",
+          "case": "complete",
+          "completed": true,
+          "elapsed_ms": 24666,
+          "execution_rounds": 1,
+          "expected_complete": true,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "completed",
+          "usage": {
+            "attempt_count": 9,
+            "reported_request_count": 8,
+            "request_count": 9,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 47360,
+              "input_tokens": 19997,
+              "output_tokens": 3687
+            },
+            "unreported_request_count": 1
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "satisfied"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 2,
+            "host": 1
+          },
+          "inspection_requests": {
+            "Read": 3,
+            "Glob": 3,
+            "Grep": 0
+          }
+        },
+        {
+          "basis": null,
+          "case": "partial",
+          "completed": false,
+          "elapsed_ms": 29303,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 17,
+            "reported_request_count": 14,
+            "request_count": 17,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 80810,
+              "input_tokens": 35767,
+              "output_tokens": 3599
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "needs_work",
+            "needs_work",
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 3,
+            "host": 3
+          },
+          "inspection_requests": {
+            "Read": 6,
+            "Glob": 5,
+            "Grep": 4
+          }
+        },
+        {
+          "basis": null,
+          "case": "forged_claim",
+          "completed": false,
+          "elapsed_ms": 45029,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 20,
+            "reported_request_count": 17,
+            "request_count": 20,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 145596,
+              "input_tokens": 51697,
+              "output_tokens": 6720
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "needs_work",
+            "needs_work",
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 4,
+            "host": 5
+          },
+          "inspection_requests": {
+            "Read": 9,
+            "Glob": 10,
+            "Grep": 0
+          }
+        },
+        {
+          "basis": null,
+          "case": "missing_evidence",
+          "completed": false,
+          "elapsed_ms": 79421,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 22,
+            "reported_request_count": 19,
+            "request_count": 22,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 152378,
+              "input_tokens": 91498,
+              "output_tokens": 10404
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "needs_work",
+            "needs_work",
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 3,
+            "host": 3
+          },
+          "inspection_requests": {
+            "Read": 6,
+            "Glob": 11,
+            "Grep": 3
+          }
+        },
+        {
+          "basis": null,
+          "case": "external_blocker",
+          "completed": false,
+          "elapsed_ms": 52269,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 24,
+            "reported_request_count": 21,
+            "request_count": 24,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 219625,
+              "input_tokens": 61804,
+              "output_tokens": 8374
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "blocked",
+            "blocked",
+            "blocked"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 3,
+            "host": 3
+          },
+          "inspection_requests": {
+            "Read": 12,
+            "Glob": 8,
+            "Grep": 2
+          }
+        },
+        {
+          "basis": null,
+          "case": "partial_admission",
+          "completed": false,
+          "elapsed_ms": 41664,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 20,
+            "reported_request_count": 17,
+            "request_count": 20,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 150939,
+              "input_tokens": 52127,
+              "output_tokens": 6953
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "needs_work",
+            "needs_work",
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 4,
+            "host": 3
+          },
+          "inspection_requests": {
+            "Read": 7,
+            "Glob": 6,
+            "Grep": 0
+          }
+        },
+        {
+          "basis": null,
+          "case": "ambiguous",
+          "completed": false,
+          "elapsed_ms": 41905,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 22,
+            "reported_request_count": 19,
+            "request_count": 22,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 135387,
+              "input_tokens": 43068,
+              "output_tokens": 5997
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "needs_work",
+            "needs_work",
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 3,
+            "host": 4
+          },
+          "inspection_requests": {
+            "Read": 7,
+            "Glob": 4,
+            "Grep": 4
+          }
+        },
+        {
+          "basis": "agent_reviewed",
+          "case": "optional_next_step",
+          "completed": true,
+          "elapsed_ms": 37544,
+          "execution_rounds": 1,
+          "expected_complete": true,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "completed",
+          "usage": {
+            "attempt_count": 9,
+            "reported_request_count": 8,
+            "request_count": 9,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 43076,
+              "input_tokens": 16360,
+              "output_tokens": 4427
+            },
+            "unreported_request_count": 1
+          },
+          "valid_reviews": 1,
+          "verdicts": [
+            "satisfied"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 2,
+            "host": 1
+          },
+          "inspection_requests": {
+            "Read": 4,
+            "Glob": 3,
+            "Grep": 0
+          }
+        },
+        {
+          "basis": null,
+          "case": "contradictory",
+          "completed": false,
+          "elapsed_ms": 65527,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 22,
+            "reported_request_count": 19,
+            "request_count": 22,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 182912,
+              "input_tokens": 56117,
+              "output_tokens": 8324
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "needs_work",
+            "needs_work",
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 3,
+            "host": 3
+          },
+          "inspection_requests": {
+            "Read": 7,
+            "Glob": 2,
+            "Grep": 0
+          }
+        },
+        {
+          "basis": null,
+          "case": "unverifiable",
+          "completed": false,
+          "elapsed_ms": 75146,
+          "execution_rounds": 3,
+          "expected_complete": false,
+          "lightweight_continuations": 0,
+          "review_failure": false,
+          "status": "budget_exhausted",
+          "usage": {
+            "attempt_count": 23,
+            "reported_request_count": 20,
+            "request_count": 23,
+            "tokens": {
+              "cache_creation_tokens": 0,
+              "cache_read_tokens": 176031,
+              "input_tokens": 50587,
+              "output_tokens": 9548
+            },
+            "unreported_request_count": 3
+          },
+          "valid_reviews": 3,
+          "verdicts": [
+            "needs_work",
+            "needs_work",
+            "needs_work"
+          ],
+          "workspace_read_requests": {
+            "reviewer": 0,
+            "host": 0
+          },
+          "inspection_requests": {
+            "Read": 14,
+            "Glob": 11,
+            "Grep": 1
+          }
+        }
+      ],
+      "force_full": true,
+      "method": "scripted execution; real independent reviewer and real host adjudication; ten single samples; forced-full baseline uses prompt policy on the same implementation",
+      "model": "MiniMax-M3.1-Flash-Preview",
+      "version": "0.6.7",
+      "started_at": "2026-10-13T16:37:43.646977+00:00",
+      "commit": "8254233685164ea488ca9d7f57bc4b8845dc0273",
+      "dirty": true,
+      "source_sha256": "f81b6c5a33d3541528c8867d1f530cfc0cfdd19a87d66033246d9b733a31d7c3",
+      "source_scope": "git-listed crates sources and evaluate-goal-review.py, including nonignored new files",
+      "false_completions": 0,
+      "false_rejections": 0,
+      "invalid_or_failed_samples": 0,
+      "postprocessing_source_sha256": "895094239c4ef7e4880e248e31023f3ca82794dddccf4605c5fbe0c4502fe400"
+    }
+  }
+}

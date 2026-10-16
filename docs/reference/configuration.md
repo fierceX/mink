@@ -1,6 +1,6 @@
 # 配置参考
 
-> 更新日期：2026-10-04
+> 更新日期：2026-10-10
 
 参数、默认值、优先级与校验。
 
@@ -690,3 +690,7 @@ macOS `write_dirs`、临时目录和会话存储的写入规则包含字面路�
 | `cwd` | `Optional[str]` | `None` |
 
 `mink-server.toml` 的服务监听字段在 `[server]`，默认模型和 Mink home 在 `[agent]`；它与 CLI `--config` 的分组字符串是不同入口。
+
+## 终端 Goal 检查器
+
+`MINK_GOAL_CHECK` 是用户声明的固定 Bash 检查命令，终端与 server 都从它加载；`/goal verified TEXT` 或 `POST /api/sessions/{id}/goal` 选择 `verifier` 验收时使用其稳定配置 ID，检查超时 60 秒。命令无效时该能力视为未配置，server 不拒绝会话启动，`GET /api/sessions/{id}/goal` 的 `verifier` 字段返回是否可用，工作台据此禁用检查器选项并在命令列表中不再宣称 `/goal verified`。默认 Goal turn/期限在 GoalLimits 中统一定义，见 [Goal 契约](goals.md)。Web/Python 不启用自动驱动：Web 只在显式创建目标时启用驱动，关闭会话后不自动续跑；崩溃恢复出的 active goal 需在界面显式「恢复」（先预约容量许可、再由 core 启动唯一 run）才继续。

@@ -1,6 +1,6 @@
 # 工具参考
 
-> 更新日期：2026-10-04
+> 更新日期：2026-10-14
 
 内置工具 schema、结果和资源协议。
 
@@ -397,3 +397,9 @@ runtime 启动时 fail closed。
 | 参数与行为说明 | 本文档（非规范性） | `additionalProperties:false` 与 serde 字段一致性测试 |
 
 结论：运行时事实已单源（metadata），schema/顺序单源（JSON），二者在 catalog 汇合校验；本轮只消除 `PythonSandbox` 的名称特判（改由声明携带 explicit-only），不引入 ToolSpec 或生成流水线。
+
+## GoalRead、GoalDraft 与 GoalReview
+
+GoalRead 默认启用，无必填参数，读取完整当前契约或待确认草案；超长结果仍走 artifact 输出保护。GoalDraft 默认在主代理可用，只替换未确认 proposal，要求精确 draft_id/revision；原始请求、验收方式与预算由宿主拥有，模型没有确认入口。
+
+GoalReview 固定在主代理的默认工具面中，只有宿主 agent 的候选绑定提交轮能成功调用，审核子代理没有该工具。只读审核者自然返回描述性报告，宿主 agent 根据报告统一提交 decision（continue/complete/blocked）、summary 和未完成时的 next_step；仅 blocked 提供 blocker 依赖说明，可选 remaining_requirements；runtime 自动绑定候选、报告与证据，不要求模型复制身份或逐项审核表；已解码的结论校验拒绝会返回具体工具失败供同轮纠正，不计入通用格式恢复窗口。执行者正常结束后由 runtime 调度这两步，不需调用 GoalReport。显式工具白名单须包含 GoalReview；缺失时确认或恢复执行被拒绝。旧 GoalReport 已从 catalog 删除。完整字段与验收规则由 [Goal 契约](goals.md) 定义。

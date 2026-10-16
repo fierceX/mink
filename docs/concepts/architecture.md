@@ -1,6 +1,6 @@
 # 架构与模块
 
-> 更新日期：2026-10-04
+> 更新日期：2026-10-14
 
 分层、职责与关键不变式。
 
@@ -131,12 +131,12 @@ TurnExecutor (agent/turn.rs)
 | `crates/mink-server/src/main.rs` | 服务装配：config 加载、registry、idle reaper、graceful shutdown、嵌入/磁盘静态服务 |
 | `crates/mink-server/src/api.rs` | REST + SSE 路由（sessions/conversation/plan/todo/artifacts/files/stream；project-aware `?project=`） |
 | `crates/mink-server/src/session/registry.rs` | 会话扫描、fs2 advisory lock lease、typed RegistryError、并发 create/open/close/delete、usage.jsonl 汇总 |
+| `crates/mink-server/src/session/admission.rs` | 容量账本（唯一 `max_running` 计数）：session 实例/generation、Reserved/Running/Draining 三态、精确释放的 permit 与 `PermitLease`（目标 run 的宿主租约） |
 | `crates/mink-server/src/session/runtime.rs` | AgentRuntime 包装、阶段机（Idle/Running/Cancelling/Closing/Closed）、forced terminal、AgentEvent→SSE JSON（stream_sequence） |
 
 | `crates/mink-server/src/session/config.rs` | ServerConfig（env > toml > ~/.minkrc > 默认） |
 | `crates/mink-server/src/web_assets.rs` | 嵌入前端服务（content-type/SPA fallback/缓存） |
-| `crates/mink-server/build.rs` | 自动 npm build + dist 嵌入（include_str! 清单） |
-| `crates/mink-server/web/` | Vue 3 SPA：单栏对话、指标行、面板体系、Edit 结构化渲染 |
+| `crates/mink-server/build.rs` | 自动 npm build + dist 按字节嵌入（`include_bytes!` 清单） |
 Server 生命周期：Ctrl+C → axum serve 停止 → idle reaper abort → `registry.shutdown_all()`；
 每 30s 扫描并按 `idle_close_secs` 关闭闲置会话；SSE 广播通道 1024、30s 心跳、
 `stream_gap {missed}` 断线对账；删除会话前持有系统文件锁。
@@ -378,7 +378,7 @@ VFS 只接管普通路径。`artifact://`、`skill://`、`rule://` 和 `session:
 - 开启输入降噪时，只精简摘要请求中的 thinking、工具参数和工具结果；完整历史和热尾部保持原样。
 - Agent JSONL、Python SDK 和 Rust runtime 暴露并映射同一组上下文压缩参数；runtime 在创建 session 前统一校验有限窗口的 reserve、tail、摘要输出和主请求输入预算关系。
 - `max_context_tokens=0` 禁用 auto/preflight 压缩和请求预算上限，但保留手动压缩；真实 context overflow 在无可见输出时按严格缩小规则重复恢复，共享 round 绝对期限且不设次数上限。
-- 子代理始终使用父 session 下的 isolated home；fork 在 runtime 初始化前克隆完整 session 状态并重置身份与遥测文件。
+- 子代理始终使用父 session 下的 isolated home；fork 在 runtime 初始化前克隆完整 session 状态并重置身份与遥测文件。模型可见的 `<environment>` 块镜像父会话的 home（`AgentSharedContext.environment_home`），子代理请求头因此与父会话在 `<tool-inventory>` 之前逐字节一致，fork 继承的历史才可能命中同一份 provider 前缀缓存；实际资源与租约仍用隔离 home。
 - `ImmutablePrefix` 变更必须通过 prefix manager / invalidate 路径。
 - `ConversationStore` append 时保持活跃后缀缓存一致；显式完整历史读取是一次性读盘操作，缓存继续保持为活跃后缀。
 - `ToolRunner::format_tool_result()` 是工具输出进入 LLM/UI 前的最大字节保护。
@@ -436,3 +436,7 @@ VFS 只接管普通路径。`artifact://`、`skill://`、`rule://` 和 `session:
 | conversation 只存 `image://` 引用，请求时才物化；每个引用只完整发送一次 | `llm/image_projection.rs`、`session/store.rs` | 重复 base64 放大请求体或缓存缺失时谎报"已附加" |
 | 图片对象内容寻址、独占创建、读回 digest 校验；子代理不继承父缓存 | `session/image_cache.rs`、`agent/sub_executor.rs` | 覆盖/篡改对象或 fork 后引用损坏 |
 | 图片批次配额从 0 计数且在物化层重复校验；超限本轮失败、历史降级 | `tools/runner.rs`、`llm/image_projection.rs` | 导入或损坏会话绕过图片预算 |
+
+## Goal 协调与会话所有权
+
+`runtime/goal/{mod,control,driver,verification,review}.rs` 在单轮执行器外调度目标和验收：`control` 负责合同生命周期、租约与准入，`driver` 持有 run 生命周期（idle/running/stopping/faulted/closed），`verification` 负责候选 generation、验收与证据版本，检查器变更证据后同轮重新只读审核；`review` 组织轻量分流与完整证据审核，重复继续时复用原只读子会话升级检查，将描述性报告与实际读取证据导入父会话，再运行宿主 agent 的候选绑定提交轮；GoalReview 只在该轮提交简洁的 decision/summary/next_step，候选和报告由 runtime 绑定；完成审核的逐项事实留在独立报告，不要求宿主重复填表，校验拒绝留在同轮纠正；`session/goal.rs` 保存权威契约、迭代、账单关联、副作用标记与恢复 journal，`session/goal_protocol.rs` 定义 v2 草案与审核协议，`tools/goal.rs` 提供 GoalRead/GoalDraft 和内部 GoalReview；确认只由宿主进行。`session/lease.rs` 是所有可写 runtime 与 server 删除共享的租约协议；终端使用同一命令解析器，并在 UI 初始化后启用驱动（`start_goal_driver` 只启用调度，`start_goal_driver_and_run` 才接起恢复出的 active 目标）。宿主容量以 `GoalRunLease` 随真实 run 存活，只在 run 结束且 turn gate 空闲后归还；停止意图无法发布时先进入 stopping，执行退出后由 run 结算发布 faulted。完整状态和恢复约束见 [Goal 契约](../reference/goals.md)。
