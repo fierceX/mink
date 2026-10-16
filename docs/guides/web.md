@@ -20,7 +20,7 @@ composer（发送/停止/运行中引导/附件/斜杠命令）、工具卡与�
 两个校验入口：
 
 ```bash
-cd apps/web && npm run check:design   # 逐字节比对拷贝来源，任何漂移即失败
+cd apps/web && npm run check:design -- --source <deepseek-harness root>   # 逐字节比对拷贝来源（基线 revision 见 apps/web/THIRD_PARTY_NOTICES.md），任何漂移即失败
 cd apps/web && npx playwright test    # fixtures（设计核对页）+ live（隔离 home 的真实服务端）
 ```
 

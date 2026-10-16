@@ -216,4 +216,4 @@ cd apps/web && npm run dsh:snapshot -- --url "<dsh web 打印的带 token URL>" 
 
 上一代 Vue 工作台已从树中移除：`crates/mink-server/web` 不再存在，CI 与文档链路（npm/typecheck/build/e2e、版本一致性检查）一并删除，服务器只服务 `apps/web`。其产品行为已由 `apps/web` 承接：目录与打开、新建任务（输入 server 工作目录，已有项目作候选）、历史与分页、实时投影、composer（发送/停止/引导/附件/斜杠命令）、工具卡与改动文件卡、目标条与目标边界卡、详情面板五页签、轮次选择器、设置与偏好、窄屏阅读 chrome。
 
-按「只抄 mink 具有的功能」的口径，上游以下的界面不在前端出现：插件面板、Pin/Archive、权限 pill、Standard mode 标签、Chat/Trajectory 页签、消息时间戳。设计层仍逐字节同步，用 `npm run check:design` 守住；视觉对照用 `dsh web` + 浏览器自动化（截图与 `data-slot`）。
+按「只抄 mink 具有的功能」的口径，上游以下的界面不在前端出现：插件面板、Pin/Archive、权限 pill、Standard mode 标签、Chat/Trajectory 页签、消息时间戳。设计层仍逐字节同步，用 `npm run check:design -- --source <deepseek-harness root>` 守住（比对基线是 `apps/web/THIRD_PARTY_NOTICES.md` 记录的 revision，CI 按该 revision 浅克隆上游后执行）；视觉对照用 `dsh web` + 浏览器自动化（截图与 `data-slot`）。

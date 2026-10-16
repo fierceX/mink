@@ -6,7 +6,7 @@
 // Usage: node scripts/check-design-parity.mjs [--source <deepseek-harness root>]
 
 import { createHash } from 'node:crypto'
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -146,6 +146,15 @@ function sha256(file) {
 const sourceRoot = process.argv.includes('--source')
   ? resolve(process.argv[process.argv.indexOf('--source') + 1])
   : resolve(REPO_DIR, '../deepseek-harness')
+
+if (!existsSync(sourceRoot)) {
+  console.error(
+    `design source not found: ${sourceRoot}\n` +
+      'pass `--source <deepseek-harness root>`; the revision to compare against is pinned in ' +
+      'apps/web/THIRD_PARTY_NOTICES.md'
+  )
+  process.exit(2)
+}
 
 const index = indexSources(sourceRoot)
 const identical = []

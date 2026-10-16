@@ -3,6 +3,9 @@
 本目录的下列文件拷贝自 deepseek-harness（<https://github.com/deepseek-ai/deepseek-harness>），
 版权归 DeepSeek 所有，按 MIT 许可使用。除导入落点（指向本目录内副本）外未作改动。
 
+对照版本（`npm run check:design` 的比对基线，升级拷贝时同步更新）：
+`5badb15009ae1756c3afe0ae0cef1faafc290ccc`（CI 按此 revision 浅克隆上游后逐字节比对）。
+
 | 本目录路径 | 上游路径 |
 | --- | --- |
 | `src/theme/styles/*.css`、`src/ui/primitives/**/*.css` | `packages/client/ui-theme/src/styles`、`packages/client/ui-primitives/src` |
