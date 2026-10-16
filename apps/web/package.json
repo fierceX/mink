@@ -4,6 +4,9 @@
   "version": "0.7.0",
   "description": "Mink web workbench: React shell whose design layer is copied from the DSH client packages",
   "type": "module",
+  "engines": {
+    "node": ">=22.22.2"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",

@@ -21,10 +21,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           # Vite 8 currently resolves Rolldown 1.2.x, whose native bindings
-          # require Node >=20.19.0. On 20.18 npm treats those platform packages
-          # as failed optional dependencies, so installation appears successful
-          # but the Rust build script later fails when it invokes `vite build`.
-          node-version: "20.19.0"
+          # require Node >=20.19.0. The jsdom 30 test environment resolves
+          # undici 8, which requires Node >=22.19.0, and jsdom itself declares
+          # ^22.22.2 || ^24.15.0 || >=26.0.0, so pin the lowest version that
+          # satisfies all of them.
+          node-version: "22.22.2"
       - run: npm ci
         working-directory: apps/web
       - name: Release versions and publication regressions
@@ -108,7 +109,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.0
       - uses: actions/setup-node@v4
         with:
-          node-version: "20.19.0"
+          node-version: "22.22.2"
       - run: npm ci
         working-directory: apps/web
       - run: cargo check --workspace --all-targets --all-features --locked
@@ -124,7 +125,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20.19.0"
+          node-version: "22.22.2"
       - run: npm ci
         working-directory: apps/web
       - name: Check and assemble documentation
@@ -177,7 +178,7 @@ jobs:
       - name: Setup Node (embedded frontend build)
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22.22.2"
 
       - name: Install web deps (embedded frontend)
         run: npm ci
@@ -369,7 +370,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20.19.0"
+          node-version: "22.22.2"
       - run: npm ci
         working-directory: apps/web
       - name: Check and assemble documentation

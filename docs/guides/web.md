@@ -28,7 +28,7 @@ cd apps/web && npx playwright test    # fixtures（设计核对页）+ live（�
 
 ## 操作起点
 
-前置：源码构建需要 Rust 与 Node.js/npm，且已配置模型。先运行 `npm ci --prefix apps/web` 再构建 server（`build.rs` 会自动执行前端构建并嵌入产物）；用 `MINK_SERVER_DEV_WEB=<apps/web/dist>` 可从磁盘服务（前端热迭代）。打开工作台后新建任务，填写服务端机器上的工作目录；看到持久回执才表示输入已接收。
+前置：源码构建需要 Rust 与 Node.js ≥22.22.2（jsdom 30 / undici 8 的下限，CI 固定该版本）及 npm，且已配置模型。先运行 `npm ci --prefix apps/web` 再构建 server（`build.rs` 会自动执行前端构建并嵌入产物）；用 `MINK_SERVER_DEV_WEB=<apps/web/dist>` 可从磁盘服务（前端热迭代）。打开工作台后新建任务，填写服务端机器上的工作目录；看到持久回执才表示输入已接收。
 
 **前端现状**：`apps/web` 已实现会话目录与打开、新建任务（可输入 server 工作目录）、对话历史与实时流、
 工具卡、详情面板（任务/目标/文件/输出/诊断）与设置（外观/字号/过程展示），并覆盖本文下文描述的会话级操作细节：
