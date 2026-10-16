@@ -55,6 +55,26 @@ fn handle_key(
         state.viewport.anchor = None;
         return false;
     }
+    if matches!(state.view, View::Main) {
+        // Keyboard parity with the goal card's click actions: Ctrl+G opens the
+        // read-only goal detail (/goals), Ctrl+O folds the newest boundary card.
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('g') {
+            state.view = View::Goal { scroll: 0 };
+            return false;
+        }
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('o') {
+            if let Some(index) = state
+                .lines
+                .iter()
+                .rposition(|item| item.kind == TranscriptKind::Goal)
+                && index >= state.inline.committed
+            {
+                state.lines[index].toggle_collapsed();
+                state.invalidate_item(index);
+            }
+            return false;
+        }
+    }
     if handle_overlay_key(&key, state) {
         return false;
     }
@@ -347,6 +367,7 @@ fn activate_action(state: &mut TuiState, index: usize, action: ClickAction) {
         }
         ClickAction::OpenPlan => state.view = View::Plan { scroll: 0 },
         ClickAction::OpenTodos => state.view = View::Todos { scroll: 0 },
+        ClickAction::OpenGoal => state.view = View::Goal { scroll: 0 },
         ClickAction::OpenArtifact { id } => state.open_artifact(&id),
         ClickAction::OpenSubAgent { session_id } => state.open_sub_agent(&session_id),
     }
@@ -356,6 +377,7 @@ fn view_scroll_mut(view: &mut View) -> Option<&mut usize> {
     match view {
         View::SubAgentDetail { scroll, .. }
         | View::Plan { scroll }
+        | View::Goal { scroll }
         | View::Todos { scroll }
         | View::Artifact { scroll }
         | View::Panel { scroll, .. } => Some(scroll),
@@ -498,7 +520,15 @@ pub(crate) fn handle_ctrl_c(
         return true;
     }
 
-    if state.active_turn_id.is_some() || state.work_state.is_working() || state.admission_pending {
+    if state.active_turn_id.is_some()
+        || state.work_state.is_working()
+        || state.admission_pending
+        || state.runtime.as_ref().is_some_and(|r| {
+            r.handle
+                .goal_snapshot()
+                .is_some_and(|g| g.status == crate::runtime::GoalStatus::Active)
+        })
+    {
         let _ = orch_tx.send(RuntimeCmd::Interrupt);
         state.stopping = state.active_turn_id.is_some() || state.admission_pending;
         state.admission_cancelled |= state.admission_pending;
@@ -836,6 +866,9 @@ fn handle_enter(
                 ));
             }
             match command {
+                SlashCommand::Goal(command) => {
+                    let _ = orch_tx.send(RuntimeCmd::Goal(command));
+                }
                 SlashCommand::Flash => {
                     let _ = orch_tx.send(RuntimeCmd::SetModel("flash".into()));
                 }
@@ -859,6 +892,7 @@ fn handle_enter(
                 SlashCommand::Help => state.add_help(),
                 SlashCommand::Skills => state.show_skills(),
                 SlashCommand::Plan => state.view = View::Plan { scroll: 0 },
+                SlashCommand::Goals => state.view = View::Goal { scroll: 0 },
                 SlashCommand::Todos => state.view = View::Todos { scroll: 0 },
                 SlashCommand::Status
                 | SlashCommand::Latest
@@ -896,12 +930,17 @@ fn handle_enter(
                 ));
             }
         }
-        Err(_) => {
+        Err(error) => {
             if !images.is_empty() {
                 state.input.pending_images = images;
             }
+            // A parser that knows why says so (a mistyped subcommand names the
+            // command it probably meant); everything else keeps the generic hint.
             state.push_line(TranscriptItem::new(
-                "Unknown command. Prefix with a space to send it as text.".into(),
+                match error.message {
+                    Some(message) => format!("{message} Prefix with a space to send it as text."),
+                    None => "Unknown command. Prefix with a space to send it as text.".into(),
+                },
                 TranscriptKind::Info,
             ));
         }
@@ -948,6 +987,14 @@ pub(crate) fn handle_event_for_mode(
                 match mouse.kind {
                     MouseEventKind::ScrollUp => scroll_by(state, -(SCROLL_STEP as isize)),
                     MouseEventKind::ScrollDown => scroll_by(state, SCROLL_STEP as isize),
+                    MouseEventKind::Down(crossterm::event::MouseButton::Left)
+                        if mouse.row == state.status_row
+                            && state.status_goal_span.is_some_and(|(start, end)| {
+                                (start..end).contains(&mouse.column)
+                            }) =>
+                    {
+                        state.view = View::Goal { scroll: 0 };
+                    }
                     MouseEventKind::Down(crossterm::event::MouseButton::Left)
                         if mouse.column >= state.viewport.content_x
                             && mouse.column
@@ -1013,6 +1060,7 @@ fn handle_full_click(state: &mut TuiState, mouse_row: u16) {
         }
         Some((_, ClickAction::OpenPlan)) => state.view = View::Plan { scroll: 0 },
         Some((_, ClickAction::OpenTodos)) => state.view = View::Todos { scroll: 0 },
+        Some((_, ClickAction::OpenGoal)) => state.view = View::Goal { scroll: 0 },
         Some((_, ClickAction::OpenArtifact { id })) => state.open_artifact(&id),
         Some((_, ClickAction::OpenSubAgent { session_id })) => {
             state.open_sub_agent(&session_id);

@@ -215,7 +215,16 @@ async fn tui_main_loop(
     let mut draw_at = tokio::time::Instant::now();
     let mut signal_closed = false;
     let mut pending_signals = std::collections::VecDeque::new();
+    let mut goal_driver_started = false;
     loop {
+        if !state.loading_history && !goal_driver_started {
+            if let Some(runtime) = &state.runtime {
+                // UI and input wiring are ready: enable scheduling and pick up
+                // a goal the previous session left active.
+                runtime.handle.start_goal_driver_and_run()?;
+            }
+            goal_driver_started = true;
+        }
         if mode == TuiMode::Inline {
             sync_inline_terminal_mode(terminal, &state, &mut saved_inline_terminal)?;
             if !state.loading_history
@@ -486,6 +495,13 @@ fn load_persisted_state(session: &crate::runtime::SessionInfo, state: &mut TuiSt
                 })
         });
     state.plan = plan;
+
+    // Read-only goal mirror: a resumed session must show its unfinished goal
+    // in the status bar before the driver emits anything.
+    state.goal = mink::runtime::session::read_goal_snapshot(&session.goal_path())
+        .as_ref()
+        .map(crate::ui::GoalDisplay::from)
+        .filter(|goal| !goal.hidden);
 
     let Ok(bytes) = std::fs::read(&session.todos_path) else {
         state.todos = None;

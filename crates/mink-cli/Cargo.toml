@@ -20,6 +20,7 @@ required-features = ["sdk-bin"]
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 crossterm = { workspace = true, optional = true, features = ["event-stream"] }
 futures = { workspace = true, optional = true }
 unicode-segmentation = { version = "1.13", optional = true }

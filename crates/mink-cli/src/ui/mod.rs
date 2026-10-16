@@ -2,9 +2,9 @@
 pub use mink::runtime::ToolResultDisplay;
 #[cfg(feature = "tui")]
 pub use mink::runtime::{
-    ArtifactDisplay, PlanDisplay, PlanTransitionDisplay, SubAgentStreamKind, TodoChangeDisplay,
-    TodoCountsDisplay, TodoDisplay, TodoItemDisplay, TodoStatusDisplay, ToolPresentation,
-    ToolResultKind,
+    ArtifactDisplay, GoalDisplay, PlanDisplay, PlanTransitionDisplay, SubAgentStreamKind,
+    TodoChangeDisplay, TodoCountsDisplay, TodoDisplay, TodoItemDisplay, TodoStatusDisplay,
+    ToolPresentation, ToolResultKind,
 };
 pub use mink::runtime::{
     PresentedToolResultDisplay, StatsSnapshot, SubAgentStreamSink, ToolCallDisplay,

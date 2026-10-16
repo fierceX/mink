@@ -20,6 +20,11 @@ pub(crate) enum ReplayEventKind {
     AssistantMessage,
     PrefixSnapshot,
     Ignored,
+    /// Goal lifecycle events carried by events.jsonl (`goal_updated`). The goal
+    /// mirror is read from `goal.json` and the live signal, so replay does not
+    /// render a line for them — but they are classified instead of falling into
+    /// `Unknown` and being silently discarded.
+    GoalLifecycle,
     Unknown,
 }
 
@@ -33,6 +38,7 @@ pub(crate) fn classify_event(evt: &Value) -> ReplayEventKind {
         "error" => ReplayEventKind::Error,
         "assistant_message" => ReplayEventKind::AssistantMessage,
         "prefix_snapshot" => ReplayEventKind::PrefixSnapshot,
+        "goal_updated" | "goal_finished" => ReplayEventKind::GoalLifecycle,
         "session_start" | "usage" | "stop" | "retry" => ReplayEventKind::Ignored,
         _ => ReplayEventKind::Unknown,
     }

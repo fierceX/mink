@@ -277,3 +277,50 @@ async fn broker_renders_set_model_error_once() {
     runtime.shutdown().await.unwrap();
     let _ = tokio::fs::remove_dir_all(base).await;
 }
+
+/// Goal boundary rows decode into typed signals from the structured payload
+/// alone; a guidance row or a plain user turn produces none.
+#[cfg(feature = "tui")]
+#[test]
+fn goal_boundary_rows_decode_to_typed_signals() {
+    let start = serde_json::json!({
+        "role": "user",
+        "content": "<current-goal>\nGoal ID: goal-1\n</current-goal>",
+        "_mink": {
+            "internal": true,
+            "source": "goal_continuation",
+            "goal_message": {
+                "kind": "start",
+                "goal_id": "goal-1",
+                "contract_revision": 2,
+                "iteration": 1,
+                "objective": "ship the parser",
+                "acceptance_criteria": ["a"],
+                "constraints": [],
+                "prior_decision": null
+            }
+        }
+    });
+    match goal_boundary_signal(&start) {
+        Some(crate::tui::TuiSignal::GoalCard(message)) => {
+            assert_eq!(message.goal_id, "goal-1");
+            assert_eq!(message.kind, mink::runtime::GoalMessageKind::Start);
+            assert_eq!(message.objective, "ship the parser");
+        }
+        other => panic!("expected a goal card, got {other:?}"),
+    }
+
+    let ended = serde_json::json!({
+        "_mink": { "internal": true, "goal_id": "goal-1", "goal_revision": 9, "goal_state_kind": "ended" }
+    });
+    match goal_boundary_signal(&ended) {
+        Some(crate::tui::TuiSignal::GoalEnded { goal_id, revision }) => {
+            assert_eq!(goal_id, "goal-1");
+            assert_eq!(revision, 9);
+        }
+        other => panic!("expected goal ended, got {other:?}"),
+    }
+
+    assert!(goal_boundary_signal(&serde_json::json!({"_mink":{"guidance":true}})).is_none());
+    assert!(goal_boundary_signal(&serde_json::json!({"role":"user","content":"hi"})).is_none());
+}

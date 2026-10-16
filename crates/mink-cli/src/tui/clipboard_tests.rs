@@ -4,13 +4,15 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 fn unique_dir(name: &str) -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "mink-clipboard-{name}-{}-{nanos}",
-        std::process::id()
+        "mink-clipboard-{name}-{}-{nanos}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ))
 }
 

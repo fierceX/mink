@@ -33,6 +33,7 @@ pub(crate) enum RuntimeCmd {
         signals: std::sync::mpsc::Sender<crate::tui::TuiSignal>,
     },
     Compact,
+    Goal(crate::local::GoalCommand),
     SetModel(String),
     Interrupt,
     Exit,
@@ -109,7 +110,9 @@ fn render_agent_event(display: &dyn Display, kind: AgentEventKind) {
         ),
         AgentEventKind::Prompt => display.render_prompt(),
         AgentEventKind::ClearLine => display.render_clear_line(),
-        AgentEventKind::TurnStarted
+        AgentEventKind::GoalUpdated { .. }
+        | AgentEventKind::GoalFinished { .. }
+        | AgentEventKind::TurnStarted
         | AgentEventKind::ConversationCommitted { .. }
         | AgentEventKind::Final { .. } => {}
     }
@@ -125,6 +128,36 @@ async fn run_turn_rendered(
         render_agent_event(display, event.kind);
     }
     stream.outcome().await
+}
+
+#[cfg(feature = "tui")]
+/// The structured goal boundary a committed row carries, if any.
+///
+/// Both the live turn stream and the goal-turn sink use this one decoder, so a
+/// card looks the same however it arrives. Rows other than goal boundaries
+/// return `None` and keep their existing handling.
+fn goal_boundary_signal(message: &serde_json::Value) -> Option<crate::tui::TuiSignal> {
+    let metadata = message.get("_mink")?;
+    if let Some(raw) = metadata.get("goal_message") {
+        let parsed: crate::runtime::GoalMessage = serde_json::from_value(raw.clone()).ok()?;
+        return Some(crate::tui::TuiSignal::GoalCard(Box::new(parsed)));
+    }
+    if metadata
+        .get("goal_state_kind")
+        .and_then(serde_json::Value::as_str)
+        == Some("ended")
+    {
+        let goal_id = metadata
+            .get("goal_id")
+            .and_then(serde_json::Value::as_str)?
+            .to_string();
+        let revision = metadata
+            .get("goal_revision")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        return Some(crate::tui::TuiSignal::GoalEnded { goal_id, revision });
+    }
+    None
 }
 
 #[cfg(feature = "tui")]
@@ -148,6 +181,10 @@ async fn render_tui_stream(
                         input_id: id.into(),
                         text: text.into(),
                     });
+                } else if let Some(signal) = goal_boundary_signal(&message) {
+                    // A goal boundary committed by the normal turn path (draft
+                    // discussion) renders as the same card a goal turn does.
+                    let _ = signals.send(signal);
                 }
             }
             // Round stops do not determine the authoritative turn outcome.
@@ -173,6 +210,7 @@ pub(crate) fn start_runtime_broker(
     let (tx, mut rx) = mpsc::unbounded_channel();
     let (work_tx, mut work_rx) = mpsc::unbounded_channel();
     let work_handle = handle.clone();
+    let control_display = display.clone();
     tokio::spawn(async move {
         while let Some(command) = work_rx.recv().await {
             let result = match command {
@@ -191,6 +229,12 @@ pub(crate) fn start_runtime_broker(
                         let _ = done.send(result);
                     }
                     continue;
+                }
+                RuntimeCmd::Goal(command) => {
+                    crate::local::execute_goal_command(&work_handle, command)
+                        .await
+                        .map(|message| display.render_info(&message))
+                        .map_err(|e| crate::runtime::RuntimeError::Command(e.to_string()))
                 }
                 RuntimeCmd::Compact => work_handle.compact().await.map(|outcome| match outcome {
                     crate::runtime::CompactOutcome::Compacted { reason } => {
@@ -225,6 +269,24 @@ pub(crate) fn start_runtime_broker(
             match command {
                 RuntimeCmd::Exit => break,
                 RuntimeCmd::Interrupt => handle.interrupt_current_turn(),
+                RuntimeCmd::Goal(command)
+                    if matches!(
+                        command,
+                        crate::local::GoalCommand::Create(_)
+                            | crate::local::GoalCommand::Human(_)
+                            | crate::local::GoalCommand::Verified(_)
+                            | crate::local::GoalCommand::Refine(_)
+                    ) =>
+                {
+                    let _ = work_tx.send(RuntimeCmd::Goal(command));
+                }
+                RuntimeCmd::Goal(command) => {
+                    let result = crate::local::execute_goal_command(&handle, command).await;
+                    match result {
+                        Ok(message) => control_display.render_info(&message),
+                        Err(error) => control_display.render_error(&error.to_string()),
+                    }
+                }
                 command => {
                     if work_tx.send(command).is_err() {
                         break;
@@ -400,6 +462,25 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
     if let Some(sub_stream_tx) = sub_stream_tx {
         runtime_options = runtime_options.with_sub_stream_tx(sub_stream_tx);
     }
+    if !cfg.agent_jsonl {
+        if let Ok(command) = std::env::var("MINK_GOAL_CHECK") {
+            runtime_options = runtime_options.with_goal_verifier(Arc::new(
+                crate::runtime::CommandGoalVerifier::new(command, 60)?,
+            ));
+        }
+        runtime_options = runtime_options.with_event_sink(Arc::new(GoalTerminalSink {
+            turns: false,
+            display: display.clone(),
+            #[cfg(feature = "tui")]
+            signals: tui_tx.as_ref().map(|(tx, ..)| tx.clone()),
+        }));
+        runtime_options = runtime_options.with_goal_event_sink(Arc::new(GoalTerminalSink {
+            turns: true,
+            display: display.clone(),
+            #[cfg(feature = "tui")]
+            signals: tui_tx.as_ref().map(|(tx, ..)| tx.clone()),
+        }));
+    }
     let runtime = AgentRuntime::start(runtime_options).await?;
     let runtime_handle = runtime.handle();
     let session = runtime.session_info().clone();
@@ -441,8 +522,31 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
             }
             #[cfg(not(feature = "tui"))]
             anyhow::bail!("this mink binary was built without the `tui` feature");
+        } else if cfg.prompt == "/goal" || cfg.prompt.starts_with("/goal ") {
+            // Parse before touching the driver: a status or control command must
+            // neither start goal execution nor block waiting for it.
+            let command = crate::local::parse_goal_command(&cfg.prompt)?;
+            let drives = crate::local::goal_command_drives_execution(&command);
+            if drives {
+                // Arm only: the create/resume command itself starts the run,
+                // so this path never schedules a second one.
+                runtime_handle.start_goal_driver()?;
+            }
+            display
+                .render_info(&crate::local::execute_goal_command(&runtime_handle, command).await?);
+            if drives {
+                let outcome = runtime_handle.wait_goal().await?;
+                process_exit_code = if outcome.status == crate::runtime::GoalStatus::Completed {
+                    0
+                } else {
+                    1
+                };
+            }
         } else if is_interactive {
             let cmd_tx = start_runtime_broker(runtime_handle.clone(), display.clone());
+            // UI and input wiring are ready: enable scheduling and pick up a
+            // goal the previous session left active.
+            runtime_handle.start_goal_driver_and_run()?;
             display.render_info("mink interactive mode (type 'exit' or Ctrl+D to quit)");
             if !session.is_new {
                 replay_last_turns(&session.events_path);
@@ -873,6 +977,17 @@ fn dispatch_local_command(
     cmd_tx: &mpsc::UnboundedSender<RuntimeCmd>,
 ) -> LocalCommandOutcome {
     match line {
+        _ if line == "/goal" || line.starts_with("/goal ") => {
+            match crate::local::parse_goal_command(line) {
+                Ok(command) => {
+                    if cmd_tx.send(RuntimeCmd::Goal(command)).is_err() {
+                        return LocalCommandOutcome::Shutdown;
+                    }
+                }
+                Err(error) => println!("{error}"),
+            }
+            LocalCommandOutcome::Handled
+        }
         "/help" => {
             for line in crate::local::COMMON_COMMAND_HELP
                 .iter()
@@ -1080,3 +1195,89 @@ fn version_line() -> String {
 #[cfg(test)]
 #[path = "cli_tests.rs"]
 mod tests;
+
+struct GoalTerminalSink {
+    turns: bool,
+    display: Arc<dyn Display>,
+    #[cfg(feature = "tui")]
+    signals: Option<std::sync::mpsc::Sender<crate::tui::TuiSignal>>,
+}
+#[async_trait::async_trait]
+impl crate::runtime::EventSink for GoalTerminalSink {
+    async fn on_event(&self, event: crate::runtime::AgentEvent) -> Result<(), String> {
+        let goal_turn = self.turns
+            && event
+                .turn_id
+                .as_ref()
+                .is_some_and(|id| id.as_str().starts_with("goal:"));
+        let goal_notice =
+            matches!(&event.kind, AgentEventKind::Info { message } if message.starts_with("Goal "));
+        // Lifecycle events drive the TUI status marker and detail view, so they
+        // pass on the non-turn sink. The turn sink already renders its own
+        // notices and must not double-report them.
+        let lifecycle = matches!(
+            &event.kind,
+            AgentEventKind::GoalUpdated { .. } | AgentEventKind::GoalFinished { .. }
+        );
+        if lifecycle {
+            #[cfg(feature = "tui")]
+            if !self.turns
+                && let Some(signals) = &self.signals
+                && let AgentEventKind::GoalUpdated { goal } = &event.kind
+            {
+                let _ = signals.send(crate::tui::TuiSignal::GoalUpdated(Box::new(
+                    crate::ui::GoalDisplay::from(goal.as_ref()),
+                )));
+            }
+            render_agent_event(self.display.as_ref(), event.kind);
+            return Ok(());
+        }
+        #[cfg(feature = "tui")]
+        if self.turns
+            && let AgentEventKind::ConversationCommitted { message, .. } = &event.kind
+            && let Some(signal) = goal_boundary_signal(message)
+        {
+            // Goal boundary rows arrive on the goal-turn sink; the session sink
+            // sees the same events and must not mint a second card.
+            if let Some(signals) = &self.signals {
+                let _ = signals.send(signal);
+            }
+        }
+        if !goal_turn && (!goal_notice || self.turns) {
+            return Ok(());
+        }
+        #[cfg(feature = "tui")]
+        if let Some(signals) = &self.signals {
+            match &event.kind {
+                AgentEventKind::TurnStarted => {
+                    let _ = signals.send(crate::tui::TuiSignal::GoalTurnStarted {
+                        turn_id: event.turn_id.as_ref().unwrap().to_string(),
+                    });
+                }
+                AgentEventKind::Final { outcome } => {
+                    let _ = signals.send(crate::tui::TuiSignal::TurnFinished {
+                        turn_id: outcome.turn_id.to_string(),
+                        status: outcome.status,
+                    });
+                }
+                AgentEventKind::ConversationCommitted { message, .. }
+                    if message["_mink"]["guidance"] == true =>
+                {
+                    if let (Some(id), Some(text)) = (
+                        message["_mink"]["input_id"].as_str(),
+                        message["content"].as_str(),
+                    ) {
+                        let _ = signals.send(crate::tui::TuiSignal::GuidanceApplied {
+                            input_id: id.into(),
+                            text: text.into(),
+                        });
+                    }
+                }
+                AgentEventKind::Stop { .. } => return Ok(()),
+                _ => {}
+            }
+        }
+        render_agent_event(self.display.as_ref(), event.kind);
+        Ok(())
+    }
+}

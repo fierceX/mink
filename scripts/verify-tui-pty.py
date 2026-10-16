@@ -27,15 +27,189 @@ import tempfile
 import termios
 import threading
 import time
+import urllib.request
+
+# Deterministic goal-flow counters, readable over HTTP so the scenario can
+# assert the stages it drove (draft discussion, execution, review, submission).
+COUNTERS = {
+    "requests": 0,
+    "draft_discussion": 0,
+    "execution": 0,
+    "review": 0,
+    "adjudication": 0,
+}
+
+# System-prompt bytes of the first (main-session) request, kept so the scenario
+# can measure how much of a sub-agent's request head matches the parent's.
+FIRST_SYSTEM = {"prompt": None}
+
+
+def _tool_names(parsed):
+    return {tool.get("function", {}).get("name") for tool in parsed.get("tools") or []}
+
+
+def _last_tool_call(messages, user_index):
+    name = None
+    for message in messages[user_index + 1:]:
+        if message.get("role") != "assistant":
+            continue
+        for call in message.get("tool_calls") or []:
+            name = (call.get("function") or {}).get("name") or name
+    return name
+
+
+def _last_tool_output(messages, user_index):
+    for message in reversed(messages[user_index + 1:]):
+        if message.get("role") != "tool":
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            content = "\n".join(
+                part.get("text", "") for part in content if isinstance(part, dict)
+            )
+        try:
+            return json.loads(content)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _system_prompt(messages):
+    for message in messages:
+        if message.get("role") == "system":
+            content = message.get("content")
+            return content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    return None
+
+
+def _common_prefix(left, right):
+    limit = min(len(left), len(right))
+    index = 0
+    while index < limit and left[index] == right[index]:
+        index += 1
+    return index
+
+
+def _prompt_stage(messages):
+    """Which goal stage the newest user prompt belongs to, if any."""
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        if "<goal-draft>" in text:
+            return "draft_discussion"
+        if "<independent-goal-review>" in text:
+            return "review"
+        if "<goal-review>" in text:
+            return "adjudication"
+        if "<current-goal>" in text:
+            return "execution"
+        return None
+    return None
+
+
+def _goal_scenario(parsed):
+    """Deterministic goal flow: draft discussion, review and host submission."""
+    messages = parsed.get("messages") or []
+    user_index = max(
+        (index for index, message in enumerate(messages) if message.get("role") == "user"),
+        default=-1,
+    )
+    text = ""
+    if user_index >= 0:
+        last = messages[user_index].get("content")
+        text = last if isinstance(last, str) else json.dumps(last, ensure_ascii=False)
+    names = _tool_names(parsed)
+    call = _last_tool_call(messages, user_index)
+    output = _last_tool_output(messages, user_index)
+    if "GoalDraft" in names and "<goal-draft>" in text:
+        if call == "GoalDraft":
+            return {"kind": "text", "text": "The draft contract is ready for human confirmation."}
+        if call != "GoalRead":
+            return {"kind": "tool", "name": "GoalRead", "arguments": {}}
+        draft = (output or {}).get("draft") or (output or {}).get("goal") or {}
+        return {
+            "kind": "tool",
+            "name": "GoalDraft",
+            "arguments": {
+                "draft_id": draft.get("id", "missing-draft-id"),
+                "revision": draft.get("revision", 0),
+                "spec": {
+                    "objective": "Verify the fixture README is readable",
+                    "scope": "README.md",
+                    "constraints": [],
+                    "subgoals": [{"id": "inspect-readme", "objective": "Inspect the fixture README"}],
+                    "criteria": [
+                        {
+                            "id": "readme-heading",
+                            "subgoal_id": "inspect-readme",
+                            "outcome": "README.md contains the fixture project heading",
+                            "required_evidence": "Read README.md",
+                        }
+                    ],
+                    "suggested_actions": ["Read README.md"],
+                },
+            },
+        }
+    if "<independent-goal-review>" in text:
+        if call != "Read":
+            return {"kind": "tool", "name": "Read", "arguments": {"path": "README.md"}}
+        return {
+            "kind": "text",
+            "text": (
+                "I inspected README.md with Read. The fixture heading is present, supporting "
+                "the original request, readme-heading criterion and the stated scope. No "
+                "missing deliverables or external blockers were observed."
+            ),
+        }
+    if "GoalReview" in names and "<goal-review>" in text:
+        return {
+            "kind": "tool",
+            "name": "GoalReview",
+            "arguments": {
+                "decision": "complete",
+                "summary": "The independent reviewer inspected README.md and confirmed the contract.",
+            },
+        }
+    return None
 
 
 class Provider(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
+    def do_GET(self):
+        body = json.dumps(COUNTERS).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        stop_test = "stop_test" in json.dumps(request.get("messages", []))
+        messages = request.get("messages", [])
+        stop_test = "stop_test" in json.dumps(messages)
+        scenario = _goal_scenario(request)
+        COUNTERS["requests"] += 1
+        stage = _prompt_stage(messages)
+        if stage:
+            COUNTERS[stage] += 1
+        system = _system_prompt(messages)
+        if system:
+            if FIRST_SYSTEM["prompt"] is None:
+                FIRST_SYSTEM["prompt"] = system
+                COUNTERS["parent_system_chars"] = len(system)
+            elif stage in ("review", "execution"):
+                counters = COUNTERS
+                counters["child_system_chars"] = len(system)
+                shared = _common_prefix(FIRST_SYSTEM["prompt"], system)
+                counters["child_system_common_prefix"] = shared
+                counters["child_system_diverge_parent"] = FIRST_SYSTEM["prompt"][
+                    max(0, shared - 40): shared + 120
+                ]
+                counters["child_system_diverge_child"] = system[max(0, shared - 40): shared + 120]
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -43,15 +217,26 @@ class Provider(http.server.BaseHTTPRequestHandler):
             payload = {"id": "synthetic", "choices": [{"index": 0, "delta": delta, "finish_reason": reason}]}
             self.wfile.write(("data: " + json.dumps(payload) + "\n\n").encode())
             self.wfile.flush()
+        def emit_tool(name, arguments):
+            emit({"tool_calls": [{"index": 0, "id": "fixture-goal", "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}]})
+            emit({}, "tool_calls")
         try:
-            emit({"content": "WAITING_TAG" if stop_test else "SCROLLBACK_ONCE\n\n"})
-            if stop_test:
+            if scenario is not None:
+                if scenario["kind"] == "tool":
+                    emit_tool(scenario["name"], scenario["arguments"])
+                else:
+                    emit({"content": scenario["text"]})
+                    emit({}, "stop")
+            elif stop_test:
+                emit({"content": "WAITING_TAG"})
                 time.sleep(2)
+                emit({}, "stop")
             else:
+                emit({"content": "SCROLLBACK_ONCE\n\n"})
                 for text in ["````text\n", "~~~\n```\n", "mixed fence\n", "````\n", "answer complete"]:
                     emit({"content": text})
                     time.sleep(0.025)
-            emit({}, "stop")
+                emit({}, "stop")
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
@@ -129,6 +314,22 @@ class Surface:
             if time.monotonic() >= deadline:
                 raise AssertionError("terminal did not become idle after initialization")
 
+    def text(self):
+        """ANSI-stripped transcript of everything this surface has emitted."""
+        clean = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", bytes(self.data))
+        clean = re.sub(rb"\x1b\][^\x07]*(?:\x07|\x1b\\)", b"", clean)
+        return clean.decode(errors="replace")
+
+    def wait_for(self, needle, text_offset=0, timeout=5):
+        """Wait for `needle` in output emitted after a text offset."""
+        deadline = time.monotonic() + timeout
+        while needle not in self.text()[text_offset:]:
+            self.pump(0.05)
+            if self.process.poll() is not None or time.monotonic() > deadline:
+                raise AssertionError(
+                    f"Missing {needle!r} after offset; tail={self.text()[-1200:]!r}"
+                )
+
     def wait_exit(self, timeout=10):
         deadline = time.monotonic() + timeout
         while self.process.poll() is None:
@@ -168,6 +369,11 @@ class Remote:
 
 
 def verify(binary, mode, base_url, use_tmux, remote=None):
+    # The head-parity measurement is per lane: the first request of this lane is
+    # the parent, later child requests are compared against it.
+    FIRST_SYSTEM["prompt"] = None
+    for key in ("parent_system_chars", "child_system_chars", "child_system_common_prefix"):
+        COUNTERS.pop(key, None)
     with tempfile.TemporaryDirectory(prefix="mink-pty-") as directory, \
             (remote.temporary_directory() if remote else contextlib.nullcontext(directory)) as work_directory:
         env = os.environ.copy()
@@ -242,6 +448,63 @@ sys.exit(result.returncode)
             if use_tmux and mode == "inline":
                 capture = tmux(["capture-pane", "-p", "-S", "-", "-t", "qa"], capture=True)
                 assert capture.count(b"SCROLLBACK_ONCE") == 1, capture.decode(errors="replace")
+            goal_scene = False
+            if not use_tmux and not remote:
+                # Goal scene: the real binary drives one full goal lifecycle
+                # against the synthetic provider. The transcript must show the
+                # structured boundary cards instead of the model-visible round
+                # prompt, and the round prompt must never echo as user prose.
+                Path(directory, "README.md").write_text(
+                    "# Fixture project\n\nThe fixture README heading lives here.\n"
+                )
+                surface.command("/goal verify the fixture README")
+                surface.wait("目标草案讨论", timeout=20)
+                deadline = time.monotonic() + 30
+                draft = None
+                while time.monotonic() < deadline:
+                    matches = list(Path(directory).rglob("goal.json"))
+                    if matches:
+                        try:
+                            current = json.loads(matches[0].read_text()).get("current") or {}
+                        except ValueError:
+                            current = {}
+                        if current.get("draft_ready"):
+                            draft = current
+                            break
+                    # Pump rather than sleep: the inline TUI asks for the cursor
+                    # position while it lays out, and only the pump answers it.
+                    surface.pump(0.1)
+                assert draft is not None, "the model draft was never saved"
+                surface.settle(timeout=20)
+                surface.command(f"/goal confirm {draft['id']} {draft['revision']}")
+                surface.wait("开始目标", timeout=20)
+                surface.wait("goal:completed", timeout=30)
+                # The lifecycle stages the scenario drove, read from the provider
+                # so "审核状态" is asserted directly and not inferred.
+                counters = json.loads(
+                    urllib.request.urlopen(
+                        base_url.replace("/v1", "") + "/counters", timeout=5
+                    ).read()
+                )
+                for stage in ["draft_discussion", "execution", "review", "adjudication"]:
+                    assert counters.get(stage, 0) >= 1, counters
+                # The child's request head must reach past the environment
+                # section (the isolated child home used to split it at ~1.3k
+                # characters, which killed provider prefix reuse).
+                assert counters.get("child_system_common_prefix", 0) > 1400, counters
+                transcript = surface.text()
+                assert "> <current-goal>" not in transcript, "the round prompt leaked as user prose"
+                assert "<current-goal>" not in transcript, "the raw round prompt was rendered"
+                # Keyboard parity: Ctrl+G opens the read-only goal detail. The
+                # fold/unfold interaction is pinned by the screen-level unit test
+                # (`goal_card_fold_and_unfold_render_the_screen_marker`), which
+                # can assert the rendered marker deterministically.
+                surface.settle(timeout=20)
+                os.write(surface.master, b"\x07")
+                surface.wait("Goal goal-", timeout=10)
+                os.write(surface.master, b"\x1b")
+                surface.pump(0.2)
+                goal_scene = True
             surface.command("stop_test")
             surface.wait("WAITING_TAG")
             streaming_latencies = []
@@ -270,6 +533,43 @@ sys.exit(result.returncode)
                 # one terminal-owned notification, not two OSC protocols.
                 assert surface.data.count(b"\x1b]9;") == 2, "missing or duplicate macOS notification"
                 assert b"\x1b]777;notify;" not in surface.data, "duplicate macOS notification protocol"
+            if goal_scene:
+                # Real-session restore: the same session is reopened from disk
+                # and the boundary cards must come back from the committed rows.
+                second = Surface(
+                    [binary, "--tui=" + mode, "--api-key", "synthetic", "--base-url", base_url, "--continue"],
+                    env,
+                    directory,
+                )
+                try:
+                    second.wait("Enter: send task", timeout=20)
+                    second.wait("开始目标", timeout=20)
+                    second.wait("goal:completed", timeout=20)
+                    # The terminal facts row exists only as a committed row, so
+                    # restoring the session is what renders it.
+                    second.wait("ended (revision", timeout=20)
+                    restored = second.text()
+                    assert "> <current-goal>" not in restored, "restore echoed the round prompt"
+                    second.command("/quit")
+                    second.wait_exit()
+                    assert second.process.returncode == 0, second.process.returncode
+                finally:
+                    second.close()
+                print(
+                    json.dumps(
+                        {
+                            "goal_scene": True,
+                            "mode": mode,
+                            "restored": True,
+                            "parent_system_chars": counters.get("parent_system_chars"),
+                            "child_system_chars": counters.get("child_system_chars"),
+                            "child_system_common_prefix": counters.get(
+                                "child_system_common_prefix"
+                            ),
+                        }
+                    ),
+                    flush=True,
+                )
             latencies.sort()
             streaming_latencies.sort()
             surface_name = ("ssh+" if remote else "") + ("tmux" if use_tmux else "pty")

@@ -1,23 +1,251 @@
 use crate::config::TuiMode;
 use crate::tui::render::content::{ContentMode, render_content};
 use crate::tui::render::detail::{
-    render_artifact_content, render_detail_bar, render_detail_content, render_panel_content,
-    render_plan_content, render_todos_content,
+    render_artifact_content, render_cached_detail, render_detail_bar, render_detail_content,
+    render_panel_content, render_plan_content, render_todos_content,
 };
 use crate::tui::render::file_picker::render_file_picker;
 use crate::tui::render::input::{render_chips, render_input};
+pub(crate) mod status;
 use crate::tui::render::status::render_status;
+pub(crate) use crate::tui::render::status::status_goal_span;
 use crate::tui::state::{TuiState, View};
+use crate::tui::theme;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
+    text::{Line, Span},
 };
 
 pub(super) mod content;
-mod detail;
+pub(crate) mod detail;
+
+/// Detail body for the goal view. Read-only: the runtime owns the contract,
+/// budget and lifecycle, so this view never proposes a change to them.
+pub(crate) fn goal_detail_lines(state: &TuiState) -> Vec<Line<'static>> {
+    let Some(goal) = state.goal.as_ref().filter(|goal| !goal.hidden) else {
+        return vec![Line::from(Span::styled(
+            "No goal state is available in this session.",
+            theme::muted(),
+        ))];
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        format!("Goal {} · {} ({})", goal.id, goal.status, goal.phase),
+        theme::primary_bold(),
+    ))];
+    // The objective, criteria, constraints and reason are host- or user-supplied
+    // text persisted to disk and re-rendered on resume, so they pass the same
+    // control-sequence sanitisation as model output.
+    let field = |label: &str, value: &str| {
+        Line::from(vec![
+            Span::styled(
+                format!("{}: ", crate::tui::sanitize::sanitize_tui_text(label)),
+                theme::muted(),
+            ),
+            Span::raw(crate::tui::sanitize::sanitize_tui_text(value)),
+        ])
+    };
+    if let Some(stage) = goal.review_stage {
+        let label = match stage {
+            mink::runtime::GoalReviewStage::Screening => "判断是否需要验收",
+            mink::runtime::GoalReviewStage::Inspecting => "检查完成证据",
+            mink::runtime::GoalReviewStage::Adjudicating => "宿主提交结论",
+        };
+        lines.push(field("Review stage", label));
+    }
+    if let Some(record) = goal.continuations.last().filter(|r| {
+        r.proposal.candidate.contract_revision == goal.contract_revision
+            && goal
+                .reviews
+                .last()
+                .is_none_or(|f| f.candidate.iteration < r.proposal.candidate.iteration)
+    }) {
+        lines.push(field(
+            "Partial completion",
+            &format!(
+                "round {}: {}",
+                record.proposal.candidate.iteration, record.proposal.summary
+            ),
+        ));
+        lines.push(field(
+            "Remaining requirements",
+            &record.proposal.remaining_requirements.join(", "),
+        ));
+        lines.push(field("Next step", &record.proposal.next_step));
+        lines.push(field("Screening report", &record.report));
+        lines.push(field("Verification", "本轮未进行完整证据验收"));
+    }
+    lines.push(field("Objective", &goal.objective));
+    lines.push(field(
+        "Acceptance",
+        &match goal.completion_basis.as_deref() {
+            Some(basis) if !basis.is_empty() => {
+                format!("{} (basis: {basis})", goal.acceptance)
+            }
+            _ => goal.acceptance.clone(),
+        },
+    ));
+    lines.push(field(
+        "Turns",
+        &format!(
+            "{}/{} used · {}/{} remaining",
+            goal.iterations, goal.max_turns, goal.remaining_turns, goal.max_turns
+        ),
+    ));
+    lines.push(field(
+        "Deadline",
+        &goal
+            .draft_duration_secs
+            .filter(|_| goal.status == "draft")
+            .map(|secs| format!("starts after confirmation: {secs} seconds"))
+            .unwrap_or_else(|| format!("unix {}", goal.deadline_unix_secs)),
+    ));
+    lines.push(field(
+        "Token soft limit",
+        &goal
+            .soft_token_limit
+            .map(|limit| limit.to_string())
+            .unwrap_or_else(|| "none".into()),
+    ));
+    if goal.status == "draft" {
+        lines.push(field(
+            "Confirm exact contract",
+            &format!("/goal confirm {} {}", goal.id, goal.revision),
+        ));
+    }
+    if !goal.original_request.is_empty() {
+        lines.push(field("Original request", &goal.original_request));
+    }
+    let historical_review = goal.reviews.last().filter(|r| {
+        r.candidate.goal_id == goal.id
+            && r.candidate.contract_revision == goal.contract_revision
+            && goal.status != "draft"
+    });
+    let latest_review = historical_review.filter(|r| {
+        goal.review_candidate
+            .as_ref()
+            .is_none_or(|c| c == &r.candidate)
+    });
+    for subgoal in &goal.subgoals {
+        let criteria: Vec<_> = goal
+            .criteria
+            .iter()
+            .filter(|c| c.subgoal_id == subgoal.id)
+            .collect();
+        if latest_review.is_some_and(|review| review.report.is_some()) {
+            lines.push(field(
+                &subgoal.id,
+                &format!("{} (see independent review report)", subgoal.objective),
+            ));
+            continue;
+        }
+        let passed = latest_review.map_or(0, |review| {
+            criteria
+                .iter()
+                .filter(|c| {
+                    review.criteria.iter().any(|check| {
+                        check.criterion_id == c.id
+                            && check.status == mink::runtime::GoalCriterionStatus::Pass
+                    })
+                })
+                .count()
+        });
+        lines.push(field(
+            &subgoal.id,
+            &format!(
+                "{} ({passed}/{} criteria reviewed as pass)",
+                subgoal.objective,
+                criteria.len()
+            ),
+        ));
+    }
+    for criterion in &goal.criteria {
+        lines.push(field(
+            &criterion.id,
+            &format!(
+                "{} · evidence: {}",
+                criterion.outcome, criterion.required_evidence
+            ),
+        ));
+    }
+    if let Some(review) = historical_review {
+        lines.push(field(
+            "Independent review",
+            &format!("round {}: {}", review.candidate.iteration, review.summary),
+        ));
+        if let Some(original) = &review.original_request {
+            lines.push(field(
+                "Original request review",
+                &format!("{:?}: {}", original.status, original.reason),
+            ));
+        }
+        if let Some(report) = &review.report {
+            lines.push(field("Review report", &report.artifact));
+        }
+        for criterion in &review.criteria {
+            lines.push(field(
+                &criterion.criterion_id,
+                &format!(
+                    "{:?}: {} [{}]",
+                    criterion.status,
+                    criterion.reason,
+                    criterion.evidence.join(", ")
+                ),
+            ));
+        }
+        for constraint in &review.constraints {
+            lines.push(field(
+                &constraint.constraint,
+                &format!("{:?}: {}", constraint.status, constraint.reason),
+            ));
+        }
+        lines.push(field("Next step", &review.next_step));
+    }
+    if !goal.acceptance_criteria.is_empty() {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "Acceptance criteria",
+            theme::primary_bold(),
+        )));
+        for criterion in &goal.acceptance_criteria {
+            lines.push(Line::from(crate::tui::sanitize::sanitize_tui_text(
+                &format!("  · {criterion}"),
+            )));
+        }
+    }
+    if !goal.scope.trim().is_empty() {
+        lines.push(field("Scope", &goal.scope));
+    }
+    if !goal.constraints.is_empty() {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "Constraints",
+            theme::primary_bold(),
+        )));
+        for constraint in &goal.constraints {
+            lines.push(Line::from(crate::tui::sanitize::sanitize_tui_text(
+                &format!("  · {constraint}"),
+            )));
+        }
+    }
+    if let Some(reason) = goal.reason.as_deref().filter(|r| !r.trim().is_empty()) {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled("Decision", theme::primary_bold())));
+        lines.push(Line::from(Span::styled(
+            crate::tui::sanitize::sanitize_tui_text(reason),
+            theme::muted(),
+        )));
+    }
+    lines
+}
+
+pub(super) fn render_goal_content(f: &mut Frame, area: Rect, scroll: usize, state: &mut TuiState) {
+    render_cached_detail(f, area, scroll, state, "goal".into(), |state, _w| {
+        goal_detail_lines(state)
+    });
+}
 mod file_picker;
 mod input;
-mod status;
 
 #[cfg(test)]
 pub(crate) use content::transcript_item_lines;
@@ -138,6 +366,11 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState, mode: TuiMode) {
             f.set_cursor_position((cursor_x, cursor_y));
 
             render_status(f, status_area, state);
+            // Record where the goal marker landed so a click can open it.
+            // The status bar only exists in the main view, so the span is
+            // cleared for every other view rather than left stale.
+            state.status_row = status_area.y;
+            state.status_goal_span = status_goal_span(state, status_area.width);
         }
         View::Panel {
             panel,
@@ -165,6 +398,14 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState, mode: TuiMode) {
                 .constraints([Constraint::Min(1), Constraint::Length(1)])
                 .split(area);
             render_plan_content(f, chunks[0], *scroll, state);
+            render_detail_bar(f, chunks[1]);
+        }
+        View::Goal { scroll } => {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .split(area);
+            render_goal_content(f, chunks[0], *scroll, state);
             render_detail_bar(f, chunks[1]);
         }
         View::Todos { scroll } => {

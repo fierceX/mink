@@ -53,7 +53,11 @@ pub fn replay_last_turns(events_path: &Path) {
 
     for evt in &events[start_idx..] {
         match crate::replay::classify_event(evt) {
-            ReplayEventKind::Ignored | ReplayEventKind::PrefixSnapshot => continue,
+            // Goal lifecycle rows are mirrored by the TUI status marker rather
+            // than replayed as transcript lines.
+            ReplayEventKind::Ignored
+            | ReplayEventKind::PrefixSnapshot
+            | ReplayEventKind::GoalLifecycle => continue,
             ReplayEventKind::UserInput => {
                 flush_newline(&mut stdout, &mut last_char, prev_was_thinking);
                 prev_was_thinking = false;

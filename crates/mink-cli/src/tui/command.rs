@@ -4,6 +4,9 @@ pub(crate) enum SlashCommand {
     Pro,
     Model(String),
     Compact,
+    Goal(crate::local::GoalCommand),
+    /// Read-only goal detail view, mirroring the status-bar marker.
+    Goals,
     Help,
     Skills,
     Plan,
@@ -22,6 +25,9 @@ pub(crate) enum SlashCommand {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SlashCommandError {
     pub input: String,
+    /// Parser-supplied explanation, when it has one worth showing: a misspelled
+    /// subcommand names the command it probably meant.
+    pub message: Option<String>,
 }
 
 pub(crate) fn parse_slash_command(input: &str) -> Result<Option<SlashCommand>, SlashCommandError> {
@@ -30,10 +36,19 @@ pub(crate) fn parse_slash_command(input: &str) -> Result<Option<SlashCommand>, S
     }
 
     let command = match input {
+        _ if input == "/goal" || input.starts_with("/goal ") => {
+            SlashCommand::Goal(crate::local::parse_goal_command(input).map_err(|error| {
+                SlashCommandError {
+                    input: input.into(),
+                    message: Some(error.to_string()),
+                }
+            })?)
+        }
         "/flash" => SlashCommand::Flash,
         "/pro" => SlashCommand::Pro,
         "/compact" => SlashCommand::Compact,
         "/help" => SlashCommand::Help,
+        "/goals" => SlashCommand::Goals,
         "/skills" => SlashCommand::Skills,
         "/plan" => SlashCommand::Plan,
         "/todos" => SlashCommand::Todos,
@@ -62,6 +77,7 @@ pub(crate) fn parse_slash_command(input: &str) -> Result<Option<SlashCommand>, S
         _ => {
             return Err(SlashCommandError {
                 input: input.to_string(),
+                message: None,
             });
         }
     };

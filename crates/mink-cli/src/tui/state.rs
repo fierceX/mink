@@ -3,7 +3,7 @@ use crate::tui::notify::{TaskNotification, TaskNotificationKind};
 use crate::tui::sanitize::sanitize_tui_text;
 use crate::ui::StatsSnapshot;
 use crate::ui::{
-    ArtifactDisplay, PlanDisplay, TodoChangeDisplay, TodoDisplay, TodoStatusDisplay,
+    ArtifactDisplay, GoalDisplay, PlanDisplay, TodoChangeDisplay, TodoDisplay, TodoStatusDisplay,
     ToolPresentation, ToolResultKind,
 };
 use ratatui::text::Line;
@@ -22,6 +22,8 @@ pub(crate) enum TranscriptKind {
     SubAgent,
     StreamThinking,
     StreamText,
+    /// A structured goal boundary card (`_mink.goal_message`).
+    Goal,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -87,6 +89,8 @@ pub(crate) struct TranscriptItem {
     pub tool_result_kind: Option<ToolResultKind>,
     pub presentation: Option<ToolPresentation>,
     pub artifacts: Vec<ArtifactDisplay>,
+    /// Structured goal boundary payload; only `TranscriptKind::Goal` carries it.
+    pub goal_message: Option<crate::runtime::GoalMessage>,
     pub sealed: bool,
     pub cached_lines: Option<Vec<Line<'static>>>,
     pub cached_width: u16,
@@ -109,7 +113,7 @@ impl CollapsePolicy {
     fn for_kind(kind: TranscriptKind) -> Self {
         match kind {
             TranscriptKind::StreamThinking => CollapsePolicy::Always,
-            TranscriptKind::Tool => CollapsePolicy::Auto {
+            TranscriptKind::Tool | TranscriptKind::Goal => CollapsePolicy::Auto {
                 threshold_lines: 20,
             },
             _ => CollapsePolicy::Never,
@@ -168,6 +172,7 @@ impl TranscriptItem {
             tool_result_kind: None,
             presentation: None,
             artifacts: Vec::new(),
+            goal_message: None,
             sealed: true,
             cached_lines: None,
             cached_width: 0,
@@ -175,6 +180,16 @@ impl TranscriptItem {
             cached_interactive: false,
             sub_detail: None,
         }
+    }
+
+    /// A sealed goal boundary card rendered from the structured payload alone.
+    ///
+    /// The plain fallback text keeps Inline output self-contained; the Full
+    /// renderer colours the same card through `TranscriptKind::Goal`.
+    pub(crate) fn goal_card(message: crate::runtime::GoalMessage) -> Self {
+        let mut item = Self::new(goal_card_text(&message), TranscriptKind::Goal);
+        item.goal_message = Some(message);
+        item
     }
 
     pub(crate) fn new_tool_result(tool_name: String, text: String) -> Self {
@@ -223,6 +238,61 @@ impl TranscriptItem {
     }
 }
 
+/**
+ * Plain-text rendering of a goal boundary card.
+ *
+ * Every field comes from the structured `GoalMessage`; nothing is parsed back
+ * out of prose. The Inline projection and the collapsed Full summary both use
+ * this text, while the Full renderer colours the same fields.
+ */
+pub(crate) fn goal_card_text(message: &crate::runtime::GoalMessage) -> String {
+    use crate::runtime::GoalMessageKind;
+    let label = match message.kind {
+        GoalMessageKind::Draft => "目标草案讨论",
+        GoalMessageKind::Start => "开始目标",
+        GoalMessageKind::Continuation => "继续执行目标",
+    };
+    let mut text = format!("{label} · {}", message.objective);
+    match message.kind {
+        GoalMessageKind::Draft => {
+            text.push_str(&format!("\n契约 r{}", message.contract_revision));
+            if let Some(feedback) = message
+                .feedback
+                .as_deref()
+                .filter(|feedback| !feedback.trim().is_empty())
+            {
+                text.push_str(&format!(" · 修改意见：{feedback}"));
+            }
+        }
+        GoalMessageKind::Start | GoalMessageKind::Continuation => {
+            text.push_str(&format!(
+                "\n第 {} 轮 · 契约 r{}",
+                message.iteration, message.contract_revision
+            ));
+        }
+    }
+    if let Some(decision) = message
+        .prior_decision
+        .as_deref()
+        .filter(|decision| !decision.trim().is_empty())
+    {
+        text.push_str(&format!("\n上一轮结论：{decision}"));
+    }
+    if !message.acceptance_criteria.is_empty() {
+        text.push_str("\n验收项：");
+        for criterion in &message.acceptance_criteria {
+            text.push_str(&format!("\n  · {criterion}"));
+        }
+    }
+    if !message.constraints.is_empty() {
+        text.push_str("\n约束：");
+        for constraint in &message.constraints {
+            text.push_str(&format!("\n  · {constraint}"));
+        }
+    }
+    text
+}
+
 impl Default for TranscriptItem {
     fn default() -> Self {
         TranscriptItem {
@@ -242,6 +312,7 @@ impl Default for TranscriptItem {
             tool_result_kind: None,
             presentation: None,
             artifacts: Vec::new(),
+            goal_message: None,
             sealed: true,
             cached_lines: None,
             cached_width: 0,
@@ -515,6 +586,7 @@ pub(crate) enum ClickAction {
     ToggleCollapse,
     OpenPlan,
     OpenTodos,
+    OpenGoal,
     OpenArtifact { id: String },
     OpenSubAgent { session_id: String },
 }
@@ -619,6 +691,13 @@ pub(crate) struct TuiState {
     pub sub_agents: SubAgentState,
     pub plan: Option<PlanDisplay>,
     pub todos: Option<TodoDisplay>,
+    /// Read-only mirror of the authoritative goal snapshot. `None` when the
+    /// session has no goal; `hidden` goals are dropped rather than shown.
+    pub goal: Option<GoalDisplay>,
+    /// Screen row of the status bar, and the column range its clickable goal
+    /// marker occupies. Recorded during render so a click can open the goal.
+    pub status_row: u16,
+    pub status_goal_span: Option<(u16, u16)>,
     pub artifacts_dir: PathBuf,
     /// Paste staging directory (`<session_dir>/attachments`).
     pub attachments_dir: PathBuf,
@@ -655,6 +734,9 @@ pub(crate) enum View {
         scroll: usize,
     },
     Plan {
+        scroll: usize,
+    },
+    Goal {
         scroll: usize,
     },
     Todos {
@@ -734,6 +816,9 @@ impl Default for TuiState {
             sub_agents: SubAgentState::default(),
             plan: None,
             todos: None,
+            goal: None,
+            status_row: 0,
+            status_goal_span: None,
             artifacts_dir: PathBuf::new(),
             attachments_dir: PathBuf::new(),
             image_input: None,
@@ -1024,6 +1109,12 @@ impl TuiState {
                     }
                     if self.todos.is_none() {
                         self.todos = state.todos;
+                    }
+                    // The read-only goal mirror is loaded from `goal.json` by
+                    // the background state; a restored session must show its
+                    // goal marker before any `GoalUpdated` arrives.
+                    if self.goal.is_none() {
+                        self.goal = state.goal;
                     }
                     self.loading_history = false;
                     self.invalidate_all_cache();

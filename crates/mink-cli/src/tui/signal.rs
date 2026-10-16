@@ -9,6 +9,20 @@ use std::sync::mpsc;
 
 #[derive(Debug, Clone, Default)]
 pub enum TuiSignal {
+    GoalTurnStarted {
+        turn_id: String,
+    },
+    /// Authoritative goal snapshot mirrored into the read-only status marker
+    /// and goal view. The runtime owns the contract; the UI never edits it.
+    GoalUpdated(Box<crate::ui::GoalDisplay>),
+    /// A goal boundary typed by core (`_mink.goal_message`). Rendered as a
+    /// transcript card from the structured payload; live and replay share it.
+    GoalCard(Box<crate::runtime::GoalMessage>),
+    /// The terminal goal facts row appended when a goal ends.
+    GoalEnded {
+        goal_id: String,
+        revision: u64,
+    },
     GuidanceApplied {
         input_id: String,
         text: String,
@@ -72,6 +86,28 @@ impl TuiState {
             self.invalidate_detail_resource(&format!("sub:{session_id}"));
         }
         match sig {
+            TuiSignal::GoalUpdated(goal) => {
+                self.goal = Some(goal.as_ref().clone());
+                self.invalidate_detail_resource("goal");
+            }
+            TuiSignal::GoalCard(message) => {
+                self.finalize_stream();
+                self.push_line(TranscriptItem::goal_card((**message).clone()));
+            }
+            TuiSignal::GoalEnded { goal_id, revision } => {
+                self.push_line(TranscriptItem::new(
+                    format!(
+                        "Goal {goal_id} ended (revision {revision}). See /goals for the contract."
+                    ),
+                    TranscriptKind::Info,
+                ));
+            }
+            TuiSignal::GoalTurnStarted { turn_id } => {
+                self.active_turn_id = Some(turn_id.clone());
+                self.stopping = false;
+                self.work_state = WorkState::WaitingModel;
+                self.arm_task_notification();
+            }
             TuiSignal::GuidanceApplied { input_id, text } => {
                 if self.applied_inputs.insert(input_id.clone()) {
                     self.finalize_stream();
@@ -105,15 +141,22 @@ impl TuiState {
                             TranscriptKind::Info,
                         ));
                     }
-                    self.finish_task_notification(
-                        if *status == crate::runtime::TurnStatus::Interrupted {
-                            TaskNotificationKind::Interrupted
-                        } else if ok {
-                            TaskNotificationKind::Completed
-                        } else {
-                            TaskNotificationKind::Failed
-                        },
-                    );
+                    if turn_id.starts_with("goal:") {
+                        self.push_line(TranscriptItem::new(
+                            "Goal turn ended; checking goal decision.".into(),
+                            TranscriptKind::Info,
+                        ));
+                    } else {
+                        self.finish_task_notification(
+                            if *status == crate::runtime::TurnStatus::Interrupted {
+                                TaskNotificationKind::Interrupted
+                            } else if ok {
+                                TaskNotificationKind::Completed
+                            } else {
+                                TaskNotificationKind::Failed
+                            },
+                        );
+                    }
                 }
             }
             TuiSignal::Thinking(c) => {

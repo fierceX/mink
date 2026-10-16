@@ -2,13 +2,15 @@ use super::*;
 use std::path::PathBuf;
 
 fn unique_dir(name: &str) -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "mink-attachments-{name}-{}-{nanos}",
-        std::process::id()
+        "mink-attachments-{name}-{}-{nanos}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ))
 }
 

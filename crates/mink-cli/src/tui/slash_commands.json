@@ -1,0 +1,250 @@
+{
+  "commands": [
+    {
+      "input": "/goal",
+      "kind": "goal",
+      "goal": "status"
+    },
+    {
+      "input": "/goal pause",
+      "kind": "goal",
+      "goal": "pause"
+    },
+    {
+      "input": "/goal resume",
+      "kind": "goal",
+      "goal": "resume"
+    },
+    {
+      "input": "/goal cancel",
+      "kind": "goal",
+      "goal": "cancel"
+    },
+    {
+      "input": "/goal clear",
+      "kind": "goal",
+      "goal": "clear"
+    },
+    {
+      "input": "/goal approve",
+      "kind": "goal",
+      "goal": "approve",
+      "text": "explicit terminal approval"
+    },
+    {
+      "input": "/goal approve 看起来完成了",
+      "kind": "goal",
+      "goal": "approve",
+      "text": "看起来完成了"
+    },
+    {
+      "input": "/goal human 完成清单",
+      "kind": "goal",
+      "goal": "create",
+      "text": "完成清单",
+      "acceptance": "human"
+    },
+    {
+      "input": "/goal verified 测试通过",
+      "kind": "goal",
+      "goal": "create",
+      "text": "测试通过",
+      "acceptance": "verifier"
+    },
+    {
+      "input": "/goal reconcile 已确认无副作用",
+      "kind": "goal",
+      "goal": "reconcile",
+      "text": "已确认无副作用"
+    },
+    {
+      "input": "/goal budget 30 90",
+      "kind": "goal",
+      "goal": "budget",
+      "turns": 30,
+      "minutes": 90,
+      "tokens": null
+    },
+    {
+      "input": "/goal budget 5 10 2000",
+      "kind": "goal",
+      "goal": "budget",
+      "turns": 5,
+      "minutes": 10,
+      "tokens": 2000
+    },
+    {
+      "input": "/goals",
+      "kind": "goals"
+    },
+    {
+      "input": "/help",
+      "kind": "help"
+    },
+    {
+      "input": "/skills",
+      "kind": "skills"
+    },
+    {
+      "input": "/plan",
+      "kind": "plan"
+    },
+    {
+      "input": "/todos",
+      "kind": "todos"
+    },
+    {
+      "input": "/inputs",
+      "kind": "inputs"
+    },
+    {
+      "input": "/status",
+      "kind": "status"
+    },
+    {
+      "input": "/latest",
+      "kind": "latest"
+    },
+    {
+      "input": "/details",
+      "kind": "details"
+    },
+    {
+      "input": "/compact",
+      "kind": "compact"
+    },
+    {
+      "input": "/flash",
+      "kind": "flash"
+    },
+    {
+      "input": "/pro",
+      "kind": "pro"
+    },
+    {
+      "input": "/model gpt-4o",
+      "kind": "model",
+      "model": "gpt-4o"
+    },
+    {
+      "input": "/resume saved-id",
+      "kind": "resume",
+      "id": "saved-id"
+    },
+    {
+      "input": "/withdraw saved-id",
+      "kind": "withdraw",
+      "id": "saved-id"
+    },
+    {
+      "input": "/sub-agent sub_1",
+      "kind": "subagent",
+      "id": "sub_1"
+    },
+    {
+      "input": "/artifact artifact://a1",
+      "kind": "artifact",
+      "id": "artifact://a1"
+    },
+    {
+      "input": "/quit",
+      "kind": "quit"
+    },
+    {
+      "input": "/q",
+      "kind": "quit"
+    },
+    {
+      "input": "/exit",
+      "kind": "quit"
+    },
+    {
+      "input": "/nonsense",
+      "error": true
+    },
+    {
+      "input": "/goal budget 30",
+      "error": true
+    },
+    {
+      "input": "/resume ",
+      "error": true
+    },
+    {
+      "input": "/withdraw  ",
+      "error": true
+    },
+    {
+      "input": "/model  ",
+      "error": true
+    },
+    {
+      "input": "/goalbudget",
+      "error": true
+    },
+    {
+      "input": "hello",
+      "not_command": true
+    },
+    {
+      "input": "/goal cancal",
+      "error": true
+    },
+    {
+      "input": "/goal cancle",
+      "error": true
+    },
+    {
+      "input": "/goal cance",
+      "error": true
+    },
+    {
+      "input": "/goal cancell",
+      "error": true
+    },
+    {
+      "input": "/goal confrim",
+      "error": true
+    },
+    {
+      "input": "/goal refne",
+      "error": true
+    },
+    {
+      "input": "/goal confrim draft-13",
+      "error": true
+    },
+    {
+      "input": "/goal refne 增加证据要求",
+      "error": true
+    },
+    {
+      "input": "/goal confirm",
+      "error": true
+    },
+    {
+      "input": "/goal refine",
+      "error": true
+    },
+    {
+      "input": "/goal fix the cancal bug",
+      "kind": "goal",
+      "goal": "create",
+      "text": "fix the cancal bug",
+      "acceptance": "agent_reviewed"
+    },
+    {
+      "input": "/goal confirm draft-1 3",
+      "kind": "goal",
+      "goal": "confirm",
+      "id": "draft-1",
+      "revision": 3
+    },
+    {
+      "input": "/goal refine 增加证据要求",
+      "kind": "goal",
+      "goal": "refine",
+      "feedback": "增加证据要求"
+    }
+  ]
+}

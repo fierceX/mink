@@ -1,5 +1,6 @@
 use crate::tui::markdown::{push_msg_with_width, truncate_visual, wrap_lines_word};
 use crate::tui::render::padded_content_area;
+use crate::tui::sanitize::sanitize_tui_text;
 use crate::tui::state::{ClickAction, ClickTarget, TranscriptItem, TranscriptKind, TuiState};
 use crate::tui::theme;
 use crate::ui::{
@@ -244,6 +245,9 @@ fn build_message_segments(
     if item.kind == TranscriptKind::Tool {
         return build_tool_card_segments(item, inner_w, interactive);
     }
+    if item.kind == TranscriptKind::Goal {
+        return build_goal_card_segments(item, inner_w, interactive);
+    }
 
     let mut seg = Vec::new();
     if item.collapsed {
@@ -273,6 +277,103 @@ fn build_message_segments(
         );
     }
     seg
+}
+
+/// Goal boundary card rendered from `_mink.goal_message` alone.
+///
+/// The header names the boundary kind; the body carries exactly the fields the
+/// runtime published (round, contract revision, feedback, prior decision,
+/// criteria, constraints). Nothing is re-parsed from the model-visible prose.
+fn build_goal_card_segments(
+    item: &TranscriptItem,
+    inner_w: u16,
+    interactive: bool,
+) -> Vec<Line<'static>> {
+    use crate::runtime::GoalMessageKind;
+    let Some(message) = item.goal_message.as_ref() else {
+        let mut fallback = Vec::new();
+        push_msg_with_width(
+            &mut fallback,
+            &item.text,
+            TranscriptKind::Info,
+            inner_w,
+            None,
+        );
+        return fallback;
+    };
+    let (label, style) = match message.kind {
+        GoalMessageKind::Draft => ("目标草案讨论", theme::info()),
+        GoalMessageKind::Start => ("开始目标", theme::primary_bold()),
+        GoalMessageKind::Continuation => ("继续执行目标", theme::primary()),
+    };
+    let mut header = Vec::new();
+    if interactive && item.is_collapsible() {
+        header.push(Span::styled(
+            if item.collapsed { "▶ " } else { "▼ " },
+            theme::muted(),
+        ));
+    } else {
+        header.push(Span::styled("◆ ", theme::muted()));
+    }
+    header.push(Span::styled(
+        label.to_string(),
+        style.add_modifier(Modifier::BOLD),
+    ));
+    header.push(Span::styled(
+        format!("  {}", sanitize_tui_text(&message.objective)),
+        theme::text(),
+    ));
+    let mut lines = vec![Line::from(header)];
+    if item.collapsed {
+        return lines;
+    }
+    let meta = match message.kind {
+        GoalMessageKind::Draft => format!("契约 r{}", message.contract_revision),
+        GoalMessageKind::Start | GoalMessageKind::Continuation => {
+            format!(
+                "第 {} 轮 · 契约 r{}",
+                message.iteration, message.contract_revision
+            )
+        }
+    };
+    lines.push(Line::from(Span::styled(
+        format!("  {meta}"),
+        theme::muted(),
+    )));
+    if message.kind == GoalMessageKind::Draft
+        && let Some(feedback) = message
+            .feedback
+            .as_deref()
+            .filter(|feedback| !feedback.trim().is_empty())
+    {
+        lines.push(Line::from(Span::styled(
+            format!("  修改意见：{}", sanitize_tui_text(feedback)),
+            theme::secondary(),
+        )));
+    }
+    if let Some(decision) = message
+        .prior_decision
+        .as_deref()
+        .filter(|decision| !decision.trim().is_empty())
+    {
+        lines.push(Line::from(Span::styled(
+            format!("  上一轮结论：{}", sanitize_tui_text(decision)),
+            theme::muted(),
+        )));
+    }
+    for criterion in &message.acceptance_criteria {
+        lines.push(Line::from(Span::styled(
+            format!("  · {}", sanitize_tui_text(criterion)),
+            theme::muted(),
+        )));
+    }
+    for constraint in &message.constraints {
+        lines.push(Line::from(Span::styled(
+            format!("  ⊘ {}", sanitize_tui_text(constraint)),
+            theme::muted(),
+        )));
+    }
+    lines
 }
 
 fn build_tool_card_segments(
@@ -449,6 +550,11 @@ fn click_action_for_message(
         Some(ToolPresentation::Todo(_)) => return Some(ClickAction::OpenTodos),
         None => {}
     }
+    // A goal boundary card opens the read-only goal view, the same one the
+    // status-bar marker and `/goals` open.
+    if item.kind == TranscriptKind::Goal {
+        return Some(ClickAction::OpenGoal);
+    }
     if let Some(artifact) = item.artifacts.first() {
         return Some(ClickAction::OpenArtifact {
             id: artifact.id.clone(),
@@ -512,6 +618,7 @@ pub(crate) fn collapsed_summary(item: &TranscriptItem, max_w: usize) -> String {
     let prefix = match item.kind {
         TranscriptKind::Tool => tool_result_summary_prefix(item, line_count),
         TranscriptKind::StreamThinking => "► thinking | ".to_string(),
+        TranscriptKind::Goal => "◆ ".to_string(),
         _ => "► ".to_string(),
     };
     let available = max_w.saturating_sub(unicode_width::UnicodeWidthStr::width(prefix.as_str()));

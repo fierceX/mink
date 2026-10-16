@@ -47,6 +47,9 @@ pub(crate) fn style_for_kind(kind: TranscriptKind) -> Style {
         TranscriptKind::Error => theme::error(),
         TranscriptKind::Info => theme::info(),
         TranscriptKind::SubAgent => theme::sub_agent(),
+        // Goal cards colour their own fields; the generic kind style is the
+        // fallback used by the shared text push path.
+        TranscriptKind::Goal => theme::primary(),
     }
 }
 

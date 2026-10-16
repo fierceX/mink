@@ -9,11 +9,14 @@ use crate::tui::markdown::{
 use crate::tui::notify::TaskNotificationKind;
 use crate::tui::render::{
     build_status_line, build_status_spans, collapsed_summary, content_viewport_height,
-    detail_lines_for_session, detail_viewport_height, split_at_visual_width, visible_lines,
+    detail_lines_for_session, detail_viewport_height, split_at_visual_width, status_goal_span,
+    transcript_item_lines, visible_lines,
 };
 use crate::tui::state::{
     ActiveOverlay, CollapsePolicy, TranscriptItem, TranscriptKind, TuiState, View, WorkState,
 };
+use crate::ui::GoalDisplay;
+
 use crate::ui::{Display, ToolResultDisplay, ToolResultKind};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -92,13 +95,15 @@ fn markdown_normalize_cleans_control_sequences_and_line_endings() {
 
 #[test]
 fn load_session_replays_recent_turns() {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
-        "mink_tui_events_{}_{}.jsonl",
+        "mink_tui_events_{}_{}_{}.jsonl",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let events = [
         serde_json::json!({"type":"user_input","content":"hello\nsecond line"}),
@@ -389,6 +394,38 @@ fn unknown_slash_command_does_not_reach_orchestrator() {
 }
 
 #[test]
+fn mistyped_goal_subcommand_is_refused_with_a_suggestion_and_no_dispatch() {
+    // `/goal cancal` used to dispatch a create, so a cancellation attempt
+    // silently became a goal whose objective was the typo.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = TuiState::default();
+    state.input.buf = "/goal cancal".into();
+    state.input.cursor = "/goal cancal".len();
+
+    let key = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    );
+
+    assert!(!handle_event(
+        crossterm::event::Event::Key(key),
+        &mut state,
+        &tx
+    ));
+    assert!(
+        rx.try_recv().is_err(),
+        "a typo must not reach the runtime as a command"
+    );
+    let line = state
+        .lines
+        .iter()
+        .find(|line| line.text.contains("cancel"))
+        .expect("suggestion line");
+    assert_eq!(line.kind, TranscriptKind::Info);
+    assert!(line.text.contains("是否") || line.text.contains("did you mean"));
+}
+
+#[test]
 fn input_scroll_keeps_cursor_visible() {
     assert_eq!(render::clamp_input_scroll(8, 7, 5, 0), 3);
     assert_eq!(render::clamp_input_scroll(8, 1, 5, 3), 1);
@@ -419,6 +456,30 @@ fn slash_command_parser_classifies_known_unknown_and_text() {
     assert_eq!(parse_slash_command("/q").unwrap(), Some(SlashCommand::Quit));
     assert_eq!(parse_slash_command(" /flash").unwrap(), None);
     assert!(parse_slash_command("/unknown").is_err());
+}
+
+#[test]
+fn slash_command_dispatches_goal_command_to_runtime() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = TuiState::default();
+    state.input.buf = "/goal ship the release".into();
+    state.input.cursor = state.input.buf.len();
+
+    assert!(!handle_event(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &mut state,
+        &tx,
+    ));
+
+    let command = rx.try_recv().expect("goal command");
+    let crate::cli::RuntimeCmd::Goal(expected) = command else {
+        panic!("expected a Goal command");
+    };
+    assert_eq!(
+        expected,
+        crate::local::GoalCommand::Create("ship the release".into())
+    );
+    assert!(state.input.buf.is_empty());
 }
 
 #[test]
@@ -1953,11 +2014,16 @@ fn file_picker_parent_prefix_allows_sandbox_sibling_root() {
 }
 
 fn unique_test_dir(name: &str) -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("mink-tui-{name}-{}-{nanos}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "mink-tui-{name}-{}-{nanos}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
 }
 
 #[test]
@@ -2680,13 +2746,15 @@ fn compact_user_input_replaces_only_marker_lines() {
 
 #[test]
 fn replay_compacts_paste_markers_in_user_input() {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
-        "mink_tui_paste_replay_{}_{}.jsonl",
+        "mink_tui_paste_replay_{}_{}_{}.jsonl",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let events = [
         serde_json::json!({
@@ -2967,4 +3035,793 @@ fn failed_control_receipt_does_not_create_a_failed_submission_from_an_unrelated_
     });
     assert_eq!(state.input.buf, "later draft");
     assert!(state.failed_drafts.is_empty());
+}
+
+fn goal_display() -> GoalDisplay {
+    GoalDisplay {
+        draft_duration_secs: None,
+        revision: 1,
+        original_request: "ship the release".into(),
+        subgoals: Vec::new(),
+        criteria: Vec::new(),
+        contract_revision: 1,
+        reviews: Vec::new(),
+        review_stage: None,
+        continuations: Vec::new(),
+        review_candidate: None,
+        id: "goal-1".into(),
+        // Core derives this; the TUI renders it rather than recomputing.
+        budget: mink::runtime::GoalBudget {
+            max_turns: 20,
+            turns_used: 8,
+            remaining_turns: 12,
+            deadline_unix_secs: 1_800_000_000,
+            remaining_secs: 5_400,
+            blocked_after_consecutive_rounds: 3,
+            blocked_rounds: 0,
+            soft_token_limit: None,
+        },
+        status: "active".into(),
+        phase: "executing".into(),
+        objective: "ship the release".into(),
+        acceptance: "model_reported".into(),
+        acceptance_criteria: vec!["cut a tag".into()],
+        scope: String::new(),
+        constraints: vec!["no network".into()],
+        completion_basis: None,
+        remaining_turns: 12,
+        max_turns: 20,
+        deadline_unix_secs: 1_800_000_000,
+        soft_token_limit: None,
+        iterations: 8,
+        reason: None,
+        hidden: false,
+    }
+}
+
+#[test]
+fn status_bar_shows_goal_marker_with_status_and_remaining_turns() {
+    let mut state = TuiState::default();
+    assert!(!build_status_line(&state, 100).contains("goal:"));
+    state.goal = Some(goal_display());
+    let line = build_status_line(&state, 100);
+    assert!(line.contains("goal:active 12/20"), "{line}");
+}
+
+#[test]
+fn status_bar_omits_hidden_goal_and_marks_completion_basis() {
+    let mut state = TuiState::default();
+    let mut done = goal_display();
+    done.status = "completed".into();
+    done.phase = "idle".into();
+    done.remaining_turns = 0;
+    done.completion_basis = Some("verified".into());
+    state.goal = Some(done.clone());
+    assert!(
+        build_status_line(&state, 100).contains("goal:completed verified"),
+        "completed goals state their basis"
+    );
+    done.hidden = true;
+    state.goal = Some(done);
+    assert!(!build_status_line(&state, 100).contains("goal:"));
+}
+
+#[test]
+fn status_goal_marker_reports_its_column_range() {
+    let mut state = TuiState::default();
+    assert_eq!(status_goal_span(&state, 100), None);
+    state.goal = Some(goal_display());
+    let (start, end) = status_goal_span(&state, 100).expect("goal marker is clickable");
+    assert!(start < end, "marker must occupy a non-empty column range");
+    // The reported range must line up with the rendered marker text.
+    let line = build_status_line(&state, 100);
+    let marker = "goal:active 12/20";
+    let at = line.find(marker).expect("marker rendered");
+    assert!(
+        at >= usize::from(start) && at + marker.len() <= usize::from(end),
+        "range {start}..{end} must cover marker at {at}..{}",
+        at + marker.len()
+    );
+}
+
+#[test]
+fn clicking_the_goal_marker_opens_the_goal_view() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = TuiState {
+        goal: Some(goal_display()),
+        status_row: 4,
+        status_goal_span: Some((10, 28)),
+        ..Default::default()
+    };
+
+    let click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 14,
+        row: 4,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(!handle_event(Event::Mouse(click), &mut state, &tx));
+    assert!(
+        matches!(state.view, View::Goal { scroll: 0 }),
+        "{:?}",
+        state.view
+    );
+
+    // A click elsewhere on the status row must not open it.
+    state.view = View::Main;
+    let outside = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 40,
+        row: 4,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(!handle_event(Event::Mouse(outside), &mut state, &tx));
+    assert!(matches!(state.view, View::Main));
+}
+
+#[test]
+fn goal_updated_signal_replaces_state_goal() {
+    let mut state = TuiState {
+        goal: Some(goal_display()),
+        ..Default::default()
+    };
+    let mut paused = goal_display();
+    paused.status = "paused".into();
+    paused.phase = "idle".into();
+    state.apply(&TuiSignal::GoalUpdated(Box::new(paused)));
+    let goal = state.goal.expect("goal retained");
+    assert_eq!(goal.status, "paused");
+    assert_eq!(goal.phase, "idle");
+}
+
+#[test]
+fn goals_slash_command_opens_the_goal_view() {
+    assert_eq!(
+        parse_slash_command("/goals").unwrap(),
+        Some(SlashCommand::Goals)
+    );
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = TuiState {
+        goal: Some(goal_display()),
+        ..Default::default()
+    };
+    state.input.buf = "/goals".into();
+    state.input.cursor = state.input.buf.len();
+    assert!(!handle_event(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &mut state,
+        &tx,
+    ));
+    assert!(
+        matches!(state.view, View::Goal { scroll: 0 }),
+        "{:?}",
+        state.view
+    );
+}
+
+#[test]
+fn goal_view_derives_progress_from_current_contract_review() {
+    let mut goal = goal_display();
+    goal.subgoals = vec![mink::runtime::GoalSubgoal {
+        id: "delivery".into(),
+        objective: "deliver parser".into(),
+    }];
+    goal.criteria = vec![mink::runtime::GoalCriterion {
+        id: "proof".into(),
+        subgoal_id: "delivery".into(),
+        outcome: "parser delivered".into(),
+        required_evidence: "parser output".into(),
+    }];
+    goal.reviews = vec![serde_json::from_value(serde_json::json!({
+        "candidate":{"goal_id":"goal-1","contract_revision":1,"iteration":1,"conversation_seq":1,"reviewer_id":"auditor"},
+        "verdict":"satisfied","original_request":{"status":"pass","reason":"checked","evidence":["proof.txt"]},
+        "criteria":[{"criterion_id":"proof","status":"pass","reason":"checked","evidence":["proof.txt"]}],
+        "constraints":[],"summary":"reviewed","next_step":"","blocker":null
+    })).unwrap()];
+    for (revision, generation, passes) in [(1, 0, true), (1, 1, false), (2, 0, false)] {
+        goal.contract_revision = revision;
+        let mut candidate = goal.reviews[0].candidate.clone();
+        candidate.generation = generation;
+        goal.review_candidate = Some(candidate);
+        let state = TuiState {
+            goal: Some(goal.clone()),
+            ..Default::default()
+        };
+        let text = super::render::goal_detail_lines(&state)
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+            .collect::<String>();
+        assert!(text.contains(if passes {
+            "1/1 criteria reviewed as pass"
+        } else {
+            "0/1 criteria reviewed as pass"
+        }));
+        assert!(text.contains("evidence: parser output"));
+    }
+}
+
+#[test]
+fn goal_view_renders_objective_limits_and_reason() {
+    let mut goal = goal_display();
+    goal.status = "blocked".into();
+    goal.reason = Some("needs a decision".into());
+    let state = TuiState {
+        goal: Some(goal),
+        view: View::Goal { scroll: 0 },
+        ..Default::default()
+    };
+    let lines = super::render::goal_detail_lines(&state);
+    let text = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for expected in [
+        "blocked",
+        "ship the release",
+        "cut a tag",
+        "no network",
+        "12/20",
+        "needs a decision",
+    ] {
+        assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+    }
+}
+
+#[test]
+fn goal_view_sanitises_persisted_user_text_before_rendering() {
+    let mut goal = goal_display();
+    // The objective is user input persisted to goal.json and re-read on resume;
+    // control sequences must never reach the terminal unfiltered.
+    goal.objective = "ship \u{1b}[31mred\u{1b}[0m \u{7}bell".into();
+    goal.constraints = vec!["no \u{1b}[2Jclear".into()];
+    goal.reason = Some("needs \u{1b}[1minput".into());
+    let state = TuiState {
+        goal: Some(goal),
+        view: View::Goal { scroll: 0 },
+        ..Default::default()
+    };
+    let text = super::render::goal_detail_lines(&state)
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!text.contains('\u{1b}'), "escape survived: {text:?}");
+    assert!(!text.contains('\u{7}'), "bell survived: {text:?}");
+    assert!(text.contains("ship"), "plain text was dropped: {text:?}");
+}
+
+/// The terminal parser and the web workbench are tested against one shared
+/// fixture, so a command added on one surface cannot be missing on the other.
+#[test]
+fn slash_command_surface_matches_the_shared_contract() {
+    let fixture = include_str!("slash_commands.json");
+    let cases: serde_json::Value = serde_json::from_str(fixture).expect("shared command fixture");
+    for case in cases["commands"].as_array().expect("commands array") {
+        let input = case["input"].as_str().expect("input");
+        let parsed = super::command::parse_slash_command(input);
+        if case.get("not_command").and_then(serde_json::Value::as_bool) == Some(true) {
+            assert!(parsed.is_ok(), "{input} should parse as prose");
+            assert!(parsed.unwrap().is_none(), "{input} is not a command");
+            continue;
+        }
+        if case.get("error").and_then(serde_json::Value::as_bool) == Some(true) {
+            assert!(parsed.is_err(), "{input} should be rejected");
+            continue;
+        }
+        let command = parsed
+            .unwrap_or_else(|e| panic!("{input} should parse: {e:?}"))
+            .unwrap_or_else(|| panic!("{input} should be a command"));
+        assert_eq!(
+            command_name(&command),
+            case["kind"].as_str().unwrap(),
+            "{input}"
+        );
+    }
+}
+
+fn command_name(command: &super::command::SlashCommand) -> &'static str {
+    use super::command::SlashCommand::*;
+    match command {
+        Goal(_) => "goal",
+        Model(_) => "model",
+        Resume(_) => "resume",
+        Withdraw(_) => "withdraw",
+        SubAgent(_) => "subagent",
+        Artifact(_) => "artifact",
+        Flash => "flash",
+        Pro => "pro",
+        Compact => "compact",
+        Help => "help",
+        Skills => "skills",
+        Plan => "plan",
+        Todos => "todos",
+        Inputs => "inputs",
+        Status => "status",
+        Latest => "latest",
+        Details => "details",
+        Goals => "goals",
+        Quit => "quit",
+    }
+}
+
+fn goal_message(
+    kind: crate::runtime::GoalMessageKind,
+    iteration: u32,
+    feedback: Option<&str>,
+) -> crate::runtime::GoalMessage {
+    crate::runtime::GoalMessage {
+        kind,
+        goal_id: "goal-1".into(),
+        contract_revision: 2,
+        iteration,
+        objective: "ship the parser".into(),
+        acceptance_criteria: vec!["parses fixtures".into()],
+        constraints: vec!["no network".into()],
+        prior_decision: None,
+        feedback: feedback.map(str::to_owned),
+    }
+}
+
+fn goal_card_lines(item: &TranscriptItem, width: u16) -> String {
+    transcript_item_lines(item, width)
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn goal_boundary_cards_render_from_the_structured_payload() {
+    let mut state = TuiState::default();
+    state.apply(&TuiSignal::GoalCard(Box::new(goal_message(
+        crate::runtime::GoalMessageKind::Draft,
+        0,
+        Some("add evidence"),
+    ))));
+    state.apply(&TuiSignal::GoalCard(Box::new(goal_message(
+        crate::runtime::GoalMessageKind::Start,
+        1,
+        None,
+    ))));
+    let cards: Vec<_> = state
+        .lines
+        .iter()
+        .filter(|item| item.kind == TranscriptKind::Goal)
+        .collect();
+    assert_eq!(cards.len(), 2, "each boundary opens one card");
+
+    let draft = goal_card_lines(cards[0], 60);
+    assert!(draft.contains("目标草案讨论"), "{draft}");
+    assert!(draft.contains("契约 r2"), "{draft}");
+    assert!(draft.contains("修改意见：add evidence"), "{draft}");
+    assert!(!draft.contains("第 0 轮"), "a draft has no round: {draft}");
+
+    let start = goal_card_lines(cards[1], 60);
+    assert!(start.contains("开始目标"), "{start}");
+    assert!(start.contains("第 1 轮 · 契约 r2"), "{start}");
+    assert!(start.contains("parses fixtures"), "{start}");
+    assert!(start.contains("no network"), "{start}");
+    // Inline/plain projection carries no expand affordance.
+    assert!(!start.contains('▶') && !start.contains('▼'), "{start}");
+}
+
+#[test]
+fn clicking_a_goal_card_opens_the_goal_view() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = TuiState::default();
+    state.apply(&TuiSignal::GoalCard(Box::new(goal_message(
+        crate::runtime::GoalMessageKind::Start,
+        1,
+        None,
+    ))));
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut state, TuiMode::Full))
+        .unwrap();
+
+    let target = state
+        .viewport
+        .click_map
+        .iter()
+        .find(|target| target.action == crate::tui::state::ClickAction::OpenGoal)
+        .expect("the goal card registers a click target");
+    let row = state.viewport.content_y + target.start_row as u16;
+    handle_event(
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }),
+        &mut state,
+        &tx,
+    );
+    assert!(
+        matches!(state.view, View::Goal { scroll: 0 }),
+        "{:?}",
+        state.view
+    );
+}
+
+#[test]
+fn goal_card_keyboard_collapses_the_newest_card_and_opens_the_detail() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = TuiState::default();
+    state.apply(&TuiSignal::GoalCard(Box::new(goal_message(
+        crate::runtime::GoalMessageKind::Start,
+        1,
+        None,
+    ))));
+    let index = state.lines.len() - 1;
+    assert!(!state.lines[index].collapsed);
+
+    let collapse = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+    assert!(!handle_event(Event::Key(collapse), &mut state, &tx));
+    assert!(state.lines[index].collapsed, "Ctrl+O folds the newest card");
+    assert!(matches!(state.view, View::Main));
+
+    let open = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+    assert!(!handle_event(Event::Key(open), &mut state, &tx));
+    assert!(
+        matches!(state.view, View::Goal { scroll: 0 }),
+        "{:?}",
+        state.view
+    );
+}
+
+#[test]
+fn inline_goal_card_output_is_stable_across_renders() {
+    let mut item = TranscriptItem::goal_card(goal_message(
+        crate::runtime::GoalMessageKind::Continuation,
+        3,
+        None,
+    ));
+    let first = goal_card_lines(&item, 50);
+    let second = goal_card_lines(&item, 50);
+    assert_eq!(first, second, "repeat renders must be byte-identical");
+    assert!(first.contains("继续执行目标"), "{first}");
+    assert!(first.contains("第 3 轮 · 契约 r2"), "{first}");
+    assert!(!first.contains('▶') && !first.contains('▼'), "{first}");
+
+    // The Inline projection never mints a second item for the same render.
+    let mut state = TuiState::default();
+    state.apply(&TuiSignal::GoalCard(Box::new(
+        item.goal_message.take().unwrap(),
+    )));
+    let before = state.lines.len();
+    let _ = goal_card_lines(&state.lines[0], 50);
+    let _ = goal_card_lines(&state.lines[0], 50);
+    assert_eq!(state.lines.len(), before);
+}
+
+#[test]
+fn goal_card_fold_and_unfold_render_the_screen_marker() {
+    let mut state = TuiState::default();
+    state.apply(&TuiSignal::GoalCard(Box::new(goal_message(
+        crate::runtime::GoalMessageKind::Start,
+        1,
+        None,
+    ))));
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    // Buffer-wide CJK cells carry a trailing blank cell; strip spaces so the
+    // assertions read the glyphs that were rendered.
+    let screen = |terminal: &Terminal<TestBackend>| -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+            .replace(' ', "")
+    };
+    terminal
+        .draw(|frame| render(frame, &mut state, TuiMode::Full))
+        .unwrap();
+    assert!(
+        screen(&terminal).contains('▼'),
+        "expanded marker missing: {:?}",
+        screen(&terminal)
+    );
+    assert!(
+        screen(&terminal).contains("开始目标"),
+        "boundary label missing: {:?}",
+        screen(&terminal)
+    );
+
+    let index = state.lines.len() - 1;
+    state.lines[index].toggle_collapsed();
+    state.invalidate_item(index);
+    terminal
+        .draw(|frame| render(frame, &mut state, TuiMode::Full))
+        .unwrap();
+    assert!(screen(&terminal).contains('▶'), "folded marker missing");
+    assert!(
+        !screen(&terminal).contains("parsesfixtures"),
+        "folding must hide the card body: {:?}",
+        screen(&terminal)
+    );
+
+    state.lines[index].toggle_collapsed();
+    state.invalidate_item(index);
+    terminal
+        .draw(|frame| render(frame, &mut state, TuiMode::Full))
+        .unwrap();
+    assert!(screen(&terminal).contains('▼'), "unfolded marker missing");
+    assert!(
+        screen(&terminal).contains("parsesfixtures"),
+        "unfolding must restore the card body: {:?}",
+        screen(&terminal)
+    );
+}
+
+#[test]
+fn history_load_adopts_the_goal_mirror_without_overwriting_a_live_one() {
+    // The background state reads goal.json; a restored session must show the
+    // marker before any GoalUpdated arrives.
+    let mut live = TuiState {
+        loading_history: true,
+        ..Default::default()
+    };
+    let history = TuiState {
+        goal: Some(goal_display()),
+        ..Default::default()
+    };
+    live.apply_ui_event(crate::tui::state::TuiUiEvent::HistoryLoaded {
+        generation: 0,
+        state: Box::new(history),
+    });
+    assert_eq!(
+        live.goal.as_ref().map(|goal| goal.id.clone()),
+        Some("goal-1".to_string())
+    );
+
+    // A mirror the runtime already published wins over the disk read.
+    let mut paused = goal_display();
+    paused.status = "paused".into();
+    let mut live = TuiState {
+        loading_history: true,
+        goal: Some(paused),
+        ..Default::default()
+    };
+    let history = TuiState {
+        goal: Some(goal_display()),
+        ..Default::default()
+    };
+    live.apply_ui_event(crate::tui::state::TuiUiEvent::HistoryLoaded {
+        generation: 0,
+        state: Box::new(history),
+    });
+    assert_eq!(
+        live.goal.as_ref().map(|goal| goal.status.clone()),
+        Some("paused".to_string())
+    );
+}
+
+/// One committed goal boundary row, shaped like `OrchActor::publish_goal_boundary`
+/// and `publish_goal_draft_discussion` write it.
+fn goal_boundary_row(
+    kind: &str,
+    iteration: u32,
+    feedback: Option<&str>,
+    content: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "role": "user",
+        "content": content,
+        "_mink": {
+            "internal": true,
+            "source": if kind == "draft" { "goal_draft" } else { "goal_continuation" },
+            "goal_message": {
+                "kind": kind,
+                "goal_id": "goal-1",
+                "contract_revision": 2 + iteration,
+                "iteration": iteration,
+                "objective": "ship the TUI matrix",
+                "acceptance_criteria": ["cards render"],
+                "constraints": ["no core changes"],
+                "prior_decision": null,
+                "feedback": feedback,
+            },
+        }
+    })
+}
+
+fn temp_session_dir(tag: &str) -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "mink_tui_{tag}_{}_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Screen symbols joined row-major; CJK cells carry a trailing blank, so
+/// comparisons for non-ASCII text use the space-stripped form.
+fn screen_text(terminal: &Terminal<TestBackend>) -> String {
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect()
+}
+
+#[test]
+fn live_goal_card_kinds_render_on_screen() {
+    let mut state = TuiState::default();
+    for (kind, iteration, feedback) in [
+        (
+            crate::runtime::GoalMessageKind::Draft,
+            0,
+            Some("add the fixture"),
+        ),
+        (crate::runtime::GoalMessageKind::Start, 1, None),
+        (crate::runtime::GoalMessageKind::Continuation, 2, None),
+    ] {
+        state.apply(&TuiSignal::GoalCard(Box::new(goal_message(
+            kind, iteration, feedback,
+        ))));
+    }
+    let backend = TestBackend::new(80, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut state, TuiMode::Full))
+        .unwrap();
+    let tight = screen_text(&terminal).replace(' ', "");
+    assert!(tight.contains("目标草案讨论"), "{tight}");
+    assert!(tight.contains("修改意见：addthefixture"), "{tight}");
+    assert!(tight.contains("开始目标"), "{tight}");
+    assert!(tight.contains("第1轮·契约r2"), "{tight}");
+    assert!(tight.contains("继续执行目标"), "{tight}");
+    assert!(tight.contains("第2轮·契约r2"), "{tight}");
+    assert!(!tight.contains("第0轮"), "a draft has no round: {tight}");
+}
+
+#[test]
+fn session_fixture_restores_goal_cards_and_never_echoes_internal_rows() {
+    let directory = temp_session_dir("session");
+    let rows = vec![
+        serde_json::json!({"role":"user","content":"please do the thing"}),
+        serde_json::json!({"role":"assistant","content":[{"type":"text","text":"working on it"}]}),
+        serde_json::json!({"role":"user","content":"use the fixture","_mink":{"guidance":true,"input_id":"i1"}}),
+        // Runtime-internal families, exactly as core writes them.
+        serde_json::json!({
+            "role":"user",
+            "content":"This is a runtime-generated checkpoint replacing an earlier span of the conversation; it may be a model summary or a lossy excerpt.\n\n<compacted-summary>\nold history\n</compacted-summary>",
+            "internal": true
+        }),
+        serde_json::json!({
+            "role":"user",
+            "content":"<todo-sync revision=\"3\">\nThe persisted todo state is newer than the active conversation.\n</todo-sync>\n\n<current-todos>\n- do it\n</current-todos>",
+            "_mink":{"todo_revision":3,"todo_state_kind":"sync"}
+        }),
+        serde_json::json!({
+            "role":"user",
+            "content":"Plan confirmed transition",
+            "internal": true,
+            "_mink":{"plan_transaction_id":"tx-1"}
+        }),
+        goal_boundary_row(
+            "draft",
+            0,
+            Some("add the fixture"),
+            "<goal-draft>\nFeedback: add the fixture\n</goal-draft>",
+        ),
+        goal_boundary_row(
+            "start",
+            1,
+            None,
+            "<current-goal>\nGoal ID: goal-1\nRound: 1/20\n</current-goal>",
+        ),
+        goal_boundary_row(
+            "continuation",
+            2,
+            None,
+            "<current-goal>\nGoal ID: goal-1\nRound: 2/20\n</current-goal>",
+        ),
+        serde_json::json!({
+            "role":"user",
+            "content":"<goal-review>host submission prompt</goal-review>",
+            "_mink":{"internal":true,"source":"goal_adjudication","candidate":{"goal_id":"goal-1"}}
+        }),
+        serde_json::json!({
+            "role":"user",
+            "content":"<current-goal>\nGoal ID: goal-1\nState: ended\n</current-goal>",
+            "_mink":{"internal":true,"goal_id":"goal-1","goal_revision":9,"goal_state_kind":"ended"}
+        }),
+        serde_json::json!({
+            "role":"user",
+            "content":"<current-goal>\nGoal ID: goal-1\nState: contract\n</current-goal>",
+            "_mink":{"internal":true,"goal_id":"goal-1","goal_revision":9,"goal_state_kind":"contract"}
+        }),
+    ];
+    let conversation = rows
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(directory.join("conversation.jsonl"), conversation).unwrap();
+    std::fs::write(directory.join("events.jsonl"), "").unwrap();
+
+    let items = crate::tui::replay::load_session(&directory.join("events.jsonl"));
+    let mut state = TuiState {
+        lines: items,
+        ..Default::default()
+    };
+    let backend = TestBackend::new(80, 60);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut state, TuiMode::Full))
+        .unwrap();
+    let raw = screen_text(&terminal);
+    let tight = raw.replace(' ', "");
+    let _ = std::fs::remove_dir_all(&directory);
+
+    // Internal rows are never echoed as user prose.
+    for payload in [
+        "<current-goal>",
+        "<compacted-summary>",
+        "<current-todos>",
+        "<todo-sync",
+        "<goal-draft>",
+        "<goal-review>",
+    ] {
+        assert!(!raw.contains(payload), "{payload} leaked: {raw}");
+    }
+    // Human rows and guidance keep their distinct presentation.
+    assert!(raw.contains("> please do the thing"), "{raw}");
+    assert!(raw.contains("[Added to context] use the fixture"), "{raw}");
+
+    // All three boundary kinds render as cards from the structured payload.
+    assert!(tight.contains("目标草案讨论"), "{tight}");
+    assert!(tight.contains("修改意见：addthefixture"), "{tight}");
+    assert!(tight.contains("开始目标"), "{tight}");
+    assert!(tight.contains("第1轮·契约r3"), "{tight}");
+    assert!(tight.contains("继续执行目标"), "{tight}");
+    assert!(tight.contains("第2轮·契约r4"), "{tight}");
+    assert!(!tight.contains("第0轮"), "a draft has no round: {tight}");
+    // The terminal facts row renders with the structured identity.
+    assert!(raw.contains("Goal goal-1 ended (revision 9)"), "{raw}");
+
+    let cards: Vec<_> = state
+        .lines
+        .iter()
+        .filter(|item| item.kind == TranscriptKind::Goal)
+        .collect();
+    assert_eq!(cards.len(), 3, "one card per boundary row");
+    let kinds: Vec<_> = cards
+        .iter()
+        .map(|item| item.goal_message.as_ref().expect("structured payload").kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            crate::runtime::GoalMessageKind::Draft,
+            crate::runtime::GoalMessageKind::Start,
+            crate::runtime::GoalMessageKind::Continuation
+        ]
+    );
 }

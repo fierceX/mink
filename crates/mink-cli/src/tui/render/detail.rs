@@ -217,7 +217,7 @@ pub(super) fn render_panel_content(
     );
 }
 
-fn render_cached_detail(
+pub(super) fn render_cached_detail(
     f: &mut Frame,
     area: Rect,
     scroll: usize,
@@ -253,6 +253,7 @@ fn render_cached_detail(
             scroll: current, ..
         }
         | crate::tui::state::View::Plan { scroll: current }
+        | crate::tui::state::View::Goal { scroll: current }
         | crate::tui::state::View::Todos { scroll: current }
         | crate::tui::state::View::Artifact { scroll: current }
         | crate::tui::state::View::Panel {

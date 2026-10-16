@@ -69,12 +69,15 @@ fn options(root: &std::path::Path, backend: Arc<BoundaryBackend>) -> AgentOption
         .with_log_events(true)
 }
 fn temp_root(label: &str) -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let root = std::env::temp_dir().join(format!(
-        "mink-tui-{label}-{}",
+        "mink-tui-{label}-{}-{}-{}",
+        std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::create_dir_all(root.join("project")).unwrap();
     root
