@@ -35,6 +35,9 @@ node_modules/
 data/
 # Reviewed, sanitized benchmark evidence; day-to-day runs remain in target/bench.
 !/docs/development/benchmarks/data/
+# The workbench's data layer is source, not local state (the `data/` rule above
+# is for captured outputs).
+!apps/web/src/data/
 test-results/
 playwright-report/
 

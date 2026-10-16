@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { mkdirSync } from 'node:fs';
-const require = createRequire(new URL('../crates/mink-server/web/package.json', import.meta.url));
+const require = createRequire(new URL('../apps/web/package.json', import.meta.url));
 const { chromium } = require('@playwright/test');
 const browser = await chromium.launch({headless:true});
 const base = process.env.MINK_DOCS_URL || 'http://127.0.0.1:8026/';

@@ -1,4 +1,4 @@
-// npm ci --prefix crates/mink-server/web; node scripts/docs-site.mjs [--build]
+// npm ci --prefix apps/web; node scripts/docs-site.mjs [--build]
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdirSync, cpSync, rmSync, readdirSync, statSync } from 'node:fs';
 import { resolve, dirname, relative } from 'node:path';
@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 const root = fileURLToPath(new URL('../', import.meta.url));
-const requireWeb = createRequire(resolve(root, 'crates/mink-server/web/package.json'));
+const requireWeb = createRequire(resolve(root, 'apps/web/package.json'));
 const { JSDOM } = await import(pathToFileURL(requireWeb.resolve('jsdom')));
 const require = createRequire(import.meta.url);
 const shared = require('../docs/assets/docs-shared.js');

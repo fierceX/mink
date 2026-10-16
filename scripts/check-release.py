@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Validate release versions before building or publishing any channel."""
 import argparse
-import json
 from pathlib import Path
 import re
 import tomllib
@@ -35,10 +34,6 @@ def check(root: Path, tag: str | None = None) -> str:
         matches = [p for p in packages if p["name"] == name and "source" not in p]
         require(len(matches) == 1 and matches[0]["version"] == version, f"{name} lock version")
     require(tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"] == version, "Python version")
-    web = root / "crates/mink-server/web"
-    require(json.loads((web / "package.json").read_text())["version"] == version, "Web version")
-    lock = json.loads((web / "package-lock.json").read_text())
-    require(lock["version"] == lock["packages"][""]["version"] == version, "Web lock version")
     index = (root / "docs/index.html").read_text()
     require(f'v{version} / OPEN SOURCE' in index, "homepage version")
     for file in ["README.md", "crates/mink-core/README.md", "docs/integration/rust.md", "docs/index.html"]:

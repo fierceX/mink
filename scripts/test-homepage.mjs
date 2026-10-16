@@ -1,5 +1,5 @@
 // Uses the existing web test dependency; no browser or provider credentials.
-// npm ci --prefix crates/mink-server/web && node scripts/test-homepage.mjs
+// npm ci --prefix apps/web && node scripts/test-homepage.mjs
 import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -8,7 +8,7 @@ import { Script } from "node:vm";
 import { test } from "node:test";
 
 const root = new URL("../", import.meta.url);
-const webRequire = createRequire(new URL("crates/mink-server/web/package.json", root));
+const webRequire = createRequire(new URL("apps/web/package.json", root));
 const { JSDOM } = await import(pathToFileURL(webRequire.resolve("jsdom")));
 const html = readFileSync(new URL("docs/index.html", root), "utf8");
 const source = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match => match[1]).join("\n");

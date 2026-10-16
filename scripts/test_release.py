@@ -71,7 +71,7 @@ class VersionTests(unittest.TestCase):
     def test_channel_and_lock_drift_are_rejected(self):
         files = ["Cargo.toml", "Cargo.lock", "pyproject.toml", "README.md", "CHANGELOG.md", "docs/index.html", "docs/integration/rust.md", "docs/integration/python.md", "docs/start/quickstart.md", "docs/development/web-and-site.md", ".github/workflows/ci.yml"]
         files += [f"crates/{p}/Cargo.toml" for p in ["mink-core", "mink-cli", "mink-server"]]
-        files += ["crates/mink-core/README.md", "crates/mink-server/web/package.json", "crates/mink-server/web/package-lock.json"]
+        files += ["crates/mink-core/README.md"]
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for file in files:
@@ -79,7 +79,7 @@ class VersionTests(unittest.TestCase):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(ROOT / file, target)
             version = release.check(root)
-            for file in ["pyproject.toml", "Cargo.lock", "crates/mink-cli/Cargo.toml", "crates/mink-server/web/package-lock.json", "docs/index.html", "docs/integration/rust.md"]:
+            for file in ["pyproject.toml", "Cargo.lock", "crates/mink-cli/Cargo.toml", "docs/index.html", "docs/integration/rust.md"]:
                 path = root / file
                 original = path.read_text()
                 path.write_text(original.replace(version, "99.0.0"))

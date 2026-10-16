@@ -26,7 +26,7 @@ jobs:
           # but the Rust build script later fails when it invokes `vite build`.
           node-version: "20.19.0"
       - run: npm ci
-        working-directory: crates/mink-server/web
+        working-directory: apps/web
       - name: Release versions and publication regressions
         run: |
           python3 scripts/check-release.py
@@ -82,18 +82,24 @@ jobs:
           MINK_REQUIRE_SANDBOX=1 cargo test -p mink-core --test sandbox_linux -- --nocapture
           MINK_REQUIRE_SANDBOX=1 cargo test -p mink-core --test sandbox_linux -- --nocapture --test-threads=1
       - run: make feature-matrix
-      - run: npm test -- --run
-        working-directory: crates/mink-server/web
-      - run: npm run typecheck
-        working-directory: crates/mink-server/web
-      - run: npm run build
-        working-directory: crates/mink-server/web
+      - name: Install web deps (served React frontend)
+        run: npm ci
+        working-directory: apps/web
+      - name: Workbench unit lane (served frontend)
+        run: |
+          npm run test
+          npm run typecheck
+          npm run build
+          npm run check:design
+        working-directory: apps/web
       - name: Install Web E2E browser
-        working-directory: crates/mink-server/web
+        working-directory: apps/web
         run: npx playwright install --with-deps chromium
-      - name: Web E2E with isolated provider
-        working-directory: crates/mink-server/web
-        run: npm run e2e -- --workers=2
+      - name: Build the server the browser lane drives
+        run: cargo build -p mink-server
+      - name: Workbench browser lane (fixtures page + isolated server)
+        working-directory: apps/web
+        run: npx playwright test --workers=2
 
   msrv:
     runs-on: ubuntu-latest
@@ -104,7 +110,7 @@ jobs:
         with:
           node-version: "20.19.0"
       - run: npm ci
-        working-directory: crates/mink-server/web
+        working-directory: apps/web
       - run: cargo check --workspace --all-targets --all-features --locked
       - run: cargo check -p mink-core --no-default-features --features runtime --locked
       - run: cargo check -p mink-cli --no-default-features --features sdk-bin --bin mink-core --locked
@@ -120,11 +126,11 @@ jobs:
         with:
           node-version: "20.19.0"
       - run: npm ci
-        working-directory: crates/mink-server/web
+        working-directory: apps/web
       - name: Check and assemble documentation
         run: make docs-site
       - name: Install documentation browser
-        working-directory: crates/mink-server/web
+        working-directory: apps/web
         run: npx playwright install --with-deps chromium
       - name: Documentation browser acceptance
         run: |
@@ -175,7 +181,7 @@ jobs:
 
       - name: Install web deps (embedded frontend)
         run: npm ci
-        working-directory: crates/mink-server/web
+        working-directory: apps/web
 
       - name: Build mink + mink-server binaries
         run: |
@@ -365,7 +371,7 @@ jobs:
         with:
           node-version: "20.19.0"
       - run: npm ci
-        working-directory: crates/mink-server/web
+        working-directory: apps/web
       - name: Check and assemble documentation
         run: make docs-site
 
