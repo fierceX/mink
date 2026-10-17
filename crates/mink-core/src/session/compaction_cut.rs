@@ -403,7 +403,17 @@ pub(crate) fn is_real_user_message(message: &Value) -> bool {
     if message.get("internal").and_then(Value::as_bool) == Some(true) {
         return false;
     }
-    if message.get("_mink").is_some() {
+    // InputInbox writes genuine human inputs with `_mink` provenance
+    // (`input_id`/`turn_id`). Those are real user messages for compaction: the
+    // engine metadata is not an internal prompt. Other `_mink` rows remain
+    // excluded.
+    if message.get("_mink").is_some()
+        && !message
+            .get("_mink")
+            .and_then(|meta| meta.get("input_id"))
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+    {
         return false;
     }
     let Some(content) = message.get("content").and_then(Value::as_str) else {

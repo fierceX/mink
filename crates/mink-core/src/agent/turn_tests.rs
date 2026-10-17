@@ -2363,6 +2363,37 @@ async fn write_argument_error_consumes_the_format_budget() -> anyhow::Result<()>
     Ok(())
 }
 
+/// Regression: a plain JSON example in the body is not a tool call unless its
+/// name is on the resolved surface (a package.json-like object must stay text).
+#[tokio::test]
+async fn scavenged_plain_json_without_a_surface_tool_is_ignored() -> anyhow::Result<()> {
+    let body = r#"Example config: {"name":"package","version":"1.0.0"}"#;
+    let backend = ScriptedBackend::new(vec![ScriptedAttempt::Events(vec![
+        Ok(Event::Text(crate::protocol::TextEvent {
+            content: body.into(),
+        })),
+        Ok(Event::Stop(StopEvent {
+            reason: "end_turn".into(),
+        })),
+    ])]);
+    let ctx = scripted_context("turn-scavenge-plain-json", backend.clone(), |cfg| {
+        cfg.llm_recovery.request_max_retries = 0;
+    })
+    .await?;
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let (decision, _) = executor.execute("show an example", None).await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert_eq!(backend.calls(), 1, "no format-feedback round is needed");
+    assert!(
+        crate::regression::tool_result_ids(&ctx.store)
+            .await?
+            .is_empty(),
+        "plain JSON must not produce a tool call"
+    );
+    Ok(())
+}
+
 /// Regression: a recognized tool call in the body whose
 /// arguments cannot be parsed must be surfaced (format feedback), not silently
 /// dropped while the turn completes.

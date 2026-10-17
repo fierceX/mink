@@ -239,9 +239,9 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
       break;
 
     case "usage":
-      next.tokensIn += Number(raw.input_tokens ?? 0);
-      next.tokensOut += Number(raw.output_tokens ?? 0);
-      next.cacheReadTokens += Number(raw.cache_read_input_tokens ?? 0);
+      next.tokensIn = (next.tokensIn ?? 0) + Number(raw.input_tokens ?? 0);
+      next.tokensOut = (next.tokensOut ?? 0) + Number(raw.output_tokens ?? 0);
+      next.cacheReadTokens = (next.cacheReadTokens ?? 0) + Number(raw.cache_read_input_tokens ?? 0);
       if (raw.cache_creation_input_tokens != null) next.cacheCreationTokens = (next.cacheCreationTokens ?? 0) + Number(raw.cache_creation_input_tokens);
       if (raw.context_tokens != null) next.contextTokens = Number(raw.context_tokens);
       if (raw.max_context != null) { next.maxContextTokens = Number(raw.max_context); next.contextLimitKnown = true; }

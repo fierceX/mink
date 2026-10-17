@@ -28,7 +28,8 @@ describe('goal budget projection', () => {
       deadline_unix_secs: 2_000,
       remaining_secs: 750,
       blocked_after_consecutive_rounds: 4,
-      blocked_rounds: 2,
+      blocked_rounds: 0,
+      blocker_rounds: 2,
       soft_token_limit: 900,
     })
   })
@@ -68,7 +69,8 @@ describe('goal budget projection', () => {
       deadline_unix_secs: 1_800,
       remaining_secs: 800,
       blocked_after_consecutive_rounds: 3,
-      blocked_rounds: 1,
+      blocked_rounds: 0,
+      blocker_rounds: 1,
       soft_token_limit: null,
     })
   })

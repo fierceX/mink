@@ -46,7 +46,7 @@ Core 的新增 `AgentEventKind::ConversationCommitted {conversation_seq,message}
 | DELETE | `/api/sessions/{id}` | 删除会话（先持有系统文件锁，阻止并发删除） |
 | POST | `/api/sessions/{id}/open` | 打开（建立 session lease） |
 | POST | `/api/sessions/{id}/close` | 关闭（中断当前 turn、释放 lease；关闭后由 idle reaper 兜底） |
-| POST | `/api/sessions/{id}/turn` | 兼容发送消息，内部转持久输入执行路径 |
+| POST | `/api/sessions/{id}/turn` | 兼容发送消息；可选 `request_id`，相同 ID+内容幂等返回既有回执，不同内容 409；未提供时服务端生成 legacy ID |
 | POST / GET | `/api/sessions/{id}/inputs` | 提交任务/引导 / 读取回执与未应用输入 |
 | PATCH / DELETE | `/api/sessions/{id}/inputs/{input_id}` | revision 编辑 / 撤回尚未消费输入 |
 | POST | `/api/sessions/{id}/inputs/{input_id}/resume` | revision 明确用于新轮次 |

@@ -906,6 +906,114 @@ test('keeps each session’s draft with that session', async ({ page }) => {
   await expect(page.getByLabel('输入消息')).toHaveValue('这是会话二的草稿')
 })
 
+test('reconnects the live stream after a network drop', async ({ page }) => {
+  // Supplementary transport-level check: abort the first subscription, then let
+  // the backoff retry through. The offline/online case below covers the browser
+  // signal path.
+  let failed = false
+  await page.route('**/stream*', route => {
+    if (!failed) {
+      failed = true
+      return route.abort('failed')
+    }
+    return route.continue()
+  })
+  await page.goto('/')
+  await page.locator(`[data-row-key="session:${E2E_SESSION_ID}"]`).click()
+  const banner = page.getByText('连接已中断，正在重连…')
+  await expect(banner).toBeVisible({ timeout: 10_000 })
+
+  await expect(banner).toHaveCount(0, { timeout: 30_000 })
+  await expect(page.getByText('fixture question one')).toBeVisible()
+})
+
+test('recovers a running turn after a real offline/online cycle', async ({ page, context }) => {
+  // A fresh session keeps this case independent of the fixture's shared history
+  // and of the other streaming specs running in parallel.
+  const created = await page.request.post('/api/sessions', {
+    data: { name: 'offline-real', cwd: `/tmp/mink-web-e2e-offline-${Date.now()}` },
+  })
+  expect(created.ok()).toBe(true)
+  const target = (await created.json() as { data: { id: string; project_key: string } }).data
+  await page.goto(`/?session=${target.id}&project=${target.project_key}`)
+  const field = page.getByLabel('输入消息')
+  await expect(field).toBeEnabled()
+  await field.fill('start a slow-task please')
+  await page.getByRole('button', { name: '发送' }).click()
+  // The provider holds this turn for ~3.5s; the session keeps running while the
+  // browser is offline.
+  await expect(page.getByRole('button', { name: '停止' })).toBeVisible()
+
+  await context.setOffline(true)
+  const banner = page.getByText('连接已中断，正在重连…')
+  await expect(banner).toBeVisible({ timeout: 10_000 })
+
+  await context.setOffline(false)
+  // Reconnect + authoritative snapshot clear the gap; the live Final still
+  // lands and the composer returns to sending.
+  await expect(banner).toHaveCount(0, { timeout: 30_000 })
+  await expect(page.getByText(/Completed: fixture response/).first()).toBeVisible({ timeout: 30_000 })
+  await expect(page.getByRole('button', { name: '发送' })).toBeVisible({ timeout: 30_000 })
+})
+
+test('restores an in-flight submission and its attachment after leaving', async ({ page }) => {
+  const created = await page.request.post('/api/sessions', {
+    data: { name: 'pending-real', cwd: `/tmp/mink-web-e2e-pending-${Date.now()}` },
+  })
+  expect(created.ok()).toBe(true)
+  const target = (await created.json() as { data: { id: string; project_key: string } }).data
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64',
+  )
+  await page.goto(`/?session=${target.id}&project=${target.project_key}`)
+  const field = page.getByLabel('输入消息')
+  await expect(field).toBeEnabled()
+  // Wait for the session's frozen image capability before opening the picker.
+  await page.getByRole('button', { name: '命令' }).click()
+  await expect(page.getByRole('option', { name: /添加图片/ })).toContainText('图片只进入会话附件目录')
+  await page.keyboard.press('Escape')
+  const picker = page.locator('input[aria-label="选择图片"]')
+  await expect(picker).toBeEnabled()
+  await picker.setInputFiles({
+    name: 'shot.png',
+    mimeType: 'image/png',
+    buffer: png,
+  })
+  const rail = page.locator('[data-composer-attachments]')
+  await expect(rail.locator('img').first()).toHaveAttribute('src', /\/attachments\//)
+
+  // Hold the admission request so the submission is genuinely in flight when
+  // the reader leaves.
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/inputs*', async route => {
+    await gate
+    await route.continue().catch(() => {})
+  })
+  await field.fill('in-flight pending words')
+  await page.getByRole('button', { name: '发送' }).click()
+  const pendingKey = `mink.pending:${target.project_key}:${target.id}`
+  await expect.poll(async () => page.evaluate(key => localStorage.getItem(key), pendingKey)).not.toBeNull()
+
+  await page.goto(`/?session=${E2E_LONG_ID}`)
+  await expect(page.locator('[class*="bubble"]').first()).toBeVisible()
+  await page.goto(`/?session=${target.id}&project=${target.project_key}`)
+  await expect(field).toHaveValue('in-flight pending words')
+  await expect(rail.locator('img').first()).toHaveAttribute('src', /\/attachments\//)
+  release()
+})
+
+test('opens the output named by an /artifact command', async ({ page }) => {
+  await openFixture(page)
+  const field = page.getByLabel('输入消息')
+  await field.fill('/artifact fixture-output')
+  await field.press('Enter')
+  const panel = page.locator('[data-detail-panel="outputs"]')
+  await expect(panel).toBeVisible()
+  await expect(panel.getByText(/fixture-output/)).toBeVisible()
+})
+
 test('keeps an older turn’s actions out of the way until it is hovered', async ({ page }) => {
   await openFixture(page)
   // The source's rule: the tail keeps its chrome, earlier rows reveal it on

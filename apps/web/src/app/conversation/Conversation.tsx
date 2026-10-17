@@ -12,6 +12,7 @@ import { Button, IconPanelLeftOutlineRegular, StateDot, Tooltip } from '../../ui
 import type { SessionState } from '../../data/types.ts'
 import type { ProcessDisplay } from '../settings/preferences.ts'
 import type { InputReceipt } from '../../data/types.ts'
+import type { ReceiptStamp } from '../../data/useSessionView.ts'
 import { PendingInputs } from './PendingInputs.tsx'
 import { useAttachments } from './useAttachments.ts'
 import { Composer } from './Composer.tsx'
@@ -49,7 +50,9 @@ export interface ConversationProps {
   /** Queue guidance for the running turn. */
   onGuide: (text: string, turnId: string, attachmentIds: readonly string[]) => Promise<string | undefined>
   /** Fold a receipt the pending strip changed back into the projection. */
-  onReceiptChanged: (receipt: InputReceipt) => void
+  onReceiptChanged: (receipt: InputReceipt, started?: ReceiptStamp) => void
+  /** Capture the view epoch/runtime generation before a receipt mutation. */
+  receiptStamp?: () => ReceiptStamp
   /** Run one slash command for this session. */
   onCommand: (text: string) => Promise<{ message: string; ok: boolean }>
   /** Bumped when a command asks the transcript to return to its tail. */
@@ -68,6 +71,8 @@ export interface ConversationProps {
   onOpenSidebar?: (() => void) | undefined
   /** This session's stored draft, restored into the composer. */
   draft: string
+  /** An unresolved submission's body, used when the stored draft is empty. */
+  pendingDraft?: string | undefined
   /** Persist the composer's draft with the session. */
   onDraftChange: (text: string) => void
   /** The model in force, as the session's runtime reports it. */
@@ -192,7 +197,8 @@ function OpenFailure({ reason, onRetry }: { reason: string; onRetry: () => void 
 export function Conversation({
   state, title, session, open, error, detailsOpen, onToggleDetails, processDisplay,
   onSend, onGuide, onReceiptChanged, onCommand, followTick, notice, chrome,
-  hasOlder, onLoadOlder, onGoalAction, onOpenFile, onOpenArtifact, onRetryOpen, onOpenSidebar, draft, onDraftChange,
+  hasOlder, onLoadOlder, onGoalAction, onOpenFile, onOpenArtifact, onRetryOpen, onOpenSidebar, draft, pendingDraft, onDraftChange,
+  receiptStamp,
   modelLabel, modelChoices, modelLoading, modelError, onModelChange, onStop,
   chromeHidden: chromeHiddenProp, onRevealChrome, onOpenSettings,
 }: ConversationProps) {
@@ -269,6 +275,7 @@ export function Conversation({
       <PendingInputs
         receipts={(state?.inputs ?? []).filter(receipt => receipt.status !== 'applied' && receipt.status !== 'withdrawn')}
         session={session}
+        captureStamp={receiptStamp}
         onChanged={onReceiptChanged}
       />
     )
@@ -327,6 +334,9 @@ export function Conversation({
       {notice !== undefined && notice !== '' && (
         <p className={rootCss.notice} role="status">{notice}</p>
       )}
+      {state?.desynced && (
+        <p className={rootCss.notice} role="status">连接已中断，正在重连…</p>
+      )}
       <div className={rootCss.body}>
         <div
           className={rootCss.scrollBody}
@@ -375,7 +385,7 @@ export function Conversation({
                       onSend={onSend}
                       onGuide={onGuide}
                       onCommand={onCommand}
-                      initialDraft={draft}
+                      initialDraft={draft !== '' ? draft : (pendingDraft ?? '')}
                       onDraftChange={onDraftChange}
                       onStop={onStop}
                     />
@@ -473,7 +483,7 @@ export function Conversation({
               onSend={onSend}
               onGuide={onGuide}
               onCommand={onCommand}
-              initialDraft={draft}
+              initialDraft={draft !== '' ? draft : (pendingDraft ?? '')}
               onDraftChange={onDraftChange}
               modelChoices={modelChoices}
               modelLoading={modelLoading}

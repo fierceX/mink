@@ -59,3 +59,13 @@ pub fn decode_args_context<T: serde::de::DeserializeOwned>(
 pub fn is_argument_error(error: &anyhow::Error) -> bool {
     error.downcast_ref::<ToolArgumentError>().is_some()
 }
+
+/// Tag a post-decode validation failure as model-format input.
+///
+/// Argument structs decode before a tool body runs; shape/empty/unknown-tag
+/// checks inside the body are still the model's input, not an execution
+/// failure. They must use this wrapper so the runner keeps them in the format
+/// window and out of belief/evidence (same path as [`decode_args`]).
+pub fn invalid_input(detail: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(ToolArgumentError::new(detail))
+}

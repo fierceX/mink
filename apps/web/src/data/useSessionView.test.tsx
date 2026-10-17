@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api, type ApiResponse, type SessionLiveState, type SessionSummary } from './api.ts'
 import { isVerifierAvailable, setVerifierAvailable } from './commands.ts'
 import type { HumanInput, InputReceipt } from './types.ts'
-import { useSessionView } from './useSessionView.ts'
+import { receiptStampHolds, useSessionView } from './useSessionView.ts'
 
 /**
  * Regressions from the workbench audit (W2, W3, W4): the view keeps one
@@ -336,5 +336,15 @@ describe('goal re-read after a command', () => {
       })
     })
     expect(result.current.state?.goal?.revision).toBe(9)
+  })
+})
+
+describe('receipt stamp guard', () => {
+  it('drops a late receipt after a runtime or view epoch change', () => {
+    const started = { identity: 'p:s', epoch: 3, runtime: 'gen-1' }
+    expect(receiptStampHolds(started, { ...started })).toBe(true)
+    expect(receiptStampHolds(started, { ...started, runtime: 'gen-2' })).toBe(false)
+    expect(receiptStampHolds(started, { ...started, epoch: 4 })).toBe(false)
+    expect(receiptStampHolds(started, { ...started, identity: 'p:other' })).toBe(false)
   })
 })

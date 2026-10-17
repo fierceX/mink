@@ -94,13 +94,13 @@ export interface SessionState {
   /** Bounded turn_id+sequence keys used to reject duplicate live delivery. */
   seenTurnEvents: string[];
   model: string;
-  tokensIn: number;
-  tokensOut: number;
+  tokensIn: number | null;
+  tokensOut: number | null;
   belief: number;
   /** Agent 工作状态（由事件推导）：idle/waiting/thinking/generating/tool/sub-agent/compacting/error */
   workState: string;
   /** 缓存命中 tokens（usage 事件累计）与当前上下文估计 */
-  cacheReadTokens: number;
+  cacheReadTokens: number | null;
   cacheCreationTokens: number | null;
   turnCount: number | null;
   requestCount: number | null;
@@ -117,7 +117,7 @@ export interface SessionState {
 export function emptySession(sessionId: string, title: string): SessionState {
   return {
     sessionId, title, running: false, desynced: false, lastSeq: 0, seenTurnEvents: [], model: "",
-    tokensIn: 0, tokensOut: 0, belief: 0, workState: "idle", cacheReadTokens: 0, cacheCreationTokens: null, turnCount: null, requestCount: null, contextLimitKnown: false, waitElapsedSecs: null, activeSubAgents: [], contextTokens: 0, maxContextTokens: 0, items: [],
+    tokensIn: null, tokensOut: null, belief: 0, workState: "idle", cacheReadTokens: null, cacheCreationTokens: null, turnCount: null, requestCount: null, contextLimitKnown: false, waitElapsedSecs: null, activeSubAgents: [], contextTokens: 0, maxContextTokens: 0, items: [],
   };
 }
 
@@ -185,6 +185,8 @@ export interface GoalSnapshot {
     remaining_secs: number;
     blocked_after_consecutive_rounds: number;
     blocked_rounds: number;
+    /** Same-blocker streak (gate progress); optional for older snapshots. */
+    blocker_rounds?: number;
     soft_token_limit: number | null;
   };
   status: string;

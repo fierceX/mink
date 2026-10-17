@@ -453,6 +453,27 @@ fn earlier_valid_arguments_do_not_hide_a_late_type_error() {
 }
 
 #[test]
+fn null_arguments_are_not_a_zero_argument_call() {
+    let mut p = OpenAIParser::new();
+    let lines = [
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"TodoRead\",\"arguments\":null}}]},\"finish_reason\":\"tool_calls\"}]}",
+        "data: [DONE]",
+    ];
+    let events = collect_lines(&mut p, &lines);
+    let call = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ToolCall(c) => Some(c),
+            _ => None,
+        })
+        .expect("the candidate is surfaced");
+    assert!(
+        call.parse_error.is_some(),
+        "null arguments must not execute as {{}}: {call:?}"
+    );
+}
+
+#[test]
 fn legacy_function_call_late_type_error_is_sticky() {
     let mut p = OpenAIParser::new();
     let lines = [

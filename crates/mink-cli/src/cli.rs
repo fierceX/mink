@@ -344,6 +344,11 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
     }
 
     apply_config_file(&mut cfg)?;
+    if let Some(message) =
+        tui_stream_conflict(cfg.tui_mode.enabled(), cfg.agent_jsonl, cfg.output_format)
+    {
+        anyhow::bail!(message);
+    }
 
     if !cfg.agent_jsonl {
         apply_provider_defaults(&mut cfg)?;
@@ -1195,6 +1200,25 @@ fn version_line() -> String {
 #[cfg(test)]
 #[path = "cli_tests.rs"]
 mod tests;
+
+/// `--tui` owns the terminal; stream-json output (`--print`, `--agent-jsonl`)
+/// writes machine-readable lines to stdout. Combining them breaks both.
+fn tui_stream_conflict(
+    tui: bool,
+    agent_jsonl: bool,
+    output_format: crate::config::OutputFormat,
+) -> Option<&'static str> {
+    if !tui {
+        return None;
+    }
+    if agent_jsonl {
+        return Some("--tui cannot be combined with --agent-jsonl");
+    }
+    if output_format == crate::config::OutputFormat::StreamJson {
+        return Some("--tui cannot be combined with --print/stream-json output");
+    }
+    None
+}
 
 struct GoalTerminalSink {
     turns: bool,

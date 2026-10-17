@@ -195,6 +195,22 @@ fn combine_reports_primary_and_cleanup_failures() {
     combine_turn_and_shutdown(Ok(()), Ok(())).unwrap();
 }
 
+#[test]
+fn tui_and_stream_json_output_are_mutually_exclusive() {
+    use crate::config::OutputFormat;
+
+    assert!(
+        super::tui_stream_conflict(true, false, OutputFormat::StreamJson).is_some(),
+        "--tui --print must be rejected"
+    );
+    assert!(
+        super::tui_stream_conflict(true, true, OutputFormat::Human).is_some(),
+        "--tui --agent-jsonl must be rejected"
+    );
+    assert!(super::tui_stream_conflict(true, false, OutputFormat::Human).is_none());
+    assert!(super::tui_stream_conflict(false, false, OutputFormat::StreamJson).is_none());
+}
+
 #[tokio::test]
 async fn broker_renders_compact_skip_once() {
     let (runtime, base) = start_test_runtime("compact-skip").await;

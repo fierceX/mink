@@ -426,8 +426,14 @@ impl Registry {
             .ok_or_else(|| RegistryError::NotFound(format!("session {id} is not open")))
     }
 
-    pub fn start_turn(&self, id: &str, project: Option<&str>, input: String) -> RegistryResult<()> {
-        self.start_turn_inner(id, project, input)
+    pub fn start_turn(
+        &self,
+        id: &str,
+        project: Option<&str>,
+        input: String,
+        request_id: Option<String>,
+    ) -> RegistryResult<()> {
+        self.start_turn_inner(id, project, input, request_id)
     }
 
     fn start_turn_inner(
@@ -435,6 +441,7 @@ impl Registry {
         id: &str,
         project: Option<&str>,
         input: String,
+        request_id: Option<String>,
     ) -> RegistryResult<()> {
         let locator = self.required_active_locator(id, project)?;
         let active = self.lock_active_state()?;
@@ -446,6 +453,15 @@ impl Registry {
                 "session {id} runtime is closed; reopen it"
             )));
         }
+        if let Some(request_id) = request_id.as_deref()
+            && session
+                .runtime
+                .existing_turn_input(request_id, &input)
+                .map_err(|error| RegistryError::Busy(error.to_string()))?
+                .is_some()
+        {
+            return Ok(());
+        }
         let instance = self.instance_key(&locator);
         let permit = self
             .capacity
@@ -453,7 +469,7 @@ impl Registry {
             .map_err(|error| self.capacity_error(id, error))?;
         session
             .runtime
-            .start_turn_with_permit(input, Some(permit))
+            .start_turn_with_permit(input, request_id, Some(permit))
             .map_err(|error| RegistryError::Busy(error.to_string()))
     }
 
@@ -763,6 +779,18 @@ impl Registry {
                 guard.get(&locator).map(|a| a.runtime.running())
             })
             .unwrap_or(false))
+    }
+
+    pub fn closed_session_ids(&self) -> Vec<(String, String)> {
+        let guard = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard
+            .iter()
+            .filter(|(_, session)| session.runtime.closed())
+            .map(|(locator, _)| (locator.id.clone(), locator.project_key.clone()))
+            .collect()
     }
 
     pub fn idle_session_ids(&self, minimum_idle: Duration) -> Vec<(String, String)> {

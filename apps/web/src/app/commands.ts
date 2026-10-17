@@ -18,6 +18,8 @@ export type CommandTab = 'task' | 'goal' | 'files' | 'outputs' | 'diagnostics'
 export interface CommandEffects {
   /** Open the detail panel, optionally on a tab. */
   openDetails?: CommandTab
+  /** Target row inside the opened tab (artifact id / sub-agent id). */
+  path?: string
   /** Return the transcript to its tail. */
   follow?: boolean
   /** Whether the session's goal snapshot should be refetched. */
@@ -221,8 +223,9 @@ export async function runCommand(input: string, context: CommandContext): Promis
       case 'withdraw':
         return await runReceiptCommand(command.kind, command.id, context)
       case 'subagent':
-      case 'artifact':
         return ok(`已打开 ${command.id}`, { openDetails: 'outputs' })
+      case 'artifact':
+        return ok(`已打开 ${command.id}`, { openDetails: 'outputs', path: command.id })
       case 'quit':
         return refuse('/quit 只在终端可用')
       default:

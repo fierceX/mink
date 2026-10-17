@@ -600,7 +600,7 @@ impl LlmBackend for DoubleUsageBackend {
 }
 
 #[tokio::test]
-async fn extra_usage_event_is_recorded_as_unreported() -> anyhow::Result<()> {
+async fn extra_usage_event_does_not_open_a_second_ledger_entry() -> anyhow::Result<()> {
     let ctx = test_context("double-usage", "https://example.invalid/v1").await?;
     let mut stream = stream_backend(
         &(Arc::new(DoubleUsageBackend) as Arc<dyn LlmBackend>),
@@ -616,25 +616,36 @@ async fn extra_usage_event_is_recorded_as_unreported() -> anyhow::Result<()> {
         let _ = event?;
     }
 
+    // One physical attempt settles exactly one record; the second Usage frame
+    // is a duplicate for the same request, not a new attempt.
     let records = ctx.usage.all_records()?;
-    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(records.len(), 1, "{records:?}");
     assert_eq!(
         records[0].status,
         crate::session::usage::UsageStatus::Reported
     );
-    assert_eq!(
-        records[1].status,
-        crate::session::usage::UsageStatus::Unreported
-    );
-    assert!(
-        records[1]
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("provider_sent_extra_usage_event")),
-        "{:?}",
-        records[1].reason
-    );
     Ok(())
+}
+
+#[test]
+fn wrapped_request_failure_keeps_attempt_count() {
+    let failure = LlmRequestFailure {
+        attempt_count: 7,
+        error: anyhow::anyhow!("transport unavailable"),
+    };
+    let wrapped = anyhow::Error::new(failure).context("aggregate backend failure");
+    assert_eq!(super::request_failure_attempt_count(&wrapped), 7);
+}
+
+#[test]
+fn sse_line_limit_only_trips_on_an_unterminated_frame() {
+    let mut terminated = vec![b'a'; MAX_SSE_LINE_BYTES + 1];
+    terminated.push(b'\n');
+    assert!(!super::sse_line_limit_exceeded(&terminated));
+    assert!(super::sse_line_limit_exceeded(&vec![
+        b'a';
+        MAX_SSE_LINE_BYTES + 1
+    ]));
 }
 
 // ── provider HTTP 总超时的真实行为 ──

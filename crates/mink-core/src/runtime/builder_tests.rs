@@ -4792,9 +4792,14 @@ async fn audit9_different_blockers_do_not_share_a_streak() {
         goal.iterations.len()
     );
     assert_eq!(
-        goal.budget().blocked_rounds,
+        goal.budget().blocker_rounds,
         1,
         "the budget view shows the same-blocker streak"
+    );
+    assert_eq!(
+        goal.budget().blocked_rounds,
+        goal.blocked_rounds,
+        "the budget's blocked_rounds mirrors the snapshot's consecutive count"
     );
 }
 

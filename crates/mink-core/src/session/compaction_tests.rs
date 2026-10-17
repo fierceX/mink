@@ -2637,10 +2637,51 @@ async fn startup_repair_loss_cleared_only_after_successful_commit() -> anyhow::R
 /// 回归：应急摘录的收缩必须**严格变小**并在到达地板后收敛，
 /// 且始终从请求原文重建（不在已省略的结果上二次裁剪）。
 #[test]
+fn emergency_excerpt_carries_startup_repair_loss() {
+    // Boundary repair removes messages from the active window; the emergency
+    // checkpoint must still carry a bounded excerpt of them.
+    let loss = vec![serde_json::json!({
+        "role": "user",
+        "content": "message that fell behind the repaired boundary"
+    })];
+    let blocks = super::emergency_blocks("audit", &[], "", Some("current request"), &[], &loss);
+    let rendered = blocks.render();
+    assert!(rendered.contains("startup boundary repair"), "{rendered}");
+    assert!(
+        rendered.contains("message that fell behind the repaired boundary"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn inbox_backed_user_messages_count_for_the_compaction_guard() {
+    use crate::session::compaction_cut::{find_compaction_cut_point, is_real_user_message};
+
+    let active = vec![
+        serde_json::json!({"role":"user","content":"first request"}),
+        serde_json::json!({"role":"assistant","content":"first answer"}),
+        serde_json::json!({"role":"user","content":"second request"}),
+        serde_json::json!({"role":"assistant","content":"second answer"}),
+        serde_json::json!({
+            "role":"user",
+            "content":"inbox request",
+            "_mink":{"input_id":"input-1","turn_id":"turn-1"}
+        }),
+    ];
+    assert!(is_real_user_message(&active[4]));
+    assert_eq!(
+        super::last_real_user_text(&active),
+        Some("inbox request".into())
+    );
+    // The guard keeps the two newest real users instead of folding everything.
+    assert_eq!(find_compaction_cut_point(&active, 1), 2);
+}
+
+#[test]
 fn emergency_excerpt_shrinks_strictly_and_terminates() {
     let request = format!("HEAD{}", "x".repeat(1_200));
     let request = format!("{request}TAIL-DO-NOT-DELETE");
-    let mut blocks = super::emergency_blocks("audit", &[], "", Some(&request), &[]);
+    let mut blocks = super::emergency_blocks("audit", &[], "", Some(&request), &[], &[]);
     let mut last_len = blocks.render().len();
     let mut steps = 0usize;
     while blocks.shrink() {
@@ -2665,7 +2706,7 @@ fn emergency_excerpt_shrinks_strictly_and_terminates() {
 #[test]
 fn emergency_keeps_request_tail() {
     let request = format!("HEAD{}TAIL-DO-NOT-DELETE", "x".repeat(5000));
-    let blocks = super::emergency_blocks("audit", &[], "", Some(&request), &[]);
+    let blocks = super::emergency_blocks("audit", &[], "", Some(&request), &[], &[]);
     assert!(blocks.render().contains("TAIL-DO-NOT-DELETE"));
 }
 
@@ -2675,7 +2716,7 @@ fn emergency_keeps_request_tail() {
 fn emergency_request_excerpt_keeps_both_ends_across_lengths() {
     for length in [0usize, 1, 64, 1_200, 5_000] {
         let request = format!("HEAD-{}-TAIL-DO-NOT-DELETE", "中😀".repeat(length));
-        let blocks = super::emergency_blocks("audit", &[], "", Some(&request), &[]);
+        let blocks = super::emergency_blocks("audit", &[], "", Some(&request), &[], &[]);
         let rendered = blocks.render();
         assert!(rendered.contains("HEAD-"), "length {length}: {rendered}");
         assert!(

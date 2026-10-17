@@ -20,6 +20,10 @@ class Provider(http.server.BaseHTTPRequestHandler):
     # "complete" ends the goal on the third admitted round; "continue" never
     # reports completion, so only the budget can stop the driver.
     mode = "complete"
+    # Set while an independent review request is being held open; the budget
+    # scenario uses it to adjust limits mid-review.
+    review_started = threading.Event()
+    review_delay = 0.0
 
     def log_message(self, *_):
         pass
@@ -44,6 +48,9 @@ class Provider(http.server.BaseHTTPRequestHandler):
 
         try:
             if candidate and "GoalReview" in names and (candidate["goal_id"], candidate["iteration"]) not in Provider.reported:
+                Provider.review_started.set()
+                if Provider.review_delay:
+                    time.sleep(Provider.review_delay)
                 round_key = (candidate["goal_id"], candidate["iteration"])
                 Provider.reported.add(round_key)
                 Provider.iterations.append(candidate["iteration"])
@@ -104,12 +111,13 @@ def main():
         "HOME": home,
         "DEEPSEEK_API_KEY": "sk-synthetic",
         "DEEPSEEK_BASE_URL": f"http://127.0.0.1:{prov_port}",
-        "MINK_SERVER_HOST": "127.0.0.1",
+        # The CLI --host must win over this deliberately unbindable value.
+        "MINK_SERVER_HOST": "192.0.2.1",
         "MINK_SERVER_PORT": str(port),
         "MINK_SERVER_MAX_RUNNING": "4",
         "TERM": "dumb",
     })
-    proc = subprocess.Popen([SERVER], env=env, stdout=subprocess.PIPE,
+    proc = subprocess.Popen([SERVER, "--host", "127.0.0.1"], env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, cwd=workspace)
     base = f"http://127.0.0.1:{port}"
     try:
@@ -271,6 +279,55 @@ def main():
         time.sleep(3)
         check("no provider request after the budget stop", Provider.calls == settled_calls,
               f"{Provider.calls - settled_calls} extra")
+
+        # ---- Budget adjustment during independent review ----
+        # A legitimate /goal budget edit while the review is in flight advances
+        # the revision. The review commit must re-read it and finish instead of
+        # faulting the whole run (which would need a session reopen).
+        status, body = api(base, "POST", "/api/sessions",
+                           {"name": "review-budget", "cwd": workspace})
+        assert status == 200, (status, body)
+        review_sid = body["data"]["id"]
+        status, body = api(base, "POST", f"/api/sessions/{review_sid}/open")
+        assert status == 200, (status, body)
+        Provider.mode = "complete"
+        Provider.review_delay = 3.0
+        Provider.review_started.clear()
+        status, body = api(base, "POST", f"/api/sessions/{review_sid}/goal",
+                           {"objective": "budget edit during review",
+                            "protocol_version": 2,
+                            "generate": False,
+                            "acceptance": "agent_reviewed",
+                            "max_turns": 4,
+                            "max_minutes": 5,
+                            "acceptance_criteria": ["finish the review"]})
+        assert status == 200, (status, body)
+        review_goal = body["data"]["goal"]
+        status, body = api(base, "POST", f"/api/sessions/{review_sid}/goal/confirm",
+                           {"goal_id": review_goal["id"], "revision": review_goal["revision"]})
+        assert status == 200, (status, body)
+        assert Provider.review_started.wait(timeout=40), "the review request never started"
+        status, body = api(base, "GET", f"/api/sessions/{review_sid}/goal")
+        assert status == 200, (status, body)
+        live_goal = body["data"]["goal"]
+        status, body = api(base, "POST", f"/api/sessions/{review_sid}/goal/budget",
+                           {"goal_id": live_goal["id"],
+                            "revision": live_goal["revision"],
+                            "max_turns": 5,
+                            "max_minutes": 5})
+        assert status == 200, (status, body)
+        adjusted = None
+        for _ in range(60):
+            time.sleep(0.5)
+            _st, snap = api(base, "GET", f"/api/sessions/{review_sid}/goal")
+            adjusted = snap["data"]["goal"]
+            if adjusted and adjusted["status"] in ("completed", "failed", "blocked", "budget_exhausted"):
+                break
+        print(f"review-budget goal: status={adjusted['status']} iterations={len(adjusted.get('iterations') or [])} revision={adjusted['revision']}")
+        check("a budget edit during review does not fault the goal",
+              adjusted["status"] == "completed" and adjusted.get("completion_basis") == "agent_reviewed",
+              f"{adjusted['status']}/{adjusted.get('completion_basis')} reason={adjusted.get('reason')}")
+        Provider.review_delay = 0.0
 
         stop.set()
         return 0 if ok else 1

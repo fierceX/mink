@@ -1,5 +1,5 @@
 use super::{Display, StatsSnapshot};
-use crate::ui::sanitize::ControlSequenceFilter;
+use crate::ui::sanitize::{ControlSequenceFilter, strip_ansi};
 use crate::util::fmt_k;
 use std::io::{self, Write};
 use std::sync::Mutex;
@@ -255,6 +255,8 @@ impl Display for TerminalDisplay {
     fn render_signal(&self, _signal_kind: &str, _severity: f64, _message: &str) {}
 
     fn render_info(&self, msg: &str) {
+        // Info is a complete message from untrusted sources (goal/review text).
+        let msg = strip_ansi(msg);
         self.write_err(&format!("\x1b[36m{msg}\x1b[0m\n"));
     }
 

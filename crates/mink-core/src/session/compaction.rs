@@ -241,6 +241,9 @@ struct EmergencyBlocks {
     request_budget: usize,
     request: Option<String>,
     previous: Option<String>,
+    /// Messages skipped by a startup boundary repair; they are no longer in the
+    /// active window, so an emergency checkpoint must carry them explicitly.
+    repair_loss: Option<String>,
     recent: Option<String>,
     artifacts: Option<String>,
 }
@@ -251,6 +254,10 @@ impl EmergencyBlocks {
         for (title, block) in [
             ("latest user request", &self.request),
             ("previous checkpoint (may be partial)", &self.previous),
+            (
+                "startup boundary repair (messages no longer in the active window)",
+                &self.repair_loss,
+            ),
             ("recent tool evidence", &self.recent),
             ("available artifacts", &self.artifacts),
         ] {
@@ -274,6 +281,9 @@ impl EmergencyBlocks {
             return true;
         }
         if self.previous.take().is_some() {
+            return true;
+        }
+        if self.repair_loss.take().is_some() {
             return true;
         }
         let Some(source) = self.request_source.as_deref() else {
@@ -517,6 +527,40 @@ fn recent_evidence(active: &[Value]) -> Option<String> {
     Some(lines.join("\n"))
 }
 
+/// Bounded excerpt of the messages a startup boundary repair removed from the
+/// active window. They still exist in `conversation.jsonl`, but once the
+/// projection boundary moved past them only this excerpt can reach the model.
+fn repair_loss_text(messages: &[Value]) -> Option<String> {
+    const MAX_MESSAGES: usize = 8;
+    if messages.is_empty() {
+        return None;
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for message in messages.iter().take(MAX_MESSAGES) {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let content = message
+            .get("content")
+            .map(|content| {
+                content
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| content.to_string())
+            })
+            .unwrap_or_default();
+        lines.push(format!("- {role}: {}", truncate_chars(&content, 240)));
+    }
+    if messages.len() > MAX_MESSAGES {
+        lines.push(format!(
+            "[…] {} earlier messages omitted…",
+            messages.len() - MAX_MESSAGES
+        ));
+    }
+    Some(lines.join("\n"))
+}
+
 /// 应急摘录材料：固定标记 → 当前用户请求 → 上一份摘要片段 → 最近工具证据。
 /// 全部来自真实数据；不读取 artifact 索引，因此不产生任何可能失效的引用。
 fn emergency_blocks(
@@ -525,6 +569,7 @@ fn emergency_blocks(
     previous_summary: &str,
     current_user_input: Option<&str>,
     artifact_refs: &[String],
+    repair_loss: &[Value],
 ) -> EmergencyBlocks {
     // 请求原文只取真实来源（当前输入优先，否则最近一条真实 user）；空文本不伪造。
     let request_source = current_user_input
@@ -551,6 +596,7 @@ fn emergency_blocks(
         previous: Some(previous_summary.trim())
             .filter(|summary| !summary.is_empty())
             .map(|summary| truncate_chars(summary, EMERGENCY_BLOCK_CHARS / 2)),
+        repair_loss: repair_loss_text(repair_loss),
         recent: recent_evidence(active),
         artifacts: (!artifact_refs.is_empty()).then(|| {
             artifact_refs
@@ -862,12 +908,18 @@ impl CompactionEngine {
                 "refusing emergency checkpoint: the active history has an incomplete tool exchange ({problem})"
             ));
         }
+        let repair_loss = self
+            .startup_repair_loss
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
         let mut blocks = emergency_blocks(
             reason,
             &active,
             &state.summary,
             ctx.current_user_input,
             &ctx.artifact_refs,
+            &repair_loss,
         );
         let input_limit = ctx
             .target_limit

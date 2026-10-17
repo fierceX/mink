@@ -261,7 +261,7 @@ export function App() {
       const effects = result.effects
       if (effects?.openDetails !== undefined) {
         setDetailTab(effects.openDetails)
-        setDetailPath(undefined)
+        setDetailPath(effects.path)
         setRightbarWidth(width => (width > 0 ? width : 360))
       }
       if (effects?.follow === true) setFollowTick(tick => tick + 1)
@@ -364,6 +364,7 @@ export function App() {
                       setRightbarWidth(width => (width > 0 ? width : 360))
                     }}
                     draft={draft.text}
+                    pendingDraft={view.pendingDraft}
                     onDraftChange={draft.write}
                     // The runtime's own report wins over the transcript's echo: a
                     // switch is confirmed by re-reading it, not by the request.
@@ -385,6 +386,7 @@ export function App() {
                     onSend={view.send}
                     onGuide={view.guide}
                     onReceiptChanged={view.mergeReceipt}
+                    receiptStamp={view.receiptStamp}
                     onCommand={runSessionCommand}
                     followTick={followTick}
                     onStop={view.stop}

@@ -380,7 +380,7 @@ surface 解析阶段 fail closed。
 
 ## Server 配置
 
-优先级：**环境变量 > `mink-server.toml` > `~/.minkrc` > 默认值**。
+优先级：**启动参数 `--host` > 环境变量 > `mink-server.toml` > `~/.minkrc` > 默认值**。
 
 | 配置项 | 环境变量 | mink-server.toml | 默认 |
 |--------|----------|------------------|------|
@@ -391,6 +391,10 @@ surface 解析阶段 fail closed。
 | 最大并发会话 | `MINK_SERVER_MAX_RUNNING` | `[server] max_running` | `4` |
 | 闲置自动关闭 | — | `[server] idle_close_secs` | `1800` |
 | turn 超时 | `MINK_SERVER_TURN_TIMEOUT` | — | `1200`（秒） |
+
+监听地址可用 `mink-server --host <IP>` 覆盖以上来源（仅接受 IPv4/IPv6 字面量，未知参数在绑定前拒绝）；
+默认仍为 `0.0.0.0`。端口**没有**启动参数，继续由 `MINK_SERVER_PORT` / `[server] port` 决定；
+IPv6 地址在启动日志中按 `[::1]:8765` 形式显示。
 
 `~/.minkrc` 与 TUI/CLI 共享同一配置文件，**schema 完全一致**（分组格式，扁平键拒绝，与 CLI 相同的 `deny_unknown_fields` 规则）：
 

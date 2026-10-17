@@ -53,6 +53,23 @@ fn render_text_strips_control_sequences_across_chunks() {
 }
 
 #[test]
+fn render_info_strips_untrusted_sequences() {
+    let out = SharedBuffer::default();
+    let err = SharedBuffer::default();
+    let display = display_with(&out, &err, false);
+
+    display.render_info("goal \x1b]0;pwned\x07ready");
+
+    let text = err.text();
+    assert!(text.contains("goal ready"), "{text:?}");
+    assert!(!text.contains("pwned"), "{text:?}");
+    assert!(
+        text.contains("\x1b[36m"),
+        "trusted color code missing: {text:?}"
+    );
+}
+
+#[test]
 fn render_error_strips_payload_but_keeps_trusted_codes() {
     let out = SharedBuffer::default();
     let err = SharedBuffer::default();

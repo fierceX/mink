@@ -210,7 +210,12 @@ impl OpenAIParser {
                         None if !arguments.is_null() => {
                             entry.arguments_type_error = Some(arguments.to_string());
                         }
-                        None => {}
+                        None => {
+                            // `arguments: null` is not a zero-argument payload:
+                            // executing it as `{}` would run a call whose
+                            // arguments the provider never supplied.
+                            entry.arguments_type_error = Some("null".into());
+                        }
                     }
                 }
             }

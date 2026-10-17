@@ -481,6 +481,19 @@ impl AsyncLlClient {
                         match chunk {
                             Some(Ok(bytes)) => {
                                 buf.extend_from_slice(&bytes);
+                                if sse_line_limit_exceeded(&buf) {
+                                    let failure = protocol_damage(anyhow::anyhow!(
+                                        "sse line exceeded {MAX_SSE_LINE_BYTES} bytes without a newline"
+                                    ));
+                                    let _ = AsyncLlClient::send_one(
+                                        &tx,
+                                        Err(anyhow::Error::new(failure)),
+                                        &cancel,
+                                    )
+                                    .await;
+                                    clean_end = true;
+                                    break 'outer;
+                                }
                                 while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
                                     let line = String::from_utf8_lossy(&buf[..=pos]).to_string();
                                     buf.drain(..=pos);
@@ -909,9 +922,6 @@ pub(crate) struct MeteredStream<S> {
     capture: UsageCapture,
     attempt_count: u32,
     completed: bool,
-    /// Extra Usage events after the first are recorded once as unreported
-    /// instead of being silently dropped.
-    extra_usage_recorded: bool,
 }
 
 impl<S> MeteredStream<S> {
@@ -921,7 +931,6 @@ impl<S> MeteredStream<S> {
             capture,
             attempt_count,
             completed: false,
-            extra_usage_recorded: false,
         }
     }
 
@@ -961,13 +970,10 @@ where
                             format!("invalid_provider_usage: {error}"),
                         );
                     }
-                } else if !self.extra_usage_recorded {
-                    self.extra_usage_recorded = true;
-                    record_unreported(
-                        &self.capture,
-                        self.attempt_count,
-                        "provider_sent_extra_usage_event".to_string(),
-                    );
+                } else {
+                    // One attempt settles exactly one usage record. Later usage
+                    // frames are duplicates for the same physical request and
+                    // must not open a second ledger entry.
                 }
                 std::task::Poll::Ready(Some(Ok(Event::Usage(usage))))
             }
@@ -995,10 +1001,24 @@ fn record_unreported(capture: &UsageCapture, attempt_count: u32, reason: impl In
 }
 
 pub(crate) fn request_failure_attempt_count(error: &anyhow::Error) -> u32 {
-    error
-        .downcast_ref::<LlmRequestFailure>()
-        .map(|failure| failure.attempt_count)
-        .unwrap_or(1)
+    // A custom backend may wrap its aggregate failure in context; the
+    // attempt count must survive that wrapping (same chain walk as
+    // `find_upstream_failure`).
+    for cause in error.chain() {
+        if let Some(failure) = cause.downcast_ref::<LlmRequestFailure>() {
+            return failure.attempt_count;
+        }
+    }
+    1
+}
+
+/// A single SSE line may not grow without bound while the peer withholds the
+/// newline. The buffer is drained for every complete line, so this only trips
+/// on an unterminated frame (broken/malicious proxy).
+const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+
+fn sse_line_limit_exceeded(buf: &[u8]) -> bool {
+    buf.len() > MAX_SSE_LINE_BYTES && !buf.contains(&b'\n')
 }
 
 impl Drop for SseEventStream {

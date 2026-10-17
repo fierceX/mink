@@ -26,6 +26,8 @@ const TAIL_LIMIT = 30
 
 export interface SessionView {
   state: SessionState | undefined
+  /** An unresolved submission's body; restores the composer after a return. */
+  pendingDraft: string | undefined
   /** The server runtime holds this session open; sending requires it. */
   open: boolean
   error: string | undefined
@@ -36,7 +38,9 @@ export interface SessionView {
   /** Queue guidance bound to the running turn. */
   guide: (text: string, turnId: string, attachmentIds?: readonly string[]) => Promise<string | undefined>
   /** Fold a receipt the panel changed back into the projection. */
-  mergeReceipt: (receipt: InputReceipt) => void
+  mergeReceipt: (receipt: InputReceipt, started?: ReceiptStamp) => void
+  /** Capture the view epoch/runtime generation before a receipt mutation. */
+  receiptStamp: () => ReceiptStamp
   /** Whether older turns remain before the loaded window. */
   hasOlder: boolean
   /** Load the previous page of history; resolves true when rows were added. */
@@ -83,10 +87,10 @@ function mergeRows(
 /** Seed the projection from the session summary and its conversation tail. */
 function seed(summary: SessionSummary, rows: readonly Record<string, unknown>[]): SessionState {
   const state = emptySession(summary.id, summary.title ?? summary.alias ?? summary.id)
-  state.tokensIn = summary.tokens_in ?? 0
-  state.tokensOut = summary.tokens_out ?? 0
-  state.cacheReadTokens = summary.cache_read_tokens ?? 0
-  state.contextTokens = summary.last_context_tokens ?? state.tokensIn
+  state.tokensIn = summary.tokens_in ?? null
+  state.tokensOut = summary.tokens_out ?? null
+  state.cacheReadTokens = summary.cache_read_tokens ?? null
+  state.contextTokens = summary.last_context_tokens ?? state.tokensIn ?? 0
   const reduced = projectMessages(state, [...rows])
   reduced.running = false
   reduced.workState = 'idle'
@@ -157,6 +161,20 @@ interface ViewStamp {
   turn: string | null
 }
 
+/** The parts of a request's view that a receipt may not outlive. */
+export interface ReceiptStamp {
+  identity: string | undefined
+  epoch: number
+  runtime: string | undefined
+}
+
+/** A receipt may land only while the view epoch and runtime generation hold. */
+export function receiptStampHolds(started: ReceiptStamp, now: ReceiptStamp): boolean {
+  return started.identity === now.identity
+    && started.epoch === now.epoch
+    && started.runtime === now.runtime
+}
+
 /**
  * Follow one session for as long as it is selected.
  * @param summary - the open session, or undefined when none is selected.
@@ -198,6 +216,11 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
       && now.runtime === stamp.runtime
       && now.turn === stamp.turn
   }
+  /** Capture the receipt boundary before an input mutation leaves the view. */
+  const receiptStamp = useCallback((): ReceiptStamp => {
+    const now = stampNow()
+    return { identity: now.identity, epoch: now.epoch, runtime: now.runtime }
+  }, [])
 
   /** The submission this session left unresolved, from memory or storage. */
   const storedSubmission = (target: SessionSummary): HumanInput | undefined => {
@@ -286,9 +309,12 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
           },
           () => {
             if (!current()) return
+            // Keep the last known running/work state: the reconnect's
+            // authoritative snapshot decides it. Faking `running:false` here
+            // flips the composer from guidance back to a new turn.
             setState(previous => (previous === undefined
               ? previous
-              : { ...previous, desynced: true, running: false, workState: 'idle' }))
+              : { ...previous, desynced: true }))
           },
           summary.project_key,
           undefined,
@@ -467,18 +493,29 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
     return true
   }, [hasOlder, summary, identityRef])
 
-  const mergeReceipt = useCallback((receipt: InputReceipt) => {
+  const mergeReceipt = useCallback((receipt: InputReceipt, started?: ReceiptStamp) => {
     // The strip is keyed by session, but its request may answer after a switch:
     // only the identity that asked for the change may fold the receipt in. The
     // receipt's own revision is the second guard — an older receipt can never
     // replace a newer one, whichever session it came from.
     if (identityRef.current !== identity) return
+    if (started !== undefined) {
+      const now = stampNow()
+      if (!receiptStampHolds(started, {
+        identity: now.identity,
+        epoch: now.epoch,
+        runtime: now.runtime,
+      })) return
+    }
     setState((previous) => {
       if (previous === undefined) return previous
       const receipts = [...previous.inputs ?? []]
       const index = receipts.findIndex(item => item.input_id === receipt.input_id)
-      if (index < 0) receipts.push(receipt)
-      else if (receipts[index].revision <= receipt.revision) receipts[index] = receipt
+      // Only fold a change into a receipt this projection already holds. A
+      // reply that raced a runtime restart / reopen must not invent a row the
+      // authoritative snapshot never contained.
+      if (index < 0) return previous
+      if (receipts[index].revision <= receipt.revision) receipts[index] = receipt
       return { ...previous, inputs: receipts }
     })
   }, [identity, identityRef])
@@ -521,5 +558,7 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
     })
   }, [summary, stateRef])
 
-  return { state, open, error, retry: () => { setAttempt(value => value + 1) }, send, guide, mergeReceipt, hasOlder, loadOlder, refreshGoal, stop }
+  const pendingDraft = summary === undefined ? undefined : storedSubmission(summary)?.text
+
+  return { state, open, error, retry: () => { setAttempt(value => value + 1) }, send, guide, mergeReceipt, hasOlder, loadOlder, refreshGoal, stop, pendingDraft, receiptStamp }
 }

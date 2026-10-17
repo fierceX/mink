@@ -9,6 +9,7 @@ import { requestId } from '../../data/request-id.ts'
 
 import { useCallback, useState } from 'react'
 import type { HumanInput, InputReceipt } from '../../data/types.ts'
+import type { ReceiptStamp } from '../../data/useSessionView.ts'
 import { api, type SessionSummary } from '../../data/api.ts'
 import { Button } from '../../ui/primitives/index.ts'
 import css from './PendingInputs.module.css'
@@ -41,10 +42,11 @@ function statusLabel(status: InputReceipt['status']): string {
  * @param props.onChanged - reload the projection after a server-side change.
  * @returns the strip, or null when the queue is empty.
  */
-export function PendingInputs({ receipts, session, onChanged }: {
+export function PendingInputs({ receipts, session, onChanged, captureStamp }: {
   receipts: readonly InputReceipt[]
   session: SessionSummary
-  onChanged: (receipt: InputReceipt) => void
+  onChanged: (receipt: InputReceipt, started?: ReceiptStamp) => void
+  captureStamp?: () => ReceiptStamp
 }) {
   const [editing, setEditing] = useState<string | undefined>(undefined)
   const [draft, setDraft] = useState('')
@@ -55,6 +57,9 @@ export function PendingInputs({ receipts, session, onChanged }: {
     if (busy !== undefined) return
     setBusy(receipt.input_id)
     setError(undefined)
+    // The receipt may answer after a runtime reopen: remember the view it was
+    // requested from so a late answer cannot fold into the new one.
+    const started = captureStamp?.()
     // One async body owns both failure kinds: a rejected call and a business
     // refusal (a non-200 code in a 2xx envelope) both say why in place.
     void (async () => {
@@ -70,14 +75,14 @@ export function PendingInputs({ receipts, session, onChanged }: {
         }
         setEditing(undefined)
         setDraft('')
-        onChanged(response.data)
+        onChanged(response.data, started)
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : String(cause))
       }
     })().finally(() => {
       setBusy(undefined)
     })
-  }, [busy, draft, onChanged, session])
+  }, [busy, captureStamp, draft, onChanged, session])
 
   if (receipts.length === 0) return null
 

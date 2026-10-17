@@ -23,7 +23,8 @@ export function goalBudget(
   }
 
   const turnsUsed = goal.iterations?.length ?? previous?.turns_used ?? 0
-  const blockedRounds = goal.blocker_rounds ?? previous?.blocked_rounds ?? 0
+  const blockedRounds = goal.blocked_rounds ?? previous?.blocked_rounds ?? 0
+  const blockerRounds = goal.blocker_rounds ?? previous?.blocker_rounds ?? previous?.blocked_rounds ?? 0
   const softTokenLimit = limits !== undefined
     && Object.prototype.hasOwnProperty.call(limits, 'soft_token_limit')
     ? limits.soft_token_limit ?? null
@@ -37,6 +38,7 @@ export function goalBudget(
     remaining_secs: Math.max(0, deadline - nowUnixSecs),
     blocked_after_consecutive_rounds: blockedThreshold,
     blocked_rounds: blockedRounds,
+    blocker_rounds: blockerRounds,
     soft_token_limit: softTokenLimit,
   }
 }

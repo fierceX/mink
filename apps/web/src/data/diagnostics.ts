@@ -2,8 +2,8 @@ import type { SessionState } from './types';
 import { fmtK } from './fmt';
 
 // Same partition and integer truncation as StatsSnapshot::cache_pct / ctx_pct.
-export function cachePercentage(input: number, read: number, creation: number | null | undefined): number | null {
-  if (creation == null) return null;
+export function cachePercentage(input: number | null | undefined, read: number | null | undefined, creation: number | null | undefined): number | null {
+  if (input == null || read == null || creation == null) return null;
   const total = input + read + creation;
   return total > 0 ? Math.floor(read * 100 / total) : null;
 }
@@ -21,9 +21,9 @@ export function diagnosticGroups(state: SessionState | null, cwd: string) {
       ...(state?.waitElapsedSecs != null ? [['模型等待',`${state.waitElapsedSecs}s`]] : []),
     ] },
     { title:'Token', rows:[
-      ['输入',fmtK((state?.tokensIn ?? 0) + (state?.cacheReadTokens ?? 0))],['输出',fmtK(state?.tokensOut ?? 0)],
+      ['输入', state?.tokensIn == null || state?.cacheReadTokens == null ? '—' : fmtK(state.tokensIn + state.cacheReadTokens)],['输出',state?.tokensOut == null ? '—' : fmtK(state.tokensOut)],
       ['缓存命中率',percent(state ? cachePercentage(state.tokensIn,state.cacheReadTokens,state.cacheCreationTokens) : null)],
-      ['缓存读取',fmtK(state?.cacheReadTokens ?? 0)],['缓存创建',state?.cacheCreationTokens == null ? '—' : fmtK(state.cacheCreationTokens)],['未缓存输入',fmtK(state?.tokensIn ?? 0)],
+      ['缓存读取',state?.cacheReadTokens == null ? '—' : fmtK(state.cacheReadTokens)],['缓存创建',state?.cacheCreationTokens == null ? '—' : fmtK(state.cacheCreationTokens)],['未缓存输入',state?.tokensIn == null ? '—' : fmtK(state.tokensIn)],
     ] },
     { title:'上下文', rows:[
       ['当前上下文',fmtK(state?.contextTokens ?? 0)],['上下文上限',state?.contextLimitKnown ? state.maxContextTokens > 0 ? fmtK(state.maxContextTokens) : '未限制' : '—'],

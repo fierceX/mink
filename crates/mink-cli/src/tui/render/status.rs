@@ -62,7 +62,7 @@ pub(crate) fn status_goal_span(state: &TuiState, width: u16) -> Option<(u16, u16
     // first item's text starts at column 1, not 0.
     let mut column = 1u16;
     for item in visible_status_items(state, width) {
-        let len = item.text.chars().count() as u16;
+        let len = status_text_width(&item.text);
         if item.click == Some(StatusClick::Goal) {
             return Some((column, column.saturating_add(len)));
         }
@@ -235,6 +235,12 @@ fn goal_status_label(goal: Option<&crate::ui::GoalDisplay>) -> Option<String> {
 fn status_width(items: &[StatusItem]) -> usize {
     items
         .iter()
-        .map(|item| 1 + unicode_width::UnicodeWidthStr::width(item.text.as_str()))
+        .map(|item| 1 + status_text_width(&item.text) as usize)
         .sum()
+}
+
+/// Display columns of one status item. The click span and the painted line must
+/// agree; `chars().count()` under-counts CJK/emoji and shifts the goal marker.
+pub(crate) fn status_text_width(text: &str) -> u16 {
+    unicode_width::UnicodeWidthStr::width(text).min(u16::MAX as usize) as u16
 }

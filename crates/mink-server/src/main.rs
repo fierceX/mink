@@ -20,7 +20,7 @@ mod web_assets;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config_path = match parse_args(std::env::args_os().skip(1))? {
+    let (config_path, host_override) = match parse_args(std::env::args_os().skip(1))? {
         ServerArgs::Version => {
             println!("{}", version_line());
             return Ok(());
@@ -29,9 +29,12 @@ async fn main() -> Result<()> {
             print_usage();
             return Ok(());
         }
-        ServerArgs::Serve(path) => path,
+        ServerArgs::Serve { config, host } => (config, host),
     };
-    let cfg = ServerConfig::load(config_path.as_deref())?;
+    let mut cfg = ServerConfig::load(config_path.as_deref())?;
+    if let Some(host) = host_override {
+        cfg.host = host;
+    }
     validate_runtime_config(&cfg)?;
 
     let cwd = std::env::current_dir()?;
@@ -49,6 +52,14 @@ async fn main() -> Result<()> {
             for (id, project) in reaper_registry.idle_session_ids(idle_close) {
                 if let Err(error) = reaper_registry.close(&id, Some(&project)).await {
                     eprintln!("[mink-server] idle close {id} failed: {error:#}");
+                }
+            }
+            // A forced turn timeout finalizes the runtime as `Closed` but the
+            // entry stays in the active table until someone removes it; without
+            // this sweep it would be listed as active forever and never reaped.
+            for (id, project) in reaper_registry.closed_session_ids() {
+                if let Err(error) = reaper_registry.close(&id, Some(&project)).await {
+                    eprintln!("[mink-server] closed-session reap {id} failed: {error:#}");
                 }
             }
         }
@@ -76,7 +87,7 @@ async fn main() -> Result<()> {
         api::router(state).fallback_service(ServeDir::new(web_dir))
     };
 
-    let addr = format!("{}:{}", cfg.host, cfg.port);
+    let addr = bind_address(&cfg.host, cfg.port);
     let listener = TcpListener::bind(&addr).await?;
     println!(
         "mink-server listening on http://{addr} (home: {})",
@@ -101,20 +112,84 @@ async fn main() -> Result<()> {
 enum ServerArgs {
     Help,
     Version,
-    Serve(Option<PathBuf>),
+    Serve {
+        config: Option<PathBuf>,
+        host: Option<String>,
+    },
 }
 
+/// Parse the process arguments.
+///
+/// The configuration path stays the single positional argument (the CLI/server
+/// contract). `--host` is the only added startup option: the listening *port*
+/// keeps its existing `MINK_SERVER_PORT`/TOML sources, so `--port` is rejected
+/// as an unknown option.
 fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<ServerArgs> {
-    let mut args = args.into_iter();
-    let first = args.next();
-    if args.next().is_some() {
-        anyhow::bail!("expected at most one configuration path; see --help");
+    let args: Vec<OsString> = args.into_iter().collect();
+    let mut config: Option<PathBuf> = None;
+    let mut host: Option<String> = None;
+    let mut index = 0usize;
+    while index < args.len() {
+        let arg = &args[index];
+        let Some(text) = arg.to_str() else {
+            anyhow::bail!("argument is not valid UTF-8; see --help");
+        };
+        match text {
+            "-h" | "--help" => {
+                if args.len() > 1 {
+                    anyhow::bail!("--help does not take other arguments");
+                }
+                return Ok(ServerArgs::Help);
+            }
+            "-V" | "--version" => {
+                if args.len() > 1 {
+                    anyhow::bail!("--version does not take other arguments");
+                }
+                return Ok(ServerArgs::Version);
+            }
+            "--host" => {
+                let value = args
+                    .get(index + 1)
+                    .and_then(|value| value.to_str())
+                    .ok_or_else(|| anyhow::anyhow!("--host requires an IP address"))?;
+                set_host(&mut host, value)?;
+                index += 2;
+                continue;
+            }
+            _ if text.starts_with("--host=") => {
+                set_host(&mut host, &text["--host=".len()..])?;
+            }
+            _ if text.starts_with('-') => anyhow::bail!("unknown option: {text}"),
+            _ => {
+                if config.is_some() {
+                    anyhow::bail!("expected at most one configuration path; see --help");
+                }
+                config = Some(PathBuf::from(arg));
+            }
+        }
+        index += 1;
     }
-    match first.as_deref().and_then(|arg| arg.to_str()) {
-        Some("-V" | "--version") => Ok(ServerArgs::Version),
-        Some("-h" | "--help") => Ok(ServerArgs::Help),
-        Some(arg) if arg.starts_with('-') => anyhow::bail!("unknown option: {arg}"),
-        _ => Ok(ServerArgs::Serve(first.map(PathBuf::from))),
+    Ok(ServerArgs::Serve { config, host })
+}
+
+fn set_host(host: &mut Option<String>, value: &str) -> Result<()> {
+    if host.is_some() {
+        anyhow::bail!("--host may only be given once");
+    }
+    let address = value.trim();
+    if address.parse::<std::net::IpAddr>().is_err() {
+        anyhow::bail!("invalid --host value {value:?}: expected an IPv4 or IPv6 address");
+    }
+    *host = Some(address.to_string());
+    Ok(())
+}
+
+/// IPv6 literals need brackets before a port can be appended.
+fn bind_address(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
     }
 }
 
@@ -138,12 +213,16 @@ fn print_usage() {
         .unwrap_or_else(|| "mink-server".to_string());
     println!("{}", version_line());
     println!();
-    println!("Usage: {program} [CONFIG_PATH]");
+    println!("Usage: {program} [CONFIG_PATH] [--host IP]");
     println!();
     println!("Options:");
+    println!(
+        "  --host IP           Listen address (overrides MINK_SERVER_HOST and config; default 0.0.0.0)"
+    );
     println!("  -V, --version       Show version");
     println!("  -h, --help          Show this help");
     println!();
     println!("Config: mink-server.toml path (optional); falls back to ~/.minkrc and environment.");
     println!("Environment: MINK_HOME, MINK_SERVER_HOST, MINK_SERVER_PORT, MINK_SERVER_MAX_RUNNING");
+    println!("The listening port has no CLI option; use MINK_SERVER_PORT or the config file.");
 }

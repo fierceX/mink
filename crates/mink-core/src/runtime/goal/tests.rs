@@ -2039,3 +2039,86 @@ async fn interrupt_during_an_active_round_pauses_without_admitting_another() {
     runtime.shutdown().await.unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn inconclusive_review_keeps_active_and_preserves_candidate() {
+    use crate::session::goal::{GoalPhase, GoalStatus, GoalStore};
+
+    let dir = std::env::temp_dir().join(format!(
+        "mink-goal-inconclusive-{}",
+        time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = GoalStore::load(
+        &dir,
+        crate::session::persistence::PersistenceFault::default(),
+    )
+    .unwrap();
+    let mut goal = store
+        .create(
+            crate::session::goal::GoalSpec::new("inconclusive"),
+            "env".into(),
+        )
+        .unwrap();
+    let candidate = crate::session::goal_protocol::GoalReviewCandidate {
+        generation: 1,
+        goal_id: goal.id.clone(),
+        contract_revision: goal.contract_revision,
+        iteration: 0,
+        conversation_seq: 0,
+        reviewer_id: "reviewer".into(),
+    };
+    goal.review_candidate = Some(candidate.clone());
+
+    super::verification::settle_non_satisfied_review(
+        &mut goal,
+        crate::session::goal_protocol::GoalReviewVerdict::Inconclusive,
+    );
+
+    assert_eq!(
+        goal.status,
+        GoalStatus::Active,
+        "inconclusive must not end the goal"
+    );
+    assert_eq!(goal.phase, GoalPhase::Idle);
+    assert_eq!(
+        goal.review_candidate,
+        Some(candidate),
+        "the candidate is preserved for an explicit re-audit"
+    );
+    assert!(
+        goal.review_failure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("inconclusive")),
+        "{:?}",
+        goal.review_failure_reason
+    );
+    assert_eq!(
+        goal.review_failure_stage,
+        Some(crate::session::goal_protocol::GoalReviewStage::Adjudicating)
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn missing_blocker_evidence_names_only_the_unavailable_reference() {
+    let references = vec!["file://present".to_string(), "file://missing".to_string()];
+    let error = super::verification::blocker_evidence_versions(&references, |reference| {
+        if reference.ends_with("missing") {
+            Err(anyhow::anyhow!("not found"))
+        } else {
+            Ok("hash-present".into())
+        }
+    })
+    .expect_err("a missing reference must reject the evidence list")
+    .to_string();
+    assert!(error.contains("file://missing"), "{error}");
+    assert!(error.contains("unavailable"), "{error}");
+    assert!(!error.contains("file://present"), "{error}");
+
+    let ok = super::verification::blocker_evidence_versions(&references[..1], |_| {
+        Ok("hash-present".into())
+    })
+    .expect("the readable reference still resolves");
+    assert_eq!(ok, vec![("file://present", "hash-present".to_string())]);
+}

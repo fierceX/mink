@@ -251,10 +251,6 @@ impl SignalCollector {
             return None;
         }
         let edit_count = history.iter().filter(|n| *n == "Edit").count();
-        let has_diff = history.iter().any(|n| *n == "Diff");
-        let has_read_op = history
-            .iter()
-            .any(|n| matches!(n.as_str(), "Bash" | "Grep" | "Read" | "Glob"));
 
         if edit_count > 4 {
             let severity = if edit_count == 5 {
@@ -276,46 +272,8 @@ impl SignalCollector {
                 ),
             ));
         }
-        if has_diff && !has_read_op && has_edit_diff_alternation(history) {
-            let alt_count = count_edit_diff_alternations(history);
-            let severity = if alt_count >= 3 {
-                self.weights.three_or_more_edit_diff_alternations
-            } else if alt_count == 2 {
-                self.weights.two_edit_diff_alternations
-            } else {
-                self.weights.one_edit_diff_alternation
-            };
-            return Some(Signal::new(
-                SignalKind::EditLoop,
-                severity,
-                "EditLoop",
-                None,
-                None,
-                format!(
-                    "edit-diff loop ({} alternations) without read operations",
-                    alt_count
-                ),
-            ));
-        }
         None
     }
-}
-
-fn has_edit_diff_alternation(history: &VecDeque<String>) -> bool {
-    count_edit_diff_alternations(history) >= 2
-}
-
-fn count_edit_diff_alternations(history: &VecDeque<String>) -> usize {
-    let mut count = 0;
-    let mut prev: Option<&str> = None;
-    for name in history {
-        match (prev, name.as_str()) {
-            (Some("Edit"), "Diff") | (Some("Diff"), "Edit") => count += 1,
-            _ => {}
-        }
-        prev = Some(name.as_str());
-    }
-    count
 }
 
 #[cfg(test)]

@@ -13,6 +13,12 @@ pub struct ToolCallInfo {
     /// parsed; the round layer turns this into a model-format failure instead
     /// of silently executing a different (empty) call.
     pub parse_error: Option<String>,
+    /// True only for the bare-JSON fallback (no explicit wrapper). Those have
+    /// the broadest false-positive surface, so only known surface tool names
+    /// are allowed to become candidates. Explicit `<tool_call>`/DSML wrappers
+    /// are a deliberate model attempt and keep their format-feedback path even
+    /// when the name is empty/damaged.
+    pub bare_json: bool,
 }
 
 /// Bounds for regex input — DSML regex can be O(n²) on adversarial input.
@@ -162,12 +168,14 @@ fn classify_wrapper_payload(content: &str) -> std::result::Result<ToolCallInfo, 
                     .to_string(),
                 arguments: content.to_string(),
                 parse_error: Some("tool call JSON does not contain a usable tool name".to_string()),
+                bare_json: false,
             }),
         },
         Err(error) => Err(ToolCallInfo {
             name: String::new(),
             arguments: content.to_string(),
             parse_error: Some(format!("parse tool call JSON: {error}")),
+            bare_json: false,
         }),
     }
 }
@@ -187,6 +195,7 @@ fn dsml_degraded(name: &str, raw: &str, error: String) -> ToolCallInfo {
         name: name.to_string(),
         arguments: raw.to_string(),
         parse_error: Some(error),
+        bare_json: false,
     }
 }
 
@@ -303,6 +312,7 @@ fn scavenge_dsml(text: &str) -> Option<Vec<ToolCallInfo>> {
                 name,
                 arguments: serde_json::to_string(&args).unwrap_or_default(),
                 parse_error: None,
+                bare_json: false,
             }),
             Some(error) => results.push(dsml_degraded(&name, &text[marker_at..], error)),
         }
@@ -353,7 +363,9 @@ fn scavenge_bare_json(text: &str) -> Option<ToolCallInfo> {
     let json_str = &slice[..end];
     let v: Value = serde_json::from_str(json_str).ok()?;
 
-    coerce_to_tool_call(&v)
+    let mut call = coerce_to_tool_call(&v)?;
+    call.bare_json = true;
+    Some(call)
 }
 
 /// Try supported JSON shapes for tool call representation. This keeps
@@ -387,6 +399,7 @@ fn coerce_to_tool_call(v: &Value) -> Option<ToolCallInfo> {
                     name: name.to_string(),
                     arguments: raw.clone(),
                     parse_error: Some(format!("parse function arguments: {error}")),
+                    bare_json: false,
                 },
             },
             // Field present with the wrong type: a type error, never `{}`.
@@ -397,6 +410,7 @@ fn coerce_to_tool_call(v: &Value) -> Option<ToolCallInfo> {
                     "function arguments must be a JSON string (got {})",
                     json_type_name(other)
                 )),
+                bare_json: false,
             },
         });
     }
@@ -422,6 +436,7 @@ fn json_arguments_info(name: &str, args: Value) -> ToolCallInfo {
         name: name.to_string(),
         arguments: serde_json::to_string(&args).unwrap_or_default(),
         parse_error: None,
+        bare_json: false,
     }
 }
 

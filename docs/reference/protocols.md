@@ -47,7 +47,7 @@ mink -m flash --print "explain this"
 {"type":"stop","reason":"end_turn"}
 ```
 
-事件流以 `final` 事件结束，`final` 携带用量信息：
+运行期事件流以 `final` 事件结束，`final` 携带用量信息；预运行失败（配置、密钥等）在进入运行期前退出，可能没有 `final`，只有错误诊断与退出码。
 
 ```bash
 mink -m flash --print "hello" | jq 'select(.type=="final") | {billing_turn_id, usage}'

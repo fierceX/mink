@@ -2,6 +2,44 @@
 
 use super::*;
 
+/// Settle a non-satisfied review without inventing a terminal state.
+///
+/// `Inconclusive` has no evidence-backed dependency: keep the goal active,
+/// preserve the candidate and record a re-audit failure. Legacy data must not
+/// bypass the consecutive-blocker threshold by ending the goal here.
+pub(super) fn settle_non_satisfied_review(g: &mut GoalSnapshot, verdict: GoalReviewVerdict) {
+    if verdict == GoalReviewVerdict::Satisfied {
+        return;
+    }
+    g.phase = GoalPhase::Idle;
+    if verdict == GoalReviewVerdict::Inconclusive {
+        g.review_failure_reason =
+            Some("independent review returned inconclusive; re-audit required".into());
+        g.review_failure_stage = Some(crate::session::goal_protocol::GoalReviewStage::Adjudicating);
+        g.reason = Some(
+            "review was inconclusive; the candidate is preserved for an explicit re-audit".into(),
+        );
+    }
+}
+
+pub(super) fn blocker_evidence_versions(
+    references: &[String],
+    version: impl Fn(&str) -> Result<String>,
+) -> Result<Vec<(&str, String)>> {
+    references
+        .iter()
+        .map(|reference| {
+            version(reference)
+                .map(|hash| (reference.as_str(), hash))
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "blocked evidence {reference} is unavailable ({error:#}); re-read it or remove it from the blocker"
+                    )
+                })
+        })
+        .collect()
+}
+
 impl AgentRuntimeHandle {
     pub(crate) fn evidence_version(&self, reference: &str) -> Result<String> {
         let cwd = self.goal_ctx.cwd.canonicalize()?;
@@ -149,16 +187,42 @@ impl AgentRuntimeHandle {
         }
         let permit = match self.begin_goal_verification(&goal.id, goal.revision) {
             Ok(permit) => permit,
-            Err(_)
+            Err(first) => {
                 if !self.run_scheduled(run_id)
                     || self
                         .goal_snapshot()
                         .is_none_or(|g| g.status != GoalStatus::Active)
-                    || self.is_closed() =>
-            {
-                return Ok(());
+                    || self.is_closed()
+                {
+                    return Ok(());
+                }
+                // A legitimate `/goal budget` edit during acceptance advances the
+                // revision. Retry the CAS once against the fresh snapshot instead
+                // of failing the whole run (which would need a session reopen).
+                let Some(fresh) = self
+                    .goal_snapshot()
+                    .filter(|g| g.id == goal.id && g.status == GoalStatus::Active)
+                else {
+                    return Ok(());
+                };
+                if fresh.revision == goal.revision {
+                    return Err(first.into());
+                }
+                goal = fresh;
+                match self.begin_goal_verification(&goal.id, goal.revision) {
+                    Ok(permit) => permit,
+                    Err(_)
+                        if !self.run_scheduled(run_id)
+                            || self
+                                .goal_snapshot()
+                                .is_none_or(|g| g.status != GoalStatus::Active)
+                            || self.is_closed() =>
+                    {
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             }
-            Err(error) => return Err(error.into()),
         };
         if !self.run_scheduled(run_id) {
             return Ok(());
@@ -558,11 +622,10 @@ impl AgentRuntimeHandle {
                             let mut ids = blocker.criterion_ids.clone();
                             ids.sort();
                             ids.dedup();
-                            let versions: Vec<_> = blocker
-                                .evidence
-                                .iter()
-                                .map(|r| self.evidence_version(r).map(|h| (r, h)))
-                                .collect::<Result<_>>()?;
+                            let versions =
+                                blocker_evidence_versions(&blocker.evidence, |reference| {
+                                    self.evidence_version(reference)
+                                })?;
                             let fingerprint = if review.report.is_some() {
                                 // Descriptions can vary while the dependency is
                                 // unchanged. Fresh artifact IDs are not new facts.
@@ -573,7 +636,7 @@ impl AgentRuntimeHandle {
                                             if r.starts_with("artifact://") {
                                                 "artifact"
                                             } else {
-                                                r.as_str()
+                                                *r
                                             },
                                             h,
                                         )
@@ -610,10 +673,7 @@ impl AgentRuntimeHandle {
                             g.blocker_fingerprint = None;
                         }
                         if review.verdict != GoalReviewVerdict::Satisfied {
-                            g.phase = GoalPhase::Idle;
-                            if review.verdict == GoalReviewVerdict::Inconclusive {
-                                g.status = GoalStatus::Blocked;
-                            }
+                            settle_non_satisfied_review(g, review.verdict.clone());
                         }
                         Ok(())
                     })?;

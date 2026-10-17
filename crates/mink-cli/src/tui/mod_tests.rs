@@ -7,6 +7,7 @@ use crate::tui::markdown::{
     push_msg_with_tool, push_msg_with_width, render_table, strip_ansi, wrap_lines_word,
 };
 use crate::tui::notify::TaskNotificationKind;
+use crate::tui::render::status::status_text_width;
 use crate::tui::render::{
     build_status_line, build_status_spans, collapsed_summary, content_viewport_height,
     detail_lines_for_session, detail_viewport_height, split_at_visual_width, status_goal_span,
@@ -874,6 +875,7 @@ fn structured_tool_result_updates_the_running_transcript_item() {
         tool_use_id: Some("call-1".into()),
         tool_name: "PlanDraft".into(),
         summary: "PlanDraft".into(),
+        input: None,
     });
     assert_eq!(state.lines.len(), 1);
     assert!(!state.lines[0].sealed);
@@ -911,6 +913,7 @@ fn tool_result_with_mismatched_id_does_not_merge_by_tool_name() {
         tool_use_id: Some("call-1".into()),
         tool_name: "TodoAdvance".into(),
         summary: "TodoAdvance(2 transitions @r1)".into(),
+        input: None,
     });
     let presentation = ToolPresentation::Todo(TodoDisplay {
         revision: 2,
@@ -959,6 +962,7 @@ fn reused_tool_id_updates_the_latest_unsealed_call() {
         tool_use_id: Some("call-1".into()),
         tool_name: "Read".into(),
         summary: "Read(old)".into(),
+        input: None,
     });
     state.apply(&TuiSignal::ToolResult {
         tool_use_id: Some("call-1".into()),
@@ -975,6 +979,7 @@ fn reused_tool_id_updates_the_latest_unsealed_call() {
         tool_use_id: Some("call-1".into()),
         tool_name: "Read".into(),
         summary: "Read(new)".into(),
+        input: None,
     });
     state.apply(&TuiSignal::ToolResult {
         tool_use_id: Some("call-1".into()),
@@ -1332,6 +1337,7 @@ fn committed_boundary_stops_at_the_first_live_item() {
         Some("call-1".into()),
         "Bash".into(),
         "Bash(test)".into(),
+        None,
     ));
     state.push_line(TranscriptItem::new("later".into(), TranscriptKind::Text));
 
@@ -1343,12 +1349,37 @@ fn committed_boundary_stops_at_the_first_live_item() {
 }
 
 #[test]
+fn status_click_width_uses_display_columns() {
+    assert_eq!(status_text_width("model:flash"), 11);
+    assert_eq!(status_text_width("模型"), 4);
+    assert_eq!(status_text_width("🙂"), 2);
+}
+
+#[test]
+fn tool_call_headers_sanitize_name_and_summary_and_keep_input() {
+    let mut state = TuiState::default();
+    state.apply(&TuiSignal::ToolCall {
+        tool_use_id: Some("call-1".into()),
+        tool_name: "Ba\x1b]0;pwned\x07sh".into(),
+        summary: "cmd \x1b[31mred".into(),
+        input: Some(serde_json::json!({"command": "ls"})),
+    });
+
+    let item = &state.lines[0];
+    assert_eq!(item.tool_name.as_deref(), Some("Bash"));
+    assert_eq!(item.tool_summary.as_deref(), Some("cmd red"));
+    assert_eq!(item.tool_input, Some(serde_json::json!({"command": "ls"})));
+    assert!(!item.text.contains("pwned"));
+}
+
+#[test]
 fn terminal_signal_seals_orphan_tool_calls() {
     let mut state = TuiState::default();
     state.apply(&TuiSignal::ToolCall {
         tool_use_id: Some("call-1".into()),
         tool_name: "Bash".into(),
         summary: "Bash(test)".into(),
+        input: None,
     });
 
     state.apply(&TuiSignal::Error("connection failed".into()));
@@ -1378,6 +1409,7 @@ fn commit_ready_moves_only_the_sealed_prefix_into_native_history() {
         Some("call-1".into()),
         "Bash".into(),
         "Bash(test)".into(),
+        None,
     ));
 
     assert!(commit_ready(&mut terminal, &mut state).unwrap());
@@ -2871,6 +2903,7 @@ fn tui_display_preserves_tool_call_and_title_fields() {
             tool_use_id,
             tool_name,
             summary,
+            ..
         } => {
             assert_eq!(tool_use_id.as_deref(), Some("call_9"));
             assert_eq!(tool_name, "Read");
@@ -3059,6 +3092,7 @@ fn goal_display() -> GoalDisplay {
             remaining_secs: 5_400,
             blocked_after_consecutive_rounds: 3,
             blocked_rounds: 0,
+            blocker_rounds: 0,
             soft_token_limit: None,
         },
         status: "active".into(),

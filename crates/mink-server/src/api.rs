@@ -128,6 +128,10 @@ struct CreateSessionReq {
 #[derive(Deserialize)]
 struct TurnReq {
     input: String,
+    /// Optional stable id for retries; the inbox treats a repeat as the same
+    /// submission instead of starting a second turn.
+    #[serde(default)]
+    request_id: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -311,9 +315,18 @@ async fn turn_session(
     if input.len() > 128 * 1024 {
         return ApiResponse::err(400, "input too large (max 128 KiB)");
     }
+    let request_id = match req.request_id {
+        Some(id) if id.trim().is_empty() => {
+            return ApiResponse::err(400, "request_id must not be empty");
+        }
+        Some(id) if id.len() > 256 => {
+            return ApiResponse::err(400, "request_id too long (max 256 bytes)");
+        }
+        other => other,
+    };
     match state
         .registry
-        .start_turn(&id, query.project.as_deref(), input)
+        .start_turn(&id, query.project.as_deref(), input, request_id)
     {
         Ok(_) => ApiResponse::ok(json!({ "id": id, "status": "running" })),
         Err(error) => registry_error(error),
@@ -2741,6 +2754,226 @@ mod tests {
         let (s, body) = req(&app, Method::GET, "/api/sessions/test-session/plan").await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(body["data"]["plan"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn turn_request_id_retry_does_not_start_a_second_turn() {
+        let home = std::env::temp_dir().join(format!(
+            "mink-server-turn-idem-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let registry = Arc::new(Registry::with_llm_backend(
+            home.clone(),
+            "mock".into(),
+            1,
+            Arc::new(MockRuntimeBackend),
+        ));
+        let created = registry.create("turn-idem", &cwd).await.unwrap();
+        let project = created.project_key.clone();
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let state = Arc::new(ApiState {
+            registry: registry.clone(),
+            cwd,
+            shutdown,
+        });
+        let app = router(state);
+        let (status, _) = req(
+            &app,
+            Method::POST,
+            &format!("/api/sessions/{}/open?project={project}", created.id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        for _ in 0..2 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(format!(
+                            "/api/sessions/{}/turn?project={project}",
+                            created.id
+                        ))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            r#"{"input":"hello once","request_id":"stable-turn-1"}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        // Reusing the id with different content is a conflict, not an internal
+        // error and not a second turn.
+        let conflict = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!(
+                        "/api/sessions/{}/turn?project={project}",
+                        created.id
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"input":"different words","request_id":"stable-turn-1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+
+        // The mock turn finishes quickly; the retry must have reused the first
+        // receipt instead of appending the same user input twice.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let dir = home
+            .join(".mink")
+            .join("projects")
+            .join(&project)
+            .join(&created.id);
+        let conversation = std::fs::read_to_string(dir.join("conversation.jsonl")).unwrap();
+        assert_eq!(
+            conversation.matches("hello once").count(),
+            1,
+            "{conversation}"
+        );
+        registry.close(&created.id, Some(&project)).await.unwrap();
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn closed_runtime_is_reapable_and_leaves_the_active_table() {
+        let home = std::env::temp_dir().join(format!(
+            "mink-server-reap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let registry = Arc::new(Registry::with_llm_backend(
+            home.clone(),
+            "mock".into(),
+            1,
+            Arc::new(MockRuntimeBackend),
+        ));
+        let created = registry.create("reap", &cwd).await.unwrap();
+        let project = created.project_key.clone();
+        registry.open(&created.id, Some(&project)).await.unwrap();
+
+        let runtime = registry
+            .active_runtime(&created.id, Some(&project))
+            .unwrap()
+            .expect("opened runtime");
+        runtime.shutdown().await.unwrap();
+        assert!(
+            registry
+                .closed_session_ids()
+                .iter()
+                .any(|(id, _)| id == &created.id),
+            "a forced/closed runtime must be reaper-visible"
+        );
+
+        // The reaper's action removes the entry (and its broadcast sender).
+        registry.close(&created.id, Some(&project)).await.unwrap();
+        assert!(
+            !registry
+                .closed_session_ids()
+                .iter()
+                .any(|(id, _)| id == &created.id)
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn closing_a_session_emits_closed_to_its_sse_stream() {
+        let home = std::env::temp_dir().join(format!(
+            "mink-server-sse-close-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let registry = Arc::new(Registry::with_llm_backend(
+            home.clone(),
+            "mock".into(),
+            1,
+            Arc::new(MockRuntimeBackend),
+        ));
+        let created = registry.create("sse-close", &cwd).await.unwrap();
+        let project = created.project_key.clone();
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let state = Arc::new(ApiState {
+            registry: registry.clone(),
+            cwd,
+            shutdown,
+        });
+        let app = router(state);
+        let (status, _) = req(
+            &app,
+            Method::POST,
+            &format!("/api/sessions/{}/open?project={project}", created.id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let stream_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/sessions/{}/stream?project={project}&snapshot=true",
+                        created.id
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stream_response.status(), StatusCode::OK);
+        let mut body = stream_response.into_body();
+
+        // The reaper's action: close removes the active entry and shutdown
+        // publishes the terminal phase to every subscribed stream.
+        registry.close(&created.id, Some(&project)).await.unwrap();
+        let saw_closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(frame) = body.frame().await {
+                let Ok(data) = frame.unwrap().into_data() else {
+                    continue;
+                };
+                for line in String::from_utf8_lossy(&data).lines() {
+                    let Some(json) = line.strip_prefix("data: ") else {
+                        continue;
+                    };
+                    let Ok(event) = serde_json::from_str::<serde_json::Value>(json) else {
+                        continue;
+                    };
+                    if event["type"] == "phase_updated" && event["phase"] == "closed" {
+                        return true;
+                    }
+                }
+            }
+            false
+        })
+        .await
+        .expect("the stream must either deliver closed or end");
+        assert!(saw_closed, "close must publish phase_updated closed");
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[tokio::test]

@@ -352,7 +352,7 @@ function GoalTab({ session, goal, driven, refresh, onReport }: {
         <dd>
           {budget === undefined
             ? '—'
-            : `${budget.blocked_rounds}/${budget.blocked_after_consecutive_rounds} 轮`}
+            : `${budget.blocker_rounds ?? budget.blocked_rounds}/${budget.blocked_after_consecutive_rounds} 轮`}
         </dd>
         <dt>Token 软限额</dt>
         <dd>{budget === undefined ? '—' : budget.soft_token_limit ?? '无'}</dd>

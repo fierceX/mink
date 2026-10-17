@@ -104,22 +104,16 @@ pub async fn execute(
     -> Result<(TurnDecision, Vec<TurnEffect>)>
 ```
 
-**TurnDecision** 有五类：
+**TurnDecision** 有四类：
 
 | 变体 | 含义 | 后续 |
 |------|------|------|
 | `Stop` | 正常结束（end_turn/stop） | 等待下个用户输入 |
-| `Continue` | 有更多 LLM 调用 | 循环继续 |
 | `Interrupted` | 被取消令牌中断 | 退出 |
 | `MaxTurnsExceeded` | 当前输入超过最大内部循环次数 | 报告限制并结束 |
 | `Failed(String)` | 不可恢复的错误 | 报告错误 |
 
-**TurnEffect** 是 turn 内部工具副作用的完成标记，供调用者（OrchActor）补充 UI 提示：
-
-| 变体 | 触发条件 | 调用者处理 |
-|------|---------|-----------|
-| `PlanCleared` | PlanClear 工具副作用已完成 | 显示计划已清空 |
-| `PlanConfirmed` | PlanConfirm 工具副作用已完成 | 显示计划已确认 |
+**TurnEffect** 是 turn 内部工具副作用的完成提示文本（`&'static str`），由调用者（OrchActor）转成对应 UI 提示；它不是枚举变体。
 
 SubAgent 由 `SubAgentCoordinator` 在 turn 内部启动、收集和注入结果。
 

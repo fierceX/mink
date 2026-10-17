@@ -265,6 +265,7 @@ fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> 
                         .map(str::to_owned),
                     tool_name: name.to_string(),
                     summary,
+                    input: None,
                 });
             }
             ReplayEventKind::ToolResult => {

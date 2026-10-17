@@ -359,21 +359,44 @@ impl SessionRuntime {
             serde_json::json!({"type":"inputs_updated","inputs":self.inbox.outstanding()}),
         );
     }
+    /// A retry that reuses an admitted request id must not take a second
+    /// capacity slot: resolve it before reserving. `None` means this is a new
+    /// submission and the normal turn path owns it.
+    pub(crate) fn existing_turn_input(
+        &self,
+        request_id: &str,
+        text: &str,
+    ) -> Result<Option<mink::runtime::InputReceipt>> {
+        self.inbox.existing(&mink::runtime::HumanInput {
+            request_id: request_id.to_string(),
+            text: text.to_string(),
+            target_turn_id: None,
+            attachment_ids: vec![],
+        })
+    }
+
     /// Start a turn that owns a capacity permit for its whole execution.
     pub(crate) fn start_turn_with_permit(
         &self,
         input: String,
+        request_id: Option<String>,
         permit: Option<crate::session::admission::ExecutionPermit>,
     ) -> Result<()> {
-        self.submit(
-            mink::runtime::HumanInput {
-                request_id: format!(
+        let request_id = request_id
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| {
+                format!(
                     "legacy-{}-{}",
                     std::process::id(),
                     std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)?
-                        .as_nanos()
-                ),
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_nanos())
+                        .unwrap_or_default()
+                )
+            });
+        self.submit(
+            mink::runtime::HumanInput {
+                request_id,
                 text: input,
                 target_turn_id: None,
                 attachment_ids: vec![],

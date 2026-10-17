@@ -18,6 +18,19 @@ export class SseClient {
   private project?: string;
   private retryDelayMs = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private listening = false;
+  private onOffline = () => {
+    if (this.closed) return;
+    // The browser going offline is a real transport signal even when the SSE
+    // request is idle: close it and tell the controller. `online` reconnects.
+    this.clearRetryTimer();
+    this.es?.close();
+    this.es = null;
+    this.onDisconnect();
+  };
+  private onOnline = () => {
+    if (!this.closed) this.reconnect();
+  };
 
   constructor(
     sessionId: string,
@@ -37,6 +50,11 @@ export class SseClient {
   connect() {
     if (this.es || this.closed) return;
     this.clearRetryTimer();
+    if (!this.listening) {
+      window.addEventListener('offline', this.onOffline);
+      window.addEventListener('online', this.onOnline);
+      this.listening = true;
+    }
     const base = `/api/sessions/${encodeURIComponent(this.sessionId)}/stream`;
     const legacyUrl = this.project ? `${base}?project=${encodeURIComponent(this.project)}` : base;
     const url = this.snapshotMode ? `${legacyUrl}${this.project ? "&" : "?"}snapshot=true` : legacyUrl;
@@ -65,7 +83,12 @@ export class SseClient {
     es.onerror = () => {
       es.close();
       this.es = null;
-      if (!this.closed) this.onDisconnect();
+      if (this.closed) return;
+      this.onDisconnect();
+      // A dropped connection is transient: reconnect with backoff. The stream
+      // re-sends the authoritative `session_snapshot` on subscribe, which is
+      // the reconciliation (the controller never trusts a local guess).
+      this.reconnect();
     };
   }
 
@@ -74,23 +97,24 @@ export class SseClient {
     this.clearRetryTimer();
     this.es?.close();
     this.es = null;
-    const delay = this.retryDelayMs;
-    this.retryDelayMs = this.retryDelayMs === 0
+    const delay = this.retryDelayMs === 0
       ? INITIAL_RETRY_MS
       : Math.min(this.retryDelayMs * 2, MAX_RETRY_MS);
-    if (delay > 0) {
-      this.retryTimer = setTimeout(() => {
-        this.retryTimer = null;
-        this.connect();
-      }, delay);
-    } else {
+    this.retryDelayMs = delay;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
       this.connect();
-    }
+    }, delay);
   }
 
   close() {
     this.closed = true;
     this.clearRetryTimer();
+    if (this.listening) {
+      window.removeEventListener('offline', this.onOffline);
+      window.removeEventListener('online', this.onOnline);
+      this.listening = false;
+    }
     if (this.es) {
       this.es.close();
       this.es = null;

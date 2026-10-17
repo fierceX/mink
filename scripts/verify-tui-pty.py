@@ -526,6 +526,9 @@ sys.exit(result.returncode)
             assert report == {"restored": True, "returncode": 0}, report
             if not use_tmux:
                 assert b"\x1b[?2004l" in surface.data, "bracketed paste was not disabled"
+            # Untrusted payloads must not reach the terminal as control sequences.
+            assert b"\x1b]52;" not in surface.data, "untrusted OSC52 leaked to the terminal"
+            assert b"\x1b]0;" not in surface.data, "untrusted window-title sequence leaked"
             if mode == "full" and not use_tmux:
                 assert b"\x1b[?1049l" in surface.data, "alternate screen was not restored"
             if sys.platform == "darwin" and not remote and not use_tmux:
@@ -553,6 +556,8 @@ sys.exit(result.returncode)
                     second.command("/quit")
                     second.wait_exit()
                     assert second.process.returncode == 0, second.process.returncode
+                    assert b"\x1b]52;" not in second.data, "replay leaked OSC52"
+                    assert b"\x1b]0;" not in second.data, "replay leaked a window-title sequence"
                 finally:
                     second.close()
                 print(
@@ -583,6 +588,30 @@ sys.exit(result.returncode)
                     pass  # The last pane exiting may already stop this isolated server.
 
 
+def check_no_tty(binary):
+    """A non-TTY launch must fail fast with a diagnostic, not wait forever."""
+    with tempfile.TemporaryDirectory(prefix="mink-no-tty-") as directory:
+        env = os.environ.copy()
+        env.update(MINK_HOME=directory, MINK_KEYBOARD_ENHANCEMENT="off")
+        process = subprocess.Popen(
+            [binary, "--tui", "--api-key", "synthetic"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            cwd=directory,
+            start_new_session=True,
+        )
+        try:
+            _out, err = process.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            _out, err = process.communicate()
+            raise AssertionError(f"non-TTY run did not exit; stderr={err[-800:]!r}")
+        assert process.returncode != 0 and b"TUI error" in err, (process.returncode, err)
+        print(json.dumps({"initialization_failure_reported": True}), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("binary")
@@ -599,16 +628,12 @@ def main():
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Provider)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
+        if not remote:
+            check_no_tty(binary)
         for mode in ["full", "inline"]:
             verify(binary, mode, f"http://127.0.0.1:{server.server_port}/v1", options.tmux, remote)
         if remote:
             return  # No-TTY initialization is already covered by the local harness.
-        with tempfile.TemporaryDirectory(prefix="mink-no-tty-") as directory:
-            env = os.environ.copy()
-            env.update(MINK_HOME=directory, MINK_KEYBOARD_ENHANCEMENT="off")
-            failed = subprocess.run([binary, "--tui", "--api-key", "synthetic"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=directory)
-            assert failed.returncode != 0 and b"TUI error" in failed.stderr, failed.stderr
-            print(json.dumps({"initialization_failure_reported": True}), flush=True)
     finally:
         server.shutdown()
         server.server_close()

@@ -34,7 +34,7 @@
 
 `/goal human 目标正文` 创建人工验收目标；独立审核满足目标契约和配置的检查器后，目标进入人工验收，以 `/goal approve 核对说明` 确认。默认 `/goal approve` 使用明确的终端确认说明。`/goal verified 目标正文` 使用 `MINK_GOAL_CHECK` 配置的检查命令，例如先设置 `MINK_GOAL_CHECK='cargo test -p my-crate'` 再启动。命令固定在 runtime 配置，具有 60 秒检查超时，经现有 Bash surface、审批、取消和输出保护执行；改变配置身份后原目标不会降级为模型判断。未配置 `MINK_GOAL_CHECK` 的部署中，工作台命令面板把 `/goal verified` 标为不可用，而不是提出必然被服务端拒绝的请求。
 
-旧版未结束目标升级后显示待确认，保留已用轮次、原截止和历史；核对迁移草案后重新确认，预算不足先明确调整。未知副作用需先检查文件或远端实际结果，用 `/goal reconcile <调查证据>` 记录对账，再确认或恢复；不会合成成功结果。
+未决副作用需先检查文件或远端实际结果，用 `/goal reconcile <调查证据>` 记录对账，再确认或恢复；不会合成成功结果。
 
 /goals 或点击状态标记查看契约、预算、审核结论和证据。完成依据区分 agent_reviewed、verified、human_approved；旧已结束目标仍展示原 model_reported。执行者结束本轮不表示 Goal 完成。clear 只隐藏已结束目标，历史保留。
 

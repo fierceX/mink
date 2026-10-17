@@ -718,6 +718,119 @@ impl crate::tools::vfs::ReadOnlyFileSystem for TestImageVfs {
 }
 
 #[tokio::test]
+async fn post_decode_model_input_errors_are_model_format() {
+    // Empty edits (Replace) and an empty hashline patch pass serde decoding but
+    // are still the model's input: they must feed the format window instead of
+    // becoming hard execution failures.
+    let shared =
+        crate::regression::test_context_for_agent_with_config("edit-format-replace", |cfg| {
+            cfg.edit_mode = crate::config::EditMode::Replace
+        })
+        .await
+        .unwrap();
+    std::fs::write(shared.cwd.join("a.txt"), "hello\n").unwrap();
+    let ctx = crate::context::ToolContext::from(shared.as_ref());
+    let runner = ToolRunner::new(Arc::new(ctx));
+    let call = ToolCallEvent {
+        name: "Edit".into(),
+        id: "edit-empty".into(),
+        input_json: serde_json::json!({"path":"a.txt","edits":[]}),
+        fields: BTreeMap::new(),
+        parse_error: None,
+        raw_arguments_digest: None,
+    };
+    let results = runner.execute_all(vec![call]).await.unwrap();
+    assert_eq!(
+        results[0].failure_source,
+        Some(crate::tools::metadata::ToolFailureSource::ModelFormat),
+        "{}",
+        results[0].content
+    );
+    assert!(results[0].content.contains("edits must contain"));
+
+    let shared =
+        crate::regression::test_context_for_agent_with_config("edit-format-hashline", |cfg| {
+            cfg.edit_mode = crate::config::EditMode::Hashline
+        })
+        .await
+        .unwrap();
+    let ctx = crate::context::ToolContext::from(shared.as_ref());
+    let runner = ToolRunner::new(Arc::new(ctx));
+    let call = ToolCallEvent {
+        name: "Edit".into(),
+        id: "edit-empty-patch".into(),
+        input_json: serde_json::json!({"input":""}),
+        fields: BTreeMap::new(),
+        parse_error: None,
+        raw_arguments_digest: None,
+    };
+    let results = runner.execute_all(vec![call]).await.unwrap();
+    assert_eq!(
+        results[0].failure_source,
+        Some(crate::tools::metadata::ToolFailureSource::ModelFormat),
+        "{}",
+        results[0].content
+    );
+    assert!(results[0].content.contains("must not be empty"));
+
+    // A well-formed patch with an invented snapshot tag is still model input:
+    // it must feed the format window, not become a hard execution failure.
+    let shared =
+        crate::regression::test_context_for_agent_with_config("edit-format-unknown-tag", |cfg| {
+            cfg.edit_mode = crate::config::EditMode::Hashline
+        })
+        .await
+        .unwrap();
+    std::fs::write(shared.cwd.join("a.txt"), "hello\n").unwrap();
+    let ctx = crate::context::ToolContext::from(shared.as_ref());
+    let runner = ToolRunner::new(Arc::new(ctx));
+    let call = ToolCallEvent {
+        name: "Edit".into(),
+        id: "edit-unknown-tag".into(),
+        input_json: serde_json::json!({
+            "input": "[a.txt#AAAA]\nPUT 'hello'..'hello':\n+bye"
+        }),
+        fields: BTreeMap::new(),
+        parse_error: None,
+        raw_arguments_digest: None,
+    };
+    let results = runner.execute_all(vec![call]).await.unwrap();
+    assert_eq!(
+        results[0].failure_source,
+        Some(crate::tools::metadata::ToolFailureSource::ModelFormat),
+        "{}",
+        results[0].content
+    );
+    assert!(results[0].content.contains("unknown"));
+}
+
+#[tokio::test]
+async fn vfs_read_rejects_paths_that_escape_the_root() {
+    let mut shared = crate::regression::test_context_for_agent("runner-vfs-escape")
+        .await
+        .unwrap();
+    {
+        let shared_ref = Arc::get_mut(&mut shared).expect("unique shared ctx");
+        shared_ref.read_only_fs = Some(Arc::new(TestImageVfs {
+            image: None,
+            text: "backend body".to_string(),
+        }));
+    }
+    let ctx = crate::context::ToolContext::from(shared.as_ref());
+    let runner = ToolRunner::new(Arc::new(ctx));
+    let results = runner
+        .execute_all(vec![read_call("call-escape", "../outside.txt")])
+        .await
+        .unwrap();
+    assert!(!results[0].succeeded(), "{}", results[0].content);
+    assert!(
+        results[0].content.contains("escape") || results[0].content.contains("virtual path"),
+        "{}",
+        results[0].content
+    );
+}
+
+#[tokio::test]
 async fn vfs_image_reads_one_at_a_time_and_text_falls_back() {
     // VfsCandidate: classification stores only the path; the image bytes are
     // read during prepare (one image in memory at a time). A backend `None`

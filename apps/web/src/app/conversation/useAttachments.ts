@@ -74,10 +74,6 @@ export function useAttachments(session: SessionSummary | undefined, limits: Imag
   const counter = useRef(0)
 
   useEffect(() => {
-    setEntries(restore(session, storageKey))
-  }, [session, storageKey])
-
-  useEffect(() => {
     if (storageKey === undefined) return
     writeAttachments(storageKey, entries.flatMap(entry =>
       entry.attachment === undefined ? [] : [{ id: entry.attachment.id, name: entry.name }]))

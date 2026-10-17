@@ -40,6 +40,10 @@ describe('TUI diagnostic parity', () => {
     state=reduceEvent(state,{type:'turn_final',outcome:{status:'interrupted',error:'interrupted'}});
     expect(state.workState).toBe('idle');expect(state.activeSubAgents).toEqual([]);
   });
+  it('a session that has not reported usage shows unknown rather than zero', () => {
+    const rows=Object.fromEntries(diagnosticGroups(emptySession('s','s'),'').flatMap(group=>group.rows));
+    expect(rows).toMatchObject({'输入':'—','输出':'—','缓存读取':'—','未缓存输入':'—','缓存命中率':'—'});
+  });
   it('does not infer missing legacy counters or cache creation', () => {
     const legacy=reduceEvent(emptySession('s','s'),{type:'usage',input_tokens:100,cache_read_input_tokens:80});
     const rows=Object.fromEntries(diagnosticGroups(legacy,'').flatMap(group=>group.rows));

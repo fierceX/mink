@@ -59,6 +59,42 @@ fn memo_end_line_open_ended_reads_cover_eof() {
 }
 
 #[tokio::test]
+async fn memo_hit_requires_a_live_snapshot() {
+    let shared = crate::regression::test_context_for_agent("memo-live-snapshot")
+        .await
+        .unwrap();
+    let ctx = crate::context::ToolContext::from(shared.as_ref());
+    std::fs::write(ctx.cwd.join("memo.txt"), "hello memo\n").unwrap();
+
+    let first = ReadTool
+        .execute(&serde_json::json!({"path":"memo.txt"}), &ctx)
+        .unwrap();
+    assert!(first.content.contains("hello memo"));
+
+    // Fill the snapshot LRU (30 paths) so memo.txt loses its tag while the
+    // memo entry itself is still live.
+    {
+        let mut store = ctx
+            .snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for index in 0..31 {
+            let path = ctx.cwd.join(format!("filler-{index}.txt"));
+            store.record(&path, "x\n", 1..=1);
+        }
+    }
+
+    let second = ReadTool
+        .execute(&serde_json::json!({"path":"memo.txt"}), &ctx)
+        .unwrap();
+    assert!(
+        second.content.contains("hello memo"),
+        "a memo hit without a snapshot must read the content again: {}",
+        second.content
+    );
+}
+
+#[tokio::test]
 async fn replace_mode_write_records_rollback_baseline() {
     let shared =
         crate::regression::test_context_for_agent_with_config("replace-write-baseline", |cfg| {

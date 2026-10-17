@@ -84,6 +84,8 @@ pub(crate) struct TranscriptItem {
     pub tool_name: Option<String>,
     pub tool_use_id: Option<String>,
     pub tool_summary: Option<String>,
+    /// Structured tool arguments, kept verbatim for card rendering/verification.
+    pub tool_input: Option<serde_json::Value>,
     pub tool_status: Option<crate::runtime::ToolStatus>,
     pub tool_exit_code: Option<i32>,
     pub tool_result_kind: Option<ToolResultKind>,
@@ -167,6 +169,7 @@ impl TranscriptItem {
             tool_name: None,
             tool_use_id: None,
             tool_summary: None,
+            tool_input: None,
             tool_status: None,
             tool_exit_code: None,
             tool_result_kind: None,
@@ -194,7 +197,7 @@ impl TranscriptItem {
 
     pub(crate) fn new_tool_result(tool_name: String, text: String) -> Self {
         let mut line = Self::new(text, TranscriptKind::Tool);
-        line.tool_name = Some(tool_name);
+        line.tool_name = Some(sanitize_tui_text(&tool_name));
         line
     }
 
@@ -202,7 +205,12 @@ impl TranscriptItem {
         tool_use_id: Option<String>,
         tool_name: String,
         summary: String,
+        input: Option<serde_json::Value>,
     ) -> Self {
+        // `tool_name`/`summary` are model-controlled and rendered outside the
+        // sanitized body text; clean them at the single ingestion point too.
+        let tool_name = sanitize_tui_text(&tool_name);
+        let summary = sanitize_tui_text(&summary);
         let text = if summary.is_empty() {
             format!("[tool] {tool_name}")
         } else {
@@ -212,6 +220,7 @@ impl TranscriptItem {
         item.tool_use_id = tool_use_id;
         item.tool_name = Some(tool_name);
         item.tool_summary = Some(summary);
+        item.tool_input = input;
         item.sealed = false;
         item
     }
@@ -307,6 +316,7 @@ impl Default for TranscriptItem {
             tool_name: None,
             tool_use_id: None,
             tool_summary: None,
+            tool_input: None,
             tool_status: None,
             tool_exit_code: None,
             tool_result_kind: None,

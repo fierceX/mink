@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### 修复
+
+- **server**：新增 `--host <IP>` 启动项（CLI > `MINK_SERVER_HOST` > `[server] host` > `0.0.0.0`）；端口仍由 `MINK_SERVER_PORT`/TOML 决定，不新增端口参数；未知参数在绑定前拒绝，IPv6 在启动日志中按 `[::1]:8765` 显示。
+- **终端**：REPL 续聊重放、`render_info` 与 TUI 工具卡头的 `tool_name`/`tool_summary` 统一走控制序列清洗；TUI 完整转发 `ToolCallDisplay.input` 并保留结构化参数。
+- **压缩/输入**：InputInbox 写入的 `_mink` 用户消息重新计入“真实 user”与 `last_real_user_text`，TUI/Web 不再丢失用户切点守卫；应急 checkpoint 显式携带启动边界修复丢掉的消息；`Read` memo 命中要求 hashline 快照仍存在。
+- **工具**：scavenge 裸 JSON 只接受当前 surface 内的工具名（普通 JSON 示例不再变成调用）；空 edits、空/坏 patch、未知 tag 等 decode 后模型输入错误统一计为 `ModelFormat`；VFS `Read` 在调用后端前规范化并拒绝 `..` 逃逸。
+- **Goal**：宿主租约在 `Running/Stopping/!enabled/closed` 拒绝路径返回错误并走 fault，不再静默丢弃；验收期间合法预算调整以新 revision 重试一次；inconclusive 审核不再直接终结目标；blocker 证据缺失时点名无效引用；`GoalBudget` 新增 `blocker_rounds`，`blocked_rounds` 与快照的连续阻断计数一致。
+- **Web**：SSE 断线自动退避重连，重连快照即权威对账，断开期间不再伪造 `running=false`；未决提交正文在返回会话后恢复；附件不再按会话对象身份重置；回执只在投影已有输入且发起视图 epoch/runtime generation 仍当前时落地；`/artifact` 命令打开指定产物；token 统计缺失时诊断页显示未知。
+- **LLM**：SSE 单行缓冲设上限并在超限时按协议损坏处理；`arguments:null` 不再执行成 `{}`；同一 attempt 的重复 usage 帧只结算一笔；包装过的 `LlmRequestFailure` 保留聚合 `attempt_count`。
+- **CLI/TUI**：`--tui` 与 `--print`/`--agent-jsonl` 在启动前互斥；状态栏目标标记按显示宽度命中；移除依赖不存在 `Diff` 工具的 EditLoop 死条件；强制关闭的会话由 reaper 回收。
+
+### 测试
+
+- 服务端 goal e2e 新增“审核进行中调整预算”场景，断言合法 revision 变更不会把 run 打成 `Faulted`；TUI PTY lane 增加 no-TTY 有界检查与 OSC52/窗口标题序列断言；补充 Inconclusive 审核结论、blocker 证据缺失、SSE 关闭、真实 offline/online 与在途提交恢复的回归用例。
+
 ## v0.7.0 (2026-10-16)
 
 本版首次发布 React Web 工作台、跨轮目标与终端 goal 卡片，并移除上一代 Vue 前端。

@@ -735,7 +735,16 @@ impl AgentRuntimeHandle {
             let mut control = self.goal_driver.lock_control();
             match &control.driver {
                 DriverState::Closed => return Err(RuntimeError::Closed),
-                DriverState::Running { .. } | DriverState::Stopping { .. } => return Ok(()),
+                DriverState::Running { .. } | DriverState::Stopping { .. } => {
+                    if lease.is_some() {
+                        // A host lease is only valid when this call starts the
+                        // run; silently dropping it would under-count capacity.
+                        return Err(RuntimeError::Command(
+                            "a goal run is already scheduled".into(),
+                        ));
+                    }
+                    return Ok(());
+                }
                 DriverState::Faulted { error, .. } => {
                     return Err(RuntimeError::Command(format!(
                         "goal driver stopped after an unrecoverable failure: {error}"
@@ -744,6 +753,13 @@ impl AgentRuntimeHandle {
                 DriverState::Idle => {}
             }
             if !control.enabled || self.is_closed() {
+                if lease.is_some() {
+                    return Err(if self.is_closed() {
+                        RuntimeError::Closed
+                    } else {
+                        RuntimeError::Command("goal driver is not enabled".into())
+                    });
+                }
                 return Ok(());
             }
             self.ensure_goal_control_open()?;
@@ -751,6 +767,11 @@ impl AgentRuntimeHandle {
                 .goal_snapshot()
                 .filter(|g| g.status == GoalStatus::Active)
             else {
+                if lease.is_some() {
+                    return Err(RuntimeError::Command(
+                        "no active goal is available to run".into(),
+                    ));
+                }
                 return Ok(());
             };
             let run_id = control.next_run_id;

@@ -228,9 +228,6 @@ pub(crate) struct EditLoopWeights {
     pub five_edits: f64,
     pub six_edits: f64,
     pub excess_edits: f64,
-    pub one_edit_diff_alternation: f64,
-    pub two_edit_diff_alternations: f64,
-    pub three_or_more_edit_diff_alternations: f64,
 }
 
 impl Default for EditLoopWeights {
@@ -239,9 +236,6 @@ impl Default for EditLoopWeights {
             five_edits: 0.6,
             six_edits: 0.8,
             excess_edits: 0.9,
-            one_edit_diff_alternation: 0.4,
-            two_edit_diff_alternations: 0.7,
-            three_or_more_edit_diff_alternations: 0.9,
         }
     }
 }

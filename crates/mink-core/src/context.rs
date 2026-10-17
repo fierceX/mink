@@ -202,6 +202,20 @@ impl ToolContext {
         start_line: Option<usize>,
         end_line: Option<usize>,
     ) -> Option<String> {
+        // A memo hit says "reuse the content you already have", not "here is the
+        // content again". Editing still needs the hashline snapshot, so a path
+        // whose snapshot was evicted must be read again instead of hitting the
+        // memo and leaving the model without a tag.
+        if !raw
+            && self
+                .snapshots
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .latest_tag(path)
+                .is_none()
+        {
+            return None;
+        }
         let meta = std::fs::metadata(path).ok()?;
         let mtime = meta.modified().ok()?;
         let epoch = self.memo_epoch.load(Ordering::SeqCst);

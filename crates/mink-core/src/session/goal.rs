@@ -375,10 +375,11 @@ pub struct GoalBudget {
     pub remaining_secs: u64,
     /// Consecutive model-reported blockers required to end the goal.
     pub blocked_after_consecutive_rounds: u32,
-    /// Consecutive rounds of the *same* blocker recorded so far — the gate
-    /// progress, not the count of blocked reports (see
-    /// [`GoalSnapshot::blocked_rounds`]).
+    /// Consecutive blocked reports (all blockers).
     pub blocked_rounds: u32,
+    /// Consecutive rounds of the *same* blocker — the gate progress, not the
+    /// count of blocked reports (see [`GoalSnapshot::blocker_rounds`]).
+    pub blocker_rounds: u32,
     pub soft_token_limit: Option<u64>,
 }
 
@@ -432,7 +433,8 @@ impl GoalSnapshot {
                 .deadline_unix_secs
                 .saturating_sub(goal_now()),
             blocked_after_consecutive_rounds: self.spec.limits.blocked_after_consecutive_rounds,
-            blocked_rounds: self.blocker_rounds,
+            blocked_rounds: self.blocked_rounds,
+            blocker_rounds: self.blocker_rounds,
             soft_token_limit: self.spec.limits.soft_token_limit,
         }
     }
@@ -1395,6 +1397,7 @@ mod tests {
         assert_eq!(budget.remaining_turns, 20);
         assert_eq!(budget.blocked_after_consecutive_rounds, 3);
         assert_eq!(budget.blocked_rounds, 0);
+        assert_eq!(budget.blocker_rounds, 0);
         assert_eq!(budget.soft_token_limit, None);
         assert!(budget.remaining_secs > 0 && budget.remaining_secs <= 3600);
         assert_eq!(

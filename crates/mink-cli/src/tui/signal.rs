@@ -37,6 +37,8 @@ pub enum TuiSignal {
         tool_use_id: Option<String>,
         tool_name: String,
         summary: String,
+        /// Complete arguments as the runtime streamed them, for structured cards.
+        input: Option<serde_json::Value>,
     },
     ToolResult {
         tool_use_id: Option<String>,
@@ -204,6 +206,7 @@ impl TuiState {
                 tool_use_id,
                 tool_name,
                 summary,
+                input,
             } => {
                 self.finalize_stream();
                 self.work_state = WorkState::RunningTool;
@@ -211,6 +214,7 @@ impl TuiState {
                     tool_use_id.clone(),
                     tool_name.clone(),
                     summary.clone(),
+                    input.clone(),
                 ));
                 if let Some(id) = tool_use_id {
                     self.active_tools.insert(id.clone(), index);

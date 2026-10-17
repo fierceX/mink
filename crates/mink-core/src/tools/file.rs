@@ -465,10 +465,11 @@ impl super::runner::ToolExec for ReadTool {
             return Ok(super::runner::ToolOutcome::text(text));
         }
         if let Some(vfs) = &ctx.read_only_fs {
+            let virtual_path = crate::tools::vfs::normalize_virtual_file_path(&selection.path)?;
             let result = vfs.read(
                 &ctx.vfs_scope,
                 &crate::tools::vfs::VfsReadRequest {
-                    path: selection.path.clone(),
+                    path: virtual_path,
                     offset: selection.offset,
                     limit: selection.limit,
                     max_full_read_bytes: ctx.tool_config.tool_result_max_bytes,
@@ -920,7 +921,8 @@ fn execute_hashline_edit(
         input,
         "Hashline Edit accepts only {\"input\": \"[PATH#TAG]...\"}; legacy path/patch and old_string/new_string inputs are unsupported",
     )?;
-    let patch = crate::tools::hashline::parse(&args.input)?;
+    let patch = crate::tools::hashline::parse(&args.input)
+        .map_err(|error| crate::tools::args::invalid_input(format!("{error:#}")))?;
     let mut store = ctx
         .snapshots
         .lock()
@@ -968,13 +970,10 @@ fn execute_hashline_edit(
         let versions = store.versions(&canonical, &authored.tag);
         if versions.is_empty() {
             let context = format_mismatch_anchor_context(&normalized, &authored_anchors);
-            bail!(
+            return Err(crate::tools::args::invalid_input(format!(
                 "Error: snapshot tag #{} for {} is unknown and does not belong to this session. Do not invent tags or reuse a tag from another session.\nCurrent content hash (diagnostic only): #{}. This hash is not an authorized snapshot tag and must not be used to retry.\nUse Read or Grep to obtain a verifiable new [PATH#TAG] header before editing again.{}",
-                authored.tag,
-                authored.path,
-                current_tag,
-                context
-            );
+                authored.tag, authored.path, current_tag, context
+            )));
         }
 
         let mut warnings = Vec::new();
@@ -1588,10 +1587,11 @@ fn execute_replace_edit(
         input,
         "Replace Edit requires path and edits with old_text/new_text/all; legacy patch inputs are unsupported",
     )?;
-    ensure!(
-        !args.edits.is_empty(),
-        "Error: edits must contain at least one entry"
-    );
+    if args.edits.is_empty() {
+        return Err(crate::tools::args::invalid_input(
+            "Error: edits must contain at least one entry",
+        ));
+    }
     let path = resolve_replace_target(&ctx.cwd, &args.path)?;
     let display_path = display_relative_path(&ctx.cwd, &path);
     let mut output = Vec::new();

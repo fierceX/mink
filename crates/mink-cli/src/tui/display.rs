@@ -39,6 +39,7 @@ impl Display for TuiDisplay {
             tool_use_id: Some(call.tool_use_id.into()),
             tool_name: call.tool_name.into(),
             summary: call.summary.into(),
+            input: call.input.cloned(),
         });
     }
 
