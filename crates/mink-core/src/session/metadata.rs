@@ -24,6 +24,22 @@ pub struct SessionMetadata {
     pub first_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// Provenance of a session-backed sub-agent child. Absent for user sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<SubAgentMetadata>,
+}
+
+/// Durable provenance written once when a child session is created.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubAgentMetadata {
+    pub version: u8,
+    /// `sub_agent`, `goal_review`, or `replan`.
+    pub origin: String,
+    /// `fresh` or `fork`.
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub depth: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -34,11 +50,13 @@ pub struct SessionRecord {
     pub modified: SystemTime,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SessionSeed {
     pub alias: Option<String>,
     pub title: Option<String>,
     pub first_prompt: Option<String>,
+    pub parent: Option<String>,
+    pub subagent: Option<SubAgentMetadata>,
 }
 
 /// Typed failure for session-reference resolution.
@@ -96,6 +114,12 @@ pub async fn ensure_metadata(paths: &Paths, cwd: &Path, seed: SessionSeed) -> Re
     }
     if metadata.first_prompt.is_none() {
         metadata.first_prompt = seed.first_prompt;
+    }
+    if metadata.parent.is_none() {
+        metadata.parent = seed.parent;
+    }
+    if metadata.subagent.is_none() {
+        metadata.subagent = seed.subagent;
     }
     if metadata.summary.is_none() {
         metadata.summary = read_summary_line(&paths.summary).await?;
@@ -375,6 +399,7 @@ fn new_metadata(paths: &Paths, cwd: &Path, now: &str) -> SessionMetadata {
         parent: None,
         first_prompt: None,
         summary: None,
+        subagent: None,
     }
 }
 

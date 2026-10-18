@@ -318,6 +318,9 @@ pub struct ResolvedConfig {
     /// `tool_timeout_secs` 都不得超过该值）。默认 600 秒。
     pub tool_timeout_max_secs: i32,
     pub sub_agent_timeout_secs: i32,
+    /// Maximum delegation depth for sub-agents. `0` disables delegation;
+    /// the default `1` preserves the historical single-level behavior.
+    pub sub_agent_max_depth: u32,
     pub llm_first_event_timeout_secs: i32,
     pub llm_idle_timeout_secs: i32,
     pub llm_wait_heartbeat_secs: i32,
@@ -400,6 +403,7 @@ impl Default for ResolvedConfig {
             tool_timeout_secs: 600,
             tool_timeout_max_secs: 600,
             sub_agent_timeout_secs: 300,
+            sub_agent_max_depth: 1,
             llm_first_event_timeout_secs: 60,
             llm_idle_timeout_secs: 90,
             llm_wait_heartbeat_secs: 30,
@@ -475,6 +479,12 @@ pub fn validate_runtime_config(cfg: &ResolvedConfig) -> Result<()> {
     )?;
     if cfg.tool_timeout_max_secs < 5 {
         bail!("tool_timeout_max_secs must be at least 5 seconds");
+    }
+    if cfg.sub_agent_timeout_secs <= 0 {
+        bail!("sub_agent_timeout_secs must be greater than 0");
+    }
+    if cfg.sub_agent_max_depth > 3 {
+        bail!("sub_agent_max_depth must be between 0 and 3");
     }
     cfg.llm_recovery.validate()?;
     Ok(())
@@ -678,6 +688,29 @@ mod validation_tests {
         );
         cfg.tool_timeout_max_secs = 5;
         assert!(validate_runtime_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn sub_agent_depth_defaults_to_one_and_is_bounded() {
+        let cfg = ResolvedConfig::default();
+        assert_eq!(cfg.sub_agent_max_depth, 1);
+        assert!(validate_runtime_config(&cfg).is_ok());
+
+        let too_deep = ResolvedConfig {
+            sub_agent_max_depth: 4,
+            ..ResolvedConfig::default()
+        };
+        assert!(
+            validate_runtime_config(&too_deep)
+                .unwrap_err()
+                .to_string()
+                .contains("sub_agent_max_depth must be between 0 and 3")
+        );
+        let disabled = ResolvedConfig {
+            sub_agent_max_depth: 0,
+            ..ResolvedConfig::default()
+        };
+        assert!(validate_runtime_config(&disabled).is_ok());
     }
 
     #[test]

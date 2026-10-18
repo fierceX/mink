@@ -215,6 +215,19 @@ pub trait Display: Send + Sync {
         in_tokens: u64,
         out_tokens: u64,
     );
+    /// Optional metadata-carrying variant used by the delegation coordinator.
+    /// Defaults to the legacy status renderer so existing displays keep working.
+    fn render_sub_agent_status_meta(
+        &self,
+        session_id: &str,
+        status: &str,
+        _label: Option<&str>,
+        _stop_reason: Option<&str>,
+        in_tokens: u64,
+        out_tokens: u64,
+    ) {
+        self.render_sub_agent_status(session_id, status, in_tokens, out_tokens);
+    }
     fn render_sub_agent_output(
         &self,
         session_id: &str,
@@ -224,6 +237,21 @@ pub trait Display: Send + Sync {
         in_tokens: u64,
         out_tokens: u64,
     );
+    /// Optional metadata-carrying output variant used by child execution.
+    #[allow(clippy::too_many_arguments)]
+    fn render_sub_agent_output_meta(
+        &self,
+        session_id: &str,
+        status: &str,
+        _label: Option<&str>,
+        _stop_reason: Option<&str>,
+        thinking: &str,
+        text: &str,
+        in_tokens: u64,
+        out_tokens: u64,
+    ) {
+        self.render_sub_agent_output(session_id, status, thinking, text, in_tokens, out_tokens);
+    }
     fn render_prompt(&self);
     fn render_clear_line(&self);
 }

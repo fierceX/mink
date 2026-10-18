@@ -372,6 +372,10 @@
         "fork": {
           "type": "boolean",
           "description": "Set to true to inherit parent session context (conversation history, plan, skills). Default is false for a fresh independent session."
+        },
+        "model": {
+          "type": "string",
+          "description": "Optional model alias or current model name for the child. Omit to use the parent's active model; unsupported values are rejected before a child starts."
         }
       },
       "required": [

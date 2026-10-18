@@ -24,6 +24,7 @@ fn builder_for_config(names: &[&str], base: Config) -> Builder {
     Builder {
         cwd: PathBuf::from("/tmp"),
         home: PathBuf::from("/home/user"),
+        delegation: None,
         skill_snapshot: Arc::new(SkillSnapshot::default()),
         context_file_snapshot: Arc::new(ContextFileSnapshot::default()),
         rule_snapshot: Arc::new(RuleSnapshot::default()),
@@ -669,4 +670,27 @@ fn every_valid_surface_preserves_combination_invariants() {
             }
         }
     }
+}
+
+#[test]
+fn delegated_scope_is_rendered_only_for_children_and_marks_the_depth_limit() {
+    let primary = builder_for(&["Read"]).build_system_prompt().unwrap();
+    assert!(!primary.contains("You are a delegated subagent"));
+
+    let mut child_builder = builder_for(&["Read"]);
+    child_builder.delegation = Some(DelegationScope {
+        depth: 1,
+        max_depth: 2,
+    });
+    let child = child_builder.build_system_prompt().unwrap();
+    assert!(child.contains("You are a delegated subagent"));
+    assert!(!child.contains("further delegation is unavailable"));
+
+    let mut limited_builder = builder_for(&["Read"]);
+    limited_builder.delegation = Some(DelegationScope {
+        depth: 1,
+        max_depth: 1,
+    });
+    let limited = limited_builder.build_system_prompt().unwrap();
+    assert!(limited.contains("Delegation depth 1 of 1; further delegation is unavailable."));
 }

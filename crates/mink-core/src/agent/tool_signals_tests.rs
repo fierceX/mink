@@ -13,6 +13,8 @@ fn tool_result(content: &str) -> ToolExecution {
         spawns_sub_agent: false,
         sub_agent_prompt: None,
         sub_agent_fork: false,
+        sub_agent_label: None,
+        sub_agent_model: None,
         exit_code: None,
         status: crate::tools::metadata::ToolStatus::Failed(
             crate::tools::metadata::ToolFailureKind::ProcessFailed,

@@ -183,12 +183,28 @@ pub enum EventLog {
         workflow_fingerprint: String,
     },
     SubAgent {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<u8>,
         session_id: String,
         status: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input_tokens: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        depth: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<String>,
     },
     Scavenge {
         note: String,

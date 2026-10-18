@@ -226,6 +226,22 @@ fn validate_sdk_request_rejects_bad_tool_timeout_options() {
     validate_sdk_request(&req).unwrap();
     assert_eq!(req.options.tools.tool_timeout, Some(30));
     assert_eq!(req.options.tools.tool_timeout_max, Some(900));
+
+    let req = parse_agent_jsonl_request(
+        r#"{"prompt":"hi","options":{"tools":{"sub_agent_max_depth":4}}}"#,
+    )
+    .unwrap();
+    let err = validate_sdk_request(&req).unwrap_err();
+    assert!(
+        err.contains("sub_agent_max_depth must be between 0 and 3"),
+        "{err}"
+    );
+    let req = parse_agent_jsonl_request(
+        r#"{"prompt":"hi","options":{"tools":{"sub_agent_max_depth":2}}}"#,
+    )
+    .unwrap();
+    validate_sdk_request(&req).unwrap();
+    assert_eq!(req.options.tools.sub_agent_max_depth, Some(2));
 }
 
 #[test]

@@ -21,6 +21,7 @@ async fn metadata_resolves_alias_and_id_prefix() {
             alias: Some("feature-x".into()),
             title: Some("Feature X work".into()),
             first_prompt: Some("implement feature x".into()),
+            ..Default::default()
         },
     )
     .await
@@ -55,6 +56,7 @@ async fn metadata_resolves_sanitized_alias_reference() {
             alias: Some("feature-x".into()),
             title: Some("Feature X work".into()),
             first_prompt: Some("implement feature x".into()),
+            ..Default::default()
         },
     )
     .await
@@ -110,6 +112,7 @@ async fn ensure_metadata_rejects_malformed_file_without_overwrite() {
             alias: Some("feature-x".into()),
             title: Some("Feature X work".into()),
             first_prompt: None,
+            ..Default::default()
         },
     )
     .await

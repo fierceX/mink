@@ -394,6 +394,7 @@ fn approval_test_config<const N: usize>(
         tool_timeout_secs: 600,
         tool_timeout_max_secs: 600,
         sub_agent_timeout_secs: 300,
+        sub_agent_max_depth: 1,
         tool_result_max_bytes: 100_000,
         file_write_max_bytes: 1_048_576,
         edit_mode: crate::config::EditMode::Hashline,
@@ -1334,6 +1335,40 @@ async fn artifact_marker_respects_budget_and_spill_failure_is_visible() {
         "{}",
         failed.content
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn deferred_sub_agent_result_still_spills_to_artifact() {
+    let shared = crate::regression::test_context_for_agent("runner-subagent-artifact")
+        .await
+        .unwrap();
+    let mut tool_ctx = crate::context::ToolContext::from(shared.as_ref());
+    tool_ctx.tool_config.tool_result_max_bytes = 256;
+    let dir = std::env::temp_dir().join(format!("mink-subagent-artifact-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    tool_ctx.artifacts = Arc::new(crate::session::artifacts::ArtifactManager::new(
+        dir.join("artifacts"),
+    ));
+    let runner = ToolRunner::new(Arc::new(tool_ctx));
+    let mut results = vec![crate::tools::runner::ToolExecution::test_result(
+        "call-sub-artifact",
+        "SubAgent",
+        "child result\n".repeat(2000),
+    )];
+    results[0].needs_finalization = true;
+
+    runner.finalize_deferred_results(&mut results);
+
+    assert!(!results[0].needs_finalization);
+    assert!(
+        results[0].content.len() <= 256,
+        "len={}",
+        results[0].content.len()
+    );
+    assert!(results[0].content.contains("artifact://"));
+    assert_eq!(results[0].artifacts.len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

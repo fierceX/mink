@@ -173,6 +173,7 @@ async fn write_session_metadata(dir: &std::path::Path, id: &str, cwd: &std::path
         parent: None,
         first_prompt: None,
         summary: None,
+        subagent: None,
     };
     tokio::fs::write(
         dir.join("session.json"),

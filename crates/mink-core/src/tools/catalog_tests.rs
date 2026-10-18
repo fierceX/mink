@@ -92,7 +92,7 @@ fn schemas_declare_exactly_the_runtime_accepted_fields() {
         ("PlanDraft", &["content"]),
         ("PlanConfirm", &[]),
         ("PlanClear", &[]),
-        ("SubAgent", &["prompt", "description", "fork"]),
+        ("SubAgent", &["prompt", "description", "fork", "model"]),
         ("GoalRead", &[]),
         ("GoalDraft", &["draft_id", "revision", "spec"]),
         (

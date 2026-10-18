@@ -364,8 +364,9 @@ runtime 启动时 fail closed。
 | 参数 | 类型 | 说明 |
 |---|---|---|
 | `prompt` | string | 子代理任务描述，必需 |
-| `description` | string | 简短描述，可选 |
+| `description` | string | 简短描述，可选；持久化为 label |
 | `fork` | boolean | 是否继承父会话上下文，默认 false |
+| `model` | string | 可选；仅接受 `ModelResolver` 别名或当前实际模型 |
 
 模式：
 
@@ -376,13 +377,14 @@ runtime 启动时 fail closed。
 
 行为：
 
-- 同一批 SubAgent 最多 8 个并发。
-- 子代理不能递归启动子代理。
-- Fork 在 child runtime 初始化前克隆完整 session 目录（跳过已有 `subagents/`）；child 身份与遥测重新初始化。
+- 同一批 SubAgent 最多 8 个并发；第 9 个及以后排队等待名额，结果按输入顺序回填。
+- 子代理不能超过 `sub_agent_max_depth`（默认 1）；到达上限时工具从子代理 surface 隐藏，运行时返回 `SafetyBlocked`。
+- Fork 在 child runtime 初始化前克隆完整 session 目录（跳过已有 `subagents/`）；child 身份与遥测重新初始化，克隆按目录项检查取消。
 - Fork 后 artifact 从克隆 index 的最大序号继续写入，不覆盖父历史正文。
-- 子代理完成时会通过 parent display 发送完整 thinking/text。
-- tool result 会注入父会话，格式为 `[sub-agent <id>] <status> (in=<n>, out=<n>) ...`。
-- 超时后未完成项返回 `Sub-agent timed out after <n>s.`，并取消对应子代理。
+- 子代理完成时通过 parent display 发送完整 thinking/text（TUI 详情），但父模型可见结果默认不含 thinking。
+- tool result 格式为 `[sub-agent <id>] <status> (in=<n>, out=<n>)` + 最后一条非空 assistant 的全部 text 块；失败/超时追加有界 `diagnostic:` 段。
+- 子代理失败/超时仍映射为 `ToolStatus`（`TimedOut` → `Failed(Timeout)`）；`sub_agent_timeout_secs` 从获得名额后起算并覆盖 setup+run。
+- `_mink.sub_agent` 携带 session_id/label/mode/depth/status/stop_reason/usage/elapsed_ms。
 
 ## 工具事实权威表（Q11）
 

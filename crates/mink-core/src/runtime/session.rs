@@ -15,6 +15,9 @@ pub use crate::session::goal::{
 };
 pub use crate::session::metadata::{SessionMetadata, SessionReferenceError, SessionSeed};
 pub use crate::session::paths::Paths as SessionPaths;
+pub use crate::session::subagent_catalog::{
+    SubAgentCatalogEntry, read_catalog as read_subagent_catalog,
+};
 pub use crate::session::todo::{TodoSnapshot, TodoStatus};
 pub use crate::session::usage::{TokenUsage, UsageKind, UsageRecord, UsageStatus, UsageSummary};
 
@@ -102,6 +105,10 @@ pub struct SessionUsage {
 }
 
 impl SessionReader {
+    /// Derived delegation catalog recorded in this session's event log.
+    pub fn subagent_catalog(&self) -> Result<Vec<SubAgentCatalogEntry>> {
+        crate::session::subagent_catalog::read_catalog(&self.directory)
+    }
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
             directory: directory.into(),

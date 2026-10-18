@@ -454,7 +454,8 @@ IPv6 地址在启动日志中按 `[::1]:8765` 形式显示。
 | `timeout_secs` | `600` | agent 运行总超时（秒），超时会终止 agent 进程组 |
 | `tool_timeout` | `600` | 单次工具调用超时（秒） |
 | `tool_timeout_max` | `600` | 单次 Bash/Python/自定义工具调用的超时上限（秒，最低 5） |
-| `sub_agent_timeout` | `300` | 子代理执行超时（秒） |
+| `sub_agent_timeout` | `300` | 子代理执行超时（秒；从获得并发名额后起算，覆盖 setup+run） |
+| `sub_agent_max_depth` | `1` | 子代理最大委派深度（`0` 禁用，范围 0..=3） |
 | `llm_first_event_timeout` | `60` | 等待首个模型 stream event 的秒数 |
 | `llm_idle_timeout` | `90` | 模型 stream 空闲超时（秒） |
 | `llm_wait_heartbeat` | `30` | 等待模型响应的提示间隔；设为 `0` 关闭提示 |
@@ -578,6 +579,7 @@ MINK_SDK_FEATURES="sdk-bin python-sandbox" python scripts/build_wheel.py
 | `tool_timeout` | `Option<i32>` |
 | `tool_timeout_max` | `Option<i32>` |
 | `sub_agent_timeout` | `Option<i32>` |
+| `sub_agent_max_depth` | `Option<u32>` |
 | `max_search_files` | `Option<usize>` |
 | `max_search_results` | `Option<usize>` |
 | `edit` | `EditConfigFile` |
@@ -664,6 +666,7 @@ macOS `write_dirs`、临时目录和会话存储的写入规则包含字面路�
 | `tool_timeout` | `int` | `600` |
 | `tool_timeout_max` | `int` | `600` |
 | `sub_agent_timeout` | `int` | `300` |
+| `sub_agent_max_depth` | `int` | `1` |
 | `llm_first_event_timeout` | `int` | `60` |
 | `llm_idle_timeout` | `int` | `90` |
 | `llm_wait_heartbeat` | `int` | `30` |

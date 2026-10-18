@@ -190,7 +190,7 @@ Rust `AgentOptions` 或 Agent JSONL `options.tools.enabled_tools` 设置。显�
 默认集合中，必须显式列出。未知、重复或当前构建 feature 不可用的名称会在创建 session 前
 报错。
 
-最终 surface 还会考虑 approval、主/子代理 role、filesystem backend 和硬依赖；schema、
+最终 surface 还会考虑 approval、主/子代理 role、filesystem backend、委派深度和硬依赖；`SubAgent` 仅在 `sub_agent_depth < sub_agent_max_depth` 时保留，到达上限后 schema、prompt 与运行时一致地拒绝继续委派。schema、
 语义能力、workflow、运行时引导和真实执行门禁都消费同一个解析结果。工具启用合同不包含
 disable flag 或 sandbox `allow_*` 策略。
 

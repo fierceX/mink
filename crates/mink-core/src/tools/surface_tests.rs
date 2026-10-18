@@ -268,3 +268,42 @@ fn enabled_tools_none_is_default_set_and_empty_list_disables_all() {
     let surface = resolve(&config, AgentRole::Primary, false).unwrap();
     assert!(surface.names().next().is_none());
 }
+
+#[test]
+fn delegation_depth_controls_the_sub_agent_surface() {
+    let config = ToolConfig::from_config(&Config::default());
+    assert_eq!(config.sub_agent_max_depth, 1);
+
+    let primary = ToolResolutionContext::from_runtime_with_delegation(
+        AgentRole::Primary,
+        &config,
+        false,
+        true,
+    );
+    let surface =
+        ModelToolSurface::resolve(ToolCatalog::builtin().unwrap(), &config, &primary).unwrap();
+    assert!(surface.has("SubAgent"));
+
+    let child_at_limit = ToolResolutionContext::from_runtime_with_delegation(
+        AgentRole::SubAgent,
+        &config,
+        false,
+        false,
+    );
+    let surface =
+        ModelToolSurface::resolve(ToolCatalog::builtin().unwrap(), &config, &child_at_limit)
+            .unwrap();
+    assert!(!surface.has("SubAgent"));
+
+    let child_with_budget = ToolResolutionContext::from_runtime_with_delegation(
+        AgentRole::SubAgent,
+        &config,
+        false,
+        true,
+    );
+    let surface =
+        ModelToolSurface::resolve(ToolCatalog::builtin().unwrap(), &config, &child_with_budget)
+            .unwrap();
+    assert!(surface.has("SubAgent"));
+    assert!(!surface.has("GoalDraft"));
+}

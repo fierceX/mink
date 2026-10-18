@@ -19,5 +19,6 @@ pub mod plan;
 pub mod prefix;
 pub mod stats;
 pub mod store;
+pub mod subagent_catalog;
 pub mod todo;
 pub mod usage;

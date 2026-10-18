@@ -258,6 +258,7 @@ class SandboxConfig:
     tool_timeout: int = 600
     tool_timeout_max: int = 600
     sub_agent_timeout: int = 300
+    sub_agent_max_depth: int = 1
     llm_first_event_timeout: int = 60
     llm_idle_timeout: int = 90
     llm_wait_heartbeat: int = 30
@@ -841,6 +842,8 @@ class AgentSession:
             tools["tool_timeout_max"] = self._config.tool_timeout_max
         if self._config.sub_agent_timeout != 300:
             tools["sub_agent_timeout"] = self._config.sub_agent_timeout
+        if self._config.sub_agent_max_depth != 1:
+            tools["sub_agent_max_depth"] = self._config.sub_agent_max_depth
         if self._config.llm_first_event_timeout != 60:
             generation["llm_first_event_timeout"] = self._config.llm_first_event_timeout
         if self._config.llm_idle_timeout != 90:
@@ -939,6 +942,8 @@ class AgentSession:
                 raise ValueError(f"{name} must be greater than 0")
         if cfg.tool_timeout_max < 5:
             raise ValueError("tool_timeout_max must be at least 5")
+        if not 0 <= cfg.sub_agent_max_depth <= 3:
+            raise ValueError("sub_agent_max_depth must be between 0 and 3")
         if cfg.max_context < 0:
             raise ValueError("max_context must be zero or greater")
         if not 1 <= cfg.context_compact_pct <= 100:
@@ -1086,6 +1091,7 @@ class AgentSession:
             "tool_timeout": cfg.tool_timeout,
             "tool_timeout_max": cfg.tool_timeout_max,
             "sub_agent_timeout": cfg.sub_agent_timeout,
+            "sub_agent_max_depth": cfg.sub_agent_max_depth,
             "max_search_files": cfg.max_search_files,
             "max_search_results": cfg.max_search_results,
             "edit": {

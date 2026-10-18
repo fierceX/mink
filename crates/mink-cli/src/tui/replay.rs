@@ -268,6 +268,20 @@ fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> 
                     input: None,
                 });
             }
+            ReplayEventKind::SubAgent => {
+                let session_id = evt["session_id"].as_str().unwrap_or_default();
+                let status = evt["status"].as_str().unwrap_or("unknown");
+                let in_tokens = evt["input_tokens"].as_u64().unwrap_or(0);
+                let out_tokens = evt["output_tokens"].as_u64().unwrap_or(0);
+                if !session_id.is_empty() {
+                    state.apply(&TuiSignal::SubAgentStatus {
+                        session_id: session_id.to_string(),
+                        status: status.to_string(),
+                        in_tokens,
+                        out_tokens,
+                    });
+                }
+            }
             ReplayEventKind::ToolResult => {
                 let tool_name = crate::replay::event_name(evt);
                 let presentation = evt
@@ -331,6 +345,23 @@ fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> 
 mod tests {
     use super::*;
     use crate::runtime::GoalMessageKind;
+
+    #[test]
+    fn sub_agent_events_replay_as_transcript_lines() {
+        let events = vec![
+            serde_json::json!({"type":"sub_agent","session_id":"sub_1","status":"launched","label":"review"}),
+            serde_json::json!({"type":"sub_agent","session_id":"sub_1","status":"running"}),
+            serde_json::json!({"type":"sub_agent","session_id":"sub_1","status":"ok","input_tokens":10,"output_tokens":5}),
+        ];
+        let items = build_lines_from_events(&events);
+        let line = items
+            .iter()
+            .find(|item| item.kind == TranscriptKind::SubAgent)
+            .expect("sub-agent line");
+        assert!(line.text.contains("sub_1"), "{}", line.text);
+        assert!(line.text.contains("ok"), "{}", line.text);
+        assert!(line.sealed, "terminal status must seal the line");
+    }
 
     fn goal_row(kind: &str, feedback: Option<&str>) -> serde_json::Value {
         serde_json::json!({

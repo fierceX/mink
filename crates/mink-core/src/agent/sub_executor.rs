@@ -9,7 +9,50 @@ use crate::session::store::ConversationStore;
 use crate::ui::{Display, SubAgentStreamKind, SubAgentStreamSink};
 use anyhow::{Result, bail};
 use std::path::{Component, Path};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+/// Why a sub-agent execution ended, independent of the tool-status vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubAgentStopReason {
+    Completed,
+    Aborted,
+    Error,
+    MaxTurns,
+    Timeout,
+}
+
+impl SubAgentStopReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Aborted => "aborted",
+            Self::Error => "error",
+            Self::MaxTurns => "max_turns",
+            Self::Timeout => "timeout",
+        }
+    }
+}
+
+/// Why this child session exists. Internal reviewers and replanners are not
+/// model-visible delegations and must not enter the delegation catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubAgentOrigin {
+    SubAgent,
+    GoalReview,
+    Replan,
+}
+
+impl SubAgentOrigin {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::SubAgent => "sub_agent",
+            Self::GoalReview => "goal_review",
+            Self::Replan => "replan",
+        }
+    }
+}
 
 /// Terminal status of one sub-agent execution.
 ///
@@ -48,9 +91,32 @@ impl SubAgentStatus {
 #[derive(Debug, Clone)]
 pub struct SubAgentResult {
     pub status: SubAgentStatus,
+    pub stop_reason: SubAgentStopReason,
     pub thinking: String,
     pub text: String,
+    /// Bounded, model-safe terminal detail (never reasoning or tool payloads).
+    pub diagnostic: Option<String>,
     pub usage: Stats,
+    pub elapsed_ms: u64,
+}
+
+impl SubAgentResult {
+    pub(crate) fn terminal(
+        status: SubAgentStatus,
+        stop_reason: SubAgentStopReason,
+        text: String,
+        diagnostic: Option<String>,
+    ) -> Self {
+        Self {
+            status,
+            stop_reason,
+            thinking: String::new(),
+            text,
+            diagnostic,
+            usage: Stats::default(),
+            elapsed_ms: 0,
+        }
+    }
 }
 
 /// CaptureDisplay silently buffers sub-agent output instead of forwarding to the parent TUI.
@@ -133,9 +199,11 @@ pub struct SubAgentExecutor {
     capture: Arc<CaptureDisplay>,
     parent_display: Arc<dyn Display>,
     session_id: String,
+    label: Option<String>,
 }
 
 impl SubAgentExecutor {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn new(
         parent_ctx: Arc<AgentSharedContext>,
         session_id: String,
@@ -143,17 +211,34 @@ impl SubAgentExecutor {
         config: Config,
     ) -> Result<Self> {
         let cancel = parent_ctx.cancel.linked_child_token();
-        Self::new_with_cancel(parent_ctx, session_id, fork, config, cancel).await
+        Self::new_child(
+            parent_ctx,
+            session_id,
+            fork,
+            config,
+            cancel,
+            None,
+            None,
+            SubAgentOrigin::SubAgent,
+        )
+        .await
     }
 
-    pub(crate) async fn new_with_cancel(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn new_child(
         parent_ctx: Arc<AgentSharedContext>,
         session_id: String,
         fork: bool,
         config: Config,
         cancel: crate::cancel::CancellationToken,
+        label: Option<String>,
+        model: Option<String>,
+        origin: SubAgentOrigin,
     ) -> Result<Self> {
-        Self::new_inner(parent_ctx, session_id, fork, config, cancel, None).await
+        Self::new_inner(
+            parent_ctx, session_id, fork, config, cancel, origin, label, model, None,
+        )
+        .await
     }
 
     pub(crate) async fn new_with_review(
@@ -180,17 +265,40 @@ impl SubAgentExecutor {
             .tool_approval
             .retain(|name, _| config.enabled_tools.as_ref().unwrap().contains(name));
         config.sub_agent_timeout_secs = crate::runtime::goal::GOAL_REVIEW_TIMEOUT_SECS as i32;
-        Self::new_inner(parent_ctx, session_id, true, config, cancel, Some(review)).await
+        Self::new_inner(
+            parent_ctx,
+            session_id,
+            true,
+            config,
+            cancel,
+            SubAgentOrigin::GoalReview,
+            Some("goal review".into()),
+            None,
+            Some(review),
+        )
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn new_inner(
         parent_ctx: Arc<AgentSharedContext>,
         session_id: String,
         fork: bool,
-        config: Config,
+        mut config: Config,
         cancel: crate::cancel::CancellationToken,
+        origin: SubAgentOrigin,
+        label: Option<String>,
+        model: Option<String>,
         review: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
     ) -> Result<Self> {
+        if let Some(model) = model {
+            config.model = model;
+        }
+        let child_depth = parent_ctx.sub_agent_depth.saturating_add(1);
+        let max_depth = parent_ctx.tool_config.sub_agent_max_depth;
+        if origin == SubAgentOrigin::SubAgent && child_depth > max_depth {
+            bail!("sub-agent depth {child_depth} exceeds sub_agent_max_depth {max_depth}");
+        }
         let mut components = Path::new(&session_id).components();
         if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
             bail!("invalid sub-agent session id: {session_id}");
@@ -206,7 +314,20 @@ impl SubAgentExecutor {
             .parent()
             .ok_or_else(|| anyhow::anyhow!("parent conversation has no session directory"))?;
         let child_home = parent_session_dir.join("subagents").join(&session_id);
-        prepare_child_home(parent_session_dir, &child_home, fork).await?;
+        let home_created = Arc::new(AtomicBool::new(false));
+        let mut home_guard = ChildHomeGuard {
+            path: child_home.clone(),
+            created: home_created.clone(),
+            armed: true,
+        };
+        prepare_child_home_with_cancel(
+            parent_session_dir,
+            &child_home,
+            fork,
+            Some(cancel.clone()),
+            Some(&home_created),
+        )
+        .await?;
         let parent_lease = parent_ctx
             .session_lease
             .lock()
@@ -236,6 +357,7 @@ impl SubAgentExecutor {
             cancel,
             interrupt: parent_ctx.interrupt.clone(),
             is_sub_agent: true,
+            sub_agent_depth: child_depth,
             usage_journal: Some(parent_ctx.usage.clone()),
             read_only_fs: parent_ctx.read_only_fs.clone(),
             resource_session_id: parent_ctx.vfs_scope.resource_session_id.clone(),
@@ -263,16 +385,31 @@ impl SubAgentExecutor {
         })
         .await?;
         let child_ctx = built.ctx;
+        let label = label
+            .map(|label| crate::session::subagent_catalog::sanitize_label(&label, &session_id));
+        let title = label
+            .as_deref()
+            .map(|label| format!("Sub-agent: {label}"))
+            .unwrap_or_else(|| format!("Sub-agent: {session_id}"));
         crate::session::metadata::ensure_metadata(
             &built.paths,
             &parent_ctx.cwd,
             SessionSeed {
                 alias: None,
-                title: Some(format!("Sub-agent {session_id}")),
+                title: Some(title),
                 first_prompt: None,
+                parent: Some(parent_ctx.config.session_id.clone()),
+                subagent: Some(crate::session::metadata::SubAgentMetadata {
+                    version: 1,
+                    origin: origin.as_str().to_string(),
+                    mode: if fork { "fork" } else { "fresh" }.to_string(),
+                    label: label.clone(),
+                    depth: child_depth,
+                }),
             },
         )
         .await?;
+        home_guard.disarm();
         let child_store = child_ctx.store.clone();
 
         Ok(Self {
@@ -281,7 +418,15 @@ impl SubAgentExecutor {
             capture,
             parent_display,
             session_id,
+            label,
         })
+    }
+
+    /// Shared child context, exposed to crate tests and internal callers that
+    /// need to inspect the built surface/provenance.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn context(&self) -> &Arc<AgentSharedContext> {
+        &self.child_ctx
     }
 
     /// Execute the sub-agent with the given prompt.
@@ -291,6 +436,7 @@ impl SubAgentExecutor {
 
     async fn execute_turn(&self, prompt: String) -> SubAgentResult {
         // 在 self 被 move 进 run_impl 之前，提取所有权字段
+        let started = Instant::now();
         let capture = self.capture.clone();
         let parent_display = self.parent_display.clone();
         let session_id = self.session_id.clone();
@@ -313,64 +459,73 @@ impl SubAgentExecutor {
         let captured_thinking = capture.take_thinking();
         let captured_text = capture.take_text();
         let stats = child_ctx.stats.snapshot().await;
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-        let (status, thinking, text) = match outcome {
-            RunOutcome::Done(Ok((TurnDecision::Stop, thinking, text))) => (
-                SubAgentStatus::Succeeded,
-                if thinking.is_empty() {
-                    captured_thinking.clone()
-                } else {
-                    thinking
-                },
-                if text.is_empty() {
-                    captured_text.clone()
-                } else {
-                    text
-                },
-            ),
+        let (status, stop_reason, thinking, text, diagnostic) = match outcome {
+            RunOutcome::Done(Ok((TurnDecision::Stop, thinking, text))) => {
+                let text = resolve_success_text(text, captured_text.clone());
+                (
+                    SubAgentStatus::Succeeded,
+                    SubAgentStopReason::Completed,
+                    if thinking.is_empty() {
+                        captured_thinking.clone()
+                    } else {
+                        thinking
+                    },
+                    text,
+                    None,
+                )
+            }
             RunOutcome::Done(Ok((TurnDecision::Interrupted, _, _))) => (
                 SubAgentStatus::Interrupted,
+                SubAgentStopReason::Aborted,
                 captured_thinking.clone(),
-                if captured_text.is_empty() {
-                    "Sub-agent interrupted.".to_string()
-                } else {
-                    captured_text.clone()
-                },
+                captured_text.clone(),
+                Some("sub_agent_interrupted".to_string()),
             ),
             RunOutcome::Done(Ok((decision, _, _))) => {
-                let detail = match decision {
-                    TurnDecision::MaxTurnsExceeded => {
-                        "sub-agent max_turns exhausted before end_turn".to_string()
-                    }
-                    TurnDecision::Failed(message) => message,
-                    // Stop/Interrupted are matched above.
+                let (reason, diagnostic) = match decision {
+                    TurnDecision::MaxTurnsExceeded => (
+                        SubAgentStopReason::MaxTurns,
+                        "sub_agent_max_turns: child exhausted max_turns before end_turn"
+                            .to_string(),
+                    ),
+                    TurnDecision::Failed(message) => (
+                        SubAgentStopReason::Error,
+                        format!("sub_agent_error: {message}"),
+                    ),
                     TurnDecision::Stop | TurnDecision::Interrupted => unreachable!(),
                 };
                 (
                     SubAgentStatus::Failed,
+                    reason,
                     captured_thinking.clone(),
-                    with_terminal_detail(&captured_text, format!("Sub-agent failed: {detail}")),
+                    captured_text.clone(),
+                    Some(diagnostic),
                 )
             }
             RunOutcome::Done(Err(error)) => (
                 SubAgentStatus::Failed,
+                SubAgentStopReason::Error,
                 captured_thinking.clone(),
-                with_terminal_detail(&captured_text, format!("Sub-agent failed: {error:#}")),
+                captured_text.clone(),
+                Some(format!("sub_agent_error: {error:#}")),
             ),
             RunOutcome::TimedOut => (
                 SubAgentStatus::TimedOut,
+                SubAgentStopReason::Timeout,
                 captured_thinking.clone(),
-                with_terminal_detail(
-                    &captured_text,
-                    format!("Sub-agent timed out after {timeout_secs}s."),
-                ),
+                captured_text.clone(),
+                Some(format!("sub_agent_timeout phase=run after {timeout_secs}s")),
             ),
         };
 
         // 向父 Display 发送完整子代理输出（TUI 用户可点击查看）
-        parent_display.render_sub_agent_output(
+        parent_display.render_sub_agent_output_meta(
             &session_id,
             status.as_str(),
+            self.label.as_deref(),
+            Some(stop_reason.as_str()),
             &captured_thinking,
             &captured_text,
             stats.total_input_tokens,
@@ -379,9 +534,12 @@ impl SubAgentExecutor {
 
         SubAgentResult {
             status,
+            stop_reason,
             thinking,
             text,
+            diagnostic: diagnostic.map(|detail| bounded_diagnostic(&detail)),
             usage: stats,
+            elapsed_ms,
         }
     }
 
@@ -393,31 +551,15 @@ impl SubAgentExecutor {
 
         match decision {
             TurnDecision::Stop => {
-                // Read back the assistant text from the CHILD store.
+                // Read back the last assistant message from the CHILD store.
+                // The whole text of that message is the result; a child may
+                // split its final answer across multiple text blocks.
                 let mut result_thinking = String::new();
                 let mut result_text = String::new();
                 if let Some(line) = self.child_store.last_assistant_message().await?
                     && let Some(content) = line.get("content").and_then(|v| v.as_array())
                 {
-                    for block in content {
-                        match block.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-                            "thinking" => {
-                                if result_thinking.is_empty()
-                                    && let Some(t) = block.get("thinking").and_then(|v| v.as_str())
-                                {
-                                    result_thinking = t.to_string();
-                                }
-                            }
-                            "text" => {
-                                if result_text.is_empty()
-                                    && let Some(t) = block.get("text").and_then(|v| v.as_str())
-                                {
-                                    result_text = t.to_string();
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
+                    (result_thinking, result_text) = extract_assistant_text(content);
                 }
                 Ok((TurnDecision::Stop, result_thinking, result_text))
             }
@@ -454,15 +596,83 @@ impl ReviewAgentSession {
     }
 }
 
-fn with_terminal_detail(captured_text: &str, detail: String) -> String {
-    if captured_text.is_empty() {
-        detail
+/// Concatenate every non-empty text block from the last assistant message and
+/// keep the first thinking block for TUI display only.
+fn extract_assistant_text(content: &[serde_json::Value]) -> (String, String) {
+    let mut thinking = String::new();
+    let mut text = String::new();
+    for block in content {
+        match block.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+            "thinking" => {
+                if thinking.is_empty()
+                    && let Some(t) = block.get("thinking").and_then(|v| v.as_str())
+                {
+                    thinking = t.to_string();
+                }
+            }
+            "text" => {
+                if let Some(t) = block.get("text").and_then(|v| v.as_str())
+                    && !t.is_empty()
+                {
+                    text.push_str(t);
+                }
+            }
+            _ => {}
+        }
+    }
+    (thinking, text)
+}
+
+/// Prefer the last assistant text; fall back to streamed text when compaction or
+/// cancellation removed it, and never return a blank success payload.
+fn resolve_success_text(text: String, captured: String) -> String {
+    let text = if text.is_empty() { captured } else { text };
+    if text.trim().is_empty() {
+        "(no output)".to_string()
     } else {
-        format!("{captured_text}\n\n{detail}")
+        text
     }
 }
 
+/// Strip control characters (except newline/tab) and truncate to 4096 bytes on
+/// a UTF-8 boundary. The diagnostic is model-visible, so it must stay bounded
+/// and must never carry raw protocol payloads.
+fn bounded_diagnostic(detail: &str) -> String {
+    const LIMIT: usize = 4096;
+    const MARKER: &str = "\n… [truncated]";
+    let mut cleaned = String::with_capacity(detail.len().min(LIMIT));
+    for ch in detail.chars() {
+        if ch == '\n' || ch == '\t' || !ch.is_control() {
+            cleaned.push(ch);
+        }
+    }
+    if cleaned.len() <= LIMIT {
+        return cleaned;
+    }
+    // Reserve room for the marker so the whole diagnostic (text + marker)
+    // stays within the model-visible 4096-byte contract.
+    let mut end = LIMIT - MARKER.len();
+    while end > 0 && !cleaned.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = cleaned[..end].to_string();
+    out.push_str(MARKER);
+    debug_assert!(out.len() <= LIMIT);
+    out
+}
+
+#[cfg(test)]
 async fn prepare_child_home(parent: &Path, child: &Path, fork: bool) -> Result<()> {
+    prepare_child_home_with_cancel(parent, child, fork, None, None).await
+}
+
+async fn prepare_child_home_with_cancel(
+    parent: &Path,
+    child: &Path,
+    fork: bool,
+    cancel: Option<crate::cancel::CancellationToken>,
+    created: Option<&AtomicBool>,
+) -> Result<()> {
     if child.exists() {
         bail!("sub-agent home already exists: {}", child.display());
     }
@@ -471,11 +681,17 @@ async fn prepare_child_home(parent: &Path, child: &Path, fork: bool) -> Result<(
         .ok_or_else(|| anyhow::anyhow!("sub-agent home has no parent"))?;
     ensure_real_directory(child_parent).await?;
     if fork {
+        if let Some(created) = created {
+            created.store(true, Ordering::SeqCst);
+        }
         let parent = parent.to_path_buf();
         let destination = child.to_path_buf();
         let copy_destination = destination.clone();
-        tokio::task::spawn_blocking(move || clone_session_dir(&parent, &copy_destination))
-            .await??;
+        let copy_cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || {
+            clone_session_dir(&parent, &copy_destination, copy_cancel.as_ref())
+        })
+        .await??;
         for name in ["events.jsonl", "stats.json", "usage.jsonl", "session.json"] {
             let path = destination.join(name);
             match tokio::fs::remove_file(&path).await {
@@ -489,8 +705,40 @@ async fn prepare_child_home(parent: &Path, child: &Path, fork: bool) -> Result<(
         }
     } else {
         tokio::fs::create_dir(child).await?;
+        if let Some(created) = created {
+            created.store(true, Ordering::SeqCst);
+        }
+    }
+    #[cfg(test)]
+    if child
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with("slow_setup_"))
+    {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
     Ok(())
+}
+
+/// Removes a partially created child home when setup is cancelled or fails.
+/// Disarmed only after the fully constructed `SubAgentExecutor` is returned.
+struct ChildHomeGuard {
+    path: std::path::PathBuf,
+    created: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl ChildHomeGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ChildHomeGuard {
+    fn drop(&mut self) {
+        if self.armed && self.created.load(Ordering::SeqCst) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 async fn ensure_real_directory(path: &Path) -> Result<()> {
@@ -510,17 +758,29 @@ async fn ensure_real_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn clone_session_dir(source: &Path, destination: &Path) -> Result<()> {
+fn clone_session_dir(
+    source: &Path,
+    destination: &Path,
+    cancel: Option<&crate::cancel::CancellationToken>,
+) -> Result<()> {
     std::fs::create_dir(destination)?;
-    if let Err(error) = copy_session_entries(source, destination, true) {
+    if let Err(error) = copy_session_entries(source, destination, true, cancel) {
         let _ = std::fs::remove_dir_all(destination);
         return Err(error);
     }
     Ok(())
 }
 
-fn copy_session_entries(source: &Path, destination: &Path, root: bool) -> Result<()> {
+fn copy_session_entries(
+    source: &Path,
+    destination: &Path,
+    root: bool,
+    cancel: Option<&crate::cancel::CancellationToken>,
+) -> Result<()> {
     for entry in std::fs::read_dir(source)? {
+        if cancel.is_some_and(crate::cancel::CancellationToken::is_cancelled) {
+            bail!("sub-agent fork cancelled");
+        }
         let entry = entry?;
         if root && entry.file_name().to_string_lossy() == "subagents" {
             continue;
@@ -534,7 +794,7 @@ fn copy_session_entries(source: &Path, destination: &Path, root: bool) -> Result
         let target = destination.join(entry.file_name());
         if file_type.is_dir() {
             std::fs::create_dir(&target)?;
-            copy_session_entries(&entry.path(), &target, false)?;
+            copy_session_entries(&entry.path(), &target, false, cancel)?;
         } else if file_type.is_file() {
             std::fs::copy(entry.path(), target)?;
         } else {

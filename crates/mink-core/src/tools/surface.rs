@@ -24,10 +24,28 @@ pub struct ToolResolutionContext {
     role: AgentRole,
     filesystem_backend: FilesystemBackend,
     edit_mode: crate::config::EditMode,
+    /// Whether this agent may start another delegation at its current depth.
+    delegation_allowed: bool,
 }
 
 impl ToolResolutionContext {
     pub fn from_runtime(role: AgentRole, config: &ToolConfig, read_only_fs_present: bool) -> Self {
+        Self::from_runtime_with_delegation(
+            role,
+            config,
+            read_only_fs_present,
+            role == AgentRole::Primary,
+        )
+    }
+
+    /// Resolve a surface with an explicit delegation budget derived from the
+    /// current agent depth and the configured maximum.
+    pub fn from_runtime_with_delegation(
+        role: AgentRole,
+        config: &ToolConfig,
+        read_only_fs_present: bool,
+        delegation_allowed: bool,
+    ) -> Self {
         Self {
             role,
             filesystem_backend: if read_only_fs_present {
@@ -36,6 +54,7 @@ impl ToolResolutionContext {
                 FilesystemBackend::Local
             },
             edit_mode: config.edit_mode,
+            delegation_allowed,
         }
     }
 
@@ -49,6 +68,10 @@ impl ToolResolutionContext {
 
     pub fn edit_mode(&self) -> crate::config::EditMode {
         self.edit_mode
+    }
+
+    pub fn delegation_allowed(&self) -> bool {
+        self.delegation_allowed
     }
 }
 
@@ -250,10 +273,13 @@ impl ModelToolSurface {
                 hidden.insert(tool.name.clone(), ToolHiddenReason::UnavailableForRole);
                 continue;
             }
-            if context.role == AgentRole::SubAgent
-                && matches!(metadata.name.as_ref(), "SubAgent" | "GoalDraft")
+            if (metadata.name.as_ref() == "SubAgent" && !context.delegation_allowed)
+                || (context.role == AgentRole::SubAgent && metadata.name.as_ref() == "GoalDraft")
             {
-                hidden.insert(tool.name.clone(), ToolHiddenReason::UnavailableForRole);
+                hidden.insert(
+                    metadata.name.to_string(),
+                    ToolHiddenReason::UnavailableForRole,
+                );
                 continue;
             }
             if context.filesystem_backend == FilesystemBackend::ReadOnlyVfs

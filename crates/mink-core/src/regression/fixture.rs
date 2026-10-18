@@ -293,7 +293,7 @@ async fn failed_read_does_not_seed_memo() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn sub_agent_accepts_declared_schema_fields() -> anyhow::Result<()> {
-    // 外部审查：SubAgent schema 声明 prompt/description/fork，executor 必须
+    // 外部审查：SubAgent schema 声明 prompt/description/fork/model，executor 必须
     // 接受全部合法字段（deny_unknown_fields 不能误伤合法调用）。
     let h = harness_with_config("subagent-schema", false, 300, |_| {}, None).await?;
     let runner = ToolRunner::new(Arc::new(ToolContext::from(h.ctx.as_ref())));
@@ -301,7 +301,7 @@ async fn sub_agent_accepts_declared_schema_fields() -> anyhow::Result<()> {
         .execute_all(vec![tool_call(
             "SubAgent",
             "sub_schema",
-            json!({"prompt": "do the work", "description": "schema check", "fork": true}),
+            json!({"prompt": "do the work", "description": "schema check", "fork": true, "model": "pro"}),
         )])
         .await?;
     assert!(result[0].succeeded(), "{}", result[0].content);

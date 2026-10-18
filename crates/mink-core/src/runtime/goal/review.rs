@@ -667,7 +667,11 @@ impl AgentRuntimeHandle {
                 ensure!(
                     result.status == crate::agent::sub_executor::SubAgentStatus::Succeeded,
                     "independent reviewer failed before returning a report: {}",
-                    result.text
+                    result
+                        .diagnostic
+                        .as_deref()
+                        .filter(|diagnostic| !diagnostic.is_empty())
+                        .unwrap_or(&result.text)
                 );
                 ensure!(
                     !result.text.trim().is_empty(),

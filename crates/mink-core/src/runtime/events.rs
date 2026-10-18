@@ -75,12 +75,20 @@ pub enum AgentEventKind {
     SubAgentStatus {
         session_id: String,
         status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<String>,
         in_tokens: u64,
         out_tokens: u64,
     },
     SubAgentOutput {
         session_id: String,
         status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<String>,
         thinking: String,
         text: String,
         in_tokens: u64,
@@ -511,6 +519,26 @@ impl Display for EventDisplay {
         self.emit(AgentEventKind::SubAgentStatus {
             session_id: session_id.into(),
             status: status.into(),
+            label: None,
+            stop_reason: None,
+            in_tokens,
+            out_tokens,
+        });
+    }
+    fn render_sub_agent_status_meta(
+        &self,
+        session_id: &str,
+        status: &str,
+        label: Option<&str>,
+        stop_reason: Option<&str>,
+        in_tokens: u64,
+        out_tokens: u64,
+    ) {
+        self.emit(AgentEventKind::SubAgentStatus {
+            session_id: session_id.into(),
+            status: status.into(),
+            label: label.map(str::to_string),
+            stop_reason: stop_reason.map(str::to_string),
             in_tokens,
             out_tokens,
         });
@@ -527,6 +555,31 @@ impl Display for EventDisplay {
         self.emit(AgentEventKind::SubAgentOutput {
             session_id: session_id.into(),
             status: status.into(),
+            label: None,
+            stop_reason: None,
+            thinking: thinking.into(),
+            text: text.into(),
+            in_tokens,
+            out_tokens,
+        });
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn render_sub_agent_output_meta(
+        &self,
+        session_id: &str,
+        status: &str,
+        label: Option<&str>,
+        stop_reason: Option<&str>,
+        thinking: &str,
+        text: &str,
+        in_tokens: u64,
+        out_tokens: u64,
+    ) {
+        self.emit(AgentEventKind::SubAgentOutput {
+            session_id: session_id.into(),
+            status: status.into(),
+            label: label.map(str::to_string),
+            stop_reason: stop_reason.map(str::to_string),
             thinking: thinking.into(),
             text: text.into(),
             in_tokens,

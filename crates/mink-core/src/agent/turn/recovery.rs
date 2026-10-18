@@ -205,11 +205,15 @@ impl super::TurnExecutor {
         child_cfg.max_tokens = child_cfg.max_tokens.min(s.replan_token_budget);
         let session_id = format!("replan_{}", crate::session::paths::chrono_session_id());
         let report = self.build_replan_report(belief);
-        let executor = match crate::agent::sub_executor::SubAgentExecutor::new(
+        let executor = match crate::agent::sub_executor::SubAgentExecutor::new_child(
             self.ctx.clone(),
             session_id.clone(),
             false,
             child_cfg,
+            self.ctx.cancel.linked_child_token(),
+            None,
+            None,
+            crate::agent::sub_executor::SubAgentOrigin::Replan,
         )
         .await
         {

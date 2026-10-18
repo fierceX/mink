@@ -373,3 +373,206 @@ fn claim_home(block: &str) -> String {
         .unwrap_or_default()
         .to_string()
 }
+
+#[test]
+fn bounded_diagnostic_strips_controls_and_truncates_on_char_boundaries() {
+    let cleaned = bounded_diagnostic("a\u{0007}b\r\nc\td");
+    assert_eq!(cleaned, "ab\nc\td");
+
+    let long = "é".repeat(4000);
+    let bounded = bounded_diagnostic(&long);
+    assert!(bounded.len() <= 4096, "len={}", bounded.len());
+    assert!(bounded.ends_with("… [truncated]"));
+    assert!(bounded.is_char_boundary(bounded.len()));
+    assert!(!bounded.contains('\u{FFFD}'));
+
+    // The marker itself counts toward the 4096-byte limit.
+    let exact = "x".repeat(4096);
+    assert_eq!(bounded_diagnostic(&exact).len(), 4096);
+    let over = "x".repeat(4097);
+    let truncated = bounded_diagnostic(&over);
+    assert_eq!(truncated.len(), 4096);
+    assert!(truncated.ends_with("… [truncated]"));
+}
+
+#[test]
+fn assistant_text_keeps_every_text_block_and_ignores_empty_text() {
+    let content = vec![
+        serde_json::json!({"type":"thinking","thinking":"plan"}),
+        serde_json::json!({"type":"text","text":"one"}),
+        serde_json::json!({"type":"text","text":""}),
+        serde_json::json!({"type":"tool_use","id":"t1"}),
+        serde_json::json!({"type":"text","text":"two"}),
+    ];
+    let (thinking, text) = extract_assistant_text(&content);
+    assert_eq!(thinking, "plan");
+    assert_eq!(text, "onetwo");
+}
+
+#[test]
+fn blank_success_text_falls_back_to_streamed_text_then_no_output() {
+    assert_eq!(
+        resolve_success_text(String::new(), "streamed".into()),
+        "streamed"
+    );
+    assert_eq!(
+        resolve_success_text("  ".into(), "  ".into()),
+        "(no output)"
+    );
+    assert_eq!(
+        resolve_success_text("answer".into(), "streamed".into()),
+        "answer"
+    );
+}
+
+#[tokio::test]
+async fn setup_timeout_removes_the_partial_child_home() -> anyhow::Result<()> {
+    let parent = crate::regression::test_context_for_agent("sub-setup-timeout").await?;
+    let child_home = parent
+        .store
+        .path()
+        .parent()
+        .expect("parent session dir")
+        .join("subagents")
+        .join("slow_setup_child");
+    let cancel = parent.cancel.linked_child_token();
+    let outcome = tokio::time::timeout(
+        tokio::time::Duration::from_millis(300),
+        SubAgentExecutor::new_child(
+            parent.clone(),
+            "slow_setup_child".into(),
+            false,
+            parent.config.clone(),
+            cancel,
+            None,
+            None,
+            SubAgentOrigin::SubAgent,
+        ),
+    )
+    .await;
+    assert!(outcome.is_err(), "the injected slow setup must time out");
+    assert!(
+        !child_home.exists(),
+        "a timed-out setup must remove its partial child home: {}",
+        child_home.display()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn child_without_label_uses_colon_id_title_fallback() -> anyhow::Result<()> {
+    let parent = crate::regression::test_context_for_agent("sub-title-fallback").await?;
+    let config = parent.config.clone();
+    let cancel = parent.cancel.linked_child_token();
+    let child = SubAgentExecutor::new_child(
+        parent,
+        "sub-title-fallback".into(),
+        false,
+        config,
+        cancel,
+        None,
+        None,
+        SubAgentOrigin::SubAgent,
+    )
+    .await?;
+    let raw = tokio::fs::read_to_string(child.child_ctx.home.join("session.json")).await?;
+    let metadata: serde_json::Value = serde_json::from_str(&raw)?;
+    assert_eq!(metadata["title"], "Sub-agent: sub-title-fallback");
+    Ok(())
+}
+
+#[tokio::test]
+async fn child_metadata_records_parent_origin_label_and_depth() -> anyhow::Result<()> {
+    let parent = crate::regression::test_context_for_agent("sub-metadata").await?;
+    let config = parent.config.clone();
+    let parent_id = parent.config.session_id.clone();
+    let cancel = parent.cancel.linked_child_token();
+    let child = SubAgentExecutor::new_child(
+        parent,
+        "sub-metadata-child".into(),
+        false,
+        config,
+        cancel,
+        Some("review diff".into()),
+        None,
+        SubAgentOrigin::SubAgent,
+    )
+    .await?;
+    let raw = tokio::fs::read_to_string(child.child_ctx.home.join("session.json")).await?;
+    let metadata: serde_json::Value = serde_json::from_str(&raw)?;
+    assert_eq!(metadata["parent"], parent_id);
+    assert_eq!(metadata["subagent"]["origin"], "sub_agent");
+    assert_eq!(metadata["subagent"]["mode"], "fresh");
+    assert_eq!(metadata["subagent"]["label"], "review diff");
+    assert_eq!(metadata["subagent"]["depth"], 1);
+    assert!(
+        metadata["title"]
+            .as_str()
+            .is_some_and(|title| title.contains("review diff"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn internal_origins_are_distinct_and_do_not_require_delegation_depth() -> anyhow::Result<()> {
+    assert_eq!(SubAgentOrigin::SubAgent.as_str(), "sub_agent");
+    assert_eq!(SubAgentOrigin::GoalReview.as_str(), "goal_review");
+    assert_eq!(SubAgentOrigin::Replan.as_str(), "replan");
+
+    let parent =
+        crate::regression::test_context_for_agent_with_config("sub-replan-metadata", |config| {
+            config.sub_agent_max_depth = 0
+        })
+        .await?;
+    let config = parent.config.clone();
+    let cancel = parent.cancel.linked_child_token();
+    let child = SubAgentExecutor::new_child(
+        parent.clone(),
+        "replan-metadata-child".into(),
+        false,
+        config,
+        cancel,
+        None,
+        None,
+        SubAgentOrigin::Replan,
+    )
+    .await?;
+    let raw = tokio::fs::read_to_string(child.child_ctx.home.join("session.json")).await?;
+    let metadata: serde_json::Value = serde_json::from_str(&raw)?;
+    assert_eq!(metadata["subagent"]["origin"], "replan");
+
+    let review = SubAgentExecutor::new_child(
+        parent.clone(),
+        "goal-review-metadata-child".into(),
+        true,
+        parent.config.clone(),
+        parent.cancel.linked_child_token(),
+        Some("goal review".into()),
+        None,
+        SubAgentOrigin::GoalReview,
+    )
+    .await?;
+    let raw = tokio::fs::read_to_string(review.child_ctx.home.join("session.json")).await?;
+    let metadata: serde_json::Value = serde_json::from_str(&raw)?;
+    assert_eq!(metadata["subagent"]["origin"], "goal_review");
+    assert_eq!(metadata["subagent"]["mode"], "fork");
+    Ok(())
+}
+
+#[test]
+fn clone_session_dir_removes_a_cancelled_destination() -> anyhow::Result<()> {
+    let root =
+        std::env::temp_dir().join(format!("mink-subagent-clone-cancel-{}", std::process::id()));
+    let source = root.join("source");
+    let destination = root.join("destination");
+    std::fs::create_dir_all(&source)?;
+    std::fs::write(source.join("conversation.jsonl"), b"{}")?;
+    let cancel = crate::cancel::CancellationToken::new();
+    cancel.cancel();
+    let error = clone_session_dir(&source, &destination, Some(&cancel))
+        .expect_err("cancelled clone must fail");
+    assert!(error.to_string().contains("cancelled"));
+    assert!(!destination.exists(), "partial destination must be removed");
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}

@@ -2,7 +2,9 @@ use crate::agent::belief::BeliefTracker;
 use crate::agent::orchestrator::{OrchActor, OrchCmd};
 use crate::agent::prefix::PrefixManager;
 use crate::agent::sub_coordinator::{SubAgentCoordinator, SubAgentRunner};
-use crate::agent::sub_executor::{SubAgentExecutor, SubAgentResult, SubAgentStatus};
+use crate::agent::sub_executor::{
+    SubAgentExecutor, SubAgentResult, SubAgentStatus, SubAgentStopReason,
+};
 use crate::agent::turn::{TurnDecision, TurnExecutor};
 use crate::config::{OutputFormat, ResolvedConfig as Config};
 use crate::context::{AgentSharedContext, ToolContext};
@@ -122,6 +124,7 @@ struct CapturedRoutedRequest {
 struct ActiveModelRoutingBackend {
     requests: Arc<Mutex<Vec<CapturedRoutedRequest>>>,
     agent_request_count: AtomicU64,
+    sub_agent_model: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -144,11 +147,15 @@ impl LlmBackend for ActiveModelRoutingBackend {
 
         let events = match request.purpose {
             LlmPurpose::Agent if self.agent_request_count.fetch_add(1, Ordering::SeqCst) == 0 => {
+                let mut input = json!({"prompt":"complete the child task","fork":false});
+                if let Some(model) = &self.sub_agent_model {
+                    input["model"] = serde_json::Value::String(model.clone());
+                }
                 vec![
                     Ok(Event::ToolCall(tool_call(
                         "SubAgent",
                         "call_sub_agent",
-                        json!({"prompt":"complete the child task","fork":false}),
+                        input,
                     ))),
                     Ok(Event::Stop(StopEvent {
                         reason: "tool_use".into(),
@@ -426,6 +433,7 @@ async fn harness_inner(
             cancel: crate::cancel::CancellationToken::new(),
             interrupt: Arc::new(AtomicBool::new(false)),
             is_sub_agent,
+            sub_agent_depth: if is_sub_agent { 1 } else { 0 },
             usage_journal: None,
             read_only_fs: None,
             resource_session_id: "regression".into(),
@@ -528,6 +536,8 @@ fn internal_result(name: &str) -> ToolExecution {
         spawns_sub_agent: false,
         sub_agent_prompt: None,
         sub_agent_fork: false,
+        sub_agent_label: None,
+        sub_agent_model: None,
         exit_code: None,
         status: crate::tools::metadata::ToolStatus::Succeeded,
         result_kind: crate::tools::metadata::ToolResultKind::Control,

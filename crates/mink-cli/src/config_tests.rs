@@ -43,6 +43,7 @@ fn cli_defaults_track_runtime_option_defaults() {
     assert_eq!(cli.tool_timeout_secs, tools.timeout_secs);
     assert_eq!(cli.tool_timeout_max_secs, tools.timeout_max_secs);
     assert_eq!(cli.sub_agent_timeout_secs, tools.sub_agent_timeout_secs);
+    assert_eq!(cli.sub_agent_max_depth, tools.sub_agent_max_depth);
     assert_eq!(cli.tool_result_max_bytes, tools.result_max_bytes);
     assert_eq!(cli.file_write_max_bytes, tools.file_write_max_bytes);
     assert_eq!(cli.edit_mode, tools.edit_mode);
@@ -54,6 +55,45 @@ fn cli_defaults_track_runtime_option_defaults() {
     assert_eq!(cli.enabled_tools, tools.enabled_tools);
     assert_eq!(cli.tool_approval_mode, tools.approval_mode);
     assert_eq!(cli.tool_approval, tools.approval);
+}
+
+#[test]
+fn sub_agent_depth_maps_from_sdk_and_toml() {
+    let request = mink::sdk_protocol::SdkRequest {
+        options: mink::sdk_protocol::SdkOptions {
+            tools: mink::sdk_protocol::SdkToolOptions {
+                sub_agent_max_depth: Some(2),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut cfg = CliConfig::default();
+    super::apply_sdk_request_options(&mut cfg, &request);
+    assert_eq!(cfg.sub_agent_max_depth, 2);
+
+    let defaults = CliConfig::default();
+    let project = MinkConfigFile {
+        tools: ToolsConfigFile {
+            sub_agent_max_depth: Some(3),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    apply_config_sources(&mut cfg, &defaults, None, Some(&project), None);
+    assert_eq!(cfg.sub_agent_max_depth, 3);
+
+    let project = MinkConfigFile {
+        tools: ToolsConfigFile {
+            sub_agent_max_depth: Some(9),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut cfg = CliConfig::default();
+    apply_config_sources(&mut cfg, &defaults, None, Some(&project), None);
+    assert_eq!(cfg.sub_agent_max_depth, defaults.sub_agent_max_depth);
 }
 
 #[test]

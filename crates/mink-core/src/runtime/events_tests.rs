@@ -176,11 +176,60 @@ fn event_display_preserves_overlapping_event_fields() {
             status,
             in_tokens,
             out_tokens,
+            ..
         } => {
             assert_eq!(session_id, "child");
             assert_eq!(status, "ok");
             assert_eq!(in_tokens, 12);
             assert_eq!(out_tokens, 34);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    display.render_sub_agent_status_meta(
+        "child",
+        "ok",
+        Some("review diff"),
+        Some("completed"),
+        12,
+        34,
+    );
+    match rx.try_recv().expect("sub-agent meta status").kind {
+        AgentEventKind::SubAgentStatus {
+            session_id,
+            label,
+            stop_reason,
+            ..
+        } => {
+            assert_eq!(session_id, "child");
+            assert_eq!(label.as_deref(), Some("review diff"));
+            assert_eq!(stop_reason.as_deref(), Some("completed"));
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    display.render_sub_agent_output_meta(
+        "child",
+        "ok",
+        Some("review diff"),
+        Some("completed"),
+        "thinking",
+        "text",
+        12,
+        34,
+    );
+    match rx.try_recv().expect("sub-agent meta output").kind {
+        AgentEventKind::SubAgentOutput {
+            session_id,
+            label,
+            stop_reason,
+            text,
+            ..
+        } => {
+            assert_eq!(session_id, "child");
+            assert_eq!(label.as_deref(), Some("review diff"));
+            assert_eq!(stop_reason.as_deref(), Some("completed"));
+            assert_eq!(text, "text");
         }
         other => panic!("unexpected event: {other:?}"),
     }

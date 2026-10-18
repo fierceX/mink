@@ -239,49 +239,69 @@ runtime 在构建阶段创建或接收共享 backend。主代理、子代理和�
 `SubAgentExecutor` 为每个子代理创建一个完全独立的 `AgentSharedContext`：
 
 ```rust
-pub async fn new(parent_ctx, session_id, fork) -> Result<Self> {
-    // 1. 在父 session 的 subagents/<id>/ 创建 isolated home
-    // 2. fork 模式在 runtime 初始化前递归克隆父 session
-    // 3. 重置 child session identity、events、stats 和 usage 文件
-    // 4. 从 isolated home 正常初始化 store、compaction 和 artifacts
-    // 5. 创建 linked child cancel token（父取消→子取消，子取消不影响父）
+pub async fn new_child(parent_ctx, session_id, fork, config, cancel, label, model, origin)
+    -> Result<Self>
+{
+    // 1. 校验以 depth = parent.depth + 1 是否超过 sub_agent_max_depth
+    // 2. 在父 session 的 subagents/<id>/ 创建 isolated home
+    // 3. fork 模式在 runtime 初始化前递归克隆父 session
+    // 4. 重置 child session identity、events、stats 和 usage 文件
+    // 5. 从 isolated home 正常初始化 store、compaction 和 artifacts
+    // 6. 创建 linked child cancel token（父取消→子取消，子取消不影响父）
+    // 7. 写入 parent / subagent provenance 与 label 标题
 }
 ```
 
 ### 两种模式
 
 **独立模式（默认）**：在父 session 的 `subagents/<session_id>/` 创建空的 isolated home。
-继承父 session 的模型、API URL、工具集和 capability snapshot，但不继承 session 历史。
+继承父 session 的能力快照、工具集与 API URL，但不继承 session 历史；模型默认使用父活动模型，也可由 `model` 参数选择 resolver 别名或当前实际模型。
 
 **Fork 模式**：在构建子 runtime 之前递归克隆父 session 目录，跳过父 session 已有的
-`subagents/`。克隆后清除 `session.json`、`events.jsonl`、`stats.json` 和 `usage.jsonl`，
+`subagents/`。克隆按目录项检查取消 token；失败或取消时删除目标目录。
+克隆后清除 `session.json`、`events.jsonl`、`stats.json` 和 `usage.jsonl`，
 使子代理拥有新的身份与用量统计；conversation、context state、plan、artifacts 及同目录
-session 状态会整体继承。压缩引擎在正常初始化时直接加载克隆后的状态。ArtifactManager 同样从
-克隆后的 index 恢复下一个序号，并以独占创建方式写入，
+session 状态会整体继承。ArtifactManager 从克隆后的 index 恢复下一个序号，并以独占创建方式写入，
 因此子代理继续产生 artifact 时不会覆盖父历史中的正文或破坏已有 `artifact://` 引用。
 
 如果父 runtime 注入了只读 VFS，子代理复用同一个 `Arc<dyn ReadOnlyFileSystem>`。两种模式都继承父代理的 `resource_session_id`，但 `agent_session_id` 使用子 session id；fork 只影响对话与 session 文件，不改变知识库分区。
 
-### 结果收集
+### 结果契约
 
-子代理完成时，通过 `last_assistant_message()` 从活跃缓存读取最后一条 assistant；缓存中不存在时
-才流式扫描子 session，并且只保留最后一个匹配消息。返回 thinking 和 text，不包含工具调用细节。
+子代理结果由 `status`、`stop_reason`（completed/aborted/error/max_turns/timeout）、
+`text`、`diagnostic`、`usage` 与 `elapsed_ms` 组成：
 
-```rust
-if let Some(message) = child_store.last_assistant_message().await? {
-    // 提取第一个 thinking block 和第一个 text block
-}
-```
+- `text` 取子会话最后一条非空 assistant 消息中**全部** text 块；为空时渲染 `(no output)`。
+- thinking 只进入 TUI 实时流与子会话历史，**不进入父模型上下文**。
+- 失败/超时/中断的终止原因放入 `diagnostic`（剥离控制字符，按 UTF-8 boundary 截断；含 `… [truncated]` 标记的总长不超过 4096 字节），不再拼进正文。
+- tool result 形如 `[sub-agent <id>] <status> (in=..., out=...)`，随后是结果正文与可选 `diagnostic:` 段；整体仍受 `format_tool_result`/artifact 保护。
+- `_mink.sub_agent` 携带 `session_id/label/mode/depth/status/stop_reason/input_tokens/output_tokens/elapsed_ms`，供 TUI/Web 结构化渲染。
 
-### 并发控制
+### 身份、目录与恢复展示
 
-`SubAgentPool` 使用 `tokio::sync::Semaphore` 限制最大并发数（默认 8）。每个子代理占用一个 permit，完成后释放。
-首次并发启动时，共享 `subagents/` 父目录按 `AlreadyExists` 幂等创建，并在创建竞争结束后重新校验为
-实体目录；随机 session 子目录仍严格独占创建，冲突时直接失败。
+- 父会话 `events.jsonl` 的 `sub_agent` 事件新增可选 `version/label/mode/parent_session_id/depth/stop_reason/duration_ms/phase`；`session::subagent_catalog` 将其折叠为派生目录（旧事件、缺字段、未知 status 都容忍）。
+- 子会话 `session.json` 写入 `parent` 与 `subagent{version,origin,mode,label,depth}`；`origin` 区分 `sub_agent`、`goal_review`、`replan`，内部审核/重规划不进入委派目录。
+- 标题使用 `Sub-agent: <label>`（缺省回退 session id）；label 经控制字符清洗、空白折叠并截断到 80 字符。
+- TUI replay 识别 `sub_agent` 事件并重建子代理行（`launched/running/终态`），恢复会话后不丢；server SSE 的 `sub_agent_status` 与 `sub_agent_output` 均透传可选 label/stop_reason。
 
-结果通过 `mpsc::UnboundedSender` 发送回 orchestrator，由 `handle_sub_agent_result()` 注入父会话。
+### 并发、超时与取消
 
-每个子代理有独立超时。超时后会取消子代理的 child token 并返回 failed 结果，父会话继续执行。
+`SubAgentCoordinator` 在工具阶段内启动并收集本次批次：
+
+- 批内并发上限为 8；第 9 个及以后**排队等待名额**，不拒绝。
+- `sub_agent_timeout_secs` 从**获得名额之后**起算，覆盖 setup + run；排队等待不计入。
+- 不再使用批次 deadline：一个慢子代理超时不会连带同批其他子代理；整批最坏耗时为 `ceil(N/8) × timeout`。
+- 状态按 `launched(phase=queued) → running(phase=run) → 终态` 记录；setup 超时的 diagnostic 标记 `phase=setup`，超时先 cancel 再给 setup 一个短宽限，部分 child home 由清理 guard 删除。
+- 批次中断/取消/Cancel 唤醒收集，未完成项标记 `cancelled` 并中止任务；`SubAgentBatch::drop` 仍对剩余任务 cancel + abort。
+- 结果按输入顺序回填；每个子代理的 usage 在父 stats 中汇总一次。
+
+### 深度与模型
+
+- `tools.sub_agent_max_depth` 默认 1、范围 0..=3；0 禁用委派。
+- 深度写入子会话元数据；`depth < max_depth` 时 surface 保留 `SubAgent`，到达上限时不渲染委派提示；运行时以 `child_depth = depth + 1 > max_depth` 返回 `SafetyBlocked`。
+- 子角色系统提示包含固定委派 scope 声明；到达上限时追加 `Delegation depth N of M; further delegation is unavailable.`
+- `model` 仅接受 `ModelResolver` 配置的别名或当前实际模型；非法值返回 `ArgumentInvalid` 且不创建 child。
+- 子代理复用父 `LlmBackend`；不同模型不共享前缀缓存。
 
 ## 并发模型
 

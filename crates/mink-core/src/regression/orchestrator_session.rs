@@ -159,6 +159,7 @@ async fn orchestrator_active_model_is_used_by_spawned_sub_agent() -> anyhow::Res
     let backend = Arc::new(ActiveModelRoutingBackend {
         requests: requests.clone(),
         agent_request_count: AtomicU64::new(0),
+        sub_agent_model: None,
     });
     let h = harness_with_config(
         "orch-sub-agent-active-model",
@@ -194,6 +195,46 @@ async fn orchestrator_active_model_is_used_by_spawned_sub_agent() -> anyhow::Res
                 purpose: "agent",
                 model: "deepseek-v4-pro".into(),
                 alias: Some("pro".into()),
+            },
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn orchestrator_sub_agent_model_parameter_routes_the_child_request() -> anyhow::Result<()> {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let backend = Arc::new(ActiveModelRoutingBackend {
+        requests: requests.clone(),
+        agent_request_count: AtomicU64::new(0),
+        sub_agent_model: Some("pro".into()),
+    });
+    let h = harness_with_config("orch-sub-agent-model", false, 300, |_| {}, Some(backend)).await?;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let actor = OrchActor::new(h.ctx.clone(), rx);
+    let handle = tokio::spawn(actor.run());
+    let outcome = send_user_input(&tx, "delegate with a different model").await?;
+    drop(tx);
+    handle.await??;
+
+    assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        &[
+            CapturedRoutedRequest {
+                purpose: "agent",
+                model: "deepseek-v4-flash".into(),
+                alias: Some("flash".into()),
+            },
+            CapturedRoutedRequest {
+                purpose: "sub_agent",
+                model: "deepseek-v4-pro".into(),
+                alias: Some("pro".into()),
+            },
+            CapturedRoutedRequest {
+                purpose: "agent",
+                model: "deepseek-v4-flash".into(),
+                alias: Some("flash".into()),
             },
         ]
     );

@@ -36,6 +36,8 @@ pub struct ToolConfig {
     /// 单次 Bash/Python/自定义工具调用的超时上限（默认 600 秒）。
     pub tool_timeout_max_secs: i32,
     pub sub_agent_timeout_secs: i32,
+    /// Maximum delegation depth (0 disables delegation).
+    pub sub_agent_max_depth: u32,
     pub tool_result_max_bytes: usize,
     pub file_write_max_bytes: usize,
     pub edit_mode: EditMode,
@@ -58,6 +60,7 @@ impl ToolConfig {
             tool_timeout_secs: cfg.tool_timeout_secs,
             tool_timeout_max_secs: cfg.tool_timeout_max_secs,
             sub_agent_timeout_secs: cfg.sub_agent_timeout_secs,
+            sub_agent_max_depth: cfg.sub_agent_max_depth,
             tool_result_max_bytes: cfg.tool_result_max_bytes,
             file_write_max_bytes: cfg.file_write_max_bytes,
             edit_mode: cfg.edit_mode,
@@ -78,13 +81,20 @@ pub(crate) fn resolve_tool_runtime(
     config: &ToolConfig,
     role: AgentRole,
     read_only_fs_present: bool,
+    sub_agent_depth: u32,
     custom_tools: &[crate::runtime::RegisteredCustomTool],
 ) -> anyhow::Result<(
     ToolResolutionContext,
     Arc<ModelToolSurface>,
     Arc<ResolvedToolCapabilities>,
 )> {
-    let resolution = ToolResolutionContext::from_runtime(role, config, read_only_fs_present);
+    let delegation_allowed = sub_agent_depth < config.sub_agent_max_depth;
+    let resolution = ToolResolutionContext::from_runtime_with_delegation(
+        role,
+        config,
+        read_only_fs_present,
+        delegation_allowed,
+    );
     let surface = Arc::new(
         crate::tools::surface::ModelToolSurface::resolve_with_custom(
             crate::tools::catalog::ToolCatalog::builtin()?,
@@ -362,6 +372,9 @@ pub struct AgentSharedContext {
     pub immutable_prefix: Mutex<Option<ImmutablePrefix>>,
     /// 是否为子代理上下文。为 true 时禁止递归调用 SubAgent。
     pub is_sub_agent: bool,
+    /// Delegation depth of this agent: 0 for a primary agent, parent + 1 for a
+    /// delegated child. Persisted in child metadata and enforced by the surface.
+    pub sub_agent_depth: u32,
     /// 用于中断当前任务的原子标志。每轮开始时重置为 false。
     pub interrupt: Arc<AtomicBool>,
     /// Avoid repeated stderr warnings if event logging starts failing.
@@ -408,6 +421,10 @@ impl AgentSharedContext {
         let system_prompt = crate::prompt::Builder {
             cwd: self.cwd.clone(),
             home: self.environment_home.clone(),
+            delegation: (self.sub_agent_depth > 0).then_some(crate::prompt::DelegationScope {
+                depth: self.sub_agent_depth,
+                max_depth: self.tool_config.sub_agent_max_depth,
+            }),
             skill_snapshot: Arc::new(self.capability_snapshot.skills.clone()),
             context_file_snapshot: Arc::new(self.capability_snapshot.context_files.clone()),
             rule_snapshot: Arc::new(self.capability_snapshot.rules.clone()),

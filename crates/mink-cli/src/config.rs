@@ -152,6 +152,7 @@ pub struct ToolsConfigFile {
     /// 单次 Bash/Python/自定义工具调用的超时上限（默认 600，至少 5）。
     pub tool_timeout_max: Option<i32>,
     pub sub_agent_timeout: Option<i32>,
+    pub sub_agent_max_depth: Option<u32>,
     pub max_search_files: Option<usize>,
     pub max_search_results: Option<usize>,
     pub edit: EditConfigFile,
@@ -212,6 +213,7 @@ pub struct CliConfig {
     /// 单次 Bash/Python/自定义工具调用的超时上限（默认 600 秒，至少 5 秒）。
     pub tool_timeout_max_secs: i32,
     pub sub_agent_timeout_secs: i32,
+    pub sub_agent_max_depth: u32,
     pub llm_first_event_timeout_secs: i32,
     pub llm_idle_timeout_secs: i32,
     pub llm_wait_heartbeat_secs: i32,
@@ -307,6 +309,7 @@ impl Default for CliConfig {
             tool_timeout_secs: 600,
             tool_timeout_max_secs: 600,
             sub_agent_timeout_secs: 300,
+            sub_agent_max_depth: 1,
             llm_first_event_timeout_secs: 60,
             llm_idle_timeout_secs: 90,
             llm_wait_heartbeat_secs: 30,
@@ -881,6 +884,13 @@ fn apply_config_sources(
                 "sub_agent_timeout",
             );
         }
+        if let Some(depth) = toml_cfg.tools.sub_agent_max_depth {
+            if depth <= 3 {
+                cfg.sub_agent_max_depth = depth;
+            } else {
+                eprintln!("[mink] Warning: ignoring sub_agent_max_depth={depth}; expected 0-3");
+            }
+        }
         if let Some(timeout) = toml_cfg.generation.llm_first_event_timeout {
             apply_positive_i32_config(
                 &mut cfg.llm_first_event_timeout_secs,
@@ -1214,6 +1224,9 @@ pub(crate) fn apply_sdk_request_options(
     }
     if let Some(value) = tools.sub_agent_timeout {
         cfg.sub_agent_timeout_secs = value;
+    }
+    if let Some(value) = tools.sub_agent_max_depth {
+        cfg.sub_agent_max_depth = value;
     }
     if let Some(value) = &tools.enabled_tools {
         cfg.enabled_tools = Some(value.clone());

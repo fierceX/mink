@@ -18,6 +18,8 @@ use std::sync::Arc;
 pub struct Builder {
     pub cwd: PathBuf,
     pub home: PathBuf,
+    /// Scope statement rendered for a delegated child; absent for primaries.
+    pub delegation: Option<DelegationScope>,
     pub skill_snapshot: Arc<SkillSnapshot>,
     pub context_file_snapshot: Arc<ContextFileSnapshot>,
     pub rule_snapshot: Arc<RuleSnapshot>,
@@ -35,6 +37,11 @@ pub struct Builder {
     pub skill_index_budget_chars: usize,
 }
 
+pub struct DelegationScope {
+    pub depth: u32,
+    pub max_depth: u32,
+}
+
 pub struct PromptBuildContext {
     pub edit_mode: crate::config::EditMode,
     pub edit_fuzzy_match: bool,
@@ -50,6 +57,29 @@ impl Builder {
     pub fn build_document(&self) -> Result<PromptDocument> {
         let mut document = PromptDocument::new();
         core::append_core_sections(self, &mut document)?;
+
+        if let Some(scope) = &self.delegation {
+            let mut content = String::from(
+                "You are a delegated subagent. Your tool scope was fixed when you were started; \
+                 operations that are unavailable are not retryable from here. Report the \
+                 limitation in your result instead.",
+            );
+            if scope.depth >= scope.max_depth {
+                content.push_str(&format!(
+                    "\nDelegation depth {} of {}; further delegation is unavailable.",
+                    scope.depth, scope.max_depth
+                ));
+            }
+            document.push(PromptSection {
+                id: "delegated-subagent".into(),
+                tag: "delegated-subagent".into(),
+                origin: PromptSectionOrigin::Core,
+                content,
+                name: None,
+                referenced_tools: Default::default(),
+                consumed_facts: Default::default(),
+            })?;
+        }
 
         if let Some(content) = self.mission_content()? {
             mission::apply(&mut document, &content, modules::reserved_section_ids())?;

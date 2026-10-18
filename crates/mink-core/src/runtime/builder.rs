@@ -84,6 +84,7 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         cancel: cancel.clone(),
         interrupt: interrupt.clone(),
         is_sub_agent: false,
+        sub_agent_depth: 0,
         usage_journal: None,
         read_only_fs,
         resource_session_id,
@@ -149,6 +150,7 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
                 .as_deref()
                 .and_then(crate::session::metadata::title_from_prompt),
             first_prompt,
+            ..Default::default()
         },
     )
     .await?;

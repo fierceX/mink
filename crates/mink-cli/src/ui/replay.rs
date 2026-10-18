@@ -108,7 +108,8 @@ fn render_events(events: &[Value], stdout: &mut dyn Write, stderr: &mut dyn Writ
             // than replayed as transcript lines.
             ReplayEventKind::Ignored
             | ReplayEventKind::PrefixSnapshot
-            | ReplayEventKind::GoalLifecycle => continue,
+            | ReplayEventKind::GoalLifecycle
+            | ReplayEventKind::SubAgent => continue,
             ReplayEventKind::UserInput => {
                 flush_newline(stdout, &mut last_char, prev_was_thinking);
                 prev_was_thinking = false;

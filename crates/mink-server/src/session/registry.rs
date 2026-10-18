@@ -281,6 +281,7 @@ impl Registry {
                     alias: Some(locator.alias.clone()),
                     title: Some(name.to_string()),
                     first_prompt: Some(name.to_string()),
+                    ..Default::default()
                 },
             )
             .await?;
@@ -945,6 +946,7 @@ fn summary_from_metadata(
         parent: None,
         first_prompt: None,
         summary: None,
+        subagent: None,
     });
     let (tokens_in, tokens_out, cache_read_tokens, last_context_tokens) = usage;
     SessionSummary {
@@ -1708,6 +1710,7 @@ mod poison_public_tests {
             parent: None,
             first_prompt: Some("把这个会话的标题补上".into()),
             summary: None,
+            subagent: None,
         };
         let summary = summary_from_metadata(Some(metadata), None, &dir, (0, 0, 0, 0));
         assert_eq!(summary.title, None);

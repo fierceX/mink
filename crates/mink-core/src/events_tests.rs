@@ -160,10 +160,18 @@ fn typed_events_round_trip_through_jsonl_values() {
             idle_ms: None,
         },
         EventLog::SubAgent {
+            version: Some(2),
             session_id: "sub".into(),
             status: "ok".into(),
             input_tokens: Some(1),
             output_tokens: Some(2),
+            label: Some("label".into()),
+            mode: Some("fresh".into()),
+            parent_session_id: Some("parent".into()),
+            depth: Some(1),
+            stop_reason: Some("completed".into()),
+            duration_ms: Some(3),
+            phase: None,
         },
         EventLog::ToolResult {
             version: Some(2),
@@ -200,4 +208,36 @@ fn typed_events_round_trip_through_jsonl_values() {
     });
     let event: EventLog = serde_json::from_value(legacy).unwrap();
     assert!(matches!(event, EventLog::ToolResult { .. }));
+}
+
+#[test]
+fn legacy_sub_agent_events_decode_without_optional_catalog_fields() {
+    use serde_json::json;
+    let legacy = json!({
+        "type":"sub_agent",
+        "session_id":"sub_legacy",
+        "status":"ok",
+        "input_tokens":1,
+        "output_tokens":2
+    });
+    let event: EventLog = serde_json::from_value(legacy).unwrap();
+    match event {
+        EventLog::SubAgent {
+            session_id,
+            status,
+            label,
+            mode,
+            depth,
+            stop_reason,
+            ..
+        } => {
+            assert_eq!(session_id, "sub_legacy");
+            assert_eq!(status, "ok");
+            assert!(label.is_none());
+            assert!(mode.is_none());
+            assert!(depth.is_none());
+            assert!(stop_reason.is_none());
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
 }

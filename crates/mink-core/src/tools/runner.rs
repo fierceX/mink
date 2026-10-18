@@ -138,6 +138,8 @@ pub struct ToolExecution {
     pub spawns_sub_agent: bool,
     pub sub_agent_prompt: Option<String>,
     pub sub_agent_fork: bool,
+    pub sub_agent_label: Option<String>,
+    pub sub_agent_model: Option<String>,
     pub exit_code: Option<i32>,
     pub status: ToolStatus,
     pub result_kind: ToolResultKind,
@@ -156,6 +158,8 @@ pub struct ToolExecution {
 pub struct SubAgentRequest {
     pub prompt: String,
     pub fork: bool,
+    pub label: Option<String>,
+    pub model: Option<String>,
 }
 
 impl ToolExecution {
@@ -171,6 +175,8 @@ impl ToolExecution {
         Some(SubAgentRequest {
             prompt,
             fork: self.sub_agent_fork,
+            label: self.sub_agent_label.take(),
+            model: self.sub_agent_model.take(),
         })
     }
 
@@ -189,6 +195,8 @@ impl ToolExecution {
             spawns_sub_agent: false,
             sub_agent_prompt: None,
             sub_agent_fork: false,
+            sub_agent_label: None,
+            sub_agent_model: None,
             exit_code: None,
             status: ToolStatus::Succeeded,
             result_kind: ToolResultKind::Text,
@@ -807,6 +815,8 @@ impl ToolRunner {
             spawns_sub_agent: false,
             sub_agent_prompt: None,
             sub_agent_fork: false,
+            sub_agent_label: None,
+            sub_agent_model: None,
             exit_code: None,
             status: super::metadata::ToolStatus::Succeeded,
             result_kind: super::metadata::ToolResultKind::FileRead,
@@ -1438,6 +1448,16 @@ fn format_dispatched_result(
             .get("fork")
             .map(|s| s == "true" || s == "1")
             .unwrap_or(false);
+    let sub_agent_label = if spawns_sub_agent && success {
+        call.fields.get("description").cloned()
+    } else {
+        None
+    };
+    let sub_agent_model = if spawns_sub_agent && success {
+        call.fields.get("model").cloned()
+    } else {
+        None
+    };
 
     ToolExecution {
         tool_use_id: call.id.clone(),
@@ -1448,6 +1468,8 @@ fn format_dispatched_result(
         spawns_sub_agent,
         sub_agent_prompt,
         sub_agent_fork,
+        sub_agent_label,
+        sub_agent_model,
         exit_code,
         status,
         result_kind,
@@ -1591,6 +1613,8 @@ pub(crate) fn blocked_tool_result(
         spawns_sub_agent: false,
         sub_agent_prompt: None,
         sub_agent_fork: false,
+        sub_agent_label: None,
+        sub_agent_model: None,
         exit_code: None,
         status: ToolStatus::Blocked(blocker),
         result_kind: ToolResultKind::Text,
@@ -1676,6 +1700,7 @@ impl ToolExec for SubAgentTool {
             prompt: String,
             description: Option<String>,
             fork: Option<bool>,
+            model: Option<String>,
         }
         let args: Args = crate::tools::args::decode_args(input)?;
         if args.prompt.trim().is_empty() {
@@ -1685,6 +1710,7 @@ impl ToolExec for SubAgentTool {
         // calls are not rejected by the runtime contract.
         let _ = args.description;
         let _ = args.fork;
+        let _ = args.model;
         Ok(ToolOutcome::text(String::new()))
     }
 }

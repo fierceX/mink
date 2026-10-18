@@ -124,6 +124,7 @@ pub(crate) struct ToolsConfigFile {
     /// 单次 Bash/Python/自定义工具调用的超时上限（默认 600，至少 5）。
     pub tool_timeout_max: Option<i32>,
     pub sub_agent_timeout: Option<i32>,
+    pub sub_agent_max_depth: Option<u32>,
     pub max_search_files: Option<usize>,
     pub max_search_results: Option<usize>,
     pub edit: EditConfigFile,
@@ -211,6 +212,7 @@ pub(crate) struct AgentConfig {
     pub tool_timeout_secs: Option<i32>,
     pub tool_timeout_max_secs: Option<i32>,
     pub sub_agent_timeout_secs: Option<i32>,
+    pub sub_agent_max_depth: Option<u32>,
     pub max_search_files: Option<usize>,
     pub max_search_results: Option<usize>,
     pub enabled_tools: Option<Vec<String>>,
@@ -325,6 +327,7 @@ pub(crate) fn merge(base: AgentConfig, over: AgentConfig) -> AgentConfig {
         tool_timeout_secs: pick(base.tool_timeout_secs, over.tool_timeout_secs),
         tool_timeout_max_secs: pick(base.tool_timeout_max_secs, over.tool_timeout_max_secs),
         sub_agent_timeout_secs: pick(base.sub_agent_timeout_secs, over.sub_agent_timeout_secs),
+        sub_agent_max_depth: pick(base.sub_agent_max_depth, over.sub_agent_max_depth),
         max_search_files: pick(base.max_search_files, over.max_search_files),
         max_search_results: pick(base.max_search_results, over.max_search_results),
         enabled_tools: pick(base.enabled_tools, over.enabled_tools),
@@ -512,6 +515,7 @@ fn from_file(file: &MinkConfigFile) -> AgentConfig {
     cfg.tool_timeout_secs = positive(tools.tool_timeout, "tool_timeout");
     cfg.tool_timeout_max_secs = positive(tools.tool_timeout_max, "tool_timeout_max");
     cfg.sub_agent_timeout_secs = positive(tools.sub_agent_timeout, "sub_agent_timeout");
+    cfg.sub_agent_max_depth = tools.sub_agent_max_depth.filter(|depth| *depth <= 3);
     cfg.max_search_files = tools.max_search_files;
     cfg.max_search_results = tools.max_search_results;
     cfg.enabled_tools = tools.enabled_tools.clone();
@@ -702,6 +706,9 @@ pub(crate) fn apply_to(mut options: AgentOptions, cfg: &AgentConfig) -> AgentOpt
     }
     if let Some(v) = cfg.sub_agent_timeout_secs {
         tools.sub_agent_timeout_secs = v;
+    }
+    if let Some(v) = cfg.sub_agent_max_depth {
+        tools.sub_agent_max_depth = v;
     }
     if let Some(v) = cfg.edit_mode {
         tools.edit_mode = v;
@@ -924,6 +931,7 @@ context_reserve_tokens = 2048
 enabled_tools = ["Read", "Edit", "Bash"]
 approval_mode = "write"
 tool_timeout = 120
+sub_agent_max_depth = 2
 skills = ["python"]
 max_search_files = 100
 
@@ -978,6 +986,7 @@ timeout = 60
         );
         assert_eq!(layer.approval_mode, Some(ToolApprovalMode::Write));
         assert_eq!(layer.tool_timeout_secs, Some(120));
+        assert_eq!(layer.sub_agent_max_depth, Some(2));
         assert_eq!(layer.skills.as_deref(), Some(&["python".to_string()][..]));
         assert_eq!(layer.edit_mode, Some(EditMode::Replace));
         assert_eq!(layer.edit_fuzzy_threshold, Some(0.9));

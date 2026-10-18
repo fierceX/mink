@@ -40,6 +40,8 @@ pub struct AgentContextBuild {
     pub cancel: CancellationToken,
     pub interrupt: Arc<AtomicBool>,
     pub is_sub_agent: bool,
+    /// Depth of the agent being built (0 = primary).
+    pub sub_agent_depth: u32,
     pub usage_journal: Option<Arc<UsageJournal>>,
     pub read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
     pub resource_session_id: String,
@@ -82,6 +84,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
                 crate::tools::surface::AgentRole::Primary
             },
             params.read_only_fs.is_some(),
+            params.sub_agent_depth,
             &params.custom_tools,
         )?;
     let paths = params.resolved_paths.unwrap_or_else(|| {
@@ -250,6 +253,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         plan_draft_path: paths.plan_draft.clone(),
         immutable_prefix: Mutex::new(None),
         is_sub_agent: params.is_sub_agent,
+        sub_agent_depth: params.sub_agent_depth,
         interrupt: params.interrupt,
         event_log_warned: AtomicBool::new(false),
         event_log_writer,

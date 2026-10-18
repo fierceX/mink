@@ -984,6 +984,8 @@ fn blocked_by_signal_recovery(
         spawns_sub_agent: false,
         sub_agent_prompt: None,
         sub_agent_fork: false,
+        sub_agent_label: None,
+        sub_agent_model: None,
         exit_code: None,
         status: crate::tools::metadata::ToolStatus::Blocked(
             crate::tools::metadata::ToolBlocker::RecoveryGuard,
