@@ -403,6 +403,30 @@ fn terminal_diagnostic_is_bounded_and_control_free() {
 }
 
 #[test]
+fn display_output_is_bounded_with_head_and_tail() {
+    let long = format!("{}{}", "A".repeat(20_000), "B".repeat(20_000));
+    let bounded = bounded_display(&long);
+    assert!(bounded.len() <= 32 * 1024, "len={}", bounded.len());
+    assert!(bounded.contains("… [truncated]"));
+    assert!(bounded.starts_with('A'));
+    assert!(bounded.ends_with('B'));
+    assert!(bounded.is_char_boundary(bounded.len()));
+
+    let multibyte = "é".repeat(30_000);
+    let bounded = bounded_display(&multibyte);
+    assert!(bounded.len() <= 32 * 1024);
+    assert!(!bounded.contains('\u{FFFD}'));
+    assert!(bounded.is_char_boundary(bounded.len()));
+}
+
+#[test]
+fn legacy_string_assistant_content_is_extracted() {
+    let (thinking, text) = extract_assistant_content(&serde_json::json!("legacy answer"));
+    assert!(thinking.is_empty());
+    assert_eq!(text, "legacy answer");
+}
+
+#[test]
 fn bounded_diagnostic_strips_controls_and_truncates_on_char_boundaries() {
     let cleaned = bounded_diagnostic("a\u{0007}b\r\nc\td");
     assert_eq!(cleaned, "ab\nc\td");
@@ -584,6 +608,82 @@ async fn internal_origins_are_distinct_and_do_not_require_delegation_depth() -> 
     let metadata: serde_json::Value = serde_json::from_str(&raw)?;
     assert_eq!(metadata["subagent"]["origin"], "goal_review");
     assert_eq!(metadata["subagent"]["mode"], "fork");
+    Ok(())
+}
+
+#[tokio::test]
+async fn fork_commit_window_drop_removes_destination_without_returning_ok() -> anyhow::Result<()> {
+    let parent = crate::regression::test_context_for_agent("sub-commit-drop").await?;
+    let child_home = parent
+        .store
+        .path()
+        .parent()
+        .expect("parent session dir")
+        .join("subagents")
+        .join("slow_commit_drop");
+    let cancel = parent.cancel.linked_child_token();
+    let task = tokio::spawn({
+        let parent = parent.clone();
+        async move {
+            SubAgentExecutor::new_child(
+                parent.clone(),
+                "slow_commit_drop".into(),
+                true,
+                parent.config.clone(),
+                cancel,
+                None,
+                None,
+                SubAgentOrigin::SubAgent,
+            )
+            .await
+        }
+    });
+    for _ in 0..100 {
+        if child_home.exists() {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+    }
+    assert!(child_home.exists(), "fork clone did not start");
+    task.abort();
+    let _ = task.await;
+    for _ in 0..100 {
+        if !child_home.exists() {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        !child_home.exists(),
+        "abandoned commit must remove the child home"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn fork_commit_success_keeps_the_directory() -> anyhow::Result<()> {
+    let parent = crate::regression::test_context_for_agent("sub-commit-success").await?;
+    let child_home = parent
+        .store
+        .path()
+        .parent()
+        .expect("parent session dir")
+        .join("subagents")
+        .join("slow_commit_success");
+    let cancel = parent.cancel.linked_child_token();
+    let child = SubAgentExecutor::new_child(
+        parent.clone(),
+        "slow_commit_success".into(),
+        true,
+        parent.config.clone(),
+        cancel,
+        None,
+        None,
+        SubAgentOrigin::SubAgent,
+    )
+    .await?;
+    assert!(child_home.exists(), "successful commit must keep the home");
+    assert_eq!(child.context().sub_agent_depth, 1);
     Ok(())
 }
 

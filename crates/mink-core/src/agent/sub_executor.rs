@@ -98,6 +98,11 @@ pub struct SubAgentResult {
     pub diagnostic: Option<String>,
     pub usage: Stats,
     pub elapsed_ms: u64,
+    /// Whether usage came from a real child StatsTracker (false for
+    /// pre-permit cancellation / an unavailable child context).
+    pub usage_known: bool,
+    /// Whether elapsed_ms is an observation rather than a placeholder zero.
+    pub elapsed_known: bool,
 }
 
 impl SubAgentResult {
@@ -115,7 +120,22 @@ impl SubAgentResult {
             diagnostic: diagnostic.map(|detail| bounded_diagnostic(&detail)),
             usage: Stats::default(),
             elapsed_ms: 0,
+            usage_known: true,
+            elapsed_known: true,
         }
+    }
+
+    /// Terminal result where no child measurement exists (pre-permit cancel,
+    /// unavailable child stats, or an unexpected host error).
+    pub(crate) fn terminal_unmeasured(
+        status: SubAgentStatus,
+        stop_reason: SubAgentStopReason,
+        diagnostic: Option<String>,
+    ) -> Self {
+        let mut result = Self::terminal(status, stop_reason, String::new(), diagnostic);
+        result.usage_known = false;
+        result.elapsed_known = false;
+        result
     }
 }
 
@@ -316,10 +336,12 @@ impl SubAgentExecutor {
         let child_home = parent_session_dir.join("subagents").join(&session_id);
         let home_created = Arc::new(AtomicBool::new(false));
         let clone_running = Arc::new(AtomicBool::new(false));
+        let abandoned = Arc::new(AtomicBool::new(false));
         let mut home_guard = ChildHomeGuard {
             path: child_home.clone(),
             created: home_created.clone(),
             clone_running: clone_running.clone(),
+            abandoned: abandoned.clone(),
             armed: true,
         };
         prepare_child_home_with_cancel(
@@ -329,6 +351,7 @@ impl SubAgentExecutor {
             Some(cancel.clone()),
             Some(&home_created),
             Some(clone_running.clone()),
+            Some(abandoned),
         )
         .await?;
         let parent_lease = parent_ctx
@@ -523,14 +546,16 @@ impl SubAgentExecutor {
             ),
         };
 
-        // 向父 Display 发送完整子代理输出（TUI 用户可点击查看）
+        // 向父 Display 发送展示侧有界的输出（完整内容仍保留在子会话）
+        let display_thinking = bounded_display(&captured_thinking);
+        let display_text = bounded_display(&captured_text);
         parent_display.render_sub_agent_output_meta(
             &session_id,
             status.as_str(),
             self.label.as_deref(),
             Some(stop_reason.as_str()),
-            &captured_thinking,
-            &captured_text,
+            &display_thinking,
+            &display_text,
             stats.total_input_tokens,
             stats.total_output_tokens,
         );
@@ -543,6 +568,8 @@ impl SubAgentExecutor {
             diagnostic: diagnostic.map(|detail| bounded_diagnostic(&detail)),
             usage: stats,
             elapsed_ms,
+            usage_known: true,
+            elapsed_known: true,
         }
     }
 
@@ -560,9 +587,9 @@ impl SubAgentExecutor {
                 let mut result_thinking = String::new();
                 let mut result_text = String::new();
                 if let Some(line) = self.child_store.last_assistant_message_with_text().await?
-                    && let Some(content) = line.get("content").and_then(|v| v.as_array())
+                    && let Some(content) = line.get("content")
                 {
-                    (result_thinking, result_text) = extract_assistant_text(content);
+                    (result_thinking, result_text) = extract_assistant_content(content);
                 }
                 Ok((TurnDecision::Stop, result_thinking, result_text))
             }
@@ -600,7 +627,16 @@ impl ReviewAgentSession {
 }
 
 /// Concatenate every non-empty text block from the last assistant message and
-/// keep the first thinking block for TUI display only.
+/// keep the first thinking block for TUI display only. String content is the
+/// legacy assistant shape and is treated as plain text.
+fn extract_assistant_content(content: &serde_json::Value) -> (String, String) {
+    match content {
+        serde_json::Value::Array(blocks) => extract_assistant_text(blocks),
+        serde_json::Value::String(text) => (String::new(), text.clone()),
+        _ => (String::new(), String::new()),
+    }
+}
+
 fn extract_assistant_text(content: &[serde_json::Value]) -> (String, String) {
     let mut thinking = String::new();
     let mut text = String::new();
@@ -664,9 +700,40 @@ fn bounded_diagnostic(detail: &str) -> String {
     out
 }
 
+fn bounded_display(text: &str) -> String {
+    const LIMIT: usize = 32 * 1024;
+    const MARKER: &str = "\n… [truncated]\n";
+    if text.len() <= LIMIT {
+        return text.to_string();
+    }
+    let budget = LIMIT - MARKER.len();
+    let mut head = budget / 2;
+    while head > 0 && !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let desired_tail = text.len() - (budget - head);
+    let mut tail = desired_tail;
+    while tail < text.len() && !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    // The ceil-boundary may add up to 3 bytes; trim the head by the same
+    // amount so the result still fits the limit.
+    let overflow = tail - desired_tail;
+    head = head.saturating_sub(overflow);
+    while head > 0 && !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut out = String::with_capacity(LIMIT);
+    out.push_str(&text[..head]);
+    out.push_str(MARKER);
+    out.push_str(&text[tail..]);
+    debug_assert!(out.len() <= LIMIT);
+    out
+}
+
 #[cfg(test)]
 async fn prepare_child_home(parent: &Path, child: &Path, fork: bool) -> Result<()> {
-    prepare_child_home_with_cancel(parent, child, fork, None, None, None).await
+    prepare_child_home_with_cancel(parent, child, fork, None, None, None, None).await
 }
 
 async fn prepare_child_home_with_cancel(
@@ -676,6 +743,7 @@ async fn prepare_child_home_with_cancel(
     cancel: Option<crate::cancel::CancellationToken>,
     created: Option<&AtomicBool>,
     clone_running: Option<Arc<AtomicBool>>,
+    abandoned: Option<Arc<AtomicBool>>,
 ) -> Result<()> {
     if child.exists() {
         bail!("sub-agent home already exists: {}", child.display());
@@ -696,10 +764,19 @@ async fn prepare_child_home_with_cancel(
         let copy_destination = destination.clone();
         let copy_cancel = cancel.clone();
         let running_flag = clone_running.clone();
+        let abandoned_flag = abandoned.clone();
         tokio::task::spawn_blocking(move || {
-            let result = clone_session_dir(&parent, &copy_destination, copy_cancel.as_ref());
+            let mut result = clone_session_dir(&parent, &copy_destination, copy_cancel.as_ref());
             if let Some(running) = running_flag {
                 running.store(false, Ordering::SeqCst);
+            }
+            if result.is_ok()
+                && abandoned_flag
+                    .as_ref()
+                    .is_some_and(|abandoned| abandoned.load(Ordering::SeqCst))
+            {
+                let _ = std::fs::remove_dir_all(&copy_destination);
+                result = Err(anyhow::anyhow!("sub-agent fork setup abandoned"));
             }
             result
         })
@@ -739,6 +816,9 @@ struct ChildHomeGuard {
     /// Fork clone owns the directory while this is true; deleting it here would
     /// race with the blocking copy. The clone's own guard removes partials.
     clone_running: Arc<AtomicBool>,
+    /// Set when setup is dropped while the blocker is still copying; the clone
+    /// closure removes the destination before returning.
+    abandoned: Arc<AtomicBool>,
     armed: bool,
 }
 
@@ -750,30 +830,27 @@ impl ChildHomeGuard {
 
 impl Drop for ChildHomeGuard {
     fn drop(&mut self) {
-        if self.armed
-            && self.created.load(Ordering::SeqCst)
-            && !self.clone_running.load(Ordering::SeqCst)
-        {
-            let _ = std::fs::remove_dir_all(&self.path);
+        if self.armed && self.created.load(Ordering::SeqCst) {
+            if self.clone_running.load(Ordering::SeqCst) {
+                self.abandoned.store(true, Ordering::SeqCst);
+            } else {
+                let _ = std::fs::remove_dir_all(&self.path);
+            }
         }
     }
 }
 
 /// Owns a partially copied fork destination inside the blocking clone.
+/// It only cleans up while the copy has not committed; once the copy succeeds,
+/// the outer `ChildHomeGuard` owns the directory.
 struct CloneDirGuard {
     path: std::path::PathBuf,
-    cancel: Option<crate::cancel::CancellationToken>,
     armed: bool,
 }
 
 impl Drop for CloneDirGuard {
     fn drop(&mut self) {
-        if self.armed
-            || self
-                .cancel
-                .as_ref()
-                .is_some_and(crate::cancel::CancellationToken::is_cancelled)
-        {
+        if self.armed {
             let _ = std::fs::remove_dir_all(&self.path);
         }
     }
@@ -804,7 +881,6 @@ fn clone_session_dir(
     std::fs::create_dir(destination)?;
     let mut guard = CloneDirGuard {
         path: destination.to_path_buf(),
-        cancel: cancel.cloned(),
         armed: true,
     };
     #[cfg(test)]
@@ -815,6 +891,13 @@ fn clone_session_dir(
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
     copy_session_entries(source, destination, true, cancel)?;
+    #[cfg(test)]
+    if destination
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with("slow_commit_"))
+    {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
     if cancel.is_some_and(crate::cancel::CancellationToken::is_cancelled) {
         bail!("sub-agent fork cancelled");
     }

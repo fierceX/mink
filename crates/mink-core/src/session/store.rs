@@ -28,19 +28,20 @@ struct CachedLines {
 
 /// True when an assistant message has at least one non-blank text block.
 fn assistant_has_text(message: &Value) -> bool {
-    message.get("role").and_then(Value::as_str) == Some("assistant")
-        && message
-            .get("content")
-            .and_then(Value::as_array)
-            .is_some_and(|content| {
-                content.iter().any(|block| {
-                    block.get("type").and_then(Value::as_str) == Some("text")
-                        && block
-                            .get("text")
-                            .and_then(Value::as_str)
-                            .is_some_and(|text| !text.trim().is_empty())
-                })
-            })
+    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return false;
+    }
+    match message.get("content") {
+        Some(Value::String(text)) => !text.trim().is_empty(),
+        Some(Value::Array(content)) => content.iter().any(|block| {
+            block.get("type").and_then(Value::as_str) == Some("text")
+                && block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.trim().is_empty())
+        }),
+        _ => false,
+    }
 }
 
 impl ConversationStore {
@@ -240,21 +241,6 @@ impl ConversationStore {
         cache.start = start;
     }
 
-    pub async fn last_assistant_message(&self) -> Result<Option<Value>> {
-        {
-            let cache = self.cache.read().await;
-            if let Some(cache) = cache.as_ref()
-                && let Some(message) = cache.lines.iter().rev().find(|message| {
-                    message.get("role").and_then(Value::as_str) == Some("assistant")
-                })
-            {
-                return Ok(Some(message.clone()));
-            }
-        }
-        let _guard = self.write_lock.lock().await;
-        self.read_last_assistant_from_disk().await
-    }
-
     /// Last assistant message that actually contains a non-blank text block.
     /// This is the result-contract query: an empty final assistant must not
     /// hide an earlier answer.
@@ -328,13 +314,6 @@ impl ConversationStore {
             ));
         }
         Ok(lines)
-    }
-
-    async fn read_last_assistant_from_disk(&self) -> Result<Option<Value>> {
-        self.read_last_assistant_from_disk_where(|value| {
-            value.get("role").and_then(Value::as_str) == Some("assistant")
-        })
-        .await
     }
 
     async fn read_last_assistant_with_text_from_disk(&self) -> Result<Option<Value>> {

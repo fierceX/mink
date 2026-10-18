@@ -254,9 +254,13 @@ impl SubAgentCoordinator {
                                 result = &mut run => Some(result),
                                 _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => None,
                             };
+                            let mut timeout_elapsed = None;
                             let mut sa = match outcome {
                                 Some(sa) => sa,
                                 None => {
+                                    // Record the deadline before the cancellation
+                                    // grace so timeout elapsed excludes cleanup.
+                                    timeout_elapsed = Some(started.elapsed());
                                     // Cancel the child before giving its setup a
                                     // short grace to observe cancellation and run
                                     // its cleanup guard.
@@ -269,6 +273,7 @@ impl SubAgentCoordinator {
                                     } else {
                                         "setup"
                                     };
+                                    let usage_known = stats_slot.get().is_some();
                                     let usage = match stats_slot.get() {
                                         Some(tracker) => tracker.snapshot().await,
                                         None => crate::session::stats::Stats::default(),
@@ -284,13 +289,22 @@ impl SubAgentCoordinator {
                                         usage,
                                         elapsed_ms: u64::try_from(started.elapsed().as_millis())
                                             .unwrap_or(u64::MAX),
+                                        usage_known,
+                                        elapsed_known: true,
                                     }
                                 }
                             };
                             // One clock for every outcome: permit acquisition is the
                             // start, so setup+run are included and queue time is not.
-                            sa.elapsed_ms =
-                                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                            // Timeouts keep the deadline measurement (grace excluded).
+                            if let Some(elapsed) = timeout_elapsed {
+                                sa.elapsed_ms =
+                                    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+                            } else {
+                                sa.elapsed_ms = u64::try_from(started.elapsed().as_millis())
+                                    .unwrap_or(u64::MAX);
+                            }
+                            sa.elapsed_known = true;
                             drop(permit);
                             sa
                         }
@@ -391,17 +405,18 @@ impl SubAgentCoordinator {
                             pr.content = content;
                             pr.conv_content = String::new();
                             pr.state_metadata = Some(serde_json::json!({
-                                "sub_agent": {
-                                    "session_id": session_id,
-                                    "label": launch.label,
-                                    "mode": launch.mode,
-                                    "depth": launch.depth,
-                                    "status": sa.status.as_str(),
-                                    "stop_reason": sa.stop_reason.as_str(),
-                                    "input_tokens": sa.usage.total_input_tokens,
-                                    "output_tokens": sa.usage.total_output_tokens,
-                                    "elapsed_ms": sa.elapsed_ms,
-                                }
+                                "sub_agent": sub_agent_metadata_value(
+                                    &session_id,
+                                    launch.label.as_deref(),
+                                    &launch.mode,
+                                    launch.depth,
+                                    sa.status.as_str(),
+                                    sa.stop_reason.as_str(),
+                                    &sa.usage,
+                                    sa.elapsed_ms,
+                                    sa.usage_known,
+                                    sa.elapsed_known,
+                                )
                             }));
                             let preview = if sa.thinking.is_empty() {
                                 truncate_str(&sa.text, 60)
@@ -503,9 +518,18 @@ impl SubAgentCoordinator {
         let reason = end.as_str();
         for (idx, launch) in &batch.pending {
             launch.cancel.cancel();
-            self.ctx
-                .display
-                .render_sub_agent_status(&launch.session_id, reason, 0, 0);
+            self.ctx.display.render_sub_agent_status_meta(
+                &launch.session_id,
+                reason,
+                launch.label.as_deref(),
+                Some(if end == BatchEnd::Interrupted {
+                    "aborted"
+                } else {
+                    "error"
+                }),
+                0,
+                0,
+            );
             self.log_sub_agent_event(
                 &launch.session_id,
                 reason,
@@ -540,6 +564,25 @@ impl SubAgentCoordinator {
                         }
                     };
                 }
+                let stop_reason = if end == BatchEnd::Interrupted {
+                    SubAgentStopReason::Aborted
+                } else {
+                    SubAgentStopReason::Error
+                };
+                pr.state_metadata = Some(serde_json::json!({
+                    "sub_agent": sub_agent_metadata_value(
+                        &launch.session_id,
+                        launch.label.as_deref(),
+                        &launch.mode,
+                        launch.depth,
+                        reason,
+                        stop_reason.as_str(),
+                        &crate::session::stats::Stats::default(),
+                        0,
+                        false,
+                        false,
+                    )
+                }));
             }
         }
     }
@@ -583,17 +626,15 @@ async fn acquire_sub_agent_permit(
     tokio::select! {
         permit = sub_semaphore.acquire_owned() => match permit {
             Ok(permit) => Ok(permit),
-            Err(_) => Err(Box::new(SubAgentResult::terminal(
+            Err(_) => Err(Box::new(SubAgentResult::terminal_unmeasured(
                 SubAgentStatus::Failed,
                 SubAgentStopReason::Error,
-                String::new(),
                 Some("sub_agent_error: semaphore closed".into()),
             ))),
         },
-        _ = cancel.cancelled() => Err(Box::new(SubAgentResult::terminal(
+        _ = cancel.cancelled() => Err(Box::new(SubAgentResult::terminal_unmeasured(
             SubAgentStatus::Interrupted,
             SubAgentStopReason::Aborted,
-            String::new(),
             Some("sub_agent_interrupted before execution".into()),
         ))),
     }
@@ -608,10 +649,9 @@ async fn run_sub_agent_runner(
     {
         Ok(future) => future,
         Err(panic_info) => {
-            return SubAgentResult::terminal(
+            return SubAgentResult::terminal_unmeasured(
                 SubAgentStatus::Failed,
                 SubAgentStopReason::Error,
-                String::new(),
                 Some(format!(
                     "sub_agent_error: task panicked: {}",
                     panic_message(panic_info)
@@ -621,10 +661,9 @@ async fn run_sub_agent_runner(
     };
     match std::panic::AssertUnwindSafe(future).catch_unwind().await {
         Ok(sa) => sa,
-        Err(panic_info) => SubAgentResult::terminal(
+        Err(panic_info) => SubAgentResult::terminal_unmeasured(
             SubAgentStatus::Failed,
             SubAgentStopReason::Error,
-            String::new(),
             Some(format!(
                 "sub_agent_error: task panicked: {}",
                 panic_message(panic_info)
@@ -699,6 +738,39 @@ fn resolve_delegation_model(
     Err(format!(
         "sub_agent_model_not_allowed: '{raw}' is neither a configured model alias nor the current model; allowed aliases: {allowed}"
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sub_agent_metadata_value(
+    session_id: &str,
+    label: Option<&str>,
+    mode: &str,
+    depth: u32,
+    status: &str,
+    stop_reason: &str,
+    usage: &crate::session::stats::Stats,
+    elapsed_ms: u64,
+    usage_known: bool,
+    elapsed_known: bool,
+) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "session_id": session_id,
+        "label": label,
+        "mode": mode,
+        "depth": depth,
+        "status": status,
+        "stop_reason": stop_reason,
+        "input_tokens": usage.total_input_tokens,
+        "output_tokens": usage.total_output_tokens,
+        "elapsed_ms": elapsed_ms,
+    });
+    if !usage_known {
+        value["usage_known"] = serde_json::Value::Bool(false);
+    }
+    if !elapsed_known {
+        value["elapsed_known"] = serde_json::Value::Bool(false);
+    }
+    value
 }
 
 fn fail_request(result: &mut ToolExecution, status: ToolStatus, content: String) {

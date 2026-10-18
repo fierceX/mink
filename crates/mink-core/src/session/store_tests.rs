@@ -34,12 +34,6 @@ async fn last_assistant_with_text_skips_blank_final_messages() {
         .unwrap()
         .expect("older answer");
     assert_eq!(with_text["content"][1]["text"], "older answer");
-    let latest = store
-        .last_assistant_message()
-        .await
-        .unwrap()
-        .expect("latest assistant");
-    assert_eq!(latest["content"][1]["text"], "");
 
     // Disk-only path must select the same message as the cache.
     let disk = ConversationStore::new(store.path().to_path_buf());
@@ -60,6 +54,24 @@ async fn last_assistant_with_text_skips_blank_final_messages() {
             .unwrap()
             .is_none()
     );
+
+    // Legacy sessions may store assistant content as a plain string.
+    let legacy = temp_store();
+    legacy.ensure().await.unwrap();
+    legacy
+        .append_runtime_message_durable(serde_json::json!({
+            "role": "assistant",
+            "content": "legacy answer"
+        }))
+        .await
+        .unwrap();
+    let legacy = ConversationStore::new(legacy.path().to_path_buf());
+    let message = legacy
+        .last_assistant_message_with_text()
+        .await
+        .unwrap()
+        .expect("legacy string answer");
+    assert_eq!(message["content"], "legacy answer");
 }
 
 #[tokio::test]
