@@ -375,6 +375,34 @@ fn claim_home(block: &str) -> String {
 }
 
 #[test]
+fn terminal_diagnostic_is_bounded_and_control_free() {
+    let setup = format!("sub_agent_setup_error: {} \u{0007}", "x".repeat(5000));
+    let result = SubAgentResult::terminal(
+        SubAgentStatus::Failed,
+        SubAgentStopReason::Error,
+        String::new(),
+        Some(setup),
+    );
+    let diagnostic = result.diagnostic.expect("setup diagnostic");
+    assert!(diagnostic.starts_with("sub_agent_setup_error:"));
+    assert!(diagnostic.len() <= 4096, "len={}", diagnostic.len());
+    assert!(!diagnostic.contains('\u{0007}'));
+    assert!(diagnostic.ends_with("… [truncated]"));
+
+    let panic = format!("sub_agent_error: task panicked: {}", "é".repeat(3000));
+    let result = SubAgentResult::terminal(
+        SubAgentStatus::Failed,
+        SubAgentStopReason::Error,
+        String::new(),
+        Some(panic),
+    );
+    let diagnostic = result.diagnostic.expect("panic diagnostic");
+    assert!(diagnostic.starts_with("sub_agent_error: task panicked:"));
+    assert!(diagnostic.len() <= 4096);
+    assert!(diagnostic.is_char_boundary(diagnostic.len()));
+}
+
+#[test]
 fn bounded_diagnostic_strips_controls_and_truncates_on_char_boundaries() {
     let cleaned = bounded_diagnostic("a\u{0007}b\r\nc\td");
     assert_eq!(cleaned, "ab\nc\td");
@@ -556,6 +584,41 @@ async fn internal_origins_are_distinct_and_do_not_require_delegation_depth() -> 
     let metadata: serde_json::Value = serde_json::from_str(&raw)?;
     assert_eq!(metadata["subagent"]["origin"], "goal_review");
     assert_eq!(metadata["subagent"]["mode"], "fork");
+    Ok(())
+}
+
+#[tokio::test]
+async fn clone_cancel_mid_copy_removes_the_destination() -> anyhow::Result<()> {
+    let root = std::env::temp_dir().join(format!(
+        "mink-subagent-clone-mid-cancel-{}",
+        std::process::id()
+    ));
+    let source = root.join("source");
+    let destination = root.join("slow_clone_destination");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&source)?;
+    std::fs::write(source.join("conversation.jsonl"), b"{}")?;
+    let cancel = crate::cancel::CancellationToken::new();
+    let copy_cancel = cancel.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        clone_session_dir(&source, &destination, Some(&copy_cancel))
+    });
+    let destination = root.join("slow_clone_destination");
+    for _ in 0..50 {
+        if destination.exists() {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+    }
+    assert!(destination.exists(), "clone did not start");
+    cancel.cancel();
+    let result = task.await?;
+    assert!(result.is_err(), "cancelled clone must fail");
+    assert!(
+        !destination.exists(),
+        "blocking clone guard must remove the destination"
+    );
+    let _ = std::fs::remove_dir_all(root);
     Ok(())
 }
 

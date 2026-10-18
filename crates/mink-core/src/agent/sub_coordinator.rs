@@ -5,13 +5,14 @@ use crate::agent::text::truncate_str;
 use crate::cancel::CancellationToken;
 use crate::config::ResolvedConfig as Config;
 use crate::context::AgentSharedContext;
-use crate::tools::metadata::{ToolFailureKind, ToolStatus};
+use crate::tools::metadata::{ToolFailureKind, ToolFailureSource, ToolStatus};
 use crate::tools::runner::ToolExecution;
 use futures::FutureExt;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
@@ -33,6 +34,9 @@ pub(crate) struct SubAgentRunSpec {
     pub depth: u32,
     pub cancel: CancellationToken,
     pub phase: Arc<AtomicU8>,
+    /// Filled by the default runner after the child context exists; custom
+    /// runners leave it empty and timeouts then report zero usage.
+    pub child_stats: Arc<OnceLock<Arc<crate::session::stats::StatsTracker>>>,
 }
 
 pub(crate) type SubAgentRunner = Arc<
@@ -147,6 +151,7 @@ impl SubAgentCoordinator {
                             ToolStatus::Failed(ToolFailureKind::ArgumentInvalid),
                             format!("Error: {error}"),
                         );
+                        result.failure_source = Some(ToolFailureSource::ModelFormat);
                         processed_results.push(result);
                         continue;
                     }
@@ -196,6 +201,7 @@ impl SubAgentCoordinator {
                 let launch_cancel = cancel.clone();
                 let launch_session_id = session_id.clone();
                 let phase = Arc::new(AtomicU8::new(PHASE_SETUP));
+                let child_stats = Arc::new(OnceLock::new());
                 let timeout_secs = self.ctx.tool_config.sub_agent_timeout_secs.max(1) as u64;
                 let display = self.ctx.display.clone();
                 let spec = SubAgentRunSpec {
@@ -207,17 +213,25 @@ impl SubAgentCoordinator {
                     depth,
                     cancel,
                     phase: phase.clone(),
+                    child_stats: child_stats.clone(),
                 };
                 let event_label = label.clone();
                 let event_mode = mode.clone();
                 let event_ctx = self.ctx.clone();
                 let handle = tokio::spawn(async move {
-                    let started = Instant::now();
                     // Single send point: either the permit path failed with an
                     // already-classified result, or the runner produced one.
                     let sa = match acquire_sub_agent_permit(sub_semaphore, &spec.cancel).await {
                         Ok(permit) => {
-                            display.render_sub_agent_status(&sid, "running", 0, 0);
+                            let started = Instant::now();
+                            display.render_sub_agent_status_meta(
+                                &sid,
+                                "running",
+                                Some(event_label.as_str()),
+                                None,
+                                0,
+                                0,
+                            );
                             event_ctx.log_event(crate::events::EventLog::SubAgent {
                                 version: Some(2),
                                 session_id: sid.clone(),
@@ -232,7 +246,7 @@ impl SubAgentCoordinator {
                                 duration_ms: None,
                                 phase: Some("run".into()),
                             });
-                            let stats_ctx = ctx.clone();
+                            let stats_slot = child_stats;
                             let cancel = spec.cancel.clone();
                             let phase = spec.phase.clone();
                             let mut run = Box::pin(run_sub_agent_runner(runner, ctx, spec));
@@ -255,7 +269,10 @@ impl SubAgentCoordinator {
                                     } else {
                                         "setup"
                                     };
-                                    let usage = stats_ctx.stats.snapshot().await;
+                                    let usage = match stats_slot.get() {
+                                        Some(tracker) => tracker.snapshot().await,
+                                        None => crate::session::stats::Stats::default(),
+                                    };
                                     SubAgentResult {
                                         status: SubAgentStatus::TimedOut,
                                         stop_reason: SubAgentStopReason::Timeout,
@@ -630,6 +647,7 @@ fn default_sub_agent_runner(config: Config) -> SubAgentRunner {
             .await
             {
                 Ok(executor) => {
+                    let _ = spec.child_stats.set(executor.context().stats.clone());
                     spec.phase.store(PHASE_RUN, Ordering::SeqCst);
                     executor.execute(spec.prompt).await
                 }

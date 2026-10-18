@@ -625,6 +625,62 @@ async fn sub_agent_results_follow_input_order_and_count_usage_per_child() -> any
 }
 
 #[tokio::test]
+async fn timed_out_child_does_not_reuse_parent_usage() -> anyhow::Result<()> {
+    let h = harness_with("sub-timeout-parent-stats", false, 1).await?;
+    h.ctx
+        .stats
+        .record_usage(&crate::protocol::UsageEvent {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_input_tokens: 2,
+            cache_creation_input_tokens: 1,
+        })
+        .await;
+    let before = h.ctx.stats.snapshot().await;
+    let coordinator = SubAgentCoordinator::new(h.ctx.clone());
+    let mut result = internal_result("SubAgent");
+    result.spawns_sub_agent = true;
+    result.sub_agent_prompt = Some("slow task".into());
+    let runner: SubAgentRunner = Arc::new(|_, _| {
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            SubAgentResult {
+                status: SubAgentStatus::Succeeded,
+                stop_reason: SubAgentStopReason::Completed,
+                diagnostic: None,
+                elapsed_ms: 0,
+                thinking: String::new(),
+                text: "late".into(),
+                usage: crate::session::stats::Stats {
+                    agent_request_count: 99,
+                    total_input_tokens: 999,
+                    total_output_tokens: 999,
+                    ..Default::default()
+                },
+            }
+        })
+    });
+    let processed = coordinator.process_with_runner(vec![result], runner).await;
+    assert!(!processed[0].succeeded());
+    assert!(
+        processed[0].content.contains("(in=0, out=0)"),
+        "timeout usage must not inherit parent stats: {}",
+        processed[0].content
+    );
+    let metadata = processed[0]
+        .state_metadata
+        .as_ref()
+        .expect("sub-agent metadata");
+    assert_eq!(metadata["sub_agent"]["input_tokens"], 0);
+    assert_eq!(metadata["sub_agent"]["output_tokens"], 0);
+    let after = h.ctx.stats.snapshot().await;
+    assert_eq!(after.agent_request_count, before.agent_request_count);
+    assert_eq!(after.total_input_tokens, before.total_input_tokens);
+    assert_eq!(after.total_output_tokens, before.total_output_tokens);
+    Ok(())
+}
+
+#[tokio::test]
 async fn slow_child_timeout_does_not_cancel_its_sibling() -> anyhow::Result<()> {
     let h = harness_with("sub-slow-sibling", false, 1).await?;
     let coordinator = SubAgentCoordinator::new(h.ctx.clone());
@@ -791,5 +847,9 @@ async fn sub_agent_model_is_forwarded_and_invalid_values_do_not_spawn() -> anyho
         )
     );
     assert!(processed[0].content.contains("sub_agent_model_not_allowed"));
+    assert_eq!(
+        processed[0].failure_source,
+        Some(crate::tools::metadata::ToolFailureSource::ModelFormat)
+    );
     Ok(())
 }

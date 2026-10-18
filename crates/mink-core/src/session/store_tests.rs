@@ -22,6 +22,47 @@ async fn add_user_and_read_back() {
 }
 
 #[tokio::test]
+async fn last_assistant_with_text_skips_blank_final_messages() {
+    let store = temp_store();
+    store.ensure().await.unwrap();
+    store.add_assistant("older answer", "", &[]).await.unwrap();
+    store.add_assistant("", "", &[]).await.unwrap();
+
+    let with_text = store
+        .last_assistant_message_with_text()
+        .await
+        .unwrap()
+        .expect("older answer");
+    assert_eq!(with_text["content"][1]["text"], "older answer");
+    let latest = store
+        .last_assistant_message()
+        .await
+        .unwrap()
+        .expect("latest assistant");
+    assert_eq!(latest["content"][1]["text"], "");
+
+    // Disk-only path must select the same message as the cache.
+    let disk = ConversationStore::new(store.path().to_path_buf());
+    let from_disk = disk
+        .last_assistant_message_with_text()
+        .await
+        .unwrap()
+        .expect("older answer from disk");
+    assert_eq!(from_disk["content"][1]["text"], "older answer");
+
+    let empty = temp_store();
+    empty.ensure().await.unwrap();
+    empty.add_assistant("", "", &[]).await.unwrap();
+    assert!(
+        empty
+            .last_assistant_message_with_text()
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn add_assistant_with_thinking_and_text() {
     let store = temp_store();
     store.ensure().await.unwrap();

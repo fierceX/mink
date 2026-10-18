@@ -112,7 +112,7 @@ impl SubAgentResult {
             stop_reason,
             thinking: String::new(),
             text,
-            diagnostic,
+            diagnostic: diagnostic.map(|detail| bounded_diagnostic(&detail)),
             usage: Stats::default(),
             elapsed_ms: 0,
         }
@@ -315,9 +315,11 @@ impl SubAgentExecutor {
             .ok_or_else(|| anyhow::anyhow!("parent conversation has no session directory"))?;
         let child_home = parent_session_dir.join("subagents").join(&session_id);
         let home_created = Arc::new(AtomicBool::new(false));
+        let clone_running = Arc::new(AtomicBool::new(false));
         let mut home_guard = ChildHomeGuard {
             path: child_home.clone(),
             created: home_created.clone(),
+            clone_running: clone_running.clone(),
             armed: true,
         };
         prepare_child_home_with_cancel(
@@ -326,6 +328,7 @@ impl SubAgentExecutor {
             fork,
             Some(cancel.clone()),
             Some(&home_created),
+            Some(clone_running.clone()),
         )
         .await?;
         let parent_lease = parent_ctx
@@ -556,7 +559,7 @@ impl SubAgentExecutor {
                 // split its final answer across multiple text blocks.
                 let mut result_thinking = String::new();
                 let mut result_text = String::new();
-                if let Some(line) = self.child_store.last_assistant_message().await?
+                if let Some(line) = self.child_store.last_assistant_message_with_text().await?
                     && let Some(content) = line.get("content").and_then(|v| v.as_array())
                 {
                     (result_thinking, result_text) = extract_assistant_text(content);
@@ -663,7 +666,7 @@ fn bounded_diagnostic(detail: &str) -> String {
 
 #[cfg(test)]
 async fn prepare_child_home(parent: &Path, child: &Path, fork: bool) -> Result<()> {
-    prepare_child_home_with_cancel(parent, child, fork, None, None).await
+    prepare_child_home_with_cancel(parent, child, fork, None, None, None).await
 }
 
 async fn prepare_child_home_with_cancel(
@@ -672,6 +675,7 @@ async fn prepare_child_home_with_cancel(
     fork: bool,
     cancel: Option<crate::cancel::CancellationToken>,
     created: Option<&AtomicBool>,
+    clone_running: Option<Arc<AtomicBool>>,
 ) -> Result<()> {
     if child.exists() {
         bail!("sub-agent home already exists: {}", child.display());
@@ -684,12 +688,20 @@ async fn prepare_child_home_with_cancel(
         if let Some(created) = created {
             created.store(true, Ordering::SeqCst);
         }
+        if let Some(running) = &clone_running {
+            running.store(true, Ordering::SeqCst);
+        }
         let parent = parent.to_path_buf();
         let destination = child.to_path_buf();
         let copy_destination = destination.clone();
         let copy_cancel = cancel.clone();
+        let running_flag = clone_running.clone();
         tokio::task::spawn_blocking(move || {
-            clone_session_dir(&parent, &copy_destination, copy_cancel.as_ref())
+            let result = clone_session_dir(&parent, &copy_destination, copy_cancel.as_ref());
+            if let Some(running) = running_flag {
+                running.store(false, Ordering::SeqCst);
+            }
+            result
         })
         .await??;
         for name in ["events.jsonl", "stats.json", "usage.jsonl", "session.json"] {
@@ -724,6 +736,9 @@ async fn prepare_child_home_with_cancel(
 struct ChildHomeGuard {
     path: std::path::PathBuf,
     created: Arc<AtomicBool>,
+    /// Fork clone owns the directory while this is true; deleting it here would
+    /// race with the blocking copy. The clone's own guard removes partials.
+    clone_running: Arc<AtomicBool>,
     armed: bool,
 }
 
@@ -735,7 +750,30 @@ impl ChildHomeGuard {
 
 impl Drop for ChildHomeGuard {
     fn drop(&mut self) {
-        if self.armed && self.created.load(Ordering::SeqCst) {
+        if self.armed
+            && self.created.load(Ordering::SeqCst)
+            && !self.clone_running.load(Ordering::SeqCst)
+        {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+/// Owns a partially copied fork destination inside the blocking clone.
+struct CloneDirGuard {
+    path: std::path::PathBuf,
+    cancel: Option<crate::cancel::CancellationToken>,
+    armed: bool,
+}
+
+impl Drop for CloneDirGuard {
+    fn drop(&mut self) {
+        if self.armed
+            || self
+                .cancel
+                .as_ref()
+                .is_some_and(crate::cancel::CancellationToken::is_cancelled)
+        {
             let _ = std::fs::remove_dir_all(&self.path);
         }
     }
@@ -764,10 +802,23 @@ fn clone_session_dir(
     cancel: Option<&crate::cancel::CancellationToken>,
 ) -> Result<()> {
     std::fs::create_dir(destination)?;
-    if let Err(error) = copy_session_entries(source, destination, true, cancel) {
-        let _ = std::fs::remove_dir_all(destination);
-        return Err(error);
+    let mut guard = CloneDirGuard {
+        path: destination.to_path_buf(),
+        cancel: cancel.cloned(),
+        armed: true,
+    };
+    #[cfg(test)]
+    if destination
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with("slow_clone_"))
+    {
+        std::thread::sleep(std::time::Duration::from_millis(300));
     }
+    copy_session_entries(source, destination, true, cancel)?;
+    if cancel.is_some_and(crate::cancel::CancellationToken::is_cancelled) {
+        bail!("sub-agent fork cancelled");
+    }
+    guard.armed = false;
     Ok(())
 }
 

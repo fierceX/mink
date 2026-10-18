@@ -26,6 +26,23 @@ struct CachedLines {
     lines: Vec<Value>,
 }
 
+/// True when an assistant message has at least one non-blank text block.
+fn assistant_has_text(message: &Value) -> bool {
+    message.get("role").and_then(Value::as_str) == Some("assistant")
+        && message
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|content| {
+                content.iter().any(|block| {
+                    block.get("type").and_then(Value::as_str) == Some("text")
+                        && block
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| !text.trim().is_empty())
+                })
+            })
+}
+
 impl ConversationStore {
     pub fn new(path: PathBuf) -> Self {
         Self {
@@ -238,6 +255,26 @@ impl ConversationStore {
         self.read_last_assistant_from_disk().await
     }
 
+    /// Last assistant message that actually contains a non-blank text block.
+    /// This is the result-contract query: an empty final assistant must not
+    /// hide an earlier answer.
+    pub async fn last_assistant_message_with_text(&self) -> Result<Option<Value>> {
+        {
+            let cache = self.cache.read().await;
+            if let Some(cache) = cache.as_ref()
+                && let Some(message) = cache
+                    .lines
+                    .iter()
+                    .rev()
+                    .find(|message| assistant_has_text(message))
+            {
+                return Ok(Some(message.clone()));
+            }
+        }
+        let _guard = self.write_lock.lock().await;
+        self.read_last_assistant_with_text_from_disk().await
+    }
+
     pub async fn lines_lossy_with_warnings<F>(&self, mut warn: F) -> Result<Vec<Value>>
     where
         F: FnMut(String),
@@ -294,6 +331,21 @@ impl ConversationStore {
     }
 
     async fn read_last_assistant_from_disk(&self) -> Result<Option<Value>> {
+        self.read_last_assistant_from_disk_where(|value| {
+            value.get("role").and_then(Value::as_str) == Some("assistant")
+        })
+        .await
+    }
+
+    async fn read_last_assistant_with_text_from_disk(&self) -> Result<Option<Value>> {
+        self.read_last_assistant_from_disk_where(assistant_has_text)
+            .await
+    }
+
+    async fn read_last_assistant_from_disk_where(
+        &self,
+        matches: impl Fn(&Value) -> bool,
+    ) -> Result<Option<Value>> {
         let file = tokio::fs::File::open(&self.path).await?;
         let mut reader = BufReader::new(file);
         let mut latest = None;
@@ -322,7 +374,7 @@ impl ConversationStore {
                     ));
                 }
             };
-            if value.get("role").and_then(Value::as_str) == Some("assistant") {
+            if matches(&value) {
                 latest = Some(value);
             }
         }
