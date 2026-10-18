@@ -381,10 +381,11 @@ runtime 启动时 fail closed。
 - 子代理不能超过 `sub_agent_max_depth`（默认 1）；到达上限时工具从子代理 surface 隐藏，运行时返回 `SafetyBlocked`。
 - Fork 在 child runtime 初始化前克隆完整 session 目录（跳过已有 `subagents/`）；child 身份与遥测重新初始化，克隆按目录项检查取消。
 - Fork 后 artifact 从克隆 index 的最大序号继续写入，不覆盖父历史正文。
-- 子代理完成时通过 parent display 发送完整 thinking/text（TUI 详情），但父模型可见结果默认不含 thinking。
+- 子代理完成时通过 parent display 发送展示侧有界的 thinking/text（TUI 详情），但父模型可见结果默认不含 thinking；完整内容仍保留在子会话。
 - tool result 格式为 `[sub-agent <id>] <status> (in=<n>, out=<n>)` + 最后一条非空 assistant 的全部 text 块；失败/超时追加有界 `diagnostic:` 段。
 - 子代理失败/超时仍映射为 `ToolStatus`（`TimedOut` → `Failed(Timeout)`）；`sub_agent_timeout_secs` 从获得名额后起算并覆盖 setup+run，不含排队。
-- `_mink.sub_agent` 携带 session_id/label/mode/depth/status/stop_reason/usage/elapsed_ms；`elapsed_ms` 同为 setup+run，不含排队。
+- `_mink.sub_agent` 携带 session_id/label/mode/depth/status/stop_reason/usage/elapsed_ms；`elapsed_ms` 同为 setup+run，不含排队；未测量时带 `usage_known/elapsed_known=false`。
+- 父 display 的 `SubAgentOutput` 只发送展示侧有界的 thinking/text，完整内容仍保留在子会话与 tool result/artifact 路径。
 
 ## 工具事实权威表（Q11）
 

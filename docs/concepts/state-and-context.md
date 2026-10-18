@@ -142,8 +142,7 @@ Append: repair tail → single-buffer line write → flush → 更新内存缓�
 因此冷历史只保留在磁盘，不随 session 生命周期持续占用运行时内存。
 
 `lines()` 仍可显式读取完整历史，但当缓存已经裁剪时不会用完整结果替换活跃缓存。
-`last_assistant_message()` 优先从活跃缓存查找，必要时流式扫描磁盘，只保留最后一条 assistant，
-避免 SDK final 或子代理结果收集重新加载完整 session。
+`last_assistant_message_with_text()` 优先从活跃缓存查找最后一条含非空 text 的 assistant，必要时流式扫描磁盘；空 assistant 不会遮盖更早的回答，避免 SDK final 或子代理结果收集重新加载完整 session。
 
 续写前只反向扫描最后一条未换行记录：若它是完整 JSON，则先补换行；若它是崩溃留下的半截 JSON，则截断到上一条完整记录。新 JSON 与换行在同一个缓冲区中写入，避免再次制造可被后续记录拼接的尾部。
 

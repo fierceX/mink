@@ -5,7 +5,8 @@
 ### 变更
 
 - **子代理**：新增 `sub_agent_max_depth`（默认 1，0 禁用，最大 3）与 `SubAgent.model` 参数；父会话 `sub_agent` 事件与子会话 `session.json` 记录 label/mode/depth/origin/stop_reason，目录折叠为派生视图，TUI replay/SSE 可显示状态与 label。
-- **子代理结果**：模型可见结果改为最后一条非空 assistant 的全部 text 块，默认不再注入 thinking；失败/超时使用 <=4096 字节的有界 `diagnostic`，并写入 `_mink.sub_agent` 结构化元数据。
+- **子代理结果**：模型可见结果改为最后一条非空 assistant 的全部 text 块，默认不再注入 thinking；失败/超时使用 <=4096 字节的有界 `diagnostic`，并写入 `_mink.sub_agent` 结构化元数据；pending 取消结果同样带身份字段，未测量时标 `usage_known/elapsed_known=false`。
+- **子代理展示**：父 `SubAgentOutput` 对 thinking/text 做头尾有界，完整内容仍保留在子会话；fork clone 的目录所有权收敛为 clone 成功即交给外层 guard，取消/提交窗口不会返回 Ok 后删除目录。
 - **子代理生命周期**：`sub_agent_timeout_secs` 改为“获得并发名额后”起算并覆盖 setup+run；删除批次 deadline，批内第 9 个起排队而非拒绝；fork 克隆按目录项检查取消；setup 超时/取消由清理 guard 删除部分 child home；状态按 `launched(queued)→running→终态` 记录。
 - **子代理提示词**：子角色新增固定委派 scope 声明，到达深度上限时显式提示不可继续委派。
 - **子代理配置**：`sub_agent_max_depth` 统一为 0..=3、`sub_agent_timeout` 统一为 >0，core/CLI/server/SDK/Python 一致拒绝越界；`elapsed_ms` 与事件 `duration_ms` 明确为 setup+run，不含排队；catalog 定位为公开 Reader API-only。

@@ -275,7 +275,8 @@ session 状态会整体继承。ArtifactManager 从克隆后的 index 恢复下�
 - thinking 只进入 TUI 实时流与子会话历史，**不进入父模型上下文**。
 - 失败/超时/中断的终止原因放入 `diagnostic`（剥离控制字符，按 UTF-8 boundary 截断；含 `… [truncated]` 标记的总长不超过 4096 字节），不再拼进正文。
 - tool result 形如 `[sub-agent <id>] <status> (in=..., out=...)`，随后是结果正文与可选 `diagnostic:` 段；整体仍受 `format_tool_result`/artifact 保护。
-- `_mink.sub_agent` 携带 `session_id/label/mode/depth/status/stop_reason/input_tokens/output_tokens/elapsed_ms`，供 TUI/Web 结构化渲染。
+- `_mink.sub_agent` 携带 `session_id/label/mode/depth/status/stop_reason/input_tokens/output_tokens/elapsed_ms`，供 TUI/Web 结构化渲染；pending 中断/通道失败结果也写同形元数据，并在未测量时带可选 `usage_known=false` / `elapsed_known=false`（缺省 true，旧数据兼容）。
+- 父 display 的 `SubAgentOutput` 对 thinking/text 做展示侧头尾有界（含 `… [truncated]`），不改变子会话历史、tool result 与 artifact。
 
 ### 身份、目录与恢复展示
 
@@ -289,7 +290,7 @@ session 状态会整体继承。ArtifactManager 从克隆后的 index 恢复下�
 `SubAgentCoordinator` 在工具阶段内启动并收集本次批次：
 
 - 批内并发上限为 8；第 9 个及以后**排队等待名额**，不拒绝。
-- `sub_agent_timeout_secs` 从**获得名额之后**起算，覆盖 setup + run；排队等待不计入；`elapsed_ms`/事件 `duration_ms` 同为 setup+run，不含排队。
+- `sub_agent_timeout_secs` 从**获得名额之后**起算，覆盖 setup + run；排队等待不计入；`elapsed_ms`/事件 `duration_ms` 同为 setup+run，不含排队；超时结果的 elapsed 在 deadline 时记录，后续取消宽限只用于清理。
 - 不再使用批次 deadline：一个慢子代理超时不会连带同批其他子代理；整批最坏耗时为 `ceil(N/8) × timeout`。
 - 状态按 `launched(phase=queued) → running(phase=run) → 终态` 记录；setup 超时的 diagnostic 标记 `phase=setup`，超时先 cancel 再给 setup 一个短宽限，部分 child home 由清理 guard 删除。
 - 批次中断/取消/Cancel 唤醒收集，未完成项标记 `cancelled` 并中止任务；`SubAgentBatch::drop` 仍对剩余任务 cancel + abort。
