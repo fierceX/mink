@@ -167,11 +167,37 @@ fn apply_switches_stream_kinds_and_collapses_thinking() {
 }
 
 #[test]
+fn sub_agent_meta_label_and_stop_reason_are_visible() {
+    let mut state = TuiState::default();
+    state.apply(&TuiSignal::SubAgentStatus {
+        session_id: "sub_1".into(),
+        status: "running".into(),
+        label: Some("review diff".into()),
+        stop_reason: None,
+        in_tokens: 0,
+        out_tokens: 0,
+    });
+    assert!(state.lines[0].text.contains("review diff"));
+    state.apply(&TuiSignal::SubAgentStatus {
+        session_id: "sub_1".into(),
+        status: "ok".into(),
+        label: Some("review diff".into()),
+        stop_reason: Some("completed".into()),
+        in_tokens: 4,
+        out_tokens: 2,
+    });
+    assert!(state.lines[0].text.contains("review diff"));
+    assert!(state.lines[0].text.contains("[completed]"));
+}
+
+#[test]
 fn sub_agent_output_invalidates_updated_line_cache() {
     let mut state = TuiState::default();
     state.apply(&TuiSignal::SubAgentStatus {
         session_id: "sub_1".into(),
         status: "launched".into(),
+        label: None,
+        stop_reason: None,
         in_tokens: 0,
         out_tokens: 0,
     });
@@ -181,6 +207,8 @@ fn sub_agent_output_invalidates_updated_line_cache() {
     state.apply(&TuiSignal::SubAgentOutput {
         session_id: "sub_1".into(),
         status: "ok".into(),
+        label: None,
+        stop_reason: None,
         thinking: "child thinking".into(),
         text: "child text".into(),
         in_tokens: 12,
@@ -201,6 +229,8 @@ fn sub_agent_status_updates_existing_line() {
     state.apply(&TuiSignal::SubAgentStatus {
         session_id: "sub_1".into(),
         status: "launched".into(),
+        label: None,
+        stop_reason: None,
         in_tokens: 0,
         out_tokens: 0,
     });
@@ -210,6 +240,8 @@ fn sub_agent_status_updates_existing_line() {
     state.apply(&TuiSignal::SubAgentStatus {
         session_id: "sub_1".into(),
         status: "running".into(),
+        label: None,
+        stop_reason: None,
         in_tokens: 3,
         out_tokens: 4,
     });
@@ -227,6 +259,8 @@ fn sub_agent_terminal_status_clears_active_state() {
     state.apply(&TuiSignal::SubAgentStatus {
         session_id: "sub_1".into(),
         status: "launched".into(),
+        label: None,
+        stop_reason: None,
         in_tokens: 0,
         out_tokens: 0,
     });
@@ -234,6 +268,8 @@ fn sub_agent_terminal_status_clears_active_state() {
     state.apply(&TuiSignal::SubAgentStatus {
         session_id: "sub_1".into(),
         status: "timed_out".into(),
+        label: None,
+        stop_reason: None,
         in_tokens: 0,
         out_tokens: 0,
     });
@@ -350,6 +386,8 @@ fn duplicate_sub_agent_output_does_not_drift_active_state() {
     state.apply(&TuiSignal::SubAgentStatus {
         session_id: "sub_1".into(),
         status: "launched".into(),
+        label: None,
+        stop_reason: None,
         in_tokens: 0,
         out_tokens: 0,
     });
@@ -357,6 +395,8 @@ fn duplicate_sub_agent_output_does_not_drift_active_state() {
     let output = TuiSignal::SubAgentOutput {
         session_id: "sub_1".into(),
         status: "ok".into(),
+        label: None,
+        stop_reason: None,
         thinking: String::new(),
         text: "done".into(),
         in_tokens: 1,
@@ -1531,6 +1571,8 @@ fn sub_agent_detail_tracks_session_after_output_update() {
     state.apply(&TuiSignal::SubAgentStatus {
         session_id: "sub_1".into(),
         status: "launched".into(),
+        label: None,
+        stop_reason: None,
         in_tokens: 0,
         out_tokens: 0,
     });
@@ -1542,6 +1584,8 @@ fn sub_agent_detail_tracks_session_after_output_update() {
     state.apply(&TuiSignal::SubAgentOutput {
         session_id: "sub_1".into(),
         status: "ok".into(),
+        label: None,
+        stop_reason: None,
         thinking: "child thinking".into(),
         text: "child text".into(),
         in_tokens: 12,

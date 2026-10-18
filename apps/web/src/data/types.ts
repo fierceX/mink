@@ -64,6 +64,8 @@ export interface SubAgentItem {
   kind: "sub_agent";
   sessionId: string;
   status: string;
+  label?: string;
+  stopReason?: string;
   thinking: string;
   text: string;
   inTokens: number;

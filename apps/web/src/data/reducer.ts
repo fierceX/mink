@@ -157,6 +157,28 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
       const liveRequired = ["tool_use_id", "tool_name", "presentation", "artifacts", "status", "exit_code", "result_kind"];
       if (raw.stream_sequence != null && liveRequired.some((field) => !Object.hasOwn(raw, field))) break;
       if (raw.stream_sequence != null && raw.tool_use_id == null) break;
+      const subAgent = raw.sub_agent as Record<string, unknown> | undefined;
+      if (subAgent !== undefined && typeof subAgent.session_id === "string") {
+        const sid = subAgent.session_id;
+        const at = next.items.findIndex((entry) => entry.kind === "sub_agent" && entry.sessionId === sid);
+        const patch = {
+          status: String(subAgent.status ?? "ok"),
+          label: typeof subAgent.label === "string" && subAgent.label !== "" ? subAgent.label : undefined,
+          stopReason: typeof subAgent.stop_reason === "string" && subAgent.stop_reason !== "" ? subAgent.stop_reason : undefined,
+          inTokens: Number(subAgent.input_tokens ?? 0),
+          outTokens: Number(subAgent.output_tokens ?? 0),
+        };
+        if (at < 0) {
+          next.items = [...next.items, { kind: "sub_agent" as const, sessionId: sid, thinking: "", text: "", ...patch }];
+        } else if (next.items[at].kind === "sub_agent") {
+          const prior = next.items[at];
+          next.items = [
+            ...next.items.slice(0, at),
+            { ...prior, ...patch, label: patch.label ?? prior.label, stopReason: patch.stopReason ?? prior.stopReason },
+            ...next.items.slice(at + 1),
+          ];
+        }
+      }
       const toolUseId = raw.tool_use_id == null ? undefined : String(raw.tool_use_id);
       const idx = lastPendingTool(next.items, toolUseId);
       if (idx < 0) break;
@@ -278,11 +300,15 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
       const status = String(raw.status ?? "");
       const inTokens = Number(raw.in_tokens ?? 0);
       const outTokens = Number(raw.out_tokens ?? 0);
+      const label = typeof raw.label === "string" && raw.label !== "" ? raw.label : undefined;
+      const stopReason = typeof raw.stop_reason === "string" && raw.stop_reason !== "" ? raw.stop_reason : undefined;
       if (idx < 0) {
         next.items = [...next.items, withKey({
           kind: "sub_agent" as const,
           sessionId,
           status,
+          label,
+          stopReason,
           thinking: "",
           text: "",
           inTokens,
@@ -293,7 +319,7 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
         if (existing.kind !== "sub_agent") break;
         next.items = [
           ...next.items.slice(0, idx),
-          { ...existing, status, inTokens, outTokens },
+          { ...existing, status, inTokens, outTokens, label: label ?? existing.label, stopReason: stopReason ?? existing.stopReason },
           ...next.items.slice(idx + 1),
         ];
       }
@@ -305,10 +331,15 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
       next.activeSubAgents = state.activeSubAgents.filter(id => id !== sessionId);
       next.workState = next.activeSubAgents.length ? "sub-agent" : "waiting";
       const idx = next.items.findIndex((item) => item.kind === "sub_agent" && item.sessionId === sessionId);
+      const label = typeof raw.label === "string" && raw.label !== "" ? raw.label : undefined;
+      const stopReason = typeof raw.stop_reason === "string" && raw.stop_reason !== "" ? raw.stop_reason : undefined;
+      const prior = idx >= 0 && next.items[idx].kind === "sub_agent" ? next.items[idx] : undefined;
       const item = withKey({
         kind: "sub_agent" as const,
         sessionId,
         status: String(raw.status ?? ""),
+        label: label ?? prior?.label,
+        stopReason: stopReason ?? prior?.stopReason,
         thinking: String(raw.thinking ?? ""),
         text: String(raw.text ?? ""),
         inTokens: Number(raw.in_tokens ?? 0),

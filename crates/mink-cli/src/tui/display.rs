@@ -79,9 +79,23 @@ impl Display for TuiDisplay {
     }
 
     fn render_sub_agent_status(&self, sid: &str, st: &str, it: u64, ot: u64) {
+        self.render_sub_agent_status_meta(sid, st, None, None, it, ot);
+    }
+
+    fn render_sub_agent_status_meta(
+        &self,
+        sid: &str,
+        st: &str,
+        label: Option<&str>,
+        stop_reason: Option<&str>,
+        it: u64,
+        ot: u64,
+    ) {
         let _ = self.tx.send(TuiSignal::SubAgentStatus {
             session_id: sid.into(),
             status: st.into(),
+            label: label.map(str::to_string),
+            stop_reason: stop_reason.map(str::to_string),
             in_tokens: it,
             out_tokens: ot,
         });
@@ -96,9 +110,26 @@ impl Display for TuiDisplay {
         it: u64,
         ot: u64,
     ) {
+        self.render_sub_agent_output_meta(sid, st, None, None, thinking, text, it, ot);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_sub_agent_output_meta(
+        &self,
+        sid: &str,
+        st: &str,
+        label: Option<&str>,
+        stop_reason: Option<&str>,
+        thinking: &str,
+        text: &str,
+        it: u64,
+        ot: u64,
+    ) {
         let _ = self.tx.send(TuiSignal::SubAgentOutput {
             session_id: sid.into(),
             status: st.into(),
+            label: label.map(str::to_string),
+            stop_reason: stop_reason.map(str::to_string),
             thinking: thinking.into(),
             text: text.into(),
             in_tokens: it,

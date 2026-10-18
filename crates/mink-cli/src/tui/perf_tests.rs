@@ -109,6 +109,8 @@ fn tui_release_stress_benchmark() {
             state.apply(&TuiSignal::SubAgentStatus {
                 session_id: format!("sub_{n}"),
                 status: "running".into(),
+                label: None,
+                stop_reason: None,
                 in_tokens: 0,
                 out_tokens: 0,
             });

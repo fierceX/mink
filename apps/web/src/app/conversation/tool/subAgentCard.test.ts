@@ -19,6 +19,18 @@ function delegation(input: string): ToolItem {
 }
 
 describe('delegation card', () => {
+  it('reads the current single-prompt schema as one row', () => {
+    const card = subAgentCard(delegation(JSON.stringify({
+      prompt: '逐项对照。',
+      description: '核对工具卡家族',
+      fork: false,
+      model: 'pro',
+    })))
+    expect(card?.tasks).toEqual([
+      { id: '核对工具卡家族', description: '核对工具卡家族', prompt: '逐项对照。' },
+    ])
+  })
+
   it('reads one row per dispatched task', () => {
     const card = subAgentCard(delegation(JSON.stringify({
       tasks: [

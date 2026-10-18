@@ -58,6 +58,8 @@ pub enum TuiSignal {
     SubAgentStatus {
         session_id: String,
         status: String,
+        label: Option<String>,
+        stop_reason: Option<String>,
         in_tokens: u64,
         out_tokens: u64,
     },
@@ -69,6 +71,8 @@ pub enum TuiSignal {
     SubAgentOutput {
         session_id: String,
         status: String,
+        label: Option<String>,
+        stop_reason: Option<String>,
         thinking: String,
         text: String,
         in_tokens: u64,
@@ -76,6 +80,24 @@ pub enum TuiSignal {
     },
     #[default]
     Shutdown,
+}
+
+fn sub_agent_title(
+    session_id: &str,
+    label: Option<&str>,
+    status: &str,
+    stop_reason: Option<&str>,
+    in_tokens: u64,
+    out_tokens: u64,
+) -> String {
+    let who = label
+        .filter(|label| !label.is_empty())
+        .unwrap_or(session_id);
+    let reason = stop_reason
+        .filter(|reason| !reason.is_empty())
+        .map(|reason| format!(" [{reason}]"))
+        .unwrap_or_default();
+    format!("[sub-agent {who}] {status}{reason} (in={in_tokens}, out={out_tokens})")
 }
 
 impl TuiState {
@@ -306,12 +328,18 @@ impl TuiState {
             TuiSignal::SubAgentStatus {
                 session_id,
                 status,
+                label,
+                stop_reason,
                 in_tokens,
                 out_tokens,
             } => {
-                let title = format!(
-                    "[sub-agent {}] {} (in={}, out={})",
-                    session_id, status, in_tokens, out_tokens
+                let title = sub_agent_title(
+                    session_id,
+                    label.as_deref(),
+                    status,
+                    stop_reason.as_deref(),
+                    *in_tokens,
+                    *out_tokens,
                 );
                 let running = status == "launched" || status == "running";
                 let terminal = matches!(
@@ -379,6 +407,8 @@ impl TuiState {
             TuiSignal::SubAgentOutput {
                 session_id,
                 status,
+                label,
+                stop_reason,
                 thinking,
                 text,
                 in_tokens,
@@ -391,9 +421,13 @@ impl TuiState {
                 } else {
                     WorkState::RunningSubAgent
                 };
-                let title = format!(
-                    "[sub-agent {}] {} (in={}, out={})",
-                    session_id, status, in_tokens, out_tokens
+                let title = sub_agent_title(
+                    session_id,
+                    label.as_deref(),
+                    status,
+                    stop_reason.as_deref(),
+                    *in_tokens,
+                    *out_tokens,
                 );
                 let thinking = sanitize_tui_text(thinking);
                 let text = sanitize_tui_text(text);

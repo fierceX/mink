@@ -190,6 +190,19 @@ export interface SubAgentTask {
 export function subAgentCard(item: ToolItem): { tasks: SubAgentTask[] } | null {
   if (item.name !== 'SubAgent') return null
   const args = toolArgs(item)
+  // Current schema: one child per call. Keep the old `tasks[]` shape as a
+  // compatibility fallback for historical transcript rows.
+  const prompt = argString(args, 'prompt')
+  if (prompt !== undefined && prompt !== '') {
+    const description = argString(args, 'description') ?? prompt.split('\n')[0] ?? ''
+    return {
+      tasks: [{
+        id: argString(args, 'description') ?? 'task-1',
+        description: description === '' ? 'task-1' : description,
+        prompt,
+      }],
+    }
+  }
   const tasks = args?.['tasks']
   if (!Array.isArray(tasks)) return null
   const rows = tasks.flatMap((task, index) => {

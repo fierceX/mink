@@ -340,6 +340,8 @@ fn unrelated_subagent_progress_preserves_artifact_layout() {
     state.apply(&TuiSignal::SubAgentStatus {
         session_id: "sub_other".into(),
         status: "running".into(),
+        label: None,
+        stop_reason: None,
         in_tokens: 0,
         out_tokens: 0,
     });

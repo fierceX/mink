@@ -273,10 +273,14 @@ fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> 
                 let status = evt["status"].as_str().unwrap_or("unknown");
                 let in_tokens = evt["input_tokens"].as_u64().unwrap_or(0);
                 let out_tokens = evt["output_tokens"].as_u64().unwrap_or(0);
+                let label = evt["label"].as_str().map(str::to_string);
+                let stop_reason = evt["stop_reason"].as_str().map(str::to_string);
                 if !session_id.is_empty() {
                     state.apply(&TuiSignal::SubAgentStatus {
                         session_id: session_id.to_string(),
                         status: status.to_string(),
+                        label,
+                        stop_reason,
                         in_tokens,
                         out_tokens,
                     });
@@ -350,15 +354,16 @@ mod tests {
     fn sub_agent_events_replay_as_transcript_lines() {
         let events = vec![
             serde_json::json!({"type":"sub_agent","session_id":"sub_1","status":"launched","label":"review"}),
-            serde_json::json!({"type":"sub_agent","session_id":"sub_1","status":"running"}),
-            serde_json::json!({"type":"sub_agent","session_id":"sub_1","status":"ok","input_tokens":10,"output_tokens":5}),
+            serde_json::json!({"type":"sub_agent","session_id":"sub_1","status":"running","label":"review"}),
+            serde_json::json!({"type":"sub_agent","session_id":"sub_1","status":"ok","label":"review","stop_reason":"completed","input_tokens":10,"output_tokens":5}),
         ];
         let items = build_lines_from_events(&events);
         let line = items
             .iter()
             .find(|item| item.kind == TranscriptKind::SubAgent)
             .expect("sub-agent line");
-        assert!(line.text.contains("sub_1"), "{}", line.text);
+        assert!(line.text.contains("review"), "{}", line.text);
+        assert!(line.text.contains("completed"), "{}", line.text);
         assert!(line.text.contains("ok"), "{}", line.text);
         assert!(line.sealed, "terminal status must seal the line");
     }

@@ -154,7 +154,7 @@ function ProcessGroup({ items, active, defaultOpen, onOpenFile, onOpenArtifact }
         if (item.kind === 'sub_agent') {
           return (
             <p key={item.key ?? index} className={assistantCss.stopped}>
-              子代理 {item.sessionId} · {item.status}
+              子代理 {item.label ?? item.sessionId} · {item.status}{item.stopReason === undefined ? '' : ` · ${item.stopReason}`}
             </p>
           )
         }

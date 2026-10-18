@@ -103,6 +103,29 @@ describe("reduceEvent", () => {
     expect(s.items[0]).toMatchObject({ kind: "sub_agent", sessionId: "abc12345", status: "completed", thinking: "t", text: "ok", inTokens: 4, outTokens: 2 });
   });
 
+  it("sub-agent label/stop_reason 在后续事件缺失时保留", () => {
+    let s = emptySession("s1", "t");
+    s = reduceEvent(s, ev("sub_agent_status", { session_id: "abc12345", status: "running", label: "review diff" }));
+    s = reduceEvent(s, ev("sub_agent_output", { session_id: "abc12345", status: "ok", text: "done" }));
+    s = reduceEvent(s, ev("sub_agent_status", { session_id: "abc12345", status: "ok", stop_reason: "completed" }));
+    expect(s.items[0]).toMatchObject({ kind: "sub_agent", label: "review diff", stopReason: "completed" });
+  });
+
+  it("历史 tool_result 的 _mink.sub_agent 可 hydrate item", () => {
+    let s = emptySession("s1", "t");
+    s = reduceEvent(s, ev("tool_call", { id: "call_1", name: "SubAgent", summary: "delegate" }));
+    s = reduceEvent(s, ev("tool_result", {
+      tool_use_id: "call_1",
+      tool_name: "SubAgent",
+      content: "ok",
+      status: { state: "succeeded" },
+      sub_agent: { session_id: "sub_1", status: "ok", label: "review", stop_reason: "completed", input_tokens: 4, output_tokens: 2 },
+    }));
+    expect(s.items.find(item => item.kind === "sub_agent")).toMatchObject({
+      kind: "sub_agent", sessionId: "sub_1", status: "ok", label: "review", stopReason: "completed", inTokens: 4, outTokens: 2,
+    });
+  });
+
   it("sub-agent output 后的 final status 保留 thinking/text", () => {
     let s = emptySession("s1", "t");
     s = reduceEvent(s, ev("sub_agent_output", { session_id: "abc12345", status: "completed", thinking: "t", text: "ok", in_tokens: 4, out_tokens: 2 }));
