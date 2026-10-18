@@ -383,8 +383,8 @@ runtime 启动时 fail closed。
 - Fork 后 artifact 从克隆 index 的最大序号继续写入，不覆盖父历史正文。
 - 子代理完成时通过 parent display 发送完整 thinking/text（TUI 详情），但父模型可见结果默认不含 thinking。
 - tool result 格式为 `[sub-agent <id>] <status> (in=<n>, out=<n>)` + 最后一条非空 assistant 的全部 text 块；失败/超时追加有界 `diagnostic:` 段。
-- 子代理失败/超时仍映射为 `ToolStatus`（`TimedOut` → `Failed(Timeout)`）；`sub_agent_timeout_secs` 从获得名额后起算并覆盖 setup+run。
-- `_mink.sub_agent` 携带 session_id/label/mode/depth/status/stop_reason/usage/elapsed_ms。
+- 子代理失败/超时仍映射为 `ToolStatus`（`TimedOut` → `Failed(Timeout)`）；`sub_agent_timeout_secs` 从获得名额后起算并覆盖 setup+run，不含排队。
+- `_mink.sub_agent` 携带 session_id/label/mode/depth/status/stop_reason/usage/elapsed_ms；`elapsed_ms` 同为 setup+run，不含排队。
 
 ## 工具事实权威表（Q11）
 

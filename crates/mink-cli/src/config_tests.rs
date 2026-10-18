@@ -93,7 +93,8 @@ fn sub_agent_depth_maps_from_sdk_and_toml() {
     };
     let mut cfg = CliConfig::default();
     apply_config_sources(&mut cfg, &defaults, None, Some(&project), None);
-    assert_eq!(cfg.sub_agent_max_depth, defaults.sub_agent_max_depth);
+    assert_eq!(cfg.sub_agent_max_depth, 9);
+    assert!(validate_runtime_config(&cfg).is_err());
 }
 
 #[test]
@@ -745,7 +746,8 @@ fn config_file_invalid_llm_timeouts_are_ignored() {
     apply_config_sources(&mut cfg, &defaults, None, Some(&project), None);
     assert_eq!(cfg.tool_timeout_secs, defaults.tool_timeout_secs);
     assert_eq!(cfg.tool_timeout_max_secs, defaults.tool_timeout_max_secs);
-    assert_eq!(cfg.sub_agent_timeout_secs, defaults.sub_agent_timeout_secs);
+    assert_eq!(cfg.sub_agent_timeout_secs, -5);
+    assert!(validate_runtime_config(&cfg).is_err());
     assert_eq!(
         cfg.llm_first_event_timeout_secs,
         defaults.llm_first_event_timeout_secs

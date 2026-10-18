@@ -320,6 +320,44 @@ pub async fn ensure_metadata(paths: &SessionPaths, cwd: &Path, seed: SessionSeed
 #[cfg(test)]
 mod reader_tests {
     use super::*;
+
+    #[test]
+    fn subagent_catalog_is_a_public_reader_api_and_tolerates_legacy_events() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-subagent-catalog-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("events.jsonl"),
+            concat!(
+                "{\"type\":\"sub_agent\",\"session_id\":\"sub_1\",\"status\":\"launched\",\"label\":\"review\",\"depth\":1}\n",
+                "{\"type\":\"sub_agent\",\"session_id\":\"sub_1\",\"status\":\"ok\",\"stop_reason\":\"completed\",\"input_tokens\":4}\n",
+                "{\"type\":\"sub_agent\",\"session_id\":\"sub_legacy\",\"status\":\"unknown\"}\n",
+                "not json\n"
+            ),
+        )
+        .unwrap();
+        let catalog = SessionReader::new(&dir).subagent_catalog().unwrap();
+        assert_eq!(catalog.len(), 2);
+        assert_eq!(catalog[0].session_id, "sub_1");
+        assert_eq!(catalog[0].label.as_deref(), Some("review"));
+        assert_eq!(catalog[0].status, "ok");
+        assert_eq!(catalog[0].stop_reason.as_deref(), Some("completed"));
+        assert_eq!(catalog[1].session_id, "sub_legacy");
+        assert_eq!(catalog[1].status, "unknown");
+        assert!(
+            SessionReader::new(dir.join("missing"))
+                .subagent_catalog()
+                .unwrap()
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
     #[test]
     fn streamed_turn_windows_keep_guidance_internal_and_tool_exchange() {
         let dir = std::env::temp_dir().join(format!(

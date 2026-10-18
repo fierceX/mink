@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-10-16
+> 更新日期：2026-10-17
 
 ## 项目概览
 
@@ -179,7 +179,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - 子代理终态由内部 `SubAgentStatus` 表达（Interrupted/TimedOut 不得映射为成功）；未完成子代理只在 `SubAgentBatch.pending`，每个任务只有一个结果发送点，`Drop` 必须 cancel+abort；fork 在 runtime 初始化前以目录级克隆继承父 session 状态，子代理复用父 `LlmBackend` 与当前活动模型。
 - 子代理身份：父 `events.jsonl` 的 `sub_agent` 事件携带可选 version/label/mode/parent_session_id/depth/stop_reason/duration_ms/phase，目录折叠只是派生视图（events 仍为 best-effort，conversation 仍是权威）；子 `session.json` 写 `parent` 与 `subagent{version,origin,mode,label,depth}`，origin 区分 `sub_agent`/`goal_review`/`replan`。
 - 子代理结果：模型可见文本只取最后一条非空 assistant 的全部 text 块（空为 `(no output)`），默认不注入 thinking；失败/超时由有界 diagnostic（含截断标记总长 <=4096 字节、含 phase 与稳定错误码）承载；`_mink.sub_agent` 携带结构化身份/用量/耗时，tool_result 大小与 artifact 保护不变。
-- 子代理生命周期：`sub_agent_timeout_secs` 从获得并发名额后起算并覆盖 setup+run；不存在批次 deadline；批内上限 8 只排队不拒绝，状态按 `launched(queued)→running→终态` 记录；fork 克隆按目录项检查取消；setup 失败/超时/取消由清理 guard 删除部分 child home。
+- 子代理生命周期：`sub_agent_timeout_secs`（必须 >0）从获得并发名额后起算并覆盖 setup+run；不存在批次 deadline；批内上限 8 只排队不拒绝，状态按 `launched(queued)→running→终态` 记录；fork 克隆按目录项检查取消；setup 失败/超时/取消由清理 guard 删除部分 child home；`elapsed_ms`/`duration_ms` 不含排队。
 - 子代理委派边界：`sub_agent_max_depth` 默认 1（0 禁用、最大 3），深度持久化在子会话元数据；`depth < max_depth` 时 surface 才保留 SubAgent，运行时以 `child_depth = depth + 1 > max_depth` 返回 SafetyBlocked；`model` 仅接受 `ModelResolver` 别名或当前实际模型。
 - 子代理提示词：子角色渲染固定委派 scope 声明，到达深度上限时显式给出剩余 0；主代理不渲染该段。
 - `TurnExecutor::new/new_for_model` 是模型与 backend 的唯一装配路径；禁止第二 backend 字段或构造后覆盖模型；`SubAgentCoordinator` 不持有 Config；默认 approval mode 为 `yolo`，`prompt` 无交互式 UI 时 fail closed。

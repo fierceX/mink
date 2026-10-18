@@ -514,8 +514,8 @@ fn from_file(file: &MinkConfigFile) -> AgentConfig {
     let tools = &file.tools;
     cfg.tool_timeout_secs = positive(tools.tool_timeout, "tool_timeout");
     cfg.tool_timeout_max_secs = positive(tools.tool_timeout_max, "tool_timeout_max");
-    cfg.sub_agent_timeout_secs = positive(tools.sub_agent_timeout, "sub_agent_timeout");
-    cfg.sub_agent_max_depth = tools.sub_agent_max_depth.filter(|depth| *depth <= 3);
+    cfg.sub_agent_timeout_secs = tools.sub_agent_timeout;
+    cfg.sub_agent_max_depth = tools.sub_agent_max_depth;
     cfg.max_search_files = tools.max_search_files;
     cfg.max_search_results = tools.max_search_results;
     cfg.enabled_tools = tools.enabled_tools.clone();
@@ -994,6 +994,16 @@ timeout = 60
         assert_eq!(layer.sandbox.enabled, Some(true));
         assert_eq!(layer.sandbox.allow_network, Some(false));
         assert_eq!(layer.sandbox_python.timeout, Some(60));
+    }
+
+    #[test]
+    fn invalid_subagent_limits_are_preserved_for_runtime_validation() {
+        let layer = parse_layer(
+            "[tools]\nsub_agent_max_depth = 4\nsub_agent_timeout = 0\n",
+            "test",
+        );
+        assert_eq!(layer.sub_agent_max_depth, Some(4));
+        assert_eq!(layer.sub_agent_timeout_secs, Some(0));
     }
 
     #[test]

@@ -878,18 +878,10 @@ fn apply_config_sources(
             );
         }
         if let Some(sub_agent_timeout) = toml_cfg.tools.sub_agent_timeout {
-            apply_positive_i32_config(
-                &mut cfg.sub_agent_timeout_secs,
-                sub_agent_timeout,
-                "sub_agent_timeout",
-            );
+            cfg.sub_agent_timeout_secs = sub_agent_timeout;
         }
         if let Some(depth) = toml_cfg.tools.sub_agent_max_depth {
-            if depth <= 3 {
-                cfg.sub_agent_max_depth = depth;
-            } else {
-                eprintln!("[mink] Warning: ignoring sub_agent_max_depth={depth}; expected 0-3");
-            }
+            cfg.sub_agent_max_depth = depth;
         }
         if let Some(timeout) = toml_cfg.generation.llm_first_event_timeout {
             apply_positive_i32_config(
@@ -1134,6 +1126,12 @@ pub fn validate_runtime_config(cfg: &CliConfig) -> Result<()> {
     )?;
     if cfg.tool_timeout_max_secs < 5 {
         bail!("tool_timeout_max_secs must be at least 5 seconds");
+    }
+    if cfg.sub_agent_timeout_secs <= 0 {
+        bail!("sub_agent_timeout must be greater than 0");
+    }
+    if cfg.sub_agent_max_depth > 3 {
+        bail!("sub_agent_max_depth must be between 0 and 3");
     }
     Ok(())
 }

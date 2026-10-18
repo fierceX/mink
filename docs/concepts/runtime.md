@@ -279,7 +279,7 @@ session 状态会整体继承。ArtifactManager 从克隆后的 index 恢复下�
 
 ### 身份、目录与恢复展示
 
-- 父会话 `events.jsonl` 的 `sub_agent` 事件新增可选 `version/label/mode/parent_session_id/depth/stop_reason/duration_ms/phase`；`session::subagent_catalog` 将其折叠为派生目录（旧事件、缺字段、未知 status 都容忍）。
+- 父会话 `events.jsonl` 的 `sub_agent` 事件新增可选 `version/label/mode/parent_session_id/depth/stop_reason/duration_ms/phase`；`session::subagent_catalog` 将其折叠为派生目录（旧事件、缺字段、未知 status 都容忍）。该 catalog 当前是公开 Reader API-only，TUI replay 仍直接消费 events，Web/TUI 未接线。
 - 子会话 `session.json` 写入 `parent` 与 `subagent{version,origin,mode,label,depth}`；`origin` 区分 `sub_agent`、`goal_review`、`replan`，内部审核/重规划不进入委派目录。
 - 标题使用 `Sub-agent: <label>`（缺省回退 session id）；label 经控制字符清洗、空白折叠并截断到 80 字符。
 - TUI replay 识别 `sub_agent` 事件并重建子代理行（`launched/running/终态`），恢复会话后不丢；server SSE 的 `sub_agent_status` 与 `sub_agent_output` 均透传可选 label/stop_reason。
@@ -289,7 +289,7 @@ session 状态会整体继承。ArtifactManager 从克隆后的 index 恢复下�
 `SubAgentCoordinator` 在工具阶段内启动并收集本次批次：
 
 - 批内并发上限为 8；第 9 个及以后**排队等待名额**，不拒绝。
-- `sub_agent_timeout_secs` 从**获得名额之后**起算，覆盖 setup + run；排队等待不计入。
+- `sub_agent_timeout_secs` 从**获得名额之后**起算，覆盖 setup + run；排队等待不计入；`elapsed_ms`/事件 `duration_ms` 同为 setup+run，不含排队。
 - 不再使用批次 deadline：一个慢子代理超时不会连带同批其他子代理；整批最坏耗时为 `ceil(N/8) × timeout`。
 - 状态按 `launched(phase=queued) → running(phase=run) → 终态` 记录；setup 超时的 diagnostic 标记 `phase=setup`，超时先 cancel 再给 setup 一个短宽限，部分 child home 由清理 guard 删除。
 - 批次中断/取消/Cancel 唤醒收集，未完成项标记 `cancelled` 并中止任务；`SubAgentBatch::drop` 仍对剩余任务 cancel + abort。
