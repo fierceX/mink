@@ -711,6 +711,17 @@ mod validation_tests {
             ..ResolvedConfig::default()
         };
         assert!(validate_runtime_config(&disabled).is_ok());
+
+        let zero_timeout = ResolvedConfig {
+            sub_agent_timeout_secs: 0,
+            ..ResolvedConfig::default()
+        };
+        assert!(
+            validate_runtime_config(&zero_timeout)
+                .unwrap_err()
+                .to_string()
+                .contains("sub_agent_timeout_secs must be greater than 0")
+        );
     }
 
     #[test]

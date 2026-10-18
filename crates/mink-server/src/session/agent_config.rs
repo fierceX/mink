@@ -1007,6 +1007,20 @@ timeout = 60
     }
 
     #[test]
+    fn invalid_subagent_limits_are_rejected_by_runtime_validation() {
+        let cfg = AgentConfig {
+            sub_agent_max_depth: Some(4),
+            sub_agent_timeout_secs: Some(0),
+            ..AgentConfig::default()
+        };
+        let options = apply_to(
+            AgentOptions::new("/tmp/mink-server-config", "/tmp/mink-server-config"),
+            &cfg,
+        );
+        assert!(options.validate_runtime_config().is_err());
+    }
+
+    #[test]
     fn flat_keys_are_rejected_like_the_cli() {
         let layer = parse_layer("model = \"pro\"\n", "test");
         assert_eq!(layer.model, None, "flat top-level keys must be rejected");

@@ -254,7 +254,7 @@ impl SubAgentCoordinator {
                                 result = &mut run => Some(result),
                                 _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => None,
                             };
-                            let sa = match outcome {
+                            let mut sa = match outcome {
                                 Some(sa) => sa,
                                 None => {
                                     // Cancel the child before giving its setup a
@@ -287,6 +287,10 @@ impl SubAgentCoordinator {
                                     }
                                 }
                             };
+                            // One clock for every outcome: permit acquisition is the
+                            // start, so setup+run are included and queue time is not.
+                            sa.elapsed_ms =
+                                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                             drop(permit);
                             sa
                         }

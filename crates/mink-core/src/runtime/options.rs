@@ -293,6 +293,13 @@ impl AgentOptions {
         self
     }
 
+    /// Validate the resolved runtime configuration before creating a session.
+    /// This is the same check used by the runtime builder, exposed for hosts
+    /// that need to reject layered config before handing it to the runtime.
+    pub fn validate_runtime_config(&self) -> anyhow::Result<()> {
+        crate::config::validate_runtime_config(&self.config)
+    }
+
     pub fn with_session(mut self, session: SessionPolicy) -> Self {
         self.session = session;
         self.session_overridden = true;

@@ -753,6 +753,21 @@ async fn queued_child_gets_its_full_budget_after_admission() -> anyhow::Result<(
     for (idx, result) in processed.iter().enumerate() {
         assert!(result.succeeded(), "slot {idx}: {}", result.content);
     }
+    let elapsed = |idx: usize| {
+        processed[idx]
+            .state_metadata
+            .as_ref()
+            .and_then(|meta| meta["sub_agent"]["elapsed_ms"].as_u64())
+            .expect("elapsed_ms")
+    };
+    // Permit starts the clock: the first wave runs ~500ms, while the queued
+    // ninth child runs ~1800ms after admission (queueing would push it >2200ms).
+    assert!((400..=1200).contains(&elapsed(0)), "first={}", elapsed(0));
+    assert!(
+        (1500..=2200).contains(&elapsed(8)),
+        "queued child elapsed must exclude queue time: {}",
+        elapsed(8)
+    );
     Ok(())
 }
 
