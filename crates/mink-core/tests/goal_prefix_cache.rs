@@ -72,9 +72,9 @@ impl LlmBackend for GoalScriptBackend {
         let adjudication = mock_review_parts(&request).is_some();
         if !independent && !adjudication {
             self.calls.lock().unwrap().push(CapturedRequest {
-                system_prompt: request.system_prompt.clone(),
-                tools: request.tools.clone(),
-                messages: request.messages.clone(),
+                system_prompt: request.system_prompt.to_string(),
+                tools: (*request.tools).clone(),
+                messages: (*request.messages).clone(),
             });
         }
         let events = if adjudication {

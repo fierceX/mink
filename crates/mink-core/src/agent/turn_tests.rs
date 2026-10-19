@@ -404,8 +404,9 @@ async fn context_overflow_after_visible_output_is_not_recoverable() -> anyhow::R
     let mut executor = TurnExecutor::new(ctx);
 
     let window = super::format_recovery::FormatRecoveryWindow::new(10, 3);
+    let projection = crate::llm::request::RequestProjection::build(&[], "", &[])?;
     let error = match executor
-        .stream_llm_response(&window, &[], "", &[], 0, None)
+        .stream_llm_response(&window, &projection, None)
         .await
     {
         Ok(_) => panic!("overflow after partial output should fail"),
@@ -475,7 +476,10 @@ impl LlmBackend for ScriptedBackend {
         request: crate::llm::client::LlmRequest,
     ) -> Result<crate::llm::client::LlmResponseStream> {
         self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-        self.requests.lock().unwrap().push(request.messages.clone());
+        self.requests
+            .lock()
+            .unwrap()
+            .push((*request.messages).clone());
         let next = self.attempts.lock().unwrap().next();
         match next {
             Some(ScriptedAttempt::Fail(error)) => Err(error),
@@ -774,9 +778,10 @@ async fn expired_round_deadline_prevents_any_new_stream() -> anyhow::Result<()> 
     .await?;
     let mut executor = TurnExecutor::new(ctx);
     let window = super::format_recovery::FormatRecoveryWindow::new(10, 3);
+    let projection = crate::llm::request::RequestProjection::build(&[], "", &[])?;
     let expired = std::time::Instant::now() - std::time::Duration::from_secs(1);
     let error = match executor
-        .stream_llm_response(&window, &[], "", &[], 0, Some(expired))
+        .stream_llm_response(&window, &projection, Some(expired))
         .await
     {
         Ok(_) => panic!("an expired round deadline must fail before opening a stream"),
@@ -1504,6 +1509,7 @@ async fn emergency_shrink_terminates_and_respects_cancel() -> anyhow::Result<()>
         main_request: crate::session::compaction::MainRequestShape {
             system_prompt: "",
             tools: &[],
+            openai_tools: None,
         },
         target_limit: Some(50),
         current_user_input: Some("keep going"),
@@ -3165,5 +3171,25 @@ async fn last_round_format_feedback_without_exhaustion_returns_max_turns() -> an
 
     assert_eq!(decision, TurnDecision::MaxTurnsExceeded);
     assert_eq!(backend.calls(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn prepare_request_builds_one_projection_without_compaction() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent("projection-build-once").await?;
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let mut messages = ctx.store.lines().await?;
+    let mut system_prompt = String::new();
+    let mut tools = Vec::new();
+
+    crate::llm::request::reset_build_count();
+    let _ = executor
+        .prepare_request(&mut messages, &mut system_prompt, &mut tools, None)
+        .await?;
+    assert_eq!(
+        crate::llm::request::build_count(),
+        1,
+        "a non-compacting round must build exactly one request projection"
+    );
     Ok(())
 }

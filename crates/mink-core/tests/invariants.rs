@@ -53,9 +53,9 @@ impl LlmBackend for ScriptedBackend {
 
     async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream> {
         let record = CapturedRequest {
-            system_prompt: request.system_prompt.clone(),
-            messages: request.messages.clone(),
-            tools: request.tools.clone(),
+            system_prompt: request.system_prompt.to_string(),
+            messages: (*request.messages).clone(),
+            tools: (*request.tools).clone(),
         };
         self.captured.lock().unwrap().push(record);
         let events = self

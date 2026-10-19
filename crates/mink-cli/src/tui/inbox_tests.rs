@@ -32,7 +32,7 @@ impl LlmBackend for BoundaryBackend {
     {
         let mut requests = self.requests.lock().unwrap();
         let first = requests.is_empty();
-        requests.push(request.messages);
+        requests.push((*request.messages).clone());
         let release = self.release.clone();
         Box::pin(async move {
             let text = crate::runtime::LlmEvent::Text(crate::runtime::LlmTextEvent {

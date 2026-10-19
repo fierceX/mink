@@ -1,0 +1,60 @@
+{
+  "failures": [],
+  "meta": {
+    "arch": "aarch64",
+    "commit": null,
+    "fd_limit": null,
+    "kernel": null,
+    "logical_cores": 12,
+    "machine": null,
+    "mock_calls": 72,
+    "os": "macOS 15.7.7",
+    "quick": false,
+    "report_version": 2,
+    "reps_override": null,
+    "rss_metric": "ps_rss_kb",
+    "rustc": null,
+    "suite": "mink-core/runtime_bench",
+    "summary_calls": 0,
+    "timestamp_epoch_secs": 1792386332
+  },
+  "samples": [
+    {
+      "case": "tool_loop_50",
+      "extra": {
+        "ms_per_round": 1.62921916,
+        "rounds": 50,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 20896
+      },
+      "max": 81.460958,
+      "mean": 81.460958,
+      "min": 81.460958,
+      "n": 1,
+      "p50": 81.460958,
+      "p95": 81.460958,
+      "unit": "ms"
+    },
+    {
+      "case": "tool_loop_20",
+      "extra": {
+        "ms_per_round": 1.3909582999999999,
+        "rounds": 20,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 21040
+      },
+      "max": 27.819166,
+      "mean": 27.819166,
+      "min": 27.819166,
+      "n": 1,
+      "p50": 27.819166,
+      "p95": 27.819166,
+      "unit": "ms"
+    }
+  ],
+  "selected_cases": [
+    "tool_loop_50",
+    "tool_loop_20"
+  ],
+  "skipped_cases": []
+}

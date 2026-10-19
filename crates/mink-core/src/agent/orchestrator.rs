@@ -346,6 +346,7 @@ impl OrchActor {
         let shape = crate::session::compaction::MainRequestShape {
             system_prompt: &system_prompt,
             tools: &tools,
+            openai_tools: None,
         };
         let target = crate::llm::client::LlmModelTarget::new(
             &active_model.actual,

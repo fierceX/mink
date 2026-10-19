@@ -269,17 +269,29 @@ impl TurnExecutor {
         system_prompt: &mut String,
         tools_json: &mut Vec<serde_json::Value>,
         round_deadline: Option<std::time::Instant>,
-    ) -> Result<(Vec<serde_json::Value>, usize)> {
+    ) -> Result<Arc<crate::llm::request::RequestProjection>> {
         if let Some(session) = &self.goal_adjudication {
             session.check_budget()?;
         }
+        let mut projection = Arc::new(crate::llm::request::RequestProjection::build(
+            messages,
+            system_prompt,
+            tools_json,
+        )?);
         // Phase 0: 上下文压缩（auto 按压力阈值触发，可多次）。可选提前压缩失败不得
         // 阻断本来可以发送的请求：只有摘要不可用类错误被放行并继续。
-        match self
-            .try_compact("auto", messages, system_prompt, tools_json, round_deadline)
+        let auto_compacted = match self
+            .try_compact(
+                "auto",
+                messages,
+                system_prompt,
+                tools_json,
+                &projection,
+                round_deadline,
+            )
             .await
         {
-            Ok(_) => {}
+            Ok((compacted, _)) => compacted,
             Err(error) if crate::session::compaction::is_compaction_interrupted(&error) => {
                 return Err(anyhow::Error::new(TurnInterrupted));
             }
@@ -293,28 +305,31 @@ impl TurnExecutor {
                 self.ctx.display.render_info(&format!(
                     "Context summary unavailable ({reason}); continuing without compaction."
                 ));
+                false
             }
             Err(error) => return Err(error),
+        };
+        if auto_compacted {
+            projection = Arc::new(crate::llm::request::RequestProjection::build(
+                messages,
+                system_prompt,
+                tools_json,
+            )?);
         }
         let input_limit = crate::session::compaction::request_input_limit(&self.ctx.config);
-        let mut request_messages = self.project_request_messages(messages)?;
-        let mut estimated_tokens = crate::llm::transport::estimate_openai_context_tokens(
-            &request_messages,
-            tools_json,
-            system_prompt,
-        )?;
         // 硬闸门：反复强制压缩，直到装得下、压无可压或压缩不再降低估算。
         let mut forced_attempts = 0usize;
         let mut last_detail: Option<String> = None;
         let mut summary_failure: Option<String> = None;
-        while estimated_tokens > input_limit {
-            let before = estimated_tokens;
+        while projection.estimated_tokens > input_limit {
+            let before = projection.estimated_tokens;
             let compacted = match self
                 .try_compact(
                     "preflight",
                     messages,
                     system_prompt,
                     tools_json,
+                    &projection,
                     round_deadline,
                 )
                 .await
@@ -342,13 +357,12 @@ impl TurnExecutor {
             if !compacted {
                 break;
             }
-            request_messages = self.project_request_messages(messages)?;
-            estimated_tokens = crate::llm::transport::estimate_openai_context_tokens(
-                &request_messages,
-                tools_json,
+            projection = Arc::new(crate::llm::request::RequestProjection::build(
+                messages,
                 system_prompt,
-            )?;
-            if estimated_tokens >= before {
+                tools_json,
+            )?);
+            if projection.estimated_tokens >= before {
                 // 压缩没有带来净收益：同一投影上继续摘要不会改变结果。
                 break;
             }
@@ -359,7 +373,7 @@ impl TurnExecutor {
         // 应急尝试返回 false 表示“最小工作空间不可用”：诊断必须由失败原因驱动，
         // 不能只在 committed==true 时附加提示。
         let mut emergency_refused = false;
-        if estimated_tokens > input_limit {
+        if projection.estimated_tokens > input_limit {
             let reason = summary_failure
                 .clone()
                 .or_else(|| last_detail.clone())
@@ -384,19 +398,19 @@ impl TurnExecutor {
             };
             emergency_refused = !emergency;
             if emergency {
-                request_messages = self.project_request_messages(messages)?;
-                estimated_tokens = crate::llm::transport::estimate_openai_context_tokens(
-                    &request_messages,
-                    tools_json,
+                projection = Arc::new(crate::llm::request::RequestProjection::build(
+                    messages,
                     system_prompt,
-                )?;
+                    tools_json,
+                )?);
             }
         }
-        if estimated_tokens > input_limit {
+        if projection.estimated_tokens > input_limit {
             anyhow::bail!(
-                "context remains over the request input budget: estimated {estimated_tokens} tokens, \
+                "context remains over the request input budget: estimated {} tokens, \
                  limit {input_limit}; {} summary compaction(s) and {} emergency checkpoint(s) committed \
                  and {forced_attempts} forced attempt(s) in this input; emergency checkpoint {} (last: {}){}",
+                projection.estimated_tokens,
                 self.compactor.compactions_this_turn(),
                 self.compactor.emergency_commits_this_turn(),
                 if emergency {
@@ -416,7 +430,7 @@ impl TurnExecutor {
                 }
             );
         }
-        Ok((request_messages, estimated_tokens))
+        Ok(projection)
     }
 
     pub async fn execute(
@@ -515,7 +529,7 @@ impl TurnExecutor {
                 .request_timeout_secs
                 .map(|secs| std::time::Instant::now() + std::time::Duration::from_secs(secs));
 
-            let (mut request_messages, current_context_tokens) = match self
+            let mut projection = match self
                 .prepare_request(
                     &mut messages,
                     &mut system_prompt,
@@ -524,7 +538,7 @@ impl TurnExecutor {
                 )
                 .await
             {
-                Ok(prepared) => prepared,
+                Ok(projection) => projection,
                 Err(error) if error.downcast_ref::<TurnInterrupted>().is_some() => {
                     // Cancellation during request preparation (including a
                     // prefix snapshot commit waiting on the event log) keeps
@@ -542,14 +556,7 @@ impl TurnExecutor {
             // Phase 1: LLM 流式响应（同 round 内可含多次 attempt 重试）
             let stream_output = loop {
                 match self
-                    .stream_llm_response(
-                        &format_window,
-                        &request_messages,
-                        &system_prompt,
-                        &tools_json,
-                        current_context_tokens,
-                        round_deadline,
-                    )
+                    .stream_llm_response(&format_window, &projection, round_deadline)
                     .await
                 {
                     Ok(output) => break output,
@@ -563,17 +570,8 @@ impl TurnExecutor {
                         overflow_shrink_attempts += 1;
                         // 被拒请求的完整本地估算与固定前缀开销：可变额度折半作为
                         // 本次更小的目标（固定前缀不参与折半）。
-                        let rejected_tokens =
-                            crate::llm::transport::estimate_openai_context_tokens(
-                                &request_messages,
-                                &tools_json,
-                                &system_prompt,
-                            )?;
-                        let prefix_tokens = crate::llm::transport::estimate_openai_context_tokens(
-                            &[],
-                            &tools_json,
-                            &system_prompt,
-                        )?;
+                        let rejected_tokens = projection.estimated_tokens;
+                        let prefix_tokens = projection.fixed_tokens;
                         let shrink_target = prefix_tokens
                             .saturating_add(rejected_tokens.saturating_sub(prefix_tokens) / 2);
                         let compacted = match self
@@ -582,6 +580,7 @@ impl TurnExecutor {
                                 &mut messages,
                                 &mut system_prompt,
                                 &mut tools_json,
+                                &projection,
                                 round_deadline,
                             )
                             .await
@@ -620,15 +619,14 @@ impl TurnExecutor {
                             self.ctx.display.render_info(
                                 "Context summary committed; verifying the request actually shrank.",
                             );
+                            projection = Arc::new(crate::llm::request::RequestProjection::build(
+                                &messages,
+                                &system_prompt,
+                                &tools_json,
+                            )?);
                         }
                         // 「完成一次摘要」不等于恢复成功：必须看重新投影后的真实大小。
-                        request_messages = self.project_request_messages(&messages)?;
-                        let mut retried_tokens =
-                            crate::llm::transport::estimate_openai_context_tokens(
-                                &request_messages,
-                                &tools_json,
-                                &system_prompt,
-                            )?;
+                        let mut retried_tokens = projection.estimated_tokens;
                         if retried_tokens >= rejected_tokens {
                             // 摘要不可用、没有收益或反而变大时，应急 checkpoint 是唯一
                             // 不依赖 LLM 的缩小手段（按折半目标构造）。
@@ -657,12 +655,12 @@ impl TurnExecutor {
                             if !committed {
                                 return Err(error);
                             }
-                            request_messages = self.project_request_messages(&messages)?;
-                            retried_tokens = crate::llm::transport::estimate_openai_context_tokens(
-                                &request_messages,
-                                &tools_json,
+                            projection = Arc::new(crate::llm::request::RequestProjection::build(
+                                &messages,
                                 &system_prompt,
-                            )?;
+                                &tools_json,
+                            )?);
+                            retried_tokens = projection.estimated_tokens;
                         }
                         if retried_tokens >= rejected_tokens {
                             // 没有变得更小：再发同样的请求只会再次被拒。

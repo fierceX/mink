@@ -139,8 +139,8 @@ async fn stream_parses_sse_text_usage_and_stop() -> anyhow::Result<()> {
             api_url,
             api_key: "secret-key".into(),
             system_prompt: "system".into(),
-            messages: vec![json!({"role":"user","content":"ping"})],
-            tools: Vec::new(),
+            messages: vec![json!({"role":"user","content":"ping"})].into(),
+            tools: Vec::new().into(),
             max_tokens: ctx.max_tokens(),
             cancel: ctx.cancel.clone(),
             verbose: ctx.verbose(),
@@ -291,6 +291,41 @@ async fn test_context(name: &str, api_url: &str) -> anyhow::Result<Arc<AgentShar
     crate::regression::test_context_for_agent_with_api_url(name, api_url).await
 }
 
+#[tokio::test]
+async fn request_clone_shares_payload_allocation() -> anyhow::Result<()> {
+    let ctx = test_context("request-clone", "https://example.invalid/v1").await?;
+    let request = timeout_test_request(&ctx, "https://example.invalid/v1".into());
+    let cloned = request.clone();
+    assert!(Arc::ptr_eq(&request.messages, &cloned.messages));
+    assert!(Arc::ptr_eq(&request.tools, &cloned.tools));
+    assert!(Arc::ptr_eq(&request.system_prompt, &cloned.system_prompt));
+    Ok(())
+}
+
+#[tokio::test]
+async fn prepared_body_matches_the_ordinary_build() -> anyhow::Result<()> {
+    let ctx = test_context("prepared-body", "https://example.invalid/v1").await?;
+    let request = timeout_test_request(&ctx, "https://example.invalid/v1".into());
+    let backend = OpenAiCompatibleBackend::deepseek_defaults();
+    let converted = crate::llm::transport::convert_messages_to_openai(&request.messages)?;
+    let tools = crate::llm::transport::convert_tools_to_openai(&request.tools);
+    let prepared = backend
+        .build_body(&request, &converted, &tools)?
+        .expect("built-in backend must build a body");
+    let ordinary = crate::llm::transport::build_openai_body_with_options_and_extensions(
+        &request.model,
+        &request.messages,
+        &request.tools,
+        &request.system_prompt,
+        request.max_tokens,
+        &OpenAiCompatibleOptions::default(),
+        None,
+        &Default::default(),
+    )?;
+    assert_eq!(&*prepared, &ordinary);
+    Ok(())
+}
+
 fn http_response(status: u16, headers: &[(&str, &str)], body: &str) -> String {
     let reason = match status {
         200 => "OK",
@@ -378,8 +413,8 @@ async fn stream_eof_residual_frame_without_trailing_newline_is_parsed() -> anyho
             api_url,
             api_key: "secret-key".into(),
             system_prompt: "system".into(),
-            messages: vec![json!({"role":"user","content":"ping"})],
-            tools: Vec::new(),
+            messages: vec![json!({"role":"user","content":"ping"})].into(),
+            tools: Vec::new().into(),
             max_tokens: ctx.max_tokens(),
             cancel: ctx.cancel.clone(),
             verbose: ctx.verbose(),
@@ -728,8 +763,8 @@ fn timeout_test_request(ctx: &Arc<AgentSharedContext>, api_url: String) -> LlmRe
         api_url,
         api_key: "secret-key".into(),
         system_prompt: "system".into(),
-        messages: vec![json!({"role":"user","content":"ping"})],
-        tools: Vec::new(),
+        messages: vec![json!({"role":"user","content":"ping"})].into(),
+        tools: Vec::new().into(),
         max_tokens: ctx.max_tokens(),
         cancel: ctx.cancel.clone(),
         verbose: ctx.verbose(),

@@ -33,15 +33,6 @@ impl super::TurnExecutor {
         self.prefix.ensure().await
     }
 
-    pub(super) fn project_request_messages(
-        &self,
-        messages: &[serde_json::Value],
-    ) -> Result<Vec<serde_json::Value>> {
-        // Full request projection: single-consumption image lifecycle (§7.3)
-        // then the plan — identical to what the compactor estimates with.
-        crate::session::plan::project_full_request(messages)
-    }
-
     pub(super) async fn reconcile_todo_state(
         &self,
         messages: &mut Vec<serde_json::Value>,
@@ -84,6 +75,7 @@ impl super::TurnExecutor {
         messages: &mut Vec<serde_json::Value>,
         system_prompt: &mut String,
         tools_json: &mut Vec<serde_json::Value>,
+        projection: &crate::llm::request::RequestProjection,
         round_deadline: Option<std::time::Instant>,
     ) -> Result<(bool, String)> {
         let model_name = self.model_name.clone();
@@ -95,6 +87,7 @@ impl super::TurnExecutor {
                 messages,
                 system_prompt,
                 tools_json,
+                projection,
                 LlmModelTarget::new(&model_name, model_alias.as_deref()),
                 round_deadline,
             )
@@ -123,6 +116,7 @@ impl super::TurnExecutor {
             crate::session::compaction::MainRequestShape {
                 system_prompt,
                 tools: tools_json,
+                openai_tools: None,
             },
             Some(self.local.current_user_input.as_str()).filter(|input| !input.trim().is_empty()),
             target_limit,
@@ -148,10 +142,7 @@ impl super::TurnExecutor {
     pub(super) async fn stream_llm_response(
         &mut self,
         window: &super::format_recovery::FormatRecoveryWindow,
-        messages: &[serde_json::Value],
-        system_prompt: &str,
-        tools_json: &[serde_json::Value],
-        current_context_tokens: usize,
+        projection: &crate::llm::request::RequestProjection,
         round_deadline: Option<std::time::Instant>,
     ) -> anyhow::Result<StreamOutput> {
         let policy = self.ctx.config.llm_recovery;
@@ -160,9 +151,7 @@ impl super::TurnExecutor {
             &self.ctx,
             &self.model_name,
             self.model_alias.as_deref(),
-            messages,
-            tools_json,
-            system_prompt,
+            projection,
         )
         .await?;
         let mut retry = RequestRetryState::new_bounded(&policy, round_deadline);
@@ -205,7 +194,7 @@ impl super::TurnExecutor {
                 .consume_attempt(
                     &prepared,
                     &attempt_cancel,
-                    current_context_tokens,
+                    projection.estimated_tokens,
                     request_deadline,
                 )
                 .await;

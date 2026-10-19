@@ -82,9 +82,9 @@ pub enum LlmPurpose {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LlmCacheProjection {
     pub model: String,
-    pub system_prompt: String,
-    pub tools: Vec<serde_json::Value>,
-    pub messages: Vec<serde_json::Value>,
+    pub system_prompt: Arc<str>,
+    pub tools: Arc<Vec<serde_json::Value>>,
+    pub messages: Arc<Vec<serde_json::Value>>,
 }
 
 /// One logical LLM request as built by the runtime.
@@ -99,9 +99,9 @@ pub struct LlmRequest {
     pub model_alias: Option<String>,
     pub api_url: String,
     pub api_key: String,
-    pub system_prompt: String,
-    pub messages: Vec<serde_json::Value>,
-    pub tools: Vec<serde_json::Value>,
+    pub system_prompt: Arc<str>,
+    pub messages: Arc<Vec<serde_json::Value>>,
+    pub tools: Arc<Vec<serde_json::Value>>,
     pub max_tokens: i32,
     pub cancel: LlmCancelToken,
     pub verbose: bool,
@@ -124,6 +124,32 @@ pub trait LlmBackend: Send + Sync {
     /// guarantee that backend-spawned tasks, connections, or threads are
     /// cleaned up.
     async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream>;
+
+    /// Build the provider body once for a round. The runtime passes the
+    /// already converted OpenAI projection so an implementation can reuse the
+    /// same conversion for estimation and transmission. Returning `None`
+    /// keeps the backend on the ordinary `stream` path.
+    fn build_body(
+        &self,
+        request: &LlmRequest,
+        openai_messages: &[serde_json::Value],
+        openai_tools: &[serde_json::Value],
+    ) -> Result<Option<Arc<Vec<u8>>>> {
+        let _ = (request, openai_messages, openai_tools);
+        Ok(None)
+    }
+
+    /// Open one streaming request, optionally with a body built by
+    /// [`Self::build_body`]. The default implementation preserves the exact
+    /// `stream` behaviour for third-party backends.
+    async fn stream_prepared(
+        &self,
+        request: LlmRequest,
+        body: Option<Arc<Vec<u8>>>,
+    ) -> Result<LlmResponseStream> {
+        let _ = body;
+        self.stream(request).await
+    }
 
     /// Whether provider prompt usage can be adjusted by the source-request
     /// token delta. Backends which inject or remove provider-visible content
@@ -303,58 +329,19 @@ impl OpenAiCompatibleBackend {
         self.tool_choice = tool_choice;
         self
     }
-}
 
-#[async_trait::async_trait]
-impl LlmBackend for OpenAiCompatibleBackend {
-    fn name(&self) -> &str {
-        "openai-compatible"
-    }
-
-    fn image_input_capability(
+    /// Send one prebuilt body. The body is shared by all attempts of a
+    /// logical request; `send_once` copies it into the HTTP request body.
+    async fn send_prepared(
         &self,
-        model: &str,
-    ) -> crate::capabilities::model_capabilities::ImageInputCapability {
-        if self.vision_models.iter().any(|vision| vision == model) {
-            return crate::capabilities::model_capabilities::ImageInputCapability::OpenAiChatImageUrl(
-                crate::capabilities::model_capabilities::OpenAiChatImageUrlLimits::default(),
-            );
-        }
-        crate::capabilities::model_capabilities::ImageInputCapability::Unsupported
-    }
-
-    fn cache_projection(
-        &self,
-        request: &LlmRequest,
-        source_prefix_len: usize,
-    ) -> Option<LlmCacheProjection> {
-        if source_prefix_len > request.messages.len() {
-            return None;
-        }
-        Some(LlmCacheProjection {
-            model: request.model.clone(),
-            system_prompt: request.system_prompt.clone(),
-            tools: request.tools.clone(),
-            messages: request.messages[..source_prefix_len].to_vec(),
-        })
-    }
-
-    async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream> {
+        request: LlmRequest,
+        body: Arc<Vec<u8>>,
+    ) -> Result<LlmResponseStream> {
         let client = AsyncLlClient::from_client(
             self.http_client()?.clone(),
             &request.api_key,
             &request.api_url,
         );
-        let body = crate::llm::transport::build_openai_body_with_options_and_extensions(
-            &request.model,
-            &request.messages,
-            &request.tools,
-            &request.system_prompt,
-            request.max_tokens,
-            &self.options,
-            self.tool_choice.as_ref(),
-            &self.extra_body,
-        )?;
         // Final body cap (v7 §9.4): fail before any bytes hit the wire. The
         // cap applies only to multimodal requests — plain text requests keep
         // their pre-existing behavior (review fix).
@@ -392,7 +379,7 @@ impl LlmBackend for OpenAiCompatibleBackend {
         // retries are owned by the runtime attempt loop, so retry counts can
         // never multiply.
         let resp = client
-            .send_once(body, &request.cancel)
+            .send_once((*body).clone(), &request.cancel)
             .await
             .map_err(anyhow::Error::new)?;
         let (tx, rx) = mpsc::channel(SSE_QUEUE_CAPACITY);
@@ -402,6 +389,96 @@ impl LlmBackend for OpenAiCompatibleBackend {
             events: Box::pin(SseEventStream { rx, cancel }),
             attempt_count: 1,
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for OpenAiCompatibleBackend {
+    fn name(&self) -> &str {
+        "openai-compatible"
+    }
+
+    fn image_input_capability(
+        &self,
+        model: &str,
+    ) -> crate::capabilities::model_capabilities::ImageInputCapability {
+        if self.vision_models.iter().any(|vision| vision == model) {
+            return crate::capabilities::model_capabilities::ImageInputCapability::OpenAiChatImageUrl(
+                crate::capabilities::model_capabilities::OpenAiChatImageUrlLimits::default(),
+            );
+        }
+        crate::capabilities::model_capabilities::ImageInputCapability::Unsupported
+    }
+
+    fn cache_projection(
+        &self,
+        request: &LlmRequest,
+        source_prefix_len: usize,
+    ) -> Option<LlmCacheProjection> {
+        if source_prefix_len > request.messages.len() {
+            return None;
+        }
+        let messages = if source_prefix_len == request.messages.len() {
+            request.messages.clone()
+        } else {
+            Arc::new(request.messages[..source_prefix_len].to_vec())
+        };
+        Some(LlmCacheProjection {
+            model: request.model.clone(),
+            system_prompt: request.system_prompt.clone(),
+            tools: request.tools.clone(),
+            messages,
+        })
+    }
+
+    fn build_body(
+        &self,
+        request: &LlmRequest,
+        openai_messages: &[serde_json::Value],
+        openai_tools: &[serde_json::Value],
+    ) -> Result<Option<Arc<Vec<u8>>>> {
+        let body = crate::llm::transport::build_openai_body_from_converted(
+            &request.model,
+            openai_messages,
+            openai_tools,
+            &request.system_prompt,
+            request.max_tokens,
+            &self.options,
+            self.tool_choice.as_ref(),
+            &self.extra_body,
+        )?;
+        Ok(Some(Arc::new(body)))
+    }
+
+    async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream> {
+        self.stream_prepared(request, None).await
+    }
+
+    async fn stream_prepared(
+        &self,
+        request: LlmRequest,
+        body: Option<Arc<Vec<u8>>>,
+    ) -> Result<LlmResponseStream> {
+        let body = match body {
+            Some(body) => body,
+            None => {
+                let converted =
+                    crate::llm::transport::convert_messages_to_openai(&request.messages)?;
+                let openai_tools = crate::llm::transport::convert_tools_to_openai(&request.tools);
+                let body = crate::llm::transport::build_openai_body_from_converted(
+                    &request.model,
+                    &converted,
+                    &openai_tools,
+                    &request.system_prompt,
+                    request.max_tokens,
+                    &self.options,
+                    self.tool_choice.as_ref(),
+                    &self.extra_body,
+                )?;
+                Arc::new(body)
+            }
+        };
+        self.send_prepared(request, body).await
     }
 }
 
@@ -671,12 +748,14 @@ impl AsyncLlClient {
 /// token, so images/attachments are materialized exactly once and the
 /// immutable prefix never changes across retries.
 pub(crate) struct PreparedLlmRequest {
-    request: LlmRequest,
+    request: Arc<LlmRequest>,
+    body: Option<Arc<Vec<u8>>>,
     local_tokens: usize,
     cache_projection: Option<LlmCacheProjection>,
     source_fingerprint: String,
-    source_system_prompt: String,
-    source_tools: Vec<serde_json::Value>,
+    source_system_prompt: Arc<str>,
+    source_tools: Arc<Vec<serde_json::Value>>,
+    message_hashes: Arc<Vec<[u8; 32]>>,
     is_agent_request: bool,
     backend_name: String,
     model_name: String,
@@ -684,22 +763,26 @@ pub(crate) struct PreparedLlmRequest {
 
 impl PreparedLlmRequest {
     pub(crate) fn request_for(&self, cancel: LlmCancelToken) -> LlmRequest {
-        let mut request = self.request.clone();
+        let mut request = (*self.request).clone();
         request.cancel = cancel;
         request
     }
+
+    pub(crate) fn body(&self) -> Option<Arc<Vec<u8>>> {
+        self.body.clone()
+    }
 }
 
-/// Build one round's fixed projection (image materialization included).
+/// Build one round's fixed transport projection. The round-level
+/// [`RequestProjection`] supplies the already converted messages/tools; only
+/// fresh images need a second conversion after materialization.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn prepare_llm_request(
     backend: &Arc<dyn LlmBackend>,
     ctx: &AgentSharedContext,
     model_name: &str,
     model_alias: Option<&str>,
-    messages_json: &[serde_json::Value],
-    tools_json: &[serde_json::Value],
-    system_prompt: &str,
+    projection: &crate::llm::request::RequestProjection,
 ) -> Result<PreparedLlmRequest> {
     let purpose = if ctx.is_sub_agent {
         LlmPurpose::SubAgent {
@@ -709,67 +792,70 @@ pub(crate) async fn prepare_llm_request(
         LlmPurpose::Agent
     };
     let is_agent_request = matches!(purpose, LlmPurpose::Agent);
-    let local_tokens = crate::llm::transport::estimate_openai_context_tokens(
-        messages_json,
-        tools_json,
-        system_prompt,
-    )?;
-    // Core Agent request projection (v7 §9.2): resolve `tool_attachment`
-    // blocks into data-URL image parts against the home image cache.
-    // Compaction bypasses this path: it may retain Agent tool schemas for
-    // cache alignment, but persisted attachments are degraded to deterministic
-    // text markers instead of materializing or resending image pixels.
-    // Runs on the blocking pool: reads + base64 of multi-MB images must not
-    // stall async workers.
-    let mut messages = messages_json.to_vec();
-    let this_turn_ids = ctx
-        .this_turn_image_ids
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone();
-    let cache = ctx.image_cache.clone();
-    let display = ctx.display.clone();
-    let limits = ctx.model_capabilities.image_input.limits().cloned();
-    let warned = ctx.warned_image_ids.clone();
-    let messages = tokio::task::spawn_blocking(move || {
-        let mut warned = warned.lock().unwrap_or_else(|error| error.into_inner());
-        crate::llm::image_projection::materialize_images_with(
-            &mut messages,
-            &cache,
-            display.as_ref(),
-            limits.as_ref(),
-            &this_turn_ids,
-            &mut warned,
-        )?;
-        Ok::<_, anyhow::Error>(messages)
-    })
-    .await??;
-    let request = LlmRequest {
+    let local_tokens = projection.estimated_tokens;
+    let (messages, openai_messages, message_hashes) = if projection.has_images {
+        // Fresh images are the only case that needs a second conversion: the
+        // budget projection intentionally kept `tool_attachment` metadata,
+        // while the wire body needs resolved data URLs.
+        let mut messages = (*projection.runtime_projected).clone();
+        let this_turn_ids = ctx
+            .this_turn_image_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let cache = ctx.image_cache.clone();
+        let display = ctx.display.clone();
+        let limits = ctx.model_capabilities.image_input.limits().cloned();
+        let warned = ctx.warned_image_ids.clone();
+        let messages = tokio::task::spawn_blocking(move || {
+            let mut warned = warned.lock().unwrap_or_else(|error| error.into_inner());
+            crate::llm::image_projection::materialize_images_with(
+                &mut messages,
+                &cache,
+                display.as_ref(),
+                limits.as_ref(),
+                &this_turn_ids,
+                &mut warned,
+            )?;
+            Ok::<_, anyhow::Error>(messages)
+        })
+        .await??;
+        let converted = crate::llm::transport::convert_messages_to_openai(&messages)?;
+        let hashes = Arc::new(crate::session::compaction::message_hashes(&messages));
+        (Arc::new(messages), Arc::new(converted), hashes)
+    } else {
+        (
+            projection.runtime_projected.clone(),
+            projection.openai_projected.clone(),
+            projection.message_hashes.clone(),
+        )
+    };
+    let request = Arc::new(LlmRequest {
         purpose,
         model: model_name.to_string(),
         model_alias: model_alias.map(str::to_string),
         api_url: ctx.api_url.clone(),
         api_key: ctx.api_key().to_string(),
-        system_prompt: system_prompt.to_string(),
+        system_prompt: projection.system_prompt.clone(),
         messages,
-        tools: tools_json.to_vec(),
+        tools: projection.runtime_tools.clone(),
         max_tokens: crate::session::compaction::effective_max_tokens(&ctx.config),
         cancel: ctx.cancel.clone(),
         verbose: ctx.verbose(),
         display: ctx.display.clone(),
-    };
+    });
+    let body = backend.build_body(&request, &openai_messages, &projection.openai_tools)?;
     Ok(PreparedLlmRequest {
         cache_projection: backend.cache_projection(&request, request.messages.len()),
-        source_fingerprint: crate::session::compaction::prefix_fingerprint(
-            &request.system_prompt,
-            &request.tools,
-        ),
-        source_system_prompt: request.system_prompt.clone(),
-        source_tools: request.tools.clone(),
+        source_fingerprint: projection.fingerprint.clone(),
+        source_system_prompt: projection.system_prompt.clone(),
+        source_tools: projection.runtime_tools.clone(),
+        message_hashes,
         backend_name: backend.name().to_string(),
         model_name: model_name.to_string(),
         local_tokens,
         is_agent_request,
+        body,
         request,
     })
 }
@@ -793,18 +879,19 @@ pub(crate) async fn open_llm_stream(
         }),
         prepared.model_name.clone(),
     );
-    let response = match guarded_open_stream(backend, request, capture).await {
+    let response = match guarded_open_stream(backend, request, prepared.body(), capture).await {
         Ok(response) => response,
         Err(error) => return Err(error),
     };
     if prepared.is_agent_request {
-        ctx.compaction.record_agent_request(
+        ctx.compaction.record_agent_request_with_hashes(
             &prepared.model_name,
             &prepared.source_fingerprint,
             prepared.local_tokens,
             prepared.backend_name.clone(),
             prepared.source_system_prompt.clone(),
             prepared.source_tools.clone(),
+            prepared.message_hashes.clone(),
             prepared.cache_projection.clone(),
         );
     }
@@ -817,10 +904,11 @@ pub(crate) async fn open_llm_stream(
 pub(crate) async fn guarded_open_stream(
     backend: &Arc<dyn LlmBackend>,
     request: LlmRequest,
+    body: Option<Arc<Vec<u8>>>,
     capture: UsageCapture,
 ) -> Result<LlmResponseStream> {
     let mut usage_guard = UsageGuard::new(capture);
-    match backend.stream(request).await {
+    match backend.stream_prepared(request, body).await {
         Ok(response) => {
             let capture = usage_guard
                 .take()
@@ -855,16 +943,9 @@ pub(crate) async fn stream_backend(
     tools_json: &[serde_json::Value],
     system_prompt: &str,
 ) -> Result<LlmEventStream> {
-    let prepared = prepare_llm_request(
-        backend,
-        ctx,
-        model_name,
-        model_alias,
-        messages_json,
-        tools_json,
-        system_prompt,
-    )
-    .await?;
+    let projection =
+        crate::llm::request::RequestProjection::build(messages_json, system_prompt, tools_json)?;
+    let prepared = prepare_llm_request(backend, ctx, model_name, model_alias, &projection).await?;
     let stream = open_llm_stream(backend, ctx, &prepared, ctx.cancel.clone()).await?;
     Ok(stream.events)
 }

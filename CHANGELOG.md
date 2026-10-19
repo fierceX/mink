@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### 破坏性变更
+
+- **LLM backend API**：`LlmRequest.messages`/`tools` 改为 `Arc<Vec<Value>>`、`system_prompt` 改为 `Arc<str>`，`LlmCacheProjection` 同样使用 `Arc` 大字段；自定义 backend 只读访问，attempt 克隆不再复制正文。`LlmBackend` 新增默认方法 `build_body(...)` 与 `stream_prepared(...)`：内置 backend 复用每 round 预构建的请求体，未实现的 backend 继续走 `stream()`，行为不变。
+
+### 性能
+
+- **请求投影**：每个 round 只构建一次 `RequestProjection`（图片单次消费投影、一次 OpenAI 转换、一次 token 估算、消息哈希与 fingerprint）；auto/preflight/overflow、压缩候选验收、发送与缓存记录共享该投影。无图片轮复用同一转换结果构建 body，有图片轮只 materialize 并二次转换一次。`tool_loop_20/50` mock 基准确认总耗时分别下降约 18.8%/20.7%，结构性计数从约 8 次消息深拷贝/10 次全量序列化降到 1 次投影 + 1 次转换 + 2 次序列化；`request_build_800k` 覆盖约 800K token 活跃历史的单轮准备。记录见 `docs/development/benchmarks/request-projection-2026-10-19.md`。
+- **工具配对扫描**：`strip_orphaned_tool_calls` 从 `Vec` 线性查找改为 `HashSet`，每次转换由 O(t²) 降为 O(t)。
+
 ### 变更
 
 - **子代理**：新增 `sub_agent_max_depth`（默认 1，0 禁用，最大 3）与 `SubAgent.model` 参数；父会话 `sub_agent` 事件与子会话 `session.json` 记录 label/mode/depth/origin/stop_reason，目录折叠为派生视图，TUI replay/SSE 可显示状态与 label。
@@ -25,6 +34,7 @@
 ### 测试
 
 - 服务端 goal e2e 新增“审核进行中调整预算”场景，断言合法 revision 变更不会把 run 打成 `Faulted`；TUI PTY lane 增加 no-TTY 有界检查与 OSC52/窗口标题序列断言；补充 Inconclusive 审核结论、blocker 证据缺失、SSE 关闭、真实 offline/online 与在途提交恢复的回归用例。
+- 请求投影新增 `RequestProjection` 预算/图片单次消费一致性测试（fresh image 与 legacy estimate 逐值相同）、每 round 构建次数测试、请求 Arc 指针共享测试、预构建 body 与普通构建字节一致测试，以及 `tool_loop_20/50` benchmark；`bench-check` 目录用例数同步为 27。
 
 ## v0.7.0 (2026-10-16)
 

@@ -1,6 +1,6 @@
 # 运行时执行
 
-> 更新日期：2026-10-16
+> 更新日期：2026-10-19
 
 完整进程隔离由 worker 的 sandbox re-exec 提供；macOS 写入规则须覆盖声明目录、临时目录与会话存储的字面/真实路径，以适配内核按真实路径判断的行为。运行时本身不隔离宿主进程，平台边界见[安全指南](../guides/security.md)。
 
@@ -226,8 +226,10 @@ runtime 在构建阶段创建或接收共享 backend。主代理、子代理和�
 
 - `model`：经过 `ModelResolver` 解析后的真实 provider 模型名。
 - `model_alias`：用户请求的别名，如 `flash`、`pro` 或 `model_aliases` 自定义别名。
-- `messages` / `tools` / `system_prompt`：当前 prefix 和 conversation 状态。
+- `messages` / `tools` / `system_prompt`：当前 prefix 和 conversation 状态；三者均为只读 `Arc` 共享，attempt 克隆不复制正文。
 - `cancel` / `display` / `purpose`：取消、状态输出和请求归属。
+
+每个 round 在进入压缩/发送前构建唯一的 `RequestProjection`：已完成图片单次消费投影、一次 OpenAI 转换、一次 token 估算、消息哈希与 fingerprint。auto/preflight/overflow 压力判断、压缩候选验收、发送与缓存记录共享该投影；无图片轮直接复用同一转换结果构建 body，有图片轮只 materialize 并二次转换一次。`LlmBackend` 可选实现 `build_body`/`stream_prepared` 以复用预构建 body；未实现时 `stream_prepared` 默认转调 `stream`，自定义 backend 无需改动。
 
 自定义 backend 只返回 `LlmEvent` 流。失败时可用 `LlmRequestFailure { attempt_count, error }`
 保留重试次数，`MeteredStream` / `UsageCapture` 仍统一写入 `usage.jsonl`。

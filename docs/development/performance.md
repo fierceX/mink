@@ -1,6 +1,6 @@
 # 性能与验证
 
-> 更新日期：2026-10-15；维护文档，不进入官网发布产物。
+> 更新日期：2026-10-19；维护文档，不进入官网发布产物。
 
 此页维护测量方法与结果索引。架构说明运行机制，集成页说明 API 契约；性能数字按日期保存在独立记录中，避免随实现说明更新而失去测试环境和版本边界。
 
@@ -10,6 +10,7 @@
 |---|---|
 | [运行时：2026-10-03](benchmarks/runtime-2026-10-03.md) | Apple M4 Pro 全量矩阵、独立密度测试、部分失败/中断记录；脱敏 JSON 和日志随仓库保存 |
 | [TUI：2026-10-04](benchmarks/tui-2026-10-04.md) | 渲染、可变尾部、PTY/tmux/SSH 输入延迟和正确性检查；保留原维护者的测量口径与限制 |
+| [请求投影重构：2026-10-19](benchmarks/request-projection-2026-10-19.md) | mock backend 的 `tool_loop_20/50` 前后对照；同源 bench 用例在基线 commit 与重构工作树上各跑一次，保留 dirty 标记与单次观测限制 |
 
 Goal 调度与可靠性模拟记录见 [2026-10-09](benchmarks/goal-2026-10-09.md)，不作为真实模型效果或性能结论。
 
@@ -40,6 +41,8 @@ make bench-quick                                             # 同上，缩减�
 | `runtime_start` / `session_create` | 已有 session 重启 / 全新 session 成本 |
 | `idle_1/100/1000` | 服务化 session 密度（RSS、线程数、创建/关闭耗时） |
 | `mock_turn_no_tool` / `mock_turn_1_tool` | Agent Loop 固定开销 / 工具派发开销 |
+| `tool_loop_20` / `tool_loop_50` | 单用户输入内 20/50 个工具 round 的请求准备与工具派发开销 |
+| `request_build_800k` | 约 2.4MB / 800K token 活跃历史的单轮请求准备（禁用自动压缩） |
 | `sse_1k/10k` | 内存 mock 事件流交付（events/s、pending backlog；不经过网络 SSE 解析） |
 | `replay_1k/10k/100k` | 会话恢复（读盘 + 首请求投影） |
 | `turns_500/2000` | 长会话内存曲线 |

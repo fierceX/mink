@@ -1094,7 +1094,7 @@ impl crate::runtime::LlmBackend for MessageCaptureBackend {
         &self,
         request: crate::runtime::LlmRequest,
     ) -> anyhow::Result<crate::runtime::LlmResponseStream> {
-        self.seen.lock().unwrap().push(request.messages);
+        self.seen.lock().unwrap().push((*request.messages).clone());
         Ok(crate::runtime::LlmResponseStream {
             events: Box::pin(futures::stream::iter(vec![
                 Ok(crate::runtime::LlmEvent::Text(
@@ -3221,7 +3221,10 @@ impl crate::runtime::LlmBackend for SystemPromptCaptureBackend {
         &self,
         request: crate::runtime::LlmRequest,
     ) -> anyhow::Result<crate::runtime::LlmResponseStream> {
-        self.seen.lock().unwrap().push(request.system_prompt);
+        self.seen
+            .lock()
+            .unwrap()
+            .push(request.system_prompt.to_string());
         Ok(crate::runtime::LlmResponseStream {
             events: Box::pin(futures::stream::iter(vec![
                 Ok(crate::runtime::LlmEvent::Text(
@@ -4138,7 +4141,7 @@ impl crate::llm::client::LlmBackend for GuidanceBoundaryBackend {
     ) -> anyhow::Result<crate::llm::client::LlmResponseStream> {
         let first = {
             let mut requests = self.requests.lock().unwrap();
-            requests.push(request.messages);
+            requests.push((*request.messages).clone());
             requests.len() == 1
         };
         if first {

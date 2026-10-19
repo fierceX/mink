@@ -4,6 +4,14 @@ use crate::protocol::StopEvent;
 use serde_json::json;
 use std::sync::Mutex;
 
+fn arc_str(value: &str) -> Arc<str> {
+    Arc::from(value)
+}
+
+fn arc_values(values: Vec<Value>) -> Arc<Vec<Value>> {
+    Arc::new(values)
+}
+
 #[derive(Debug)]
 struct CapturedSummaryRequest {
     model: String,
@@ -64,7 +72,7 @@ impl LlmBackend for CapturingSummaryBackend {
             model: request.model.clone(),
             system_prompt: request.system_prompt.clone(),
             tools: request.tools.clone(),
-            messages: request.messages[..source_prefix_len].to_vec(),
+            messages: Arc::new(request.messages[..source_prefix_len].to_vec()),
         })
     }
 
@@ -72,9 +80,9 @@ impl LlmBackend for CapturingSummaryBackend {
         self.requests.lock().unwrap().push(CapturedSummaryRequest {
             model: request.model,
             model_alias: request.model_alias,
-            system_prompt: request.system_prompt,
-            messages: request.messages,
-            tools: request.tools,
+            system_prompt: request.system_prompt.to_string(),
+            messages: (*request.messages).clone(),
+            tools: (*request.tools).clone(),
             max_tokens: request.max_tokens,
         });
         Ok(crate::llm::client::LlmResponseStream {
@@ -241,7 +249,7 @@ async fn provider_usage_calibrates_auto_but_not_preflight() -> anyhow::Result<()
         798_000,
         "mock".into(),
         "system".into(),
-        vec![],
+        arc_values(vec![]),
         None,
     );
     ctx.compaction.record_agent_usage(&UsageEvent {
@@ -308,12 +316,12 @@ async fn provider_calibration_requires_actual_projection_compatibility() -> anyh
     let full = vec![json!({"name":"Read"}), json!({"name":"Edit"})];
     let previous = LlmCacheProjection {
         model: "flash".into(),
-        system_prompt: "routed system".into(),
-        tools: narrowed.clone(),
-        messages: vec![
+        system_prompt: arc_str("routed system"),
+        tools: arc_values(narrowed.clone()),
+        messages: arc_values(vec![
             json!({"role":"user","content":"inspect"}),
             json!({"role":"user","content":"original router guidance"}),
-        ],
+        ]),
     };
     ctx.compaction.record_agent_request(
         "flash",
@@ -321,7 +329,7 @@ async fn provider_calibration_requires_actual_projection_compatibility() -> anyh
         700_000,
         "router-llm-backend".into(),
         "source system".into(),
-        full.clone(),
+        arc_values(full.clone()),
         Some(previous.clone()),
     );
     ctx.compaction.record_agent_usage(&UsageEvent {
@@ -332,11 +340,11 @@ async fn provider_calibration_requires_actual_projection_compatibility() -> anyh
     });
 
     let compatible = LlmCacheProjection {
-        messages: vec![
+        messages: arc_values(vec![
             json!({"role":"user","content":"inspect"}),
             json!({"role":"user","content":"original router guidance"}),
             json!({"role":"assistant","content":"done"}),
-        ],
+        ]),
         ..previous.clone()
     };
     let calibrated = ctx.compaction.pressure_decision(
@@ -350,7 +358,7 @@ async fn provider_calibration_requires_actual_projection_compatibility() -> anyh
     assert_eq!(calibrated.effective_tokens, 610_000);
 
     let restored_tools = LlmCacheProjection {
-        tools: full,
+        tools: arc_values(full),
         ..compatible.clone()
     };
     let changed_tools = ctx.compaction.pressure_decision(
@@ -363,10 +371,10 @@ async fn provider_calibration_requires_actual_projection_compatibility() -> anyh
     assert_eq!(changed_tools.source, "local_fallback");
 
     let changed_guidance = LlmCacheProjection {
-        messages: vec![
+        messages: arc_values(vec![
             json!({"role":"user","content":"inspect"}),
             json!({"role":"user","content":"different router guidance"}),
-        ],
+        ]),
         ..previous
     };
     let changed_messages = ctx.compaction.pressure_decision(
@@ -395,15 +403,15 @@ async fn stored_projection_hashes_messages_and_shares_usage_baseline() -> anyhow
         100,
         "openai-compatible".into(),
         "system".into(),
-        vec![],
+        arc_values(vec![]),
         Some(LlmCacheProjection {
             model: "flash".into(),
-            system_prompt: "system".into(),
-            tools: vec![],
-            messages: vec![json!({
+            system_prompt: arc_str("system"),
+            tools: arc_values(vec![]),
+            messages: arc_values(vec![json!({
                 "role":"user",
                 "content":[{"type":"image_url","image_url":{"url":unique_pixels}}]
-            })],
+            })]),
         }),
     );
     ctx.compaction.record_agent_usage(&UsageEvent {
@@ -467,17 +475,17 @@ async fn cache_aligned_summary_uses_dynamic_cap_when_configured_cap_exceeds_wind
     let resolved = crate::config::model_resolver(&ctx.config).resolve(&ctx.config.model);
     let projection = LlmCacheProjection {
         model: resolved.actual.clone(),
-        system_prompt: system.clone(),
-        tools: tools.clone(),
-        messages: messages.clone(),
+        system_prompt: arc_str(&system),
+        tools: arc_values(tools.clone()),
+        messages: arc_values(messages.clone()),
     };
     ctx.compaction.record_agent_request(
         &resolved.actual,
         &prefix_fingerprint(&system, &tools),
         1_000,
         backend.name().into(),
-        system.clone(),
-        tools.clone(),
+        arc_str(&system),
+        arc_values(tools.clone()),
         Some(projection),
     );
 
@@ -515,6 +523,7 @@ async fn tail_target_is_tightened_to_available_space() -> anyhow::Result<()> {
     let shape = MainRequestShape {
         system_prompt: "",
         tools: &[],
+        openai_tools: None,
     };
     let (did_compact, reason) = ctx
         .compaction
@@ -564,17 +573,17 @@ async fn cache_aligned_summary_reuses_agent_system_tools_and_prefix() -> anyhow:
     let resolved = crate::config::model_resolver(&ctx.config).resolve(&ctx.config.model);
     let projection = LlmCacheProjection {
         model: resolved.actual.clone(),
-        system_prompt: system.clone(),
-        tools: tools.clone(),
-        messages: messages.clone(),
+        system_prompt: arc_str(&system),
+        tools: arc_values(tools.clone()),
+        messages: arc_values(messages.clone()),
     };
     ctx.compaction.record_agent_request(
         &resolved.actual,
         &prefix_fingerprint(&system, &tools),
         10_000,
         backend.name().into(),
-        system.clone(),
-        tools.clone(),
+        arc_str(&system),
+        arc_values(tools.clone()),
         Some(projection),
     );
 
@@ -641,13 +650,13 @@ async fn raw_partial_aligned_summary_degrades_unconsumed_attachment() -> anyhow:
         &prefix_fingerprint(&system, &tools),
         1_000,
         backend.name().into(),
-        system,
-        tools,
+        Arc::from(system),
+        arc_values(tools),
         Some(LlmCacheProjection {
             model: resolved.actual.clone(),
-            system_prompt: "stable agent system".into(),
-            tools: vec![json!({"name":"Read","description":"read"})],
-            messages: recent_messages,
+            system_prompt: arc_str("stable agent system"),
+            tools: arc_values(vec![json!({"name":"Read","description":"read"})]),
+            messages: arc_values(recent_messages),
         }),
     );
 
@@ -720,13 +729,13 @@ async fn partial_alignment_rolls_back_before_incomplete_tool_exchange() -> anyho
         &prefix_fingerprint(&system, &tools),
         1_000,
         backend.name().into(),
-        system.clone(),
-        tools.clone(),
+        arc_str(&system),
+        arc_values(tools.clone()),
         Some(LlmCacheProjection {
             model: resolved.actual.clone(),
-            system_prompt: system,
-            tools,
-            messages: recent_messages,
+            system_prompt: Arc::from(system),
+            tools: arc_values(tools),
+            messages: arc_values(recent_messages),
         }),
     );
 
@@ -1327,6 +1336,7 @@ fn candidate_estimate_matches_real_projection() {
     let shape = MainRequestShape {
         system_prompt: "",
         tools: &[],
+        openai_tools: None,
     };
     let projected = shape
         .estimate(&crate::session::plan::project_full_request(&candidate).unwrap())
@@ -1421,6 +1431,7 @@ fn candidate_estimate_keeps_unconsumed_attachment_billed() {
     let shape = MainRequestShape {
         system_prompt: "",
         tools: &[],
+        openai_tools: None,
     };
     let accepted = estimate_candidate_tokens(shape, &fresh, None).unwrap();
     assert_eq!(accepted, shape.estimate(&fresh).unwrap());
@@ -1446,6 +1457,7 @@ fn candidate_estimate_includes_predicted_todo_sync() {
     let shape = MainRequestShape {
         system_prompt: "",
         tools: &[],
+        openai_tools: None,
     };
     let mut expected = candidate.clone();
     expected.push(crate::session::todo::sync_message_bounded(
@@ -1535,6 +1547,7 @@ async fn oversized_net_summary_is_not_published() -> anyhow::Result<()> {
     let shape = MainRequestShape {
         system_prompt: "",
         tools: &[],
+        openai_tools: None,
     };
     let before = estimate_candidate_tokens(shape, &ctx.compaction.active_messages().await?, None)?;
     let (compacted, reason) = ctx
@@ -1592,6 +1605,7 @@ async fn over_budget_strict_candidate_falls_back_to_budget_feasible_cut() -> any
     let shape = MainRequestShape {
         system_prompt: "",
         tools: &[],
+        openai_tools: None,
     };
     let active = ctx.compaction.active_messages().await?;
     let context_tokens = estimate_candidate_tokens(shape, &active, None)?;
@@ -1658,6 +1672,7 @@ async fn strict_feasibility_accounts_for_active_plan() -> anyhow::Result<()> {
     let shape = MainRequestShape {
         system_prompt: "",
         tools: &[],
+        openai_tools: None,
     };
     let active = ctx.compaction.active_messages().await?;
     let context_tokens = estimate_candidate_tokens(shape, &active, None)?;
@@ -1721,6 +1736,7 @@ async fn expired_round_deadline_blocks_emergency_publish() -> anyhow::Result<()>
     let shape = MainRequestShape {
         system_prompt: "",
         tools: &[],
+        openai_tools: None,
     };
     let expired = std::time::Instant::now() - std::time::Duration::from_secs(1);
 
@@ -2755,6 +2771,7 @@ async fn emergency_checkpoint_keeps_long_request_ends_in_projection() -> anyhow:
     let shape = MainRequestShape {
         system_prompt: "",
         tools: &[],
+        openai_tools: None,
     };
     let committed = ctx
         .compaction

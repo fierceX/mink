@@ -56,12 +56,18 @@ async fn maybe_compact_attempts_again_after_a_successful_compaction() -> anyhow:
     let mut tools = Vec::new();
     let target = LlmModelTarget::new("test-model", None);
 
+    let projection = crate::llm::request::RequestProjection::build(
+        messages.as_slice(),
+        system_prompt.as_str(),
+        tools.as_slice(),
+    )?;
     let (first, detail) = compactor
         .maybe_compact_bounded(
             "manual",
             &mut messages,
             &mut system_prompt,
             &mut tools,
+            &projection,
             target,
             None,
         )
@@ -74,12 +80,18 @@ async fn maybe_compact_attempts_again_after_a_successful_compaction() -> anyhow:
         .add_assistant(&"w".repeat(24_000), "", &[])
         .await?;
     messages = ctx.store.lines().await?;
+    let projection = crate::llm::request::RequestProjection::build(
+        messages.as_slice(),
+        system_prompt.as_str(),
+        tools.as_slice(),
+    )?;
     let (second, detail) = compactor
         .maybe_compact_bounded(
             "preflight",
             &mut messages,
             &mut system_prompt,
             &mut tools,
+            &projection,
             target,
             None,
         )
@@ -130,12 +142,18 @@ async fn maybe_compact_success_refreshes_context_and_prefix() -> anyhow::Result<
     let mut system_prompt = String::new();
     let mut tools = Vec::new();
 
+    let projection = crate::llm::request::RequestProjection::build(
+        messages.as_slice(),
+        system_prompt.as_str(),
+        tools.as_slice(),
+    )?;
     let (did_compact, detail) = compactor
         .maybe_compact_bounded(
             "manual",
             &mut messages,
             &mut system_prompt,
             &mut tools,
+            &projection,
             LlmModelTarget::new("test-model", None),
             None,
         )
@@ -216,12 +234,18 @@ async fn goal_checkpoint_survives_compaction_and_stays_out_of_immutable_prefix()
     let mut messages = ctx.compaction.active_messages().await?;
     let mut prompt = String::new();
     let mut tools = vec![];
+    let projection = crate::llm::request::RequestProjection::build(
+        messages.as_slice(),
+        prompt.as_str(),
+        tools.as_slice(),
+    )?;
     let (compacted, detail) = compactor
         .maybe_compact_bounded(
             "manual",
             &mut messages,
             &mut prompt,
             &mut tools,
+            &projection,
             LlmModelTarget::new("test-model", None),
             None,
         )

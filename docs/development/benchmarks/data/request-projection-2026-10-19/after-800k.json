@@ -1,0 +1,43 @@
+{
+  "failures": [],
+  "meta": {
+    "arch": "aarch64",
+    "commit": null,
+    "fd_limit": null,
+    "kernel": null,
+    "logical_cores": 12,
+    "machine": null,
+    "mock_calls": 2,
+    "os": "macOS 15.7.7",
+    "quick": false,
+    "report_version": 2,
+    "reps_override": null,
+    "rss_metric": "ps_rss_kb",
+    "rustc": null,
+    "suite": "mink-core/runtime_bench",
+    "summary_calls": 0,
+    "timestamp_epoch_secs": 1792387461
+  },
+  "samples": [
+    {
+      "case": "request_build_800k",
+      "extra": {
+        "approx_input_tokens": 800000,
+        "history_bytes": 2400000,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 35408
+      },
+      "max": 12.724124999999999,
+      "mean": 12.724124999999999,
+      "min": 12.724124999999999,
+      "n": 1,
+      "p50": 12.724124999999999,
+      "p95": 12.724124999999999,
+      "unit": "ms"
+    }
+  ],
+  "selected_cases": [
+    "request_build_800k"
+  ],
+  "skipped_cases": []
+}

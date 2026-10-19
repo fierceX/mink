@@ -1,7 +1,7 @@
 use crate::llm::client::{OpenAiCompatibleOptions, TokenParamKind};
 use anyhow::Result;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 pub fn build_openai_body(
     model: &str,
@@ -52,12 +52,40 @@ pub(crate) fn build_openai_body_with_options_and_extensions(
     extra_body: &BTreeMap<String, Value>,
 ) -> Result<Vec<u8>> {
     let converted = convert_messages_to_openai(messages)?;
+    let openai_tools = convert_tools_to_openai(tools);
+    build_openai_body_from_converted(
+        model,
+        &converted,
+        &openai_tools,
+        system_prompt,
+        max_tokens,
+        options,
+        tool_choice,
+        extra_body,
+    )
+}
 
+/// Build the wire body from already converted OpenAI messages and tools.
+///
+/// The conversion is intentionally separate: a round can reuse one converted
+/// projection for both token estimation and the final body instead of walking
+/// the full history twice.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_openai_body_from_converted(
+    model: &str,
+    messages: &[Value],
+    tools: &[Value],
+    system_prompt: &str,
+    max_tokens: i32,
+    options: &OpenAiCompatibleOptions,
+    tool_choice: Option<&Value>,
+    extra_body: &BTreeMap<String, Value>,
+) -> Result<Vec<u8>> {
     let mut openai_messages: Vec<Value> = vec![];
     if !system_prompt.is_empty() {
         openai_messages.push(json!({"role":"system","content":system_prompt}));
     }
-    openai_messages.extend(converted);
+    openai_messages.extend_from_slice(messages);
 
     let mut body = json!({
         "model": model,
@@ -89,7 +117,7 @@ pub(crate) fn build_openai_body_with_options_and_extensions(
         }
     }
     if !tools.is_empty() {
-        body["tools"] = Value::Array(convert_tools_to_openai(tools));
+        body["tools"] = Value::Array(tools.to_vec());
         if let Some(tool_choice) = tool_choice {
             body["tool_choice"] = tool_choice.clone();
         }
@@ -104,11 +132,27 @@ pub(crate) fn estimate_openai_context_tokens(
     system_prompt: &str,
 ) -> Result<usize> {
     let converted = convert_messages_to_openai(messages)?;
+    let openai_tools = convert_tools_to_openai(tools);
+    estimate_openai_converted(&converted, &openai_tools, system_prompt)
+}
+
+/// Estimate tokens from an already converted OpenAI projection.
+///
+/// `messages` must not contain materialized image data URLs for the normal
+/// budget path: the byte estimate would count the base64 payload as text on
+/// top of the separate tile estimate. The caller keeps `tool_attachment`
+/// metadata in the projection until send time, exactly like the pre-refactor
+/// estimate did.
+pub(crate) fn estimate_openai_converted(
+    converted: &[Value],
+    openai_tools: &[Value],
+    system_prompt: &str,
+) -> Result<usize> {
     let mut request_messages = Vec::with_capacity(converted.len() + 1);
     if !system_prompt.is_empty() {
         request_messages.push(json!({"role":"system","content":system_prompt}));
     }
-    request_messages.extend(converted);
+    request_messages.extend_from_slice(converted);
     // Single-consumption: `project_request_messages` already turned consumed
     // references into text citations, so only the unconsumed batch counts
     // image tokens. The JSON byte estimate covers text and already-
@@ -137,7 +181,7 @@ pub(crate) fn estimate_openai_context_tokens(
         }
     }
     let message_bytes = serde_json::to_vec(&request_messages)?.len();
-    let tool_bytes = serde_json::to_vec(&convert_tools_to_openai(tools))?.len();
+    let tool_bytes = serde_json::to_vec(openai_tools)?.len();
     Ok(message_bytes
         .saturating_add(tool_bytes)
         .div_ceil(3)
@@ -180,7 +224,9 @@ pub(crate) fn convert_messages_to_openai(messages: &[Value]) -> Result<Vec<Value
         }
         result.push(message);
     }
-    // Post-process: strip orphaned tool_calls (no matching tool message)
+    // Post-process: strip orphaned tool_calls (no matching tool message).
+    // HashSet keeps this linear in the number of tool messages; the previous
+    // Vec scan was O(tool_calls * tool_messages) on every conversion.
     let valid_ids = collect_tool_call_ids(&result);
     for msg in result.iter_mut() {
         strip_orphaned_tool_calls(msg, &valid_ids);
@@ -189,20 +235,20 @@ pub(crate) fn convert_messages_to_openai(messages: &[Value]) -> Result<Vec<Value
 }
 
 /// Collect all tool_call_ids from tool-role messages in the converted message list.
-fn collect_tool_call_ids(msgs: &[Value]) -> Vec<String> {
-    let mut ids = Vec::new();
+fn collect_tool_call_ids(msgs: &[Value]) -> HashSet<String> {
+    let mut ids = HashSet::new();
     for msg in msgs {
         if msg.get("role").and_then(Value::as_str) == Some("tool")
             && let Some(id) = msg.get("tool_call_id").and_then(Value::as_str)
         {
-            ids.push(id.to_string());
+            ids.insert(id.to_string());
         }
     }
     ids
 }
 
 /// Remove orphaned tool_calls from an assistant message that have no matching tool result.
-fn strip_orphaned_tool_calls(msg: &mut Value, valid_ids: &[String]) {
+fn strip_orphaned_tool_calls(msg: &mut Value, valid_ids: &HashSet<String>) {
     if msg.get("role").and_then(Value::as_str) != Some("assistant") {
         return;
     }
@@ -213,7 +259,7 @@ fn strip_orphaned_tool_calls(msg: &mut Value, valid_ids: &[String]) {
         .iter()
         .filter(|tc| {
             let id = tc.get("id").and_then(Value::as_str).unwrap_or("");
-            valid_ids.iter().any(|v| v == id)
+            valid_ids.contains(id)
         })
         .cloned()
         .collect();
@@ -289,7 +335,7 @@ fn convert_tool_result_messages(content: &Value) -> Result<Vec<Value>> {
     Ok(out)
 }
 
-fn convert_tools_to_openai(tools: &[Value]) -> Vec<Value> {
+pub(crate) fn convert_tools_to_openai(tools: &[Value]) -> Vec<Value> {
     tools.iter().map(|tool| {
         if tool.get("type").and_then(Value::as_str) == Some("function") { return tool.clone(); }
         json!({

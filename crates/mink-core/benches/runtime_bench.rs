@@ -31,6 +31,7 @@ static SUBAGENT_CALLS: AtomicU64 = AtomicU64::new(0);
 enum MockMode {
     Echo,
     OneTool,
+    ToolLoop(usize),
     Fanout(usize),
     Stream(usize),
 }
@@ -69,11 +70,7 @@ impl LlmBackend for MockBackend {
             return Ok(echo_response());
         }
 
-        let tool_results = request
-            .messages
-            .iter()
-            .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("tool"))
-            .count();
+        let tool_results = tool_exchange_count(&request);
         let user_text = last_user_text(&request);
         let asked = match self.mode {
             MockMode::OneTool => user_text.contains(".txt"),
@@ -83,6 +80,26 @@ impl LlmBackend for MockBackend {
         let already_called = assistant_tool_round_since_user(&request);
 
         match self.mode {
+            MockMode::ToolLoop(rounds) if tool_results < rounds => {
+                let index = tool_results;
+                match index % 3 {
+                    0 => Ok(tool_call_response(
+                        "Read",
+                        json!({"path": format!("bench-{index}.txt")}),
+                        &format!("call-loop-{index}"),
+                    )),
+                    1 => Ok(tool_call_response(
+                        "Glob",
+                        json!({"pattern": "bench-*.txt"}),
+                        &format!("call-loop-{index}"),
+                    )),
+                    _ => Ok(tool_call_response(
+                        "Grep",
+                        json!({"pattern": "line 0", "path": format!("bench-{index}.txt")}),
+                        &format!("call-loop-{index}"),
+                    )),
+                }
+            }
             MockMode::OneTool if asked && !already_called => {
                 let target =
                     last_user_token(&request, ".txt").unwrap_or_else(|| "bench.txt".into());
@@ -226,6 +243,28 @@ fn last_user_text(request: &LlmRequest) -> String {
         .to_string()
 }
 
+/// Count completed assistant tool rounds in the runtime-shaped request.
+/// Provider-shaped `tool` messages only exist after conversion; the backend
+/// receives runtime messages whose tool results live inside user content.
+fn tool_exchange_count(request: &LlmRequest) -> usize {
+    request
+        .messages
+        .iter()
+        .filter(|message| {
+            message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+                && message
+                    .get("content")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|blocks| {
+                        blocks.iter().any(|block| {
+                            block.get("type").and_then(serde_json::Value::as_str)
+                                == Some("tool_use")
+                        })
+                    })
+        })
+        .count()
+}
+
 /// Whether an assistant message after the latest string-content user turn
 /// already carries tool calls, i.e. this round has dispatched tools already.
 fn assistant_tool_round_since_user(request: &LlmRequest) -> bool {
@@ -307,9 +346,14 @@ fn case_names(quick: bool) -> Vec<String> {
     if !quick {
         names.push("idle_1000".to_string());
     }
+    if !quick {
+        names.push("tool_loop_50".to_string());
+        names.push("request_build_800k".to_string());
+    }
     names.extend([
         "mock_turn_no_tool".to_string(),
         "mock_turn_1_tool".to_string(),
+        "tool_loop_20".to_string(),
         "sse_1k".to_string(),
     ]);
     if !quick {
@@ -390,12 +434,16 @@ fn context_policy_zero() -> ContextPolicy {
 }
 
 fn bench_file(dir: &Path, lines: usize) -> PathBuf {
-    let path = dir.join("bench.txt");
+    bench_file_named(dir, "bench.txt", lines)
+}
+
+fn bench_file_named(dir: &Path, name: &str, lines: usize) -> PathBuf {
+    let path = dir.join(name);
     let content = (0..lines)
         .map(|i| format!("line {i}: benchmark content"))
         .collect::<Vec<_>>()
         .join("\n");
-    std::fs::write(&path, content).expect("write bench.txt");
+    std::fs::write(&path, content).expect("write bench file");
     path
 }
 
@@ -830,6 +878,77 @@ async fn case_mock_turn_one_tool(args: &Args) -> anyhow::Result<Sample> {
     runtime.shutdown().await?;
     cleanup(&root);
     Ok(summarize("mock_turn_1_tool", "ms", &durations, extra))
+}
+
+async fn case_tool_loop(rounds: usize) -> anyhow::Result<Sample> {
+    let root = temp_root(&format!("tool-loop-{rounds}"));
+    let home = root.join("home");
+    for index in 0..rounds {
+        bench_file_named(&root, &format!("bench-{index}.txt"), 200);
+    }
+    let runtime = AgentRuntime::start(
+        options_for(&home, &root, MockMode::ToolLoop(rounds), SessionPolicy::New)
+            .with_max_turns(rounds as i32 + 1),
+    )
+    .await?;
+    let tracker = RssTracker::start();
+    let start = Instant::now();
+    let outcome = runtime.run_turn("tool loop benchmark").await?;
+    let elapsed = start.elapsed();
+    let peak = tracker.stop();
+    anyhow::ensure!(
+        matches!(outcome.status, TurnStatus::Ok),
+        "tool loop failed: {outcome:?}"
+    );
+    anyhow::ensure!(
+        outcome.tool_call_count == rounds as u32 && outcome.tool_error_count == 0,
+        "expected {rounds} successful tool calls, got {} calls / {} errors",
+        outcome.tool_call_count,
+        outcome.tool_error_count
+    );
+    let extra = json!({
+        "rounds": rounds,
+        "rss_peak_kb": peak,
+        "ms_per_round": elapsed.as_secs_f64() * 1000.0 / rounds as f64,
+        "rss_metric": rss_metric_name(),
+    });
+    runtime.shutdown().await?;
+    cleanup(&root);
+    Ok(summarize(
+        &format!("tool_loop_{rounds}"),
+        "ms",
+        &[elapsed],
+        extra,
+    ))
+}
+
+async fn case_request_build_large() -> anyhow::Result<Sample> {
+    const HISTORY_BYTES: usize = 2_400_000;
+    let root = temp_root("request-build-large");
+    let home = root.join("home");
+    let runtime = AgentRuntime::start(
+        options(&home, &root, MockMode::Echo).with_context_policy(context_policy_zero()),
+    )
+    .await?;
+    runtime.run_turn("x".repeat(HISTORY_BYTES)).await?;
+    let tracker = RssTracker::start();
+    let start = Instant::now();
+    let outcome = runtime.run_turn("measure a large projection").await?;
+    let elapsed = start.elapsed();
+    let peak = tracker.stop();
+    anyhow::ensure!(
+        matches!(outcome.status, TurnStatus::Ok),
+        "large projection turn failed"
+    );
+    let extra = json!({
+        "history_bytes": HISTORY_BYTES,
+        "approx_input_tokens": HISTORY_BYTES / 3,
+        "rss_peak_kb": peak,
+        "rss_metric": rss_metric_name(),
+    });
+    runtime.shutdown().await?;
+    cleanup(&root);
+    Ok(summarize("request_build_800k", "ms", &[elapsed], extra))
 }
 
 async fn case_sse(label: &str, chunks: usize) -> anyhow::Result<Sample> {
@@ -1306,6 +1425,9 @@ async fn run_case(name: &str, args: &Args) -> anyhow::Result<Option<Sample>> {
         "idle_1000" => Some(case_idle(1000).await?),
         "mock_turn_no_tool" => Some(case_mock_turn_no_tool(args).await?),
         "mock_turn_1_tool" => Some(case_mock_turn_one_tool(args).await?),
+        "tool_loop_20" => Some(case_tool_loop(20).await?),
+        "tool_loop_50" => Some(case_tool_loop(50).await?),
+        "request_build_800k" => Some(case_request_build_large().await?),
         "sse_1k" => Some(case_sse("sse_1k", 1_000).await?),
         "sse_10k" => Some(case_sse("sse_10k", 10_000).await?),
         "replay_1k" => Some(case_replay("replay_1k", 1_000).await?),

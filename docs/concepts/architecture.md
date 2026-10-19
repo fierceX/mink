@@ -1,6 +1,6 @@
 # 架构与模块
 
-> 更新日期：2026-10-14
+> 更新日期：2026-10-19
 
 分层、职责与关键不变式。
 
@@ -33,13 +33,14 @@ OrchActor (agent/orchestrator.rs)
   │  维护 BeliefTracker 和当前强制模型
   ▼
 TurnExecutor (agent/turn.rs)
-  │  单轮执行器：压缩 -> LLM stream（固定投影 + attempt 重试）-> scavenge ->
+  │  单轮执行器：请求投影（每 round 一次）-> 压缩 -> LLM stream（固定 payload + attempt 重试）-> scavenge ->
   │  候选接受 -> 工具 -> 信号 -> 格式窗口结算 -> 决策 -> 历史刷新
   │  组合 PrefixManager / TurnCompactor / ToolSignalProcessor /
   │  SubAgentCoordinator（模型与 backend 在构造时一次确定）
   ▼
 ┌─────── LLM 层 ────────┐
-│ llm/client.rs         │ LlmBackend 注入、每次 `stream()` 一个物理请求的 OpenAI-compatible 客户端、usage 采集、模型名解析、请求选项、缓存投影 seam 与校准门控
+│ llm/client.rs         │ LlmBackend 注入、每次 `stream()` 一个物理请求的 OpenAI-compatible 客户端、usage 采集、模型名解析、请求选项、缓存投影 seam 与校准门控 │
+│ llm/request.rs        │ 每 round 唯一的 `RequestProjection`：图片单次消费投影、OpenAI 转换、token 估算、消息哈希与 fingerprint │
 │ llm/recovery.rs       │ 类型化上游错误（可重试/协议损坏/永久）、请求重试计数与 deadline、纯退避/Retry-After 计算、稳定终态码
 │ llm/transport.rs      │ OpenAI chat/completions 请求构造、tool_choice 和 extra_body 合并
 │ sse/openai.rs         │ SSE 增量解析、usage、stop、tool call 合并；坏参数/坏身份候选不执行、不静默跳帧
@@ -365,6 +366,7 @@ VFS 只接管普通路径。`artifact://`、`skill://`、`rule://` 和 `session:
 - 正常 turn、压缩和最终回复提取不加载完整历史；恢复时流式解析并校验 JSONL，但只保留并缓存活跃后缀。
 - 投影边界必须位于完整历史内，并且不能拆开 tool call/result 协议。
 - 所有压缩统一调用 LLM 摘要；摘要以唯一 internal user `<compacted-summary>` checkpoint 投影，不修改 immutable system/tools prefix。
+- 每个 round 的请求投影只构建一次：图片单次消费、OpenAI 转换、token 估算、消息哈希与 fingerprint 共享同一 `RequestProjection`；发送 body 对无图片轮复用该转换结果，有图片轮只 materialize 并二次转换一次。
 - 摘要输入优先复用上一 Agent 请求的 system/tools 与历史公共缓存前缀（backend 声明 `cache_projection`），无法证明边界或超预算时按 reduction 配置降级；auto 压力以最近同模型、同指纹、同投影代际的 provider prompt usage 校准，preflight 保持保守本地估算，`CompactionCheck` 事件记录压力来源。
 - Plan 状态变更以 append-only transition 持久化在 conversation 尾部（confirmed/cleared 内部 user 消息），压缩后活动 `plan.md` 以唯一的 `<active-plan-checkpoint>` 投影，PlanClear 后移除；文件变更与 conversation 追加由 `plan-transaction.json` 可重放 journal 协调，两者都不进入 immutable prefix。
 - Todo 权威完整快照保存在 `todos.json`；conversation 尾部追加增量事件和当前 active batch 的紧凑物化投影，不进入 immutable prefix。

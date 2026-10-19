@@ -11,7 +11,7 @@ fn strip_orphaned_tool_calls_removes_unmatched() {
         ]
     });
     // Only call_2 has a matching tool result
-    let valid_ids = vec!["call_2".to_string()];
+    let valid_ids = HashSet::from(["call_2".to_string()]);
     strip_orphaned_tool_calls(&mut msg, &valid_ids);
     let tcs = msg["tool_calls"].as_array().unwrap();
     assert_eq!(tcs.len(), 1);
@@ -28,7 +28,7 @@ fn strip_orphaned_removes_tool_calls_field_when_all_orphaned() {
             {"id": "call_1", "type": "function", "function": {"name": "Read", "arguments": "{}"}}
         ]
     });
-    let valid_ids: Vec<String> = vec![];
+    let valid_ids: HashSet<String> = HashSet::new();
     strip_orphaned_tool_calls(&mut msg, &valid_ids);
     assert!(msg.get("tool_calls").is_none());
     assert_eq!(msg["content"], "text");
@@ -44,7 +44,7 @@ fn strip_orphaned_keeps_all_when_matched() {
             {"id": "call_2", "type": "function", "function": {"name": "Bash", "arguments": "{}"}}
         ]
     });
-    let valid_ids = vec!["call_1".to_string(), "call_2".to_string()];
+    let valid_ids = HashSet::from(["call_1".to_string(), "call_2".to_string()]);
     strip_orphaned_tool_calls(&mut msg, &valid_ids);
     let tcs = msg["tool_calls"].as_array().unwrap();
     assert_eq!(tcs.len(), 2);
@@ -54,7 +54,7 @@ fn strip_orphaned_keeps_all_when_matched() {
 fn strip_orphaned_ignores_non_assistant_messages() {
     let mut msg = json!({"role": "user", "content": "hello"});
     let original = msg.clone();
-    strip_orphaned_tool_calls(&mut msg, &["x".to_string()]);
+    strip_orphaned_tool_calls(&mut msg, &HashSet::from(["x".to_string()]));
     assert_eq!(msg, original);
 }
 
@@ -74,6 +74,37 @@ fn convert_messages_strips_orphaned_end_to_end() {
     // The assistant message should have tool_calls stripped (no matching tool msg)
     let assistant = converted.iter().find(|m| m["role"] == "assistant").unwrap();
     assert!(assistant.get("tool_calls").is_none());
+}
+
+#[test]
+fn convert_strips_orphans_across_large_tool_history() {
+    let mut msgs = Vec::new();
+    for index in 0..2_000 {
+        let id = format!("call_{index}");
+        msgs.push(json!({"role":"assistant","content":[
+            {"type":"tool_use","id":id,"name":"Read","input":{"path":"/x"}}
+        ]}));
+        msgs.push(json!({"role":"user","content":[
+            {"type":"tool_result","tool_use_id":id,"content":"ok"}
+        ]}));
+    }
+    // The final assistant call has no result; only that one must be stripped.
+    msgs.push(json!({"role":"assistant","content":[
+        {"type":"tool_use","id":"orphan","name":"Read","input":{"path":"/x"}}
+    ]}));
+    let converted = convert_messages_to_openai(&msgs).unwrap();
+    let assistant_calls = converted
+        .iter()
+        .filter(|m| m["role"] == "assistant" && m.get("tool_calls").is_some())
+        .count();
+    assert_eq!(assistant_calls, 2_000);
+    assert!(
+        converted
+            .iter()
+            .all(|m| m.get("tool_calls").is_none_or(|calls| calls
+                .as_array()
+                .is_some_and(|calls| calls.iter().all(|call| call["id"] != "orphan"))))
+    );
 }
 
 #[test]

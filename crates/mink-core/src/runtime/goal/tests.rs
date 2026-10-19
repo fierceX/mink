@@ -1004,7 +1004,7 @@ impl LlmBackend for ExecutionRequestFailureBackend {
             },
             _ => {
                 assert!(
-                    serde_json::to_string(&request.messages)?
+                    serde_json::to_string(&*request.messages)?
                         .contains("write-before-request-failure"),
                     "recovery must retain the committed tool exchange"
                 );

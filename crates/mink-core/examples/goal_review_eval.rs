@@ -19,15 +19,15 @@ impl LlmBackend for EvaluationBackend {
         false
     }
     async fn stream(&self, mut request: LlmRequest) -> anyhow::Result<LlmResponseStream> {
-        let host = request
-            .messages
+        let mut messages = (*request.messages).clone();
+        let host = messages
             .iter()
             .filter_map(|m| m["content"].as_str())
             .rfind(|s| !s.starts_with("<goal-conclusion-required>"))
             .is_some_and(|s| s.starts_with("<goal-review>"));
         if self.delegate_all || host || !matches!(request.purpose, LlmPurpose::Agent) {
             if self.force_full
-                && let Some(message) = request.messages.iter_mut().rev().find(|m| {
+                && let Some(message) = messages.iter_mut().rev().find(|m| {
                     m["content"].as_str().is_some_and(|s| {
                         s.starts_with("<goal-review>") || s.starts_with("<independent-goal-review>")
                     })
@@ -41,6 +41,7 @@ impl LlmBackend for EvaluationBackend {
                     "{text}\nEvaluation baseline policy: the independent reviewer must inspect actual evidence before returning its report; the host uses the unified decision tool."
                 ));
             }
+            request.messages = Arc::new(messages);
             return self.real.stream(request).await;
         }
         Ok(LlmResponseStream {

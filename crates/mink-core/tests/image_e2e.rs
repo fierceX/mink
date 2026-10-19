@@ -111,8 +111,8 @@ impl LlmBackend for CapturingVisionBackend {
 
     async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream> {
         self.requests.lock().unwrap().push(serde_json::json!({
-            "messages": request.messages,
-            "tools": request.tools,
+            "messages": &*request.messages,
+            "tools": &*request.tools,
         }));
         let events = self
             .responses

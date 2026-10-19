@@ -1,6 +1,6 @@
 # 扩展契约
 
-> 更新日期：2026-10-06
+> 更新日期：2026-10-19
 
 LLM backend、只读 VFS 与初始化扩展。
 
@@ -70,6 +70,7 @@ let runtime = AgentRuntime::start(
 
 实现要点：
 - 从 `LlmRequest` 读取 system prompt、messages、tools、取消 token 和模型名
+- `LlmRequest.messages`/`tools` 是 `Arc<Vec<Value>>`，`system_prompt` 是 `Arc<str>`：只读共享，attempt 克隆不复制正文；自定义 backend 不应修改这些字段
 - `LlmRequest.model` 是解析后的真实模型名；`LlmRequest.model_alias` 保留用户请求的别名
 - 失败时返回 `LlmRequestFailure { attempt_count, error }`，usage 日志可记录重试次数
 - 图片能力：实现 `image_input_capability(model)`（trait 默认 `Unsupported`，fail
@@ -78,7 +79,8 @@ let runtime = AgentRuntime::start(
   （优先级高于 backend 声明）
 - 缓存投影（可选）：实现 `cache_projection(request, source_prefix_len)` 可让压缩摘要
   复用上一 Agent 请求的 system/tools 与历史公共缓存前缀（返回 provider 可见的整条前缀
-  或其指定长度切片）；不实现时返回默认 `None`，摘要自动降级为全量输入，功能不受影响
+  或其指定长度切片）；不实现时返回默认 `None`，摘要自动降级为全量输入，功能不受影响。返回的 `LlmCacheProjection` 同样用 `Arc` 共享大字段
+- 预构建 body（可选）：实现 `build_body(request, openai_messages, openai_tools)` 返回 `Some(Arc<Vec<u8>>)`，并覆写 `stream_prepared(request, body)` 直接发送该 body；runtime 每 round 只构建一次。默认 `build_body` 返回 `None`、`stream_prepared` 转调 `stream`，现有 backend 无需改动
 - 校准门控：若 backend 会动态改写请求（如注入/删减消息或改变工具面），声明
   `prompt_usage_calibration_safe() -> false` 可关闭 auto 压缩的 provider usage 校准，
   回退到保守本地估算（默认 `true`，仅对 provider 可见内容与本地请求一致时适用）

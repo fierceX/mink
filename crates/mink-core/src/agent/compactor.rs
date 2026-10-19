@@ -120,31 +120,24 @@ impl TurnCompactor {
         messages: &mut Vec<serde_json::Value>,
         system_prompt: &mut String,
         tools_json: &mut Vec<serde_json::Value>,
+        projection: &crate::llm::request::RequestProjection,
         target: LlmModelTarget<'_>,
         round_deadline: Option<std::time::Instant>,
     ) -> Result<(bool, String)> {
-        // Same projection as the real request: consumed image references
-        // become text citations FIRST, so the compaction estimate counts
-        // visual tokens only for the unconsumed batch — otherwise history
-        // pictures would trigger premature compaction (they are never
-        // re-expanded after consumption).
-        let request_messages = crate::session::plan::project_full_request(messages)?;
-        let local_tokens = crate::llm::transport::estimate_openai_context_tokens(
-            &request_messages,
-            tools_json,
-            system_prompt,
-        )?;
-        let source_fingerprint =
-            crate::session::compaction::prefix_fingerprint(system_prompt, tools_json);
+        // The round projection already applied the single-consumption image
+        // projection and converted the request once. No re-projection and no
+        // second estimate happen on the below-threshold path.
+        let local_tokens = projection.estimated_tokens;
+        let source_fingerprint = projection.fingerprint.clone();
         let projection_request = LlmRequest {
             purpose: LlmPurpose::Agent,
             model: target.model.to_string(),
             model_alias: target.alias.map(str::to_string),
             api_url: self.ctx.api_url.clone(),
             api_key: self.ctx.api_key().to_string(),
-            system_prompt: system_prompt.clone(),
-            messages: request_messages,
-            tools: tools_json.clone(),
+            system_prompt: projection.system_prompt.clone(),
+            messages: projection.runtime_projected.clone(),
+            tools: projection.runtime_tools.clone(),
             max_tokens: crate::session::compaction::effective_max_tokens(&self.ctx.config),
             cancel: self.ctx.cancel.clone(),
             verbose: self.ctx.verbose(),
@@ -166,8 +159,9 @@ impl TurnCompactor {
                 Some(self.compactions_this_turn + 1),
                 // 主请求的真实形状：候选验收与真实发送使用同一套 system/tools。
                 Some(crate::session::compaction::MainRequestShape {
-                    system_prompt,
-                    tools: tools_json,
+                    system_prompt: &projection.system_prompt,
+                    tools: &projection.runtime_tools,
+                    openai_tools: Some(&projection.openai_tools),
                 }),
                 todo_candidate_state(&self.ctx, &self.ctx.todo_store.snapshot()),
                 round_deadline,

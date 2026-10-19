@@ -33,7 +33,7 @@ class RuntimeBenchTests(unittest.TestCase):
     def test_case_catalogue_and_invalid_arguments(self):
         listed = self.run_bench('--list')
         self.assertEqual(listed.returncode, 0, listed.stderr)
-        self.assertEqual(len(listed.stdout.splitlines()), 25)
+        self.assertEqual(len(listed.stdout.splitlines()), 28)
         for args, diagnostic in [(['--reps', '0'], '--reps must be greater than zero'),
                                  (['--case', 'missing-case'], 'no case matched')]:
             result = self.run_bench(*args)

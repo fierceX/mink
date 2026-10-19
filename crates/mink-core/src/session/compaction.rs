@@ -112,15 +112,28 @@ pub(crate) fn is_compaction_deadline_expired(error: &anyhow::Error) -> bool {
 pub(crate) struct MainRequestShape<'a> {
     pub system_prompt: &'a str,
     pub tools: &'a [Value],
+    /// Already converted tools from the active round projection. `None` keeps
+    /// legacy callers working by converting `tools` again.
+    pub openai_tools: Option<&'a [Value]>,
 }
 
 impl MainRequestShape<'_> {
     fn estimate(&self, messages: &[Value]) -> Result<usize> {
-        crate::llm::transport::estimate_openai_context_tokens(
-            messages,
-            self.tools,
-            self.system_prompt,
-        )
+        match self.openai_tools {
+            Some(openai_tools) => {
+                let converted = crate::llm::transport::convert_messages_to_openai(messages)?;
+                crate::llm::transport::estimate_openai_converted(
+                    &converted,
+                    openai_tools,
+                    self.system_prompt,
+                )
+            }
+            None => crate::llm::transport::estimate_openai_context_tokens(
+                messages,
+                self.tools,
+                self.system_prompt,
+            ),
+        }
     }
 }
 
@@ -357,8 +370,8 @@ struct LatestAgentRequest {
     local_tokens: usize,
     projection_generation: u64,
     backend_name: String,
-    source_system_prompt: String,
-    source_tools: Vec<Value>,
+    source_system_prompt: Arc<str>,
+    source_tools: Arc<Vec<Value>>,
     projection: Option<CacheProjectionSnapshot>,
 }
 
@@ -379,9 +392,9 @@ struct PromptUsageState {
 #[derive(Debug, Clone)]
 struct CacheProjectionSnapshot {
     model: String,
-    system_prompt: String,
-    tools: Vec<Value>,
-    message_hashes: Vec<[u8; 32]>,
+    system_prompt: Arc<str>,
+    tools: Arc<Vec<Value>>,
+    message_hashes: Arc<Vec<[u8; 32]>>,
 }
 
 #[derive(Debug)]
@@ -702,6 +715,7 @@ impl CompactionEngine {
         Ok((!state.summary.trim().is_empty()).then_some(state.summary))
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_agent_request(
         &self,
@@ -709,8 +723,36 @@ impl CompactionEngine {
         source_fingerprint: &str,
         local_tokens: usize,
         backend_name: String,
-        source_system_prompt: String,
-        source_tools: Vec<Value>,
+        source_system_prompt: Arc<str>,
+        source_tools: Arc<Vec<Value>>,
+        projection: Option<LlmCacheProjection>,
+    ) {
+        let hashes = projection
+            .as_ref()
+            .map(|projection| Arc::new(message_hashes(&projection.messages)))
+            .unwrap_or_else(|| Arc::new(Vec::new()));
+        self.record_agent_request_with_hashes(
+            model,
+            source_fingerprint,
+            local_tokens,
+            backend_name,
+            source_system_prompt,
+            source_tools,
+            hashes,
+            projection,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_agent_request_with_hashes(
+        &self,
+        model: &str,
+        source_fingerprint: &str,
+        local_tokens: usize,
+        backend_name: String,
+        source_system_prompt: Arc<str>,
+        source_tools: Arc<Vec<Value>>,
+        message_hashes: Arc<Vec<[u8; 32]>>,
         projection: Option<LlmCacheProjection>,
     ) {
         let request = Arc::new(LatestAgentRequest {
@@ -721,7 +763,9 @@ impl CompactionEngine {
             backend_name,
             source_system_prompt,
             source_tools,
-            projection: projection.map(CacheProjectionSnapshot::from_projection),
+            projection: projection.map(|projection| {
+                CacheProjectionSnapshot::from_projection(projection, message_hashes)
+            }),
         });
         self.prompt_usage
             .lock()
@@ -1500,9 +1544,9 @@ impl CompactionEngine {
                 model_alias: target.alias.map(str::to_string),
                 api_url: self.api_url.clone(),
                 api_key: self.api_key.clone(),
-                system_prompt: system_prompt.clone(),
-                messages: attempt_messages,
-                tools: tools.clone(),
+                system_prompt: Arc::from(system_prompt.as_str()),
+                messages: Arc::new(attempt_messages),
+                tools: Arc::new(tools.clone()),
                 max_tokens: summary_output_cap,
                 cancel: attempt_cancel.clone(),
                 verbose: self.config.verbose,
@@ -1526,6 +1570,7 @@ impl CompactionEngine {
                 opened = crate::llm::client::guarded_open_stream(
                     &self.llm_backend,
                     request,
+                    None,
                     capture,
                 ) => opened,
                 _ = request_cancel.cancelled() => return Err(CompactionInterrupted::error()),
@@ -1846,7 +1891,7 @@ impl CompactionEngine {
                     api_url: self.api_url.clone(),
                     api_key: self.api_key.clone(),
                     system_prompt: latest.source_system_prompt.clone(),
-                    messages: source_messages.clone(),
+                    messages: Arc::new(source_messages.clone()),
                     tools: latest.source_tools.clone(),
                     max_tokens: effective_max_tokens(&self.config),
                     cancel: self.cancel.clone(),
@@ -1873,7 +1918,7 @@ impl CompactionEngine {
                 let candidate_hashes = message_hashes(&candidate.messages);
                 let aligned_messages = candidate_hashes
                     .iter()
-                    .zip(&recent_projection.message_hashes)
+                    .zip(recent_projection.message_hashes.iter())
                     .take_while(|(left, right)| left == right)
                     .count();
                 let aligned_messages = rollback_incomplete_tool_exchange_boundary(
@@ -1934,8 +1979,8 @@ impl CompactionEngine {
                     return Err("aligned_input_over_budget".into());
                 }
                 Ok(SummaryRequestInput {
-                    system_prompt: candidate.system_prompt,
-                    tools: candidate.tools,
+                    system_prompt: candidate.system_prompt.to_string(),
+                    tools: (*candidate.tools).clone(),
                     messages,
                     meta: SummaryInputMeta {
                         input_mode: if aligned_messages == candidate.messages.len() {
@@ -2155,12 +2200,12 @@ fn provider_projection_extends(
 }
 
 impl CacheProjectionSnapshot {
-    fn from_projection(projection: LlmCacheProjection) -> Self {
+    fn from_projection(projection: LlmCacheProjection, message_hashes: Arc<Vec<[u8; 32]>>) -> Self {
         Self {
             model: projection.model,
             system_prompt: projection.system_prompt,
             tools: projection.tools,
-            message_hashes: message_hashes(&projection.messages),
+            message_hashes,
         }
     }
 }

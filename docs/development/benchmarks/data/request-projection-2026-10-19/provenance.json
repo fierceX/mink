@@ -1,0 +1,38 @@
+{
+  "date": "2026-10-19",
+  "suite": "mink-core/runtime_bench",
+  "cases": ["tool_loop_20", "tool_loop_50", "request_build_800k"],
+  "baseline": {
+    "kind": "clean git worktree",
+    "commit": "7753952",
+    "bench_source": "same runtime_bench.rs copied into the baseline worktree"
+  },
+  "optimized": {
+    "kind": "working tree (dirty)",
+    "commit": null,
+    "diff_sha256": "a13876271f69b8c08c8abcc0efbc4818096f1e169de7af72e611242379af6083"
+  },
+  "toolchain": {
+    "rustc": "1.99.0 (b940084d7 2026-09-28)",
+    "cargo_profile": "bench"
+  },
+  "machine": {
+    "model": "Apple M4 Pro",
+    "logical_cores": 12,
+    "memory": "24GB",
+    "os": "macOS 15.7.7 / Darwin 24.6.0",
+    "arch": "aarch64"
+  },
+  "files": {
+    "baseline.json": "6f0042e341ee18f0d0cf8cb83b1c5d55e7b030f9ffe13b51f2c8687fc4ea3264",
+    "after.json": "59e10ce3f498679b68c2773b5e6174669ea8db849507296bef6cbddc034cc7ec",
+    "baseline-800k.json": "002061b91ce87d1cd1682efdcd764a755eb58ef02286a66ae17ba5d2e2f109c5",
+    "after-800k.json": "3305535e79ba706a83cb130e89f8742fee96e7b6b8f83955c4c0d32d7a712f58"
+  },
+  "limitations": [
+    "n=1 per case; p50/p95 are the same single observation",
+    "mock backend; excludes provider latency",
+    "short, text-only history; request_build_800k is about 800K estimated input tokens, not a 940K window",
+    "RSS peaks include allocator retention and process reuse"
+  ]
+}
