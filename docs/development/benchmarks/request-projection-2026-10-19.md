@@ -4,7 +4,7 @@
 
 ## 目的
 
-验证每个 round 的请求准备从「重复投影/转换/序列化」收敛为一次 `RequestProjection` 后，长工具循环的实际开销变化。只测 mink 自身开销：LLM 流量使用可注入的 mock backend。
+验证每个最终请求的请求准备从「重复投影/转换/序列化」收敛为一次 `RequestProjection` 后，长工具循环的实际开销变化。`tool_loop` 用例不触发压缩，因此每轮构建一次；压缩轮会在提交后重建。只测 mink 自身开销：LLM 流量使用可注入的 mock backend。
 
 ## 源码与工具链
 
@@ -47,7 +47,8 @@ cargo bench -p mink-core --bench runtime_bench -- --case tool_loop_50
 
 ## 解释边界
 
-- 这是短消息、无图片历史；`RequestProjection` 的结构性收益（每 round 从约 8 次消息深拷贝/10 次序列化降到 1 次投影 + 1 次转换 + 2 次序列化）并不能直接按比例映射到墙钟时间。
+- 这是短消息、无图片历史；`RequestProjection` 的结构性收益（每个最终请求从约 8 次 messages 深拷贝/10 次全量序列化降到约 3 次 messages 序列化（估算、body、cache 哈希）+ 2 次 tools 序列化 + 1 次转换）并不能直接按比例映射到墙钟时间。
 - 用例仍包含工具执行、持久化、事件日志和信号处理；请求准备只是总耗时的一部分。
 - 未运行 `request_build_940k`、图片首轮或真实 provider；这些不在此记录中。
 - 基线 bench 源码与重构工作树共用同一份 `runtime_bench.rs`，但 Cargo 构建路径不同；不将绝对数值与其他日期的矩阵混比。
+- 本记录对应重构提交 `89556b6`。后续 cache projection 哈希对齐修复把哈希取值来源从完整请求改为 backend 返回的 provider 可见前缀，并调整了哈希时点；每个最终请求的投影/转换/序列化次数不变，本次 benchmark 未重跑。

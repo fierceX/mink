@@ -95,7 +95,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - 压缩与子代理请求必须使用当前活动真实模型名与别名，并复用 runtime 共享 `LlmBackend`；provider context overflow 只在无可见输出时触发本 round 的收缩恢复：收缩次数不设硬上限（每次必须严格缩小，否则报错或转应急），且 overflow 收缩、其摘要请求与主请求共享同一 round 绝对期限（`request_timeout_secs`），overflow 后重进 stream 不得重置总期限。
 - `max_context_tokens=0` 禁用 auto/preflight 与本地输入预算上限、保留手动压缩；压缩百分比、响应预留、热尾部、摘要输出预算来自显式配置（不推断隐式档位）；有限窗口下只有 `reserve < 窗口` 是硬约束（决定响应预留），摘要输出上限与热尾部是**软目标**：切点按可用空间收紧热尾部，摘要输出 cap 按「输入 + 输出 ≤ 窗口」动态下调（低于最小实用输出转应急），因此不做 S/T 组合硬校验。
 - Agent JSONL `SdkOptions`、Python `SandboxConfig`、Rust `AgentOptions` 覆盖同一组压缩参数并映射到唯一 `Config`；runtime 创建 session 前调用 `validate_runtime_config()`。
-- 每个 round 的请求投影只构建一次（`RequestProjection`：单次图片消费投影、OpenAI 转换、token 估算、消息哈希与 fingerprint）；auto/preflight/overflow、压缩候选验收、发送与缓存记录共享该投影，禁止在 round 内重复全量转换或重复估算。发送 body 对无图片轮复用同一转换结果；有图片轮只 materialize 并二次转换一次。`strip_orphaned_tool_calls` 以 HashSet 线性扫描。
+- 每个**最终请求**的请求投影只构建一次（`RequestProjection`：单次图片消费投影、OpenAI 转换、token 估算与 fingerprint）；压缩提交或活跃历史变化后必须重建（无压缩轮 1 次，压缩轮 2 次以上）。auto/preflight/overflow、压缩候选验收与发送共享该投影，禁止在同一最终请求内重复全量转换或重复估算。发送 body 对无图片轮复用同一转换结果；有图片轮只 materialize 并二次转换一次。cache projection 的消息哈希必须从 backend 返回的 **provider 可见前缀** 计算，不得取完整请求。`strip_orphaned_tool_calls` 以 HashSet 线性扫描。
 
 ### LLM 有界恢复
 

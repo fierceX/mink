@@ -3,12 +3,12 @@ use anyhow::Result;
 use serde_json::Value;
 use std::sync::Arc;
 
-/// One round's immutable request projection.
+/// One final request's immutable projection.
 ///
-/// Built exactly once per round from the active history. Budget checks,
-/// compaction pressure, transport conversion and prompt-usage bookkeeping all
-/// share this value; an attempt only clones `Arc`s and replaces its cancel
-/// token.
+/// Built once for each final request; compaction or an active-history change
+/// invalidates it and forces a rebuild. Budget checks, compaction pressure and
+/// transport conversion share this value; an attempt only clones `Arc`s and
+/// replaces its cancel token.
 pub(crate) struct RequestProjection {
     /// Runtime-shaped messages after the single-consumption image projection
     /// (consumed images are stable text citations).
@@ -24,7 +24,6 @@ pub(crate) struct RequestProjection {
     /// Estimated cost of the same system/tools with an empty message list;
     /// overflow recovery uses it instead of re-estimating the prefix.
     pub(crate) fixed_tokens: usize,
-    pub(crate) message_hashes: Arc<Vec<[u8; 32]>>,
     pub(crate) fingerprint: String,
     pub(crate) has_images: bool,
 }
@@ -56,9 +55,6 @@ impl RequestProjection {
         let estimated_tokens =
             transport::estimate_openai_converted(&openai_projected, &openai_tools, system_prompt)?;
         let fixed_tokens = transport::estimate_openai_converted(&[], &openai_tools, system_prompt)?;
-        let message_hashes = Arc::new(crate::session::compaction::message_hashes(
-            &runtime_projected,
-        ));
         let fingerprint = crate::session::compaction::prefix_fingerprint(system_prompt, tools);
         let has_images = runtime_projected.iter().any(|message| {
             message
@@ -78,7 +74,6 @@ impl RequestProjection {
             system_prompt: Arc::from(system_prompt),
             estimated_tokens,
             fixed_tokens,
-            message_hashes,
             fingerprint,
             has_images,
         })
@@ -110,7 +105,6 @@ mod tests {
             vec![json!({"name":"Read","description":"read","input_schema":{"type":"object"}})];
         let projection = RequestProjection::build(&messages, "system", &tools).unwrap();
         assert!(projection.has_images);
-        assert_eq!(projection.message_hashes.len(), messages.len());
         assert_eq!(
             projection.estimated_tokens,
             crate::llm::transport::estimate_openai_context_tokens(&messages, &tools, "system")

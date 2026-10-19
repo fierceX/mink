@@ -125,6 +125,14 @@ pub trait LlmBackend: Send + Sync {
     /// cleaned up.
     async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream>;
 
+    /// Whether this backend consumes the converted projection through
+    /// [`Self::build_body`]. Backends returning `true` must also override
+    /// [`Self::stream_prepared`]. The default keeps third-party backends on the
+    /// ordinary `stream` path without a redundant conversion.
+    fn supports_prebuilt_body(&self) -> bool {
+        false
+    }
+
     /// Build the provider body once for a round. The runtime passes the
     /// already converted OpenAI projection so an implementation can reuse the
     /// same conversion for estimation and transmission. Returning `None`
@@ -141,13 +149,18 @@ pub trait LlmBackend: Send + Sync {
 
     /// Open one streaming request, optionally with a body built by
     /// [`Self::build_body`]. The default implementation preserves the exact
-    /// `stream` behaviour for third-party backends.
+    /// `stream` behaviour for third-party backends and rejects a body that the
+    /// backend did not declare support for.
     async fn stream_prepared(
         &self,
         request: LlmRequest,
         body: Option<Arc<Vec<u8>>>,
     ) -> Result<LlmResponseStream> {
-        let _ = body;
+        if body.is_some() {
+            anyhow::bail!(
+                "backend returned a prepared body but does not implement stream_prepared; implement both or neither"
+            );
+        }
         self.stream(request).await
     }
 
@@ -396,6 +409,10 @@ impl OpenAiCompatibleBackend {
 impl LlmBackend for OpenAiCompatibleBackend {
     fn name(&self) -> &str {
         "openai-compatible"
+    }
+
+    fn supports_prebuilt_body(&self) -> bool {
+        true
     }
 
     fn image_input_capability(
@@ -742,20 +759,23 @@ impl AsyncLlClient {
     }
 }
 
-/// One round's fixed request projection.
+/// One final request's fixed transport projection.
 ///
-/// Built once per round: every attempt clones the template with a fresh cancel
-/// token, so images/attachments are materialized exactly once and the
-/// immutable prefix never changes across retries.
+/// Built once per final request (rebuilt after compaction/history changes):
+/// every attempt clones the template with a fresh cancel token, so
+/// images/attachments are materialized exactly once and the immutable prefix
+/// never changes across retries.
 pub(crate) struct PreparedLlmRequest {
     request: Arc<LlmRequest>,
     body: Option<Arc<Vec<u8>>>,
     local_tokens: usize,
     cache_projection: Option<LlmCacheProjection>,
+    /// Hashes of `cache_projection.messages`, i.e. the provider-visible prefix
+    /// reported by the backend, never the source request.
+    cache_projection_hashes: Arc<Vec<[u8; 32]>>,
     source_fingerprint: String,
     source_system_prompt: Arc<str>,
     source_tools: Arc<Vec<serde_json::Value>>,
-    message_hashes: Arc<Vec<[u8; 32]>>,
     is_agent_request: bool,
     backend_name: String,
     model_name: String,
@@ -793,7 +813,8 @@ pub(crate) async fn prepare_llm_request(
     };
     let is_agent_request = matches!(purpose, LlmPurpose::Agent);
     let local_tokens = projection.estimated_tokens;
-    let (messages, openai_messages, message_hashes) = if projection.has_images {
+    let wants_prebuilt_body = backend.supports_prebuilt_body();
+    let (messages, openai_messages) = if projection.has_images {
         // Fresh images are the only case that needs a second conversion: the
         // budget projection intentionally kept `tool_attachment` metadata,
         // while the wire body needs resolved data URLs.
@@ -820,14 +841,18 @@ pub(crate) async fn prepare_llm_request(
             Ok::<_, anyhow::Error>(messages)
         })
         .await??;
-        let converted = crate::llm::transport::convert_messages_to_openai(&messages)?;
-        let hashes = Arc::new(crate::session::compaction::message_hashes(&messages));
-        (Arc::new(messages), Arc::new(converted), hashes)
+        let converted = if wants_prebuilt_body {
+            Some(Arc::new(crate::llm::transport::convert_messages_to_openai(
+                &messages,
+            )?))
+        } else {
+            None
+        };
+        (Arc::new(messages), converted)
     } else {
         (
             projection.runtime_projected.clone(),
-            projection.openai_projected.clone(),
-            projection.message_hashes.clone(),
+            Some(projection.openai_projected.clone()),
         )
     };
     let request = Arc::new(LlmRequest {
@@ -844,13 +869,29 @@ pub(crate) async fn prepare_llm_request(
         verbose: ctx.verbose(),
         display: ctx.display.clone(),
     });
-    let body = backend.build_body(&request, &openai_messages, &projection.openai_tools)?;
+    let body = match (wants_prebuilt_body, openai_messages.as_ref()) {
+        (true, Some(openai_messages)) => {
+            backend.build_body(&request, openai_messages, &projection.openai_tools)?
+        }
+        _ => None,
+    };
+    let cache_projection = backend.cache_projection(&request, request.messages.len());
+    let cache_projection_hashes = cache_projection
+        .as_ref()
+        .map(|projection| {
+            let hashes = Arc::new(crate::session::compaction::message_hashes(
+                &projection.messages,
+            ));
+            debug_assert_eq!(hashes.len(), projection.messages.len());
+            hashes
+        })
+        .unwrap_or_else(|| Arc::new(Vec::new()));
     Ok(PreparedLlmRequest {
-        cache_projection: backend.cache_projection(&request, request.messages.len()),
+        cache_projection,
+        cache_projection_hashes,
         source_fingerprint: projection.fingerprint.clone(),
         source_system_prompt: projection.system_prompt.clone(),
         source_tools: projection.runtime_tools.clone(),
-        message_hashes,
         backend_name: backend.name().to_string(),
         model_name: model_name.to_string(),
         local_tokens,
@@ -891,7 +932,7 @@ pub(crate) async fn open_llm_stream(
             prepared.backend_name.clone(),
             prepared.source_system_prompt.clone(),
             prepared.source_tools.clone(),
-            prepared.message_hashes.clone(),
+            prepared.cache_projection_hashes.clone(),
             prepared.cache_projection.clone(),
         );
     }

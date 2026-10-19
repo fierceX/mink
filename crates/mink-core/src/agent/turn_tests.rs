@@ -3193,3 +3193,33 @@ async fn prepare_request_builds_one_projection_without_compaction() -> anyhow::R
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn prepare_request_rebuilds_projection_after_compaction() -> anyhow::Result<()> {
+    let backend = RepeatedCompactionBackend::new(vec![]);
+    let ctx = repeated_compaction_context("projection-rebuild-after-compaction", backend).await?;
+    for index in 0..4 {
+        ctx.store
+            .add_user(&format!("request {index}: {}", "x".repeat(100_000)))
+            .await?;
+        ctx.store.add_assistant("ack", "", &[]).await?;
+    }
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let mut messages = ctx.store.lines().await?;
+    let mut system_prompt = String::new();
+    let mut tools = Vec::new();
+
+    crate::llm::request::reset_build_count();
+    let projection = executor
+        .prepare_request(&mut messages, &mut system_prompt, &mut tools, None)
+        .await?;
+    assert!(
+        crate::llm::request::build_count() >= 2,
+        "a compacting final request must rebuild its projection: {} builds",
+        crate::llm::request::build_count()
+    );
+    assert!(
+        projection.estimated_tokens <= crate::session::compaction::request_input_limit(&ctx.config)
+    );
+    Ok(())
+}

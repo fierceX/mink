@@ -304,6 +304,31 @@ async fn provider_usage_calibrates_auto_but_not_preflight() -> anyhow::Result<()
     Ok(())
 }
 
+#[test]
+fn provider_projection_extends_uses_provider_visible_hashes() {
+    let previous = LlmCacheProjection {
+        model: "flash".into(),
+        system_prompt: arc_str("system"),
+        tools: arc_values(vec![]),
+        messages: arc_values(vec![json!({"role":"user","content":"trimmed"})]),
+    };
+    let snapshot = CacheProjectionSnapshot::from_projection(
+        previous.clone(),
+        Arc::new(message_hashes(&previous.messages)),
+    );
+    let current = LlmCacheProjection {
+        messages: arc_values(vec![
+            json!({"role":"user","content":"trimmed"}),
+            json!({"role":"assistant","content":"extended"}),
+        ]),
+        ..previous
+    };
+    assert!(
+        provider_projection_extends(&snapshot, &current),
+        "hashes from the provider-visible projection must extend into the next one"
+    );
+}
+
 #[tokio::test]
 async fn provider_calibration_requires_actual_projection_compatibility() -> anyhow::Result<()> {
     let ctx = crate::regression::test_context_for_agent_with_config_and_backend(

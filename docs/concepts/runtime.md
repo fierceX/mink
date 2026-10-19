@@ -229,7 +229,7 @@ runtime 在构建阶段创建或接收共享 backend。主代理、子代理和�
 - `messages` / `tools` / `system_prompt`：当前 prefix 和 conversation 状态；三者均为只读 `Arc` 共享，attempt 克隆不复制正文。
 - `cancel` / `display` / `purpose`：取消、状态输出和请求归属。
 
-每个 round 在进入压缩/发送前构建唯一的 `RequestProjection`：已完成图片单次消费投影、一次 OpenAI 转换、一次 token 估算、消息哈希与 fingerprint。auto/preflight/overflow 压力判断、压缩候选验收、发送与缓存记录共享该投影；无图片轮直接复用同一转换结果构建 body，有图片轮只 materialize 并二次转换一次。`LlmBackend` 可选实现 `build_body`/`stream_prepared` 以复用预构建 body；未实现时 `stream_prepared` 默认转调 `stream`，自定义 backend 无需改动。
+每个最终请求在进入压缩/发送前构建唯一的 `RequestProjection`：已完成图片单次消费投影、一次 OpenAI 转换、一次 token 估算与 fingerprint；压缩提交或活跃历史变化后重建。auto/preflight/overflow 压力判断、压缩候选验收与发送共享该投影；无图片轮直接复用同一转换结果构建 body，有图片轮只 materialize 并二次转换一次。cache projection 的消息哈希由 backend 返回的 provider 可见前缀计算。`LlmBackend` 可选声明 `supports_prebuilt_body() -> true`，实现 `build_body`/`stream_prepared` 以复用预构建 body；默认 `supports_prebuilt_body=false`，不调用 `build_body`，`stream_prepared` 在收到 body 时返回明确错误，自定义 backend 无需改动 `stream()`。
 
 自定义 backend 只返回 `LlmEvent` 流。失败时可用 `LlmRequestFailure { attempt_count, error }`
 保留重试次数，`MeteredStream` / `UsageCapture` 仍统一写入 `usage.jsonl`。

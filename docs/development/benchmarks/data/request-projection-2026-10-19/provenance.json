@@ -8,9 +8,10 @@
     "bench_source": "same runtime_bench.rs copied into the baseline worktree"
   },
   "optimized": {
-    "kind": "working tree (dirty)",
-    "commit": null,
-    "diff_sha256": "a13876271f69b8c08c8abcc0efbc4818096f1e169de7af72e611242379af6083"
+    "kind": "commit",
+    "commit": "89556b6",
+    "measured_worktree_diff_sha256": "a13876271f69b8c08c8abcc0efbc4818096f1e169de7af72e611242379af6083",
+    "note": "benchmark ran on the pre-commit working tree; the committed tree matches that refactor"
   },
   "toolchain": {
     "rustc": "1.99.0 (b940084d7 2026-09-28)",

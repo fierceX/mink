@@ -291,6 +291,133 @@ async fn test_context(name: &str, api_url: &str) -> anyhow::Result<Arc<AgentShar
     crate::regression::test_context_for_agent_with_api_url(name, api_url).await
 }
 
+struct TrimmingCacheBackend;
+
+#[async_trait::async_trait]
+impl LlmBackend for TrimmingCacheBackend {
+    fn name(&self) -> &str {
+        "trimming-cache"
+    }
+
+    fn cache_projection(
+        &self,
+        request: &LlmRequest,
+        source_prefix_len: usize,
+    ) -> Option<LlmCacheProjection> {
+        let len = source_prefix_len.saturating_sub(1);
+        Some(LlmCacheProjection {
+            model: request.model.clone(),
+            system_prompt: request.system_prompt.clone(),
+            tools: request.tools.clone(),
+            messages: Arc::new(request.messages[..len].to_vec()),
+        })
+    }
+
+    async fn stream(&self, _request: LlmRequest) -> Result<LlmResponseStream> {
+        Ok(LlmResponseStream {
+            events: Box::pin(futures::stream::iter(vec![Ok(Event::Stop(LlmStopEvent {
+                reason: "end_turn".into(),
+            }))])),
+            attempt_count: 1,
+        })
+    }
+}
+
+#[tokio::test]
+async fn cache_projection_hashes_follow_provider_visible_prefix() -> anyhow::Result<()> {
+    let ctx = test_context("cache-projection-hashes", "https://example.invalid/v1").await?;
+    let messages = vec![
+        json!({"role":"user","content":"first"}),
+        json!({"role":"assistant","content":"answer"}),
+        json!({"role":"user","content":"second"}),
+    ];
+    let projection = crate::llm::request::RequestProjection::build(&messages, "system", &[])?;
+    let backend: Arc<dyn LlmBackend> = Arc::new(TrimmingCacheBackend);
+    let prepared = prepare_llm_request(&backend, &ctx, "test-model", None, &projection).await?;
+    let cached = prepared
+        .cache_projection
+        .as_ref()
+        .expect("cache projection");
+    assert_eq!(cached.messages.len(), messages.len() - 1);
+    assert_eq!(
+        prepared.cache_projection_hashes.len(),
+        cached.messages.len(),
+        "hashes must be taken from the provider-visible cache projection"
+    );
+    assert_eq!(
+        *prepared.cache_projection_hashes,
+        crate::session::compaction::message_hashes(&cached.messages)
+    );
+    Ok(())
+}
+
+struct PrebuiltBodyBackend;
+
+#[async_trait::async_trait]
+impl LlmBackend for PrebuiltBodyBackend {
+    fn name(&self) -> &str {
+        "prebuilt-body"
+    }
+
+    fn supports_prebuilt_body(&self) -> bool {
+        true
+    }
+
+    fn build_body(
+        &self,
+        _request: &LlmRequest,
+        _openai_messages: &[serde_json::Value],
+        _openai_tools: &[serde_json::Value],
+    ) -> Result<Option<Arc<Vec<u8>>>> {
+        Ok(Some(Arc::new(b"prebuilt".to_vec())))
+    }
+
+    async fn stream(&self, _request: LlmRequest) -> Result<LlmResponseStream> {
+        Ok(LlmResponseStream {
+            events: Box::pin(futures::stream::iter(vec![Ok(Event::Stop(LlmStopEvent {
+                reason: "end_turn".into(),
+            }))])),
+            attempt_count: 1,
+        })
+    }
+
+    async fn stream_prepared(
+        &self,
+        request: LlmRequest,
+        body: Option<Arc<Vec<u8>>>,
+    ) -> Result<LlmResponseStream> {
+        anyhow::ensure!(body.is_some(), "prepared body missing");
+        self.stream(request).await
+    }
+}
+
+#[tokio::test]
+async fn prebuilt_body_requires_matching_stream_prepared() -> anyhow::Result<()> {
+    let ctx = test_context("prebuilt-body-contract", "https://example.invalid/v1").await?;
+    let projection = crate::llm::request::RequestProjection::build(&[], "system", &[])?;
+    let backend: Arc<dyn LlmBackend> = Arc::new(PrebuiltBodyBackend);
+    let prepared = prepare_llm_request(&backend, &ctx, "test-model", None, &projection).await?;
+    assert!(prepared.body.is_some());
+
+    let default_backend: Arc<dyn LlmBackend> = Arc::new(TrimmingCacheBackend);
+    let error = match default_backend
+        .stream_prepared(
+            prepared.request_for(ctx.cancel.clone()),
+            Some(Arc::new(Vec::new())),
+        )
+        .await
+    {
+        Ok(_) => panic!("a body without stream_prepared must fail"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("does not implement stream_prepared")
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn request_clone_shares_payload_allocation() -> anyhow::Result<()> {
     let ctx = test_context("request-clone", "https://example.invalid/v1").await?;
@@ -307,22 +434,46 @@ async fn prepared_body_matches_the_ordinary_build() -> anyhow::Result<()> {
     let ctx = test_context("prepared-body", "https://example.invalid/v1").await?;
     let request = timeout_test_request(&ctx, "https://example.invalid/v1".into());
     let backend = OpenAiCompatibleBackend::deepseek_defaults();
-    let converted = crate::llm::transport::convert_messages_to_openai(&request.messages)?;
-    let tools = crate::llm::transport::convert_tools_to_openai(&request.tools);
-    let prepared = backend
-        .build_body(&request, &converted, &tools)?
-        .expect("built-in backend must build a body");
-    let ordinary = crate::llm::transport::build_openai_body_with_options_and_extensions(
-        &request.model,
+    let projection = crate::llm::request::RequestProjection::build(
         &request.messages,
-        &request.tools,
         &request.system_prompt,
-        request.max_tokens,
-        &OpenAiCompatibleOptions::default(),
-        None,
-        &Default::default(),
+        &request.tools,
     )?;
-    assert_eq!(&*prepared, &ordinary);
+    let dyn_backend: Arc<dyn LlmBackend> = Arc::new(OpenAiCompatibleBackend::deepseek_defaults());
+    let prepared = prepare_llm_request(&dyn_backend, &ctx, "test-model", None, &projection).await?;
+    assert!(
+        prepared.body.is_some(),
+        "the built-in backend must opt into the prebuilt body path"
+    );
+    for messages in [
+        (*request.messages).clone(),
+        vec![json!({"role":"user","content":[
+            {"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}
+        ]})],
+    ] {
+        let mut request = request.clone();
+        request.messages = Arc::new(messages);
+        let converted = crate::llm::transport::convert_messages_to_openai(&request.messages)?;
+        let tools = crate::llm::transport::convert_tools_to_openai(&request.tools);
+        let prepared = backend
+            .build_body(&request, &converted, &tools)?
+            .expect("built-in backend must build a body");
+        let ordinary = crate::llm::transport::build_openai_body_with_options_and_extensions(
+            &request.model,
+            &request.messages,
+            &request.tools,
+            &request.system_prompt,
+            request.max_tokens,
+            &OpenAiCompatibleOptions::default(),
+            None,
+            &Default::default(),
+        )?;
+        assert_eq!(&*prepared, &ordinary);
+        assert!(
+            !serde_json::to_string(&*request.messages)?.contains("image_url")
+                || String::from_utf8_lossy(&prepared).contains("data:image/png;base64,AAAA")
+        );
+    }
     Ok(())
 }
 

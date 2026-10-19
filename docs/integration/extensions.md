@@ -79,8 +79,8 @@ let runtime = AgentRuntime::start(
   （优先级高于 backend 声明）
 - 缓存投影（可选）：实现 `cache_projection(request, source_prefix_len)` 可让压缩摘要
   复用上一 Agent 请求的 system/tools 与历史公共缓存前缀（返回 provider 可见的整条前缀
-  或其指定长度切片）；不实现时返回默认 `None`，摘要自动降级为全量输入，功能不受影响。返回的 `LlmCacheProjection` 同样用 `Arc` 共享大字段
-- 预构建 body（可选）：实现 `build_body(request, openai_messages, openai_tools)` 返回 `Some(Arc<Vec<u8>>)`，并覆写 `stream_prepared(request, body)` 直接发送该 body；runtime 每 round 只构建一次。默认 `build_body` 返回 `None`、`stream_prepared` 转调 `stream`，现有 backend 无需改动
+  或其指定长度切片）；不实现时返回默认 `None`，摘要自动降级为全量输入，功能不受影响。返回的 `LlmCacheProjection` 同样用 `Arc` 共享大字段；runtime 的缓存对齐哈希取自 `cache_projection.messages`，不是完整 source request
+- 预构建 body（可选）：先声明 `supports_prebuilt_body() -> true`，再实现 `build_body(request, openai_messages, openai_tools)` 返回 `Some(Arc<Vec<u8>>)` 并覆写 `stream_prepared(request, body)` 直接发送该 body；runtime 只为声明支持的 backend 调用 `build_body`。默认 `supports_prebuilt_body=false`、不调用 `build_body`，`stream_prepared` 若收到 body 会返回明确错误（实现 `build_body` 必须同时声明支持并覆写 `stream_prepared`）
 - 校准门控：若 backend 会动态改写请求（如注入/删减消息或改变工具面），声明
   `prompt_usage_calibration_safe() -> false` 可关闭 auto 压缩的 provider usage 校准，
   回退到保守本地估算（默认 `true`，仅对 provider 可见内容与本地请求一致时适用）
