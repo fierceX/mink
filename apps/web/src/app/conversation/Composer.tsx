@@ -85,6 +85,10 @@ export interface ComposerProps {
   onGuide: (text: string, turnId: string, attachmentIds: readonly string[]) => Promise<string | undefined>
   /** Run one slash command; resolves to its message and whether it succeeded. */
   onCommand: (text: string) => Promise<{ message: string; ok: boolean }>
+  /** Slash commands need a session; the new-conversation composer hides them. */
+  commandsEnabled?: boolean | undefined
+  /** The model seat belongs to a session's runtime. */
+  showModelSeat?: boolean | undefined
   onStop: () => void
 }
 
@@ -96,6 +100,7 @@ export interface ComposerProps {
 export function Composer({
   hero, running, targetTurnId, disabled, pending, attachments, canAttach, model,
   modelChoices, modelLoading, modelError, onModelChange, initialDraft, onDraftChange, onSend, onGuide, onCommand, onStop,
+  commandsEnabled = true, showModelSeat = true,
 }: ComposerProps) {
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   // The owner keys this composer by session identity, so the initial draft is
@@ -125,7 +130,7 @@ export function Composer({
   })
   const panelOpen = useCommandPopupOpen(commandPopup.controller)
   const dragging = useDocumentDrop(canAttach && disabled ? false : canAttach, attachments.add)
-  const commandMode = inCommandMode(text)
+  const commandMode = commandsEnabled && inCommandMode(text)
   // One copied surface serves both entries: the add control opens the whole
   // contract, `/` opens it carrying the draft's query. While it is open its own
   // search box holds focus, so the composer stops feeding it.
@@ -162,7 +167,7 @@ export function Composer({
     }
     const payload = text.trim()
     const ids = attachments.ids
-    if ((payload === '' && ids.length === 0) || disabled || busy || attachments.blocked) return
+    if ((payload === '' && attachments.entries.length === 0) || disabled || busy || attachments.blocked) return
     if (running && targetTurnId === null) {
       setError('当前会话尚未取得引导能力，请等待同步')
       return
@@ -214,10 +219,12 @@ export function Composer({
       )}
       <div className={css.card} data-mink-composer data-composer-card>
         {/* The copied shell renders its own card above the composer while open. */}
-        <PopupSelectView
-          popup={commandPopup.controller}
-          t={(key, params) => commandText(COMMAND_LOCALE, key, params)}
-        />
+        {commandsEnabled && (
+          <PopupSelectView
+            popup={commandPopup.controller}
+            t={(key, params) => commandText(COMMAND_LOCALE, key, params)}
+          />
+        )}
         <ComposerAttachments entries={attachments.entries} onRemove={attachments.remove} />
         {/* One scrollport caps the draft at the seat's 14 lines (the copied
             sheet's own number); the textarea grows inside it. */}
@@ -307,17 +314,22 @@ export function Composer({
                 event.target.value = ''
               }}
             />
-            {/* The source's round add control opens the command shell. */}
-            <Tooltip label="命令" side="top" delayMs={400}>
+            {/* The source's round add control opens the command shell; before a
+                session exists it is just the attachment picker. */}
+            <Tooltip label={commandsEnabled ? '命令' : '添加图片'} side="top" delayMs={400}>
               <button
                 type="button"
                 className={css.add}
-                aria-label="命令"
-                aria-haspopup="listbox"
-                aria-expanded={panelOpen}
-                disabled={disabled}
+                aria-label={commandsEnabled ? '命令' : '添加图片'}
+                aria-haspopup={commandsEnabled ? 'listbox' : undefined}
+                aria-expanded={commandsEnabled ? panelOpen : undefined}
+                disabled={disabled || (!commandsEnabled && !canAttach)}
                 onMouseDown={(event) => { event.preventDefault() }}
                 onClick={() => {
+                  if (!commandsEnabled) {
+                    picker.current?.click()
+                    return
+                  }
                   if (panelOpen) commandPopup.close()
                   else commandPopup.openAll()
                 }}
@@ -328,50 +340,52 @@ export function Composer({
           </div>
           <div className={panelOpen ? css.trailingActive : css.trailing}>
             <span className={css.standardControls} hidden={panelOpen}>
-              <Menu
-                open={modelMenuOpen}
-                align="end"
-                side="top"
-                onClose={() => { setModelMenuOpen(false) }}
-                anchor={(
-                  <button
-                    type="button"
-                    className={css.select}
-                    aria-label={`当前模型 ${model === '' ? '未记录' : model}`}
-                    aria-haspopup="menu"
-                    aria-expanded={modelMenuOpen}
-                    // An open session can always ask for a model: an empty list means
-                    // the read has not answered yet, not that choosing is impossible.
-                    disabled={disabled}
-                    onClick={() => { setModelMenuOpen(value => !value) }}
-                  >
-                    {model === '' ? '模型未记录' : model}
-                  </button>
-                )}
-              >
-                <div className={modelCss.list} role="group" aria-label="切换模型">
-                  {modelLoading === true && (modelChoices ?? []).length === 0 && (
-                    <span className={modelCss.status}>正在读取模型…</span>
-                  )}
-                  {modelLoading !== true && (modelChoices ?? []).length === 0 && (
-                    <span className={modelCss.status} data-model-unavailable>
-                      {modelError === undefined ? '此会话没有可切换的模型' : `读取模型失败：${modelError}`}
-                    </span>
-                  )}
-                  {(modelChoices ?? []).map(choice => (
-                    <MenuItemButton
-                      key={choice.alias}
-                      onSelect={() => {
-                        setModelMenuOpen(false)
-                        onModelChange?.(choice.alias)
-                      }}
+              {showModelSeat && (
+                <Menu
+                  open={modelMenuOpen}
+                  align="end"
+                  side="top"
+                  onClose={() => { setModelMenuOpen(false) }}
+                  anchor={(
+                    <button
+                      type="button"
+                      className={css.select}
+                      aria-label={`当前模型 ${model === '' ? '未记录' : model}`}
+                      aria-haspopup="menu"
+                      aria-expanded={modelMenuOpen}
+                      // An open session can always ask for a model: an empty list means
+                      // the read has not answered yet, not that choosing is impossible.
+                      disabled={disabled}
+                      onClick={() => { setModelMenuOpen(value => !value) }}
                     >
-                      <span className={modelCss.alias}>{choice.alias}</span>
-                      <span className={modelCss.target}>{choice.model}</span>
-                    </MenuItemButton>
-                  ))}
-                </div>
-              </Menu>
+                      {model === '' ? '模型未记录' : model}
+                    </button>
+                  )}
+                >
+                  <div className={modelCss.list} role="group" aria-label="切换模型">
+                    {modelLoading === true && (modelChoices ?? []).length === 0 && (
+                      <span className={modelCss.status}>正在读取模型…</span>
+                    )}
+                    {modelLoading !== true && (modelChoices ?? []).length === 0 && (
+                      <span className={modelCss.status} data-model-unavailable>
+                        {modelError === undefined ? '此会话没有可切换的模型' : `读取模型失败：${modelError}`}
+                      </span>
+                    )}
+                    {(modelChoices ?? []).map(choice => (
+                      <MenuItemButton
+                        key={choice.alias}
+                        onSelect={() => {
+                          setModelMenuOpen(false)
+                          onModelChange?.(choice.alias)
+                        }}
+                      >
+                        <span className={modelCss.alias}>{choice.alias}</span>
+                        <span className={modelCss.target}>{choice.model}</span>
+                      </MenuItemButton>
+                    ))}
+                  </div>
+                </Menu>
+              )}
             </span>
             {/* The composer's own line answers for the states the card cannot show
                 (an unavailable session, an upload in flight); a refused submission

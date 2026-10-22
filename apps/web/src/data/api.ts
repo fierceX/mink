@@ -25,6 +25,8 @@ export interface SessionSummary {
   title: string | null
   /** First human input, used as the row label when the session has no title. */
   first_prompt?: string | null
+  /** Created without a title; the row reads as a new conversation. */
+  untitled?: boolean
   cwd: string
   created_at: string
   updated_at: string
@@ -85,11 +87,28 @@ export const api = {
   version: () => request<{ bundle: string }>('/api/version'),
   listSessions: () => request<SessionSummary[]>('/api/sessions'),
   /** Create a session in one working directory; the server names it when none is given. */
-  createSession: (cwd: string, name?: string) =>
+  createSession: (input: {
+    cwd: string
+    /** Stable client identity for the first-send creation; retries resolve it. */
+    draftId?: string
+    /** The first human input, which becomes the session's display title. */
+    firstPrompt?: string
+    name?: string
+  }) =>
     request<SessionSummary>('/api/sessions', {
       method: 'POST',
-      body: JSON.stringify(name === undefined ? { cwd } : { cwd, name }),
+      body: JSON.stringify({
+        cwd: input.cwd,
+        ...(input.draftId === undefined ? {} : { draft_id: input.draftId }),
+        ...(input.firstPrompt === undefined ? {} : { first_prompt: input.firstPrompt }),
+        ...(input.name === undefined ? {} : { name: input.name }),
+      }),
     }),
+  /** Validate a working directory without creating a session or project. */
+  workspace: (path: string) =>
+    request<{ cwd: string; project_key: string; name: string }>(
+      `/api/workspace?path=${encodeURIComponent(path)}`,
+    ),
   getSession: (id: string, project?: string, signal?: AbortSignal) =>
     request<SessionLiveState>(sessionUrl(id, '', project), signal === undefined ? {} : { signal }),
   openSession: (id: string, project?: string) =>
@@ -192,9 +211,9 @@ export const api = {
   todo: (id: string, project?: string) =>
     request<{ todos: TodoSnapshot }>(sessionUrl(id, '/todo', project)),
   /** Current goal, preferring the live runtime over the persisted file. */
-  goal: (id: string, project?: string) =>
+  goal: (id: string, project?: string, full = false) =>
     request<{ goal: GoalSnapshot | null; driven: boolean; verifier?: boolean }>(
-      sessionUrl(id, '/goal', project),
+      `${sessionUrl(id, '/goal', project)}${project === undefined ? '?' : '&'}full=${full ? 'true' : 'false'}`,
     ),
   /**
    * Confirm or refine a draft, or pause, resume, cancel, clear, re-budget,

@@ -1,4 +1,5 @@
 import { devices, expect, test, type Page } from '@playwright/test'
+import { mkdirSync } from 'node:fs'
 import { E2E_LONG_ID, E2E_SESSION_ID } from './global-setup.ts'
 
 // Live lane: the workbench served by the isolated mink-server (fixture home +
@@ -28,6 +29,47 @@ async function fixtureCwd(page: Page): Promise<string> {
   expect(fixture).toBeDefined()
   return fixture!.cwd
 }
+
+test('centers the composing hero in the conversation column', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: /^在 .* 新建任务$/ }).click()
+  await expect(page.locator('[data-new-conversation]')).toBeVisible()
+  const geometry = await page.evaluate(() => {
+    const root = document.querySelector('[data-new-conversation]')?.getBoundingClientRect()
+    const stack = document.querySelector('[data-new-conversation] [class*="stack"]')?.getBoundingClientRect()
+    const card = document.querySelector('[data-new-conversation] [data-composer-card]')?.getBoundingClientRect()
+    return { root, stack, card }
+  })
+  expect(geometry.root).toBeDefined()
+  expect(geometry.stack).toBeDefined()
+  expect(geometry.card).toBeDefined()
+  const root = geometry.root!
+  const stack = geometry.stack!
+  const card = geometry.card!
+  // The hero inherits the conversation root's width axis and centers in the
+  // whole middle column, instead of shrink-wrapping at its left edge.
+  expect(Math.abs((stack.left + stack.width / 2) - (root.left + root.width / 2))).toBeLessThanOrEqual(3)
+  expect(card.width).toBeGreaterThan(600)
+  expect(card.left).toBeGreaterThan(root.left + 120)
+  await page.screenshot({ path: 'test-results/live-new-conversation-centered.png' })
+})
+
+test('creates the session only when the first message is sent', async ({ page }) => {
+  await page.goto('/')
+  // An existing project is enough: no directory dialog, no name field.
+  await page.getByRole('button', { name: /^在 .* 新建任务$/ }).click()
+  await expect(page.locator('[data-new-conversation]')).toBeVisible()
+  expect(new URL(page.url()).searchParams.has('session')).toBe(false)
+
+  await page.getByLabel('输入消息').fill('please answer with the fixture response')
+  await page.getByRole('button', { name: '发送' }).click()
+
+  // The first send creates the session, admits the turn, and the live snapshot
+  // replaces the composing view with the real conversation.
+  await expect(page.getByText(/Completed: fixture response/)).toBeVisible()
+  await expect(page).toHaveURL(/[?&]session=/)
+  await expect(page.locator('[data-new-conversation]')).toHaveCount(0)
+})
 
 test('renders the fixture history and streams a fresh turn', async ({ page }) => {
   await openFixture(page)
@@ -303,12 +345,26 @@ test('jumps between loaded turns from the turn navigator', async ({ page }) => {
   await expect(latest).toHaveCount(0)
 })
 
+test('a desktop click on the transcript keeps the composer visible', async ({ page }) => {
+  await openFixture(page)
+  // Reading chrome is a narrow-layout affordance. A click in a desktop
+  // transcript used to mount the same hide gesture and take the input card away.
+  await page.locator('[class*="flowItem"]').first().click()
+  await expect(page.getByLabel('输入消息')).toBeVisible()
+  await expect(page.locator('header').first()).toBeVisible()
+  await expect(page.locator('[data-mink-composer-seat]')).toBeVisible()
+})
+
 test('steps the mobile chrome aside for reading and brings it back', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   // The session identity travels in the URL, so a phone lands in the same
   // conversation after a reload instead of the drawer dance.
   await page.goto(`/?session=${E2E_LONG_ID}`)
   await expect(page.locator('[class*="bubble"]').first()).toBeVisible()
+  // The capped snapshot opens with only the newest turns; page one history batch
+  // back so the phone viewport actually has something to scroll.
+  const older = page.getByRole('button', { name: '加载更早的轮次' })
+  if (await older.count() > 0) await older.click()
   const header = page.locator('header').first()
   await expect(header).toBeVisible()
 
@@ -514,6 +570,8 @@ test('keeps a reader inside the history where they were', async ({ browser }) =>
   const phone = await context.newPage()
   await phone.goto(`/?session=${E2E_LONG_ID}`)
   await expect(phone.locator('[class*="flowItem"]').first()).toBeVisible()
+  const older = phone.getByRole('button', { name: '加载更早的轮次' })
+  if (await older.count() > 0) await older.click()
   await phone.locator('[data-conversation-scroll]').first().hover()
   const read = (): Promise<{ gap: number; offset: number; first: string | null; collapsed: boolean }> => phone.evaluate(() => {
     const node = document.querySelector('[data-conversation-scroll]')
@@ -920,10 +978,10 @@ test('reconnects the live stream after a network drop', async ({ page }) => {
   })
   await page.goto('/')
   await page.locator(`[data-row-key="session:${E2E_SESSION_ID}"]`).click()
-  const banner = page.getByText('连接已中断，正在重连…')
-  await expect(banner).toBeVisible({ timeout: 10_000 })
+  const reconnect = page.getByRole('button', { name: '重新连接会话' })
+  await expect(reconnect).toBeVisible({ timeout: 10_000 })
 
-  await expect(banner).toHaveCount(0, { timeout: 30_000 })
+  await expect(reconnect).toHaveCount(0, { timeout: 30_000 })
   await expect(page.getByText('fixture question one')).toBeVisible()
 })
 
@@ -945,13 +1003,13 @@ test('recovers a running turn after a real offline/online cycle', async ({ page,
   await expect(page.getByRole('button', { name: '停止' })).toBeVisible()
 
   await context.setOffline(true)
-  const banner = page.getByText('连接已中断，正在重连…')
-  await expect(banner).toBeVisible({ timeout: 10_000 })
+  const reconnect = page.getByRole('button', { name: '重新连接会话' })
+  await expect(reconnect).toBeVisible({ timeout: 10_000 })
 
   await context.setOffline(false)
   // Reconnect + authoritative snapshot clear the gap; the live Final still
   // lands and the composer returns to sending.
-  await expect(banner).toHaveCount(0, { timeout: 30_000 })
+  await expect(reconnect).toHaveCount(0, { timeout: 30_000 })
   await expect(page.getByText(/Completed: fixture response/).first()).toBeVisible({ timeout: 30_000 })
   await expect(page.getByRole('button', { name: '发送' })).toBeVisible({ timeout: 30_000 })
 })
@@ -1037,27 +1095,31 @@ test('collapses the sidebar to a rail when the reader asks it to', async ({ page
   await page.screenshot({ path: 'test-results/live-rail.png' })
 })
 
-test('creates a session in a working directory typed in the new-task dialog', async ({ page }) => {
-  // The audit's W8: the server can create a session in any directory it reaches,
-  // and the browser must be able to name one the catalog has never seen — the
-  // first session of a fresh install is created from here.
+test('opens a new project with only a directory and creates its first conversation on send', async ({ page }) => {
   await page.goto('/')
-  const directory = `/tmp/mink-web-e2e-new-${Date.now()}`
-  await page.getByRole('button', { name: '新建任务', exact: true }).first().click()
-  const dialog = page.getByRole('dialog', { name: '新建任务' })
+  const directory = `/tmp/mink-web-e2e-project-${Date.now()}`
+  mkdirSync(directory, { recursive: true })
+  await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
+  const dialog = page.getByRole('dialog', { name: '新建项目' })
   await expect(dialog).toBeVisible()
+  // A project is a directory; it has no separate name field.
+  await expect(dialog.getByLabel('任务名称')).toHaveCount(0)
   await dialog.getByLabel('工作目录').fill(directory)
-  await dialog.getByLabel('任务名称').fill('typed directory task')
-  await page.screenshot({ path: 'test-results/live-new-session.png' })
-  await dialog.getByRole('button', { name: '创建' }).click()
+  await page.screenshot({ path: 'test-results/live-new-project.png' })
+  await dialog.getByRole('button', { name: '打开目录' }).click()
   await expect(dialog).toHaveCount(0)
 
-  // The created session opens straight away: the composer is live, and the
-  // catalog now carries the directory that was just typed.
-  await expect(page.getByLabel('输入消息')).toBeEnabled()
+  // The composer is browser-only until its first send: no session URL yet.
+  await expect(page.locator('[data-new-conversation]')).toBeVisible()
+  expect(new URL(page.url()).searchParams.has('session')).toBe(false)
+  await page.getByLabel('输入消息').fill('please answer with the fixture response')
+  await page.getByRole('button', { name: '发送' }).click()
+  await expect(page.getByText(/Completed: fixture response/)).toBeVisible()
   await expect(page).toHaveURL(/[?&]session=/)
-  await expect(page.locator('[data-row-key^="session:"]').filter({ hasText: 'typed directory task' })).toBeVisible()
-  await expect(page.getByRole('treeitem', { name: new RegExp(directory.slice(directory.lastIndexOf('/') + 1)) })).toBeVisible()
+
+  // The project appears once its first session exists.
+  const projectName = directory.slice(directory.lastIndexOf('/') + 1)
+  await expect(page.getByRole('treeitem', { name: new RegExp(projectName) })).toBeVisible()
 })
 
 
@@ -1066,6 +1128,7 @@ test('retries a failed goal with explicit budget adjustment and preserves its hi
   const created = await page.request.post('/api/sessions', { data: { name: 'retry-execution', cwd: await fixtureCwd(page) } })
   const body = await created.json() as { data: { id: string; project_key: string } }
   const goalUrl = `/api/sessions/${body.data.id}/goal?project=${body.data.project_key}`
+  const fullGoalUrl = `${goalUrl}&full=true`
   await page.goto(`/?session=${body.data.id}&project=${body.data.project_key}`)
   await expect(page.getByLabel('输入消息')).toBeEnabled()
   const drafted = await page.request.post(goalUrl, { data: {
@@ -1077,7 +1140,7 @@ test('retries a failed goal with explicit budget adjustment and preserves its hi
   await panel.getByRole('tab', { name: '目标' }).click()
   await panel.getByRole('button', { name: '确认并启动' }).click()
   await expect(page.locator('[data-goal-bar]')).toHaveAttribute('data-goal-status', 'failed')
-  const before = await (await page.request.get(goalUrl)).json()
+  const before = await (await page.request.get(fullGoalUrl)).json()
   const original = before.data.goal
   // Exhaust both gates without changing the contract or erasing the failed turn.
   const expired = await page.request.post(`/api/sessions/${body.data.id}/goal/budget?project=${body.data.project_key}`, {
@@ -1096,7 +1159,7 @@ test('retries a failed goal with explicit budget adjustment and preserves its hi
   await expect(page.locator('[data-goal-bar]')).toHaveAttribute('data-goal-status', 'failed')
   await panel.getByRole('button', { name: '重试目标' }).click()
   await expect(page.locator('[data-goal-bar]')).toHaveAttribute('data-goal-status', 'completed')
-  const after = await (await page.request.get(goalUrl)).json()
+  const after = await (await page.request.get(fullGoalUrl)).json()
   expect(after.data.goal.id).toBe(original.id)
   expect(after.data.goal.contract_revision).toBe(original.contract_revision)
   expect(after.data.goal.iterations).toHaveLength(2)
@@ -1121,7 +1184,7 @@ test('records lightweight goal continuation without full evidence review', async
   await expect(page.locator('[data-goal-bar]')).toHaveAttribute('data-goal-status', 'budget_exhausted')
   await expect(panel.getByRole('region', { name: '轻量分流' })).toContainText('剩余要求：criterion-1')
   await expect(panel.getByText(/本轮未进行完整证据验收/)).toBeVisible()
-  const response = await page.request.get(goalUrl)
+  const response = await page.request.get(`${goalUrl}&full=true`)
   const snapshot = await response.json() as { data: { goal: { reviews: unknown[]; continuations: unknown[]; iterations: unknown[]; completion_basis: unknown } } }
   expect(snapshot.data.goal.reviews).toHaveLength(0)
   expect(snapshot.data.goal.continuations).toHaveLength(1)

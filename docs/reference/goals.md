@@ -14,7 +14,7 @@ Goal 是 Session 内版本化、有边界的跨 turn 目标：目标形成、执
 
 `confirm_goal(id, revision)` 是宿主 compare-and-set 操作，不向模型暴露。它核对草案、执行权、配置与预算后发布 active；启用驱动时启动唯一 run。默认 20 个执行 turn、60 分钟从确认时开始；草案讨论不消耗执行轮次，模型调用正常进入会话账单。已确认契约不能由执行模型修改，变更范围需取消并重新形成契约。`cancel_goal_draft` 取消待确认草案并中断在途讨论。
 
-状态为 draft/active/paused/blocked/budget_exhausted/completed/cancelled/failed；阶段另存 idle/executing/verifying。completed/cancelled/failed 为终态，一个 Session 最多一个未结束目标。暂停不重置截止时间；调整预算不自动恢复。草案不能通过 pause/resume 绕过确认。
+状态为 draft/active/paused/blocked/budget_exhausted/completed/cancelled/failed；阶段另存 idle/executing/verifying。completed/cancelled/failed 为终态，一个 Session 最多一个未结束目标。暂停不重置截止时间；调整预算不自动恢复。草案不能通过 pause/resume 绕过确认。取消/完成（以及人工验收之外的终态展示）载入时把遗留的 verifying 归一为 idle；paused/blocked/budget_exhausted/failed 的 verifying 保留，供 resume 重试原审核而不是新开执行轮。普通用户 turn 的压缩不得因无关 Goal 的 review 期限而失败；审核压缩只在 review 会话内检查该预算，宿主 adjudication 在自身批次前后核对。
 
 执行失败与 finished/billing/usage 同次原子发布为 failed，表示本 run 已结束，不自动重试，也不进入完成审核。宿主显式 `resume_goal` 可重试同一目标；无需识别错误字符串或区分历史失败版本。原有 iteration、用量、失败/阻断记录、契约身份和已提交工具交换完整保留，不重放已提交调用，不重置已用轮次或原期限。单个请求的自动重试与格式恢复上限保持不变，显式重试是宿主发起的新 run。
 
@@ -81,6 +81,6 @@ Rust：draft_goal、request_goal_draft、goal_draft_snapshot、generate_goal_dra
 
 Web：GET `/api/sessions/{id}/goal` 优先读活运行时快照，关闭时回退落盘 current；hidden 归一为 null。POST 同路径要求 `protocol_version:2`，objective、acceptance（agent_reviewed/human/verifier）、max_turns、max_minutes、acceptance_criteria、constraints；默认形成模型草案，宿主准备结构化 `draft_spec` 时可设 `generate:false`。成功返回 draft，尚未启动执行。
 
-POST `.../goal/{action}` 必须携带 goal_id/revision；新增 confirm、refine（feedback），保留 pause/resume/cancel/clear/budget/approve/reconcile。确认预约容量并由 core 激活；refine 的模型讨论也占同一宿主容量。SSE goal_updated 与镜像水位保持同一发布边界；已清除（hidden）的目标在事件、镜像与快照中同样归一为 null，草案和审核详情只呈现 core 快照。
+POST `.../goal/{action}` 必须携带 goal_id/revision；新增 confirm、refine（feedback），保留 pause/resume/cancel/clear/budget/approve/reconcile。确认预约容量并由 core 激活；refine 的模型讨论也占同一宿主容量。SSE goal_updated 与镜像水位保持同一发布边界；事件、快照与动作响应只携带状态/额度/最新审核摘要，完整契约用 `GET .../goal?full=true` 按需读取。已清除（hidden）的目标在事件、镜像与快照中同样归一为 null，草案和审核详情只呈现 core 快照。
 
 CLI/TUI：`/goal <请求>`、`/goal refine <意见>`、`/goal confirm <ID> <REVISION>`；/goals 与可点击状态标记显示只读详情；`/goal` help 与解析分支列出同一组子命令（含 reconcile），`/goal confrim`、`/goal refne` 等误拼在三个解析器一致拒绝并给出建议。草案讨论通过类型化内部消息持久化，携带原始请求与修改意见，不注册为人类 Inbox 请求。Web 显示待确认草案卡片，控制指令只进入模型上下文。界面区分执行轮 Final 与 GoalFinished，呈现待确认、执行中、审核中、待人工验收及逐项审核证据；子目标进度仅由同一契约版本的最新审核派生；当前候选存在时必须匹配该候选。Python SDK 没有 Goal 产品入口。

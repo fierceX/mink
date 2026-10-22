@@ -105,6 +105,7 @@ createRoot(el).render(
         now={Date.now()}
         onToggle={noop}
         onNewSession={noop}
+        onAddProject={noop}
         onOpenSettings={noop}
         onOpenSession={noop}
         onCreateIn={noop}

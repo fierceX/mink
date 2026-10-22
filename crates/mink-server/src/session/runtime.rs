@@ -1,5 +1,7 @@
 use anyhow::{Result, anyhow};
-use mink::runtime::{AgentEvent, AgentEventStream, AgentOptions, AgentRuntime, SessionInfo};
+use mink::runtime::{
+    AgentEvent, AgentEventStream, AgentOptions, AgentRuntime, GoalSnapshot, SessionInfo,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
@@ -8,6 +10,11 @@ use tokio::task::JoinHandle;
 
 const TURN_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 const TURN_JOIN_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+/// Snapshot tail policy: at most this many recent user turns, and a soft byte
+/// ceiling that drops older whole turns first. The newest turn is always kept
+/// even when it alone exceeds the ceiling, so a tool exchange is never split.
+const SNAPSHOT_RECENT_TURNS: usize = 4;
+const SNAPSHOT_MAX_BYTES: usize = 256 * 1024;
 const OWNED_SHUTDOWN_JOIN_GRACE: std::time::Duration = std::time::Duration::from_secs(12);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +57,12 @@ struct Projection {
     generation: String,
     watermark: u64,
     rows: Vec<serde_json::Value>,
+    /// Serialized row sizes, aligned with `rows`, so trimming does not
+    /// re-serialize the whole window on every commit.
+    row_bytes: Vec<usize>,
+    /// Older rows were dropped from the projection; the reader can page them
+    /// back through the conversation endpoint.
+    has_older: bool,
     progress: Vec<serde_json::Value>,
     current_turn: Option<String>,
     phase: &'static str,
@@ -64,6 +77,39 @@ struct Projection {
     goal: Option<mink::runtime::GoalSnapshot>,
 }
 impl Projection {
+    /// Seed a newly opened projection. Only the retained tail is serialized:
+    /// computing row sizes for the whole 17 MB conversation just to drop most
+    /// of it made opening a long session slower than the snapshot itself.
+    fn trim_initial(&mut self) {
+        let boundaries: Vec<_> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                row["role"] == "user"
+                    && row["content"].is_string()
+                    && row["internal"] != true
+                    && row.pointer("/_mink/guidance") != Some(&serde_json::Value::Bool(true))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if boundaries.len() > SNAPSHOT_RECENT_TURNS {
+            let start = boundaries[boundaries.len() - SNAPSHOT_RECENT_TURNS];
+            self.rows.drain(..start);
+            self.has_older = start > 0;
+        }
+        self.row_bytes = self
+            .rows
+            .iter()
+            .map(|row| {
+                serde_json::to_vec(row)
+                    .map(|bytes| bytes.len())
+                    .unwrap_or(0)
+            })
+            .collect();
+        self.trim();
+    }
+
     fn trim(&mut self) {
         let boundaries: Vec<_> = self
             .rows
@@ -77,8 +123,27 @@ impl Projection {
             })
             .map(|(i, _)| i)
             .collect();
-        if boundaries.len() > 20 {
-            self.rows.drain(..boundaries[boundaries.len() - 20]);
+        if boundaries.is_empty() {
+            return;
+        }
+        // Start at the oldest of the last N turns; when those still exceed the
+        // byte ceiling, move forward one whole turn at a time. The final turn
+        // is never dropped, so a tool call/result exchange stays intact.
+        let mut first = boundaries.len().saturating_sub(SNAPSHOT_RECENT_TURNS);
+        let mut start = if boundaries.len() > SNAPSHOT_RECENT_TURNS {
+            boundaries[first]
+        } else {
+            0
+        };
+        let bytes_from = |from: usize| self.row_bytes[from..].iter().sum::<usize>();
+        while first + 1 < boundaries.len() && bytes_from(start) > SNAPSHOT_MAX_BYTES {
+            first += 1;
+            start = boundaries[first];
+        }
+        if start > 0 {
+            self.rows.drain(..start);
+            self.row_bytes.drain(..start);
+            self.has_older = true;
         }
     }
 }
@@ -151,6 +216,8 @@ impl SessionRuntime {
             ),
             watermark: 0,
             rows,
+            row_bytes: vec![],
+            has_older: false,
             progress: vec![],
             current_turn: None,
             phase: "idle",
@@ -160,7 +227,7 @@ impl SessionRuntime {
             activity: serde_json::json!({"work_state":"idle","wait_elapsed_secs":null,"active_sub_agents":[]}),
             goal,
         };
-        projection.trim();
+        projection.trim_initial();
         let inbox = runtime.handle().input_inbox().clone();
         let image_input = runtime.handle().image_input().clone();
         let attachments = Arc::new(mink::runtime::AttachmentStore::new(
@@ -340,14 +407,62 @@ impl SessionRuntime {
         &self.attachments
     }
     pub fn detail(&self) -> serde_json::Value {
-        let p = self.projection.lock().unwrap_or_else(|e| e.into_inner());
-        serde_json::json!({"generation":p.generation,"current_turn":p.current_turn,"phase":p.phase,"capabilities":{"image_input":self.image_input},"last_final":p.last_final,"goal":p.goal.as_ref().filter(|g| !g.hidden)})
+        let (generation, current_turn, phase, last_final, goal) = {
+            let p = self.projection.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                p.generation.clone(),
+                p.current_turn.clone(),
+                p.phase,
+                p.last_final.clone(),
+                p.goal.clone(),
+            )
+        };
+        serde_json::json!({"generation":generation,"current_turn":current_turn,"phase":phase,"capabilities":{"image_input":self.image_input},"last_final":last_final,"goal":goal.as_ref().filter(|g| !g.hidden).map(goal_summary)})
     }
     pub fn snapshot_subscription(&self) -> (serde_json::Value, broadcast::Receiver<String>) {
-        let p = self.projection.lock().unwrap_or_else(|e| e.into_inner());
-        let rx = self.event_tx.subscribe();
+        // Clone the projection under its lock, then serialize outside it: a
+        // multi-megabyte snapshot must not hold off the live publishers (and
+        // the turn task) while serde walks every row.
+        let (
+            generation,
+            watermark,
+            rows,
+            has_older,
+            progress,
+            current_turn,
+            phase,
+            goal,
+            last_final,
+            resources,
+            diagnostics,
+            activity,
+            inputs,
+            rx,
+        ) = {
+            let p = self.projection.lock().unwrap_or_else(|e| e.into_inner());
+            // Subscribing inside the same critical section is what makes the
+            // snapshot watermark and the first delivered event contiguous.
+            let rx = self.event_tx.subscribe();
+            let inputs = self.inbox.outstanding();
+            (
+                p.generation.clone(),
+                p.watermark,
+                p.rows.clone(),
+                p.has_older,
+                p.progress.clone(),
+                p.current_turn.clone(),
+                p.phase,
+                p.goal.clone(),
+                p.last_final.clone(),
+                p.resources.clone(),
+                p.diagnostics.clone(),
+                p.activity.clone(),
+                inputs,
+                rx,
+            )
+        };
         (
-            serde_json::json!({"type":"session_snapshot","generation":p.generation,"stream_sequence":p.watermark,"conversation":p.rows,"progress":p.progress,"current_turn":p.current_turn,"phase":p.phase,"running":matches!(p.phase,"running"|"cancelling"|"closing"),"inputs":self.inbox.outstanding(),"goal":p.goal.as_ref().filter(|g| !g.hidden),"capabilities":{"image_input":self.image_input},"last_final":p.last_final,"resources":p.resources,"diagnostics":p.diagnostics,"activity":p.activity}),
+            serde_json::json!({"type":"session_snapshot","generation":generation,"stream_sequence":watermark,"conversation":rows,"has_older":has_older,"progress":progress,"current_turn":current_turn,"phase":phase,"running":matches!(phase,"running"|"cancelling"|"closing"),"inputs":inputs,"goal":goal.as_ref().filter(|g| !g.hidden).map(goal_summary),"capabilities":{"image_input":self.image_input},"last_final":last_final,"resources":resources,"diagnostics":diagnostics,"activity":activity}),
             rx,
         )
     }
@@ -730,7 +845,99 @@ fn agent_event_to_json(event: &AgentEvent, stream_sequence: u64) -> serde_json::
     if value.get("type").and_then(serde_json::Value::as_str) == Some("final") {
         value["type"] = "turn_final".into();
     }
+    // Core emits its own GoalUpdated/GoalFinished events during a turn; the
+    // server also mirrors the goal watch channel. Both carry the full contract,
+    // which can be hundreds of kilobytes of reviews and usage records. The
+    // stream carries the same summary on both paths, and the detail tab asks
+    // for the full snapshot explicitly.
+    if matches!(
+        value.get("type").and_then(serde_json::Value::as_str),
+        Some("goal_updated" | "goal_finished")
+    ) && let Some(goal) = value.get("goal").cloned()
+    {
+        value["goal"] = goal_summary_value(&goal);
+    }
+    let kind = value_type(&value).map(str::to_string);
+    if let Some(object) = value.as_object_mut() {
+        match kind.as_deref() {
+            Some("tool_result") => {
+                // The workbench renders the complete tool row from the formal
+                // history; the live event only needs the content field.
+                object.remove("content_preview");
+            }
+            Some("sub_agent_output") => {
+                // A sub-agent's final text is displayed as a summary card; the
+                // full body already lives in the child session. Bound both
+                // streams so one child cannot dominate the live SSE payload.
+                for key in ["text", "thinking"] {
+                    if let Some(text) = object.get(key).and_then(serde_json::Value::as_str) {
+                        object.insert(key.into(), bounded_text(text, 32 * 1024).into());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     value
+}
+
+fn value_type(value: &serde_json::Value) -> Option<&str> {
+    value.get("type").and_then(serde_json::Value::as_str)
+}
+
+fn bounded_text(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…[truncated {} bytes]", &text[..end], text.len() - end)
+}
+
+/// Goal fields the live bar and status wording consume. Heavy history stays on
+/// the explicit detail read; the stream and the session snapshot remain small.
+fn goal_summary(goal: &GoalSnapshot) -> serde_json::Value {
+    serde_json::to_value(goal)
+        .map(|value| goal_summary_value(&value))
+        .unwrap_or(serde_json::Value::Null)
+}
+
+pub(crate) fn goal_summary_value(goal: &serde_json::Value) -> serde_json::Value {
+    let Some(mut object) = goal.as_object().cloned() else {
+        return goal.clone();
+    };
+    let iterations = object
+        .remove("iterations")
+        .and_then(|value| value.as_array().map(Vec::len))
+        .unwrap_or(0);
+    object.insert("iterations_count".into(), iterations.into());
+    for key in [
+        "usage_records",
+        "checker_records",
+        "checker_evidence_versions",
+        "evidence_versions",
+        "checker_passed_candidate",
+        "review_report",
+        "report",
+        "environment",
+    ] {
+        object.remove(key);
+    }
+    for key in ["reviews", "continuations"] {
+        if let Some(array) = object
+            .get_mut(key)
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            let last = array.last().cloned();
+            array.clear();
+            if let Some(last) = last {
+                array.push(last);
+            }
+        }
+    }
+    serde_json::Value::Object(object)
 }
 
 fn publish(
@@ -763,7 +970,7 @@ fn publish_goal(
         tx,
         sequence,
         &mut p,
-        serde_json::json!({"type":"goal_updated","goal":goal}),
+        serde_json::json!({"type":"goal_updated","goal":goal.as_ref().map(goal_summary)}),
     );
 }
 
@@ -815,7 +1022,11 @@ fn publish_locked(
                     }
                 }
             }
+            let row_bytes = serde_json::to_vec(&row)
+                .map(|bytes| bytes.len())
+                .unwrap_or(0);
             p.rows.push(row);
+            p.row_bytes.push(row_bytes);
             p.trim();
         }
         "phase_updated" => {
@@ -1154,6 +1365,133 @@ impl mink::runtime::EventSink for GoalTurnSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_text_keeps_utf8_boundaries_and_marks_the_cut() {
+        let text = "汉".repeat(20);
+        let bounded = bounded_text(&text, 4);
+        assert!(bounded.starts_with("汉"));
+        assert!(bounded.contains("truncated"));
+        assert!(bounded.len() < text.len());
+        assert_eq!(bounded_text("short", 100), "short");
+    }
+
+    fn projection(rows: Vec<serde_json::Value>) -> Projection {
+        let row_bytes = rows
+            .iter()
+            .map(|row| {
+                serde_json::to_vec(row)
+                    .map(|bytes| bytes.len())
+                    .unwrap_or(0)
+            })
+            .collect();
+        Projection {
+            generation: "g".into(),
+            watermark: 0,
+            rows,
+            row_bytes,
+            has_older: false,
+            progress: vec![],
+            current_turn: None,
+            phase: "idle",
+            last_final: None,
+            resources: serde_json::json!({}),
+            diagnostics: serde_json::json!({}),
+            activity: serde_json::json!({}),
+            goal: None,
+        }
+    }
+
+    fn turn(n: usize, body_bytes: usize) -> Vec<serde_json::Value> {
+        vec![
+            serde_json::json!({ "seq": n, "role": "user", "content": format!("prompt {n}") }),
+            serde_json::json!({
+                "seq": n + 1,
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "x".repeat(body_bytes) }]
+            }),
+        ]
+    }
+
+    #[test]
+    fn snapshot_tail_keeps_recent_turns_and_never_splits_the_latest() {
+        let small: Vec<_> = (1..=6).flat_map(|n| turn(n * 2, 10)).collect();
+        let mut p = projection(small);
+        p.trim();
+        assert!(p.has_older);
+        assert_eq!(p.rows.first().unwrap()["seq"], 6);
+        assert_eq!(p.rows.iter().filter(|row| row["role"] == "user").count(), 4);
+
+        let large: Vec<_> = (1..=6).flat_map(|n| turn(n * 2, 100 * 1024)).collect();
+        let mut p = projection(large);
+        p.trim();
+        assert!(p.has_older);
+        assert!(p.rows.first().unwrap()["seq"].as_u64().unwrap() > 1);
+        assert_eq!(p.rows.last().unwrap()["role"], "assistant");
+
+        let mut rows = turn(2, 300 * 1024);
+        rows.extend(turn(4, 300 * 1024));
+        let mut p = projection(rows);
+        p.trim();
+        assert!(p.has_older);
+        assert_eq!(
+            p.rows.first().unwrap()["seq"],
+            4,
+            "the newest turn stays whole"
+        );
+        assert_eq!(p.rows.last().unwrap()["role"], "assistant");
+    }
+
+    #[test]
+    fn opening_a_long_projection_serializes_only_the_retained_tail() {
+        let rows: Vec<_> = (1..=8).flat_map(|n| turn(n * 2, 10)).collect();
+        let mut p = projection(rows);
+        p.trim_initial();
+        assert!(p.has_older);
+        assert_eq!(p.rows.iter().filter(|row| row["role"] == "user").count(), 4);
+        assert_eq!(p.row_bytes.len(), p.rows.len());
+    }
+
+    #[test]
+    fn goal_summary_drops_heavy_history_and_keeps_bar_fields() {
+        let goal = serde_json::json!({
+            "id": "g1",
+            "revision": 7,
+            "status": "active",
+            "phase": "idle",
+            "spec": {"objective": "ship it"},
+            "iterations": [{"n": 1}, {"n": 2}],
+            "reviews": [{"verdict": "partial"}, {"verdict": "satisfied"}],
+            "continuations": [{"n": 1}, {"n": 2}],
+            "usage_records": [{"tokens": 1}],
+            "checker_records": [{"ok": true}],
+            "review_report": {"long": "x"},
+            "report": {"long": "y"},
+            "review_candidate": {"iteration": 1},
+            "environment": "host",
+            "pending_effects": []
+        });
+        let summary = goal_summary_value(&goal);
+        assert_eq!(summary["id"], "g1");
+        assert_eq!(summary["iterations_count"], 2);
+        assert_eq!(summary["reviews"].as_array().unwrap().len(), 1);
+        assert_eq!(summary["reviews"][0]["verdict"], "satisfied");
+        assert_eq!(summary["continuations"].as_array().unwrap().len(), 1);
+        for key in [
+            "iterations",
+            "usage_records",
+            "checker_records",
+            "review_report",
+            "report",
+            "environment",
+        ] {
+            assert!(
+                summary.get(key).is_none(),
+                "{key} must not be streamed: {summary}"
+            );
+        }
+        assert_eq!(summary["review_candidate"]["iteration"], 1);
+    }
 
     #[test]
     fn activity_tracks_reliable_progress_and_clears_wait_at_boundaries() {

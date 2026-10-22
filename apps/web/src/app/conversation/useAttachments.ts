@@ -24,6 +24,8 @@ export interface DraftAttachment {
   preview: string
   status: 'uploading' | 'ready' | 'failed'
   attachment?: Attachment
+  /** A composing-stage file; the upload starts after the session exists. */
+  file?: File
   error?: string
 }
 

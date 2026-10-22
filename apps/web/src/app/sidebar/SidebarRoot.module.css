@@ -478,6 +478,48 @@
   font-weight: 400;
 }
 
+/* Secondary project verb: quieter than the primary new-conversation bar, and
+   the rail keeps the same one-glyph affordance. */
+.addProject {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  margin: 0 2px 10px;
+  padding: 4px 10px;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: var(--dsw-radius-md);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 20px;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.addProject:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.addProjectLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.collapsed .addProject {
+  align-self: flex-start;
+  width: 36px;
+  height: 36px;
+  justify-content: center;
+  margin: 0 2px 8px;
+  padding: 0;
+}
+
 .newSession:is(:hover, :focus-visible) .newSessionShortcut { opacity: 1; }
 
 .panelList {

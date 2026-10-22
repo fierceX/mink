@@ -73,6 +73,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/api/version", get(api_version))
         .route("/api/sessions", get(list_sessions).post(create_session))
+        .route("/api/workspace", get(check_workspace))
         .route(
             "/api/sessions/{id}",
             get(get_session).delete(delete_session),
@@ -123,6 +124,14 @@ struct CreateSessionReq {
     name: Option<String>,
     #[serde(default)]
     cwd: Option<PathBuf>,
+    /// Client identity for a conversation that is created on its first send.
+    /// Reusing it after a lost reply resolves the same session instead of
+    /// leaving a second empty one.
+    #[serde(default)]
+    draft_id: Option<String>,
+    /// The first human input; the server derives the display title from it.
+    #[serde(default)]
+    first_prompt: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -139,6 +148,9 @@ struct ProjectQuery {
     project: Option<String>,
     snapshot: Option<bool>,
     request_id: Option<String>,
+    /// Goal reads ask for the full contract only when a detail view is open.
+    #[serde(default)]
+    full: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -154,6 +166,9 @@ struct HistoryQuery {
     before_seq: Option<u64>,
     #[serde(default)]
     turns: bool,
+    /// Byte ceiling for one whole-turn page; the newest turn is always kept.
+    #[serde(default)]
+    max_bytes: Option<usize>,
 }
 
 fn default_limit() -> usize {
@@ -193,6 +208,54 @@ fn registry_error(error: crate::session::registry::RegistryError) -> ApiResponse
     };
     ApiResponse::err(code, error.to_string())
 }
+#[derive(Deserialize)]
+struct WorkspaceQuery {
+    path: Option<String>,
+}
+
+/// Validate a working directory before the workbench opens a composing view.
+/// Projects are derived from sessions, so this deliberately creates nothing.
+async fn check_workspace(Query(query): Query<WorkspaceQuery>) -> ApiResponse {
+    let Some(raw) = query
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return ApiResponse::err(400, "path is required");
+    };
+    let path = PathBuf::from(raw);
+    let checked = tokio::task::spawn_blocking(
+        move || -> std::result::Result<(String, String, String), String> {
+            let canonical = std::fs::canonicalize(&path)
+                .map_err(|error| format!("workspace is not accessible: {error}"))?;
+            if !canonical.is_dir() {
+                return Err("workspace must be a directory".into());
+            }
+            let name = canonical
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| canonical.display().to_string());
+            Ok((
+                canonical.display().to_string(),
+                name,
+                mink::runtime::session::project_key(&canonical),
+            ))
+        },
+    )
+    .await;
+    match checked {
+        Ok(Ok((cwd, name, project_key))) => ApiResponse::ok(json!({
+            "cwd": cwd,
+            "project_key": project_key,
+            "name": name,
+        })),
+        Ok(Err(message)) => ApiResponse::err(400, message),
+        Err(error) => ApiResponse::err(500, format!("workspace check failed: {error}")),
+    }
+}
+
 async fn list_sessions(State(state): State<Arc<ApiState>>) -> ApiResponse {
     match state.registry.list().await {
         Ok(sessions) => ApiResponse::ok(json!(sessions)),
@@ -228,9 +291,51 @@ async fn create_session(
     State(state): State<Arc<ApiState>>,
     Json(req): Json<CreateSessionReq>,
 ) -> ApiResponse {
+    if let Some(prompt) = req.first_prompt.as_deref() {
+        let prompt = prompt.trim();
+        if prompt.len() > 128 * 1024 {
+            return ApiResponse::err(400, "first_prompt too large (max 128 KiB)");
+        }
+    }
     let cwd = req.cwd.clone().unwrap_or_else(|| state.cwd.clone());
-    let name = req.name.unwrap_or_else(|| "unnamed".to_string());
-    match state.registry.create(&name, &cwd).await {
+    // A workbench conversation is created on its first send. The draft id is
+    // the idempotency key, so a reply lost on the network cannot leave two
+    // sessions behind.
+    if let Some(draft_id) = req
+        .draft_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        return match state
+            .registry
+            .create_draft(draft_id, &cwd, req.first_prompt.as_deref())
+            .await
+        {
+            Ok(summary) => ApiResponse::ok(json!(summary)),
+            Err(error) => registry_error(error),
+        };
+    }
+    // No name is not "the unnamed session": every call without one must create
+    // a fresh conversation. The generated alias stays internal; the title is
+    // derived from the first prompt when the caller supplied one.
+    let Some(name) = req
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        let draft_id = format!("draft-{}", mink::runtime::session::new_session_id());
+        return match state
+            .registry
+            .create_draft(&draft_id, &cwd, req.first_prompt.as_deref())
+            .await
+        {
+            Ok(summary) => ApiResponse::ok(json!(summary)),
+            Err(error) => registry_error(error),
+        };
+    };
+    match state.registry.create(name, &cwd).await {
         Ok(summary) => ApiResponse::ok(json!(summary)),
         Err(error) => registry_error(error),
     }
@@ -398,6 +503,7 @@ async fn submit_input(
         Ok(r) => r,
         Err(e) => return e,
     };
+    let submitted_text = input.text.trim().to_string();
     if input.attachment_ids.len() > 8 {
         return ApiResponse::err(400, "max 8 attachments");
     }
@@ -439,10 +545,25 @@ async fn submit_input(
         .registry
         .submit_input(&id, query.project.as_deref(), input, None)
     {
-        Ok(receipt) => ApiResponse::ok(json!(receipt)),
+        Ok(receipt) => {
+            // A session created without text stays untitled until a real human
+            // message arrives. Run the fill under the registry's per-session
+            // lock: a delete racing this write must not recreate the metadata
+            // directory. Image-only input deliberately does not fill it.
+            if !submitted_text.is_empty()
+                && let Err(error) = state
+                    .registry
+                    .backfill_title(&id, query.project.as_deref(), &submitted_text)
+                    .await
+            {
+                eprintln!("[mink-server] title backfill failed: {error}");
+            }
+            ApiResponse::ok(json!(receipt))
+        }
         Err(e) => registry_error(e),
     }
 }
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InputEdit {
@@ -727,6 +848,11 @@ async fn history_endpoint(
     if !(1..=2000).contains(&query.limit) {
         return ApiResponse::err(400, "history limit must be in 1..=2000");
     }
+    if let Some(max_bytes) = query.max_bytes
+        && !(1..=16 * 1024 * 1024).contains(&max_bytes)
+    {
+        return ApiResponse::err(400, "history max_bytes must be in 1..=16777216");
+    }
     let dir = match state
         .registry
         .session_dir(&id, query.project.as_deref())
@@ -736,12 +862,14 @@ async fn history_endpoint(
         Err(error) => return registry_error(error),
     };
     if query.turns && matches!(kind, HistoryKind::Conversation) {
+        let max_bytes = query.max_bytes.unwrap_or(512 * 1024);
         return match tokio::task::spawn_blocking(move || {
-            mink::runtime::session::SessionReader::new(dir).conversation_turns(
+            mink::runtime::session::SessionReader::new(dir).conversation_turns_bounded(
                 query.from_seq,
                 query.limit,
                 query.tail,
                 query.before_seq,
+                Some(max_bytes),
             )
         })
         .await
@@ -906,6 +1034,11 @@ async fn get_goal(
         // the session snapshot, the goal_updated event and the disk fallback:
         // one normalization rule for every read surface.
         let goal = (!goal.hidden).then_some(goal);
+        let goal = match (goal, query.full) {
+            (Some(goal), Some(true)) => json!(goal),
+            (Some(goal), _) => crate::session::runtime::goal_summary_value(&json!(goal)),
+            (None, _) => serde_json::Value::Null,
+        };
         return ApiResponse::ok(
             json!({ "goal": goal, "driven": true, "verifier": state.registry.verifier_configured() }),
         );
@@ -930,8 +1063,10 @@ async fn get_goal(
                 .unwrap_or(serde_json::Value::Null);
             let goal = if goal.get("hidden").and_then(serde_json::Value::as_bool) == Some(true) {
                 serde_json::Value::Null
-            } else {
+            } else if query.full == Some(true) {
                 goal
+            } else {
+                crate::session::runtime::goal_summary_value(&goal)
             };
             ApiResponse::ok(
                 json!({ "goal": goal, "driven": false, "verifier": state.registry.verifier_configured() }),
@@ -1277,7 +1412,9 @@ async fn goal_action(
         other => return ApiResponse::err(404, format!("unknown goal action {other}")),
     };
     match result {
-        Ok(goal) => ApiResponse::ok(json!({ "goal": goal })),
+        Ok(goal) => ApiResponse::ok(json!({
+            "goal": crate::session::runtime::goal_summary_value(&json!(goal)),
+        })),
         Err(error) => ApiResponse::err(409, format!("{error}")),
     }
 }
@@ -1742,6 +1879,137 @@ mod tests {
         let status = response.status();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// One router over a fresh home, for tests that create real sessions.
+    fn creation_router() -> (Router, PathBuf, PathBuf) {
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let home = std::env::temp_dir().join(format!(
+            "mink-server-create-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let cwd = home.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let registry = Arc::new(Registry::new(home.clone(), "flash".to_string(), 4));
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let app = router(Arc::new(ApiState {
+            registry,
+            cwd: cwd.clone(),
+            shutdown,
+        }));
+        (app, home, cwd)
+    }
+
+    #[tokio::test]
+    async fn workspace_check_accepts_only_existing_directories() {
+        let (app, home, cwd) = creation_router();
+        let uri = format!(
+            "/api/workspace?path={}",
+            urlencoding_simple(&cwd.display().to_string())
+        );
+        let (status, body) = req(&app, Method::GET, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["name"], "workspace");
+        assert!(
+            body["data"]["project_key"]
+                .as_str()
+                .is_some_and(|key| !key.is_empty())
+        );
+
+        let missing = home.join("missing");
+        let uri = format!(
+            "/api/workspace?path={}",
+            urlencoding_simple(&missing.display().to_string())
+        );
+        let (status, body) = req(&app, Method::GET, &uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// Minimal query escaping for a temp path: enough for spaces and separators.
+    fn urlencoding_simple(value: &str) -> String {
+        value
+            .bytes()
+            .flat_map(|byte| match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                    vec![byte as char]
+                }
+                other => format!("%{other:02X}").chars().collect(),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn draft_id_is_idempotent_and_first_prompt_names_the_session() {
+        let (app, home, cwd) = creation_router();
+        let body = serde_json::json!({
+            "cwd": cwd.display().to_string(),
+            "draft_id": "draft-idem",
+            "first_prompt": "  fix the reconnect path\nmore detail",
+        });
+        let (status, first) = post_json(&app, "/api/sessions", body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        let (status, second) = post_json(&app, "/api/sessions", body).await;
+        assert_eq!(status, StatusCode::OK, "{second}");
+        assert_eq!(first["data"]["id"], second["data"]["id"]);
+        assert_eq!(first["data"]["title"], "fix the reconnect path", "{first}");
+        assert_eq!(
+            first["data"]["first_prompt"],
+            "fix the reconnect path\nmore detail"
+        );
+        assert_eq!(first["data"]["untitled"], false, "{first}");
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn first_prompt_is_bounded_before_creation_and_in_the_session_list() {
+        let (app, home, cwd) = creation_router();
+        let too_long = "x".repeat(128 * 1024 + 1);
+        let (status, body) = post_json(
+            &app,
+            "/api/sessions",
+            serde_json::json!({
+                "cwd": cwd.display().to_string(),
+                "draft_id": "draft-too-long",
+                "first_prompt": too_long,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let (_, listed) = req(&app, Method::GET, "/api/sessions").await;
+        assert!(listed["data"].as_array().unwrap().is_empty(), "{listed}");
+
+        let (status, created) = post_json(
+            &app,
+            "/api/sessions",
+            serde_json::json!({
+                "cwd": cwd.display().to_string(),
+                "draft_id": "draft-long-list",
+                "first_prompt": "y".repeat(600),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let (_, listed) = req(&app, Method::GET, "/api/sessions").await;
+        let prompt = listed["data"][0]["first_prompt"].as_str().unwrap();
+        assert!(prompt.ends_with('…'), "{prompt}");
+        assert!(prompt.len() <= 512 + '…'.len_utf8(), "{prompt}");
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn sessions_without_a_draft_or_name_are_new_and_untitled() {
+        let (app, home, cwd) = creation_router();
+        let body = serde_json::json!({ "cwd": cwd.display().to_string() });
+        let (status, first) = post_json(&app, "/api/sessions", body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        let (status, second) = post_json(&app, "/api/sessions", body).await;
+        assert_eq!(status, StatusCode::OK, "{second}");
+        assert_ne!(first["data"]["id"], second["data"]["id"]);
+        assert_eq!(first["data"]["title"], serde_json::Value::Null, "{first}");
+        assert_eq!(first["data"]["untitled"], true, "{first}");
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[tokio::test]
@@ -2490,7 +2758,9 @@ mod tests {
         // can leave `MODEL` set to a value that changes the resolved surface
         // and the capacity expectations below no longer describe what runs.
         let _env = crate::session::TEST_ENV_LOCK.lock().await;
-        struct WaitingBackend;
+        struct WaitingBackend {
+            started: Arc<std::sync::atomic::AtomicBool>,
+        }
         #[async_trait::async_trait]
         impl mink::runtime::LlmBackend for WaitingBackend {
             fn name(&self) -> &str {
@@ -2500,6 +2770,8 @@ mod tests {
                 &self,
                 _request: mink::runtime::LlmRequest,
             ) -> anyhow::Result<mink::runtime::LlmResponseStream> {
+                self.started
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(mink::runtime::LlmResponseStream {
                     events: Box::pin(futures::stream::pending()),
                     attempt_count: 1,
@@ -2537,11 +2809,14 @@ mod tests {
         ));
         let cwd = home.join("project");
         std::fs::create_dir_all(&cwd).unwrap();
+        let backend_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let registry = Arc::new(Registry::with_llm_backend(
             home.clone(),
             "mock".into(),
             1,
-            Arc::new(WaitingBackend),
+            Arc::new(WaitingBackend {
+                started: backend_started.clone(),
+            }),
         ));
         let a = registry.create("a", &cwd).await.unwrap();
         let b = registry.create("b", &cwd).await.unwrap();
@@ -2563,6 +2838,22 @@ mod tests {
         let (status, duplicate) = post(&app, &a_inputs, task).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(first["data"]["input_id"], duplicate["data"]["input_id"]);
+        // Wait until the running turn has reached the provider stream. The
+        // inbox applies pending guidance at the top of every round, so guidance
+        // admitted before the first request started is legitimately applied by
+        // that round; "live guidance" means the turn is already waiting on the
+        // model when the input arrives.
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while !backend_started.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let runtime = registry
+            .active_runtime(&a.id, Some(&a.project_key))
+            .unwrap()
+            .unwrap();
         let guidance = json!({"request_id":"guide", "text":"extra constraint", "target_turn_id":first["data"]["turn_id"]});
         let (status, guide) = post(&app, &a_inputs, guidance.clone()).await;
         assert_eq!(
@@ -2572,12 +2863,8 @@ mod tests {
         );
         assert_eq!(post(&app, &a_inputs, guidance).await.0, StatusCode::OK);
         registry.interrupt(&a.id, Some(&a.project_key)).unwrap();
-        let runtime = registry
-            .active_runtime(&a.id, Some(&a.project_key))
-            .unwrap()
-            .unwrap();
         let guide_id = guide["data"]["input_id"].as_str().unwrap();
-        let receipt = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(15), async {
             loop {
                 if !runtime.running()
                     && let Some(receipt) = runtime.inbox().entries().into_iter().find(|r| {

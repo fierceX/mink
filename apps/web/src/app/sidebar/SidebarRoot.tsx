@@ -8,6 +8,7 @@
 import clsx from 'clsx'
 import { useEffect, useRef, useState } from 'react'
 import {
+  IconFolderCloseRegular,
   IconNewChatOutlineRegular,
   IconPanelLeftOutlineRegular,
   IconSettingsOutlineRegular,
@@ -39,6 +40,8 @@ export interface SidebarRootProps {
   notice?: string | undefined
   onToggle: () => void
   onNewSession: () => void
+  /** Open the path-only new-project entry. */
+  onAddProject: () => void
   onOpenSettings: () => void
   onOpenSession: (session: SessionSummary) => void
   onCreateIn: (group: ProjectGroup) => void
@@ -59,6 +62,7 @@ export function SidebarRoot({
   notice,
   onToggle,
   onNewSession,
+  onAddProject,
   onOpenSettings,
   onOpenSession,
   onCreateIn,
@@ -187,8 +191,18 @@ export function SidebarRoot({
         </button>
       </Tooltip>
 
-      {/* The browsing region fills the column between the controls and the foot
-          in both states; the rail keeps its single expand affordance above. */}
+      <Tooltip label="新建项目" delayMs={500} side="right" disabled={wide}>
+        <button
+          type="button"
+          className={css.addProject}
+          aria-label="新建项目"
+          onClick={onAddProject}
+        >
+          <IconFolderCloseRegular size={wide ? 14 : 18} />
+          {wide && <span className={css.addProjectLabel}>新建项目</span>}
+        </button>
+      </Tooltip>
+
       <div className={css.regionArea}>
         {notice !== undefined && (
           <p className={css.notice} role="status">{notice}</p>

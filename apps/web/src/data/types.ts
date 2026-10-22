@@ -207,6 +207,8 @@ export interface GoalSnapshot {
   };
   completion_basis?: string | null;
   iterations?: unknown[];
+  /** Count when the stream carries a summary instead of the full history. */
+  iterations_count?: number;
   reason?: string | null;
   hidden?: boolean;
   repeated_failures?: number;

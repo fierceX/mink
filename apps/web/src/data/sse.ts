@@ -8,11 +8,14 @@ import type { RawEvent } from "./types";
 const INITIAL_RETRY_MS = 500;
 const MAX_RETRY_MS = 30_000;
 
+/** Why the live stream stopped; the view words its reconnect control from this. */
+export type SseDisconnectReason = 'transport' | 'offline' | 'session_closed' | 'stream_gap'
+
 export class SseClient {
   private es: EventSource | null = null;
   private sessionId: string;
   private onEvent: (raw: RawEvent) => void;
-  private onDisconnect: () => void;
+  private onDisconnect: (reason: SseDisconnectReason) => void;
   private onOpen: () => void;
   private closed = false;
   private project?: string;
@@ -26,7 +29,7 @@ export class SseClient {
     this.clearRetryTimer();
     this.es?.close();
     this.es = null;
-    this.onDisconnect();
+    this.onDisconnect('offline');
   };
   private onOnline = () => {
     if (!this.closed) this.reconnect();
@@ -35,7 +38,7 @@ export class SseClient {
   constructor(
     sessionId: string,
     onEvent: (raw: RawEvent) => void,
-    onDisconnect: () => void,
+    onDisconnect: (reason: SseDisconnectReason) => void,
     project?: string,
     onOpen: () => void = () => {},
     private snapshotMode = false,
@@ -74,7 +77,16 @@ export class SseClient {
       // 形成紧密重连循环。
       if (raw.type === "session_closed") {
         this.close();
-        this.onDisconnect();
+        this.onDisconnect('session_closed');
+        return;
+      }
+      // A gap means the client missed events. Tear the stream down and let the
+      // reconnect's snapshot reconcile, rather than trusting a partial view.
+      if (raw.type === "stream_gap") {
+        es.close();
+        this.es = null;
+        this.onDisconnect('stream_gap');
+        this.reconnect();
         return;
       }
       this.onEvent({ ...raw, type: String(raw.type) });
@@ -84,7 +96,7 @@ export class SseClient {
       es.close();
       this.es = null;
       if (this.closed) return;
-      this.onDisconnect();
+      this.onDisconnect('transport');
       // A dropped connection is transient: reconnect with backoff. The stream
       // re-sends the authoritative `session_snapshot` on subscribe, which is
       // the reconciliation (the controller never trusts a local guess).

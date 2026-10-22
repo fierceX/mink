@@ -432,6 +432,7 @@ impl SubAgentExecutor {
                     label: label.clone(),
                     depth: child_depth,
                 }),
+                untitled: false,
             },
         )
         .await?;

@@ -30,7 +30,7 @@ export function EmptyState({ project, notice, onCreate }: {
         <h1 className={css.title}>今天想让 Mink 做什么？</h1>
         <p className={css.note}>
           {project === undefined
-            ? '还没有发现任何项目：新建任务时输入 server 上的工作目录即可。'
+            ? '还没有发现任何项目：先打开一个工作目录，再发送首条消息。'
             : `从左侧选择 ${project.name} 里的会话，或在这里新建一个。`}
         </p>
         <Button
@@ -39,7 +39,7 @@ export function EmptyState({ project, notice, onCreate }: {
           onClick={() => { onCreate(project) }}
         >
           <IconPlusOutlineMedium size={14} />
-          {project === undefined ? '新建任务' : `在 ${project.name} 新建任务`}
+          {project === undefined ? '新建项目' : `在 ${project.name} 新建任务`}
         </Button>
         {notice !== undefined && <p className={css.notice} role="status">{notice}</p>}
       </div>

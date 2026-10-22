@@ -8,11 +8,13 @@
 
 ### 性能
 
+- **Web 快照/传输**：`session_snapshot` 的 conversation 改为“最近 4 个完整用户轮次 + 256 KiB 上限”，超限时丢更早整轮并返回 `has_older`；历史按钮按 20 轮/512 KiB 分批。打开长会话时只序列化保留尾部计算 `row_bytes`，`from_seq` 前向页保持请求起点而不是偷偷退化成最新子集。Goal 的 SSE 与快照只传 bar 所需摘要（`iterations_count`、最新 review/continuation 与 `review_candidate`），完整契约走 `GET /goal?full=true`；goal 动作响应同样摘要化。快照在锁内只复制字段并建立订阅，JSON 序列化移到锁外。REST/静态资源启用 gzip/brotli，SSE 保持不压缩。
 - **请求投影**：每个**最终请求**只构建一次 `RequestProjection`（图片单次消费投影、一次 OpenAI 转换、一次 token 估算与 fingerprint）；压缩提交或活跃历史变化后重建（无压缩轮 1 次，压缩轮 2 次以上）。auto/preflight/overflow、压缩候选验收与发送共享该投影；无图片轮复用同一转换结果构建 body，有图片轮只 materialize 并二次转换一次。cache projection 的消息哈希从 backend 返回的 provider 可见前缀计算，保证自定义缓存投影仍能参与对齐。`tool_loop_20/50` mock 基准确认总耗时分别下降约 18.8%/20.7%，结构性计数从约 8 次 messages 深拷贝/10 次全量序列化降到约 3 次 messages 序列化（估算、body、cache 哈希）+ 2 次 tools 序列化 + 1 次转换；`request_build_800k` 覆盖约 800K token 活跃历史的单轮准备。记录见 `docs/development/benchmarks/request-projection-2026-10-19.md`。
 - **工具配对扫描**：`strip_orphaned_tool_calls` 从 `Vec` 线性查找改为 `HashSet`，每次转换由 O(t²) 降为 O(t)。
 
 ### 变更
 
+- **Web 工作台**：项目内新建直接进入 composing 视图，首次发送才用稳定 `draft_id` 创建会话并由首条输入生成标题；新增仅选目录的「新建项目」，无名称创建不再复用 `unnamed`，支持 `untitled` 回填。composing 视图复用会话宽度轴居中，项目信息收为胶囊，提示与取消居中排在输入卡下方。首条 `request_id` 随 compose 草稿持久化，刷新后复用同一次提交；暂存附件限制单图与总请求字节；`first_prompt` 创建时限制 128 KiB，列表摘要截到 512 字节。断线时 header 提供连接状态按钮，可重新 `/open` 并按权威快照重载，不依赖浏览器刷新；会话关闭/网络离线有独立文案。
 - **子代理**：新增 `sub_agent_max_depth`（默认 1，0 禁用，最大 3）与 `SubAgent.model` 参数；父会话 `sub_agent` 事件与子会话 `session.json` 记录 label/mode/depth/origin/stop_reason，目录折叠为派生视图，TUI replay/SSE 可显示状态与 label。
 - **子代理结果**：模型可见结果改为最后一条非空 assistant 的全部 text 块，默认不再注入 thinking；失败/超时使用 <=4096 字节的有界 `diagnostic`，并写入 `_mink.sub_agent` 结构化元数据；pending 取消结果同样带身份字段，未测量时标 `usage_known/elapsed_known=false`。
 - **子代理展示**：父 `SubAgentOutput` 对 thinking/text 做头尾有界，完整内容仍保留在子会话；fork clone 的目录所有权收敛为 clone 成功即交给外层 guard，取消/提交窗口不会返回 Ok 后删除目录。
@@ -22,17 +24,19 @@
 
 ### 修复
 
-- **server**：新增 `--host <IP>` 启动项（CLI > `MINK_SERVER_HOST` > `[server] host` > `0.0.0.0`）；端口仍由 `MINK_SERVER_PORT`/TOML 决定，不新增端口参数；未知参数在绑定前拒绝，IPv6 在启动日志中按 `[::1]:8765` 显示。
+- **Web**：宽屏点击正文不再误触手机阅读态；主区内容宽度随中间列发布，宽表在列内按需横向滚动；实时 `tool_result` 去除未使用的 `content_preview`，子代理输出实时帧有界。首条发送在会话创建后失败时，错误显示在会话内而不是只在可能关闭的侧栏；连接状态等权威 snapshot 到达才算 connected，首次打开不再闪“已恢复”。SSE 断线自动退避重连，重连快照即权威对账，断开期间不再伪造 `running=false`；未决提交正文在返回会话后恢复；附件不再按会话对象身份重置；回执只在投影已有输入且发起视图 epoch/runtime generation 仍当前时落地；`/artifact` 命令打开指定产物；token 统计缺失时诊断页显示未知。
+- **server**：新增 `--host <IP>` 启动项（CLI > `MINK_SERVER_HOST` > `[server] host` > `0.0.0.0`）；端口仍由 `MINK_SERVER_PORT`/TOML 决定，不新增端口参数；未知参数在绑定前拒绝，IPv6 在启动日志中按 `[::1]:8765` 显示。首条文本的标题回填改由 Registry 在会话操作锁内完成，图片-only 输入不再写占位 `first_prompt`，迟到的回填不会复活已删除会话；工作目录校验移入 blocking pool。
 - **终端**：REPL 续聊重放、`render_info` 与 TUI 工具卡头的 `tool_name`/`tool_summary` 统一走控制序列清洗；TUI 完整转发 `ToolCallDisplay.input` 并保留结构化参数。
 - **压缩/输入**：InputInbox 写入的 `_mink` 用户消息重新计入“真实 user”与 `last_real_user_text`，TUI/Web 不再丢失用户切点守卫；应急 checkpoint 显式携带启动边界修复丢掉的消息；`Read` memo 命中要求 hashline 快照仍存在。
 - **工具**：scavenge 裸 JSON 只接受当前 surface 内的工具名（普通 JSON 示例不再变成调用）；空 edits、空/坏 patch、未知 tag 等 decode 后模型输入错误统一计为 `ModelFormat`；VFS `Read` 在调用后端前规范化并拒绝 `..` 逃逸。
-- **Goal**：宿主租约在 `Running/Stopping/!enabled/closed` 拒绝路径返回错误并走 fault，不再静默丢弃；验收期间合法预算调整以新 revision 重试一次；inconclusive 审核不再直接终结目标；blocker 证据缺失时点名无效引用；`GoalBudget` 新增 `blocker_rounds`，`blocked_rounds` 与快照的连续阻断计数一致。
+- **Goal**：详情 tab 只在同 id/revision 合并 live 摘要；revision/id 变化时先替换为摘要并强制重拉 `full=true`，避免旧 `iterations`/`review_report` 与新 review 混用；流摘要保留 `review_candidate`，候选验收匹配不再退回“待审核”。已取消/已完成目标载入时清除遗留 `verifying`（paused/blocked/budget_exhausted/failed 保留以供 resume 重审）；普通用户 turn 的压缩不再因无关 Goal 的 review 期限报 `goal review budget exhausted` 而整体失败。宿主租约在 `Running/Stopping/!enabled/closed` 拒绝路径返回错误并走 fault，不再静默丢弃；验收期间合法预算调整以新 revision 重试一次；inconclusive 审核不再直接终结目标；blocker 证据缺失时点名无效引用；`GoalBudget` 新增 `blocker_rounds`，`blocked_rounds` 与快照的连续阻断计数一致。
 - **Web**：SSE 断线自动退避重连，重连快照即权威对账，断开期间不再伪造 `running=false`；未决提交正文在返回会话后恢复；附件不再按会话对象身份重置；回执只在投影已有输入且发起视图 epoch/runtime generation 仍当前时落地；`/artifact` 命令打开指定产物；token 统计缺失时诊断页显示未知。
 - **LLM**：SSE 单行缓冲设上限并在超限时按协议损坏处理；`arguments:null` 不再执行成 `{}`；同一 attempt 的重复 usage 帧只结算一笔；包装过的 `LlmRequestFailure` 保留聚合 `attempt_count`。
 - **CLI/TUI**：`--tui` 与 `--print`/`--agent-jsonl` 在启动前互斥；状态栏目标标记按显示宽度命中；移除依赖不存在 `Diff` 工具的 EditLoop 死条件；强制关闭的会话由 reaper 回收。
 
 ### 测试
 
+- **Web**：新增新对话 draft id/首条输入建会话、composing 草案与暂存附件、会话关闭后的手动重连、宽表列内滚动 fixture、Goal 摘要预算、snapshot 双限制与历史分页上限的单元/e2e 覆盖；补首条提交 request_id 持久化、总数附件上限、会话创建后失败提示、Goal revision 重拉、snapshot 前连接态与首次打开不误报恢复的回归。
 - 服务端 goal e2e 新增“审核进行中调整预算”场景，断言合法 revision 变更不会把 run 打成 `Faulted`；TUI PTY lane 增加 no-TTY 有界检查与 OSC52/窗口标题序列断言；补充 Inconclusive 审核结论、blocker 证据缺失、SSE 关闭、真实 offline/online 与在途提交恢复的回归用例。
 - 请求投影新增 `RequestProjection` 预算/图片单次消费一致性测试（fresh image 与 legacy estimate 逐值相同）、无压缩轮与压缩轮构建次数测试、请求 Arc 指针共享测试、预构建 body 与普通构建字节一致测试（含 image_url 块）、自定义 `cache_projection` 哈希对齐测试，以及 `tool_loop_20/50` benchmark；`bench-check` 目录用例数同步为 28。
 

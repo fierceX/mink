@@ -13,6 +13,9 @@ pub struct SessionSummary {
     /// First human input of the session, when one was recorded. The list uses it
     /// as a label when the session has no title of its own.
     pub first_prompt: Option<String>,
+    /// Created without a display title; the workbench labels it as a new
+    /// conversation until the first prompt arrives.
+    pub untitled: bool,
     pub cwd: String,
     pub created_at: String,
     pub updated_at: String,

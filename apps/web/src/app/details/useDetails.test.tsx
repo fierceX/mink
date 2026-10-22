@@ -1,7 +1,7 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api, type SessionSummary } from '../../data/api.ts'
-import type { GoalSnapshot } from '../../data/types.ts'
+import type { GoalReview, GoalSnapshot } from '../../data/types.ts'
 import { isVerifierAvailable, setVerifierAvailable } from '../../data/commands.ts'
 import { useDetails } from './useDetails.ts'
 
@@ -141,6 +141,51 @@ describe('detail goal merge', () => {
     rerender({ live: created })
     await act(async () => { seed.resolve(ok(null, false)) })
     expect(result.current.goal.snapshot?.id).toBe('new-goal')
+  })
+
+  it('refetches full history instead of mixing an old revision with a live summary', async () => {
+    const candidate1 = { goal_id: 'goal-1', contract_revision: 1, generation: 1, iteration: 1, conversation_seq: 1, reviewer_id: 'reviewer' }
+    const candidate2 = { ...candidate1, generation: 2, iteration: 2, conversation_seq: 2 }
+    const review = (text: string): GoalReview => ({
+      verdict: 'satisfied', summary: text, next_step: '', criteria: [], constraints: [],
+    })
+    const full1: GoalSnapshot = {
+      id: 'goal-1', revision: 1, status: 'active', phase: 'working',
+      review_candidate: candidate1,
+      reviews: [review('old')], iterations: [{ n: 1 }],
+    }
+    const full2: GoalSnapshot = {
+      id: 'goal-1', revision: 2, status: 'completed', phase: 'done',
+      review_candidate: candidate2,
+      reviews: [review('old'), { ...review('new'), candidate: candidate2 }], iterations: [{ n: 1 }, { n: 2 }],
+    }
+    const seed1 = deferred<GoalAnswer>()
+    const seed2 = deferred<GoalAnswer>()
+    vi.spyOn(api, 'goal')
+      .mockReturnValueOnce(seed1.promise)
+      .mockReturnValueOnce(seed2.promise)
+    const { result, rerender } = renderHook(
+      ({ live }) => useDetails(SESSION, 'goal', undefined, { goal: live }),
+      { initialProps: { live: undefined as GoalSnapshot | undefined } },
+    )
+    await act(async () => { seed1.resolve(ok(full1, true)) })
+    expect(result.current.goal.snapshot?.iterations).toHaveLength(1)
+
+    rerender({ live: {
+      id: 'goal-1', revision: 2, status: 'completed', phase: 'done',
+      review_candidate: candidate2,
+      reviews: [{ ...review('new'), candidate: candidate2 }],
+      continuations: [],
+    } })
+    // The summary must replace the old contract while the full read runs; it
+    // may not be spread over revision-1 iterations and review history.
+    expect(result.current.goal.snapshot?.revision).toBe(2)
+    expect(result.current.goal.snapshot?.iterations).toBeUndefined()
+    expect(result.current.goal.snapshot?.review_candidate).toEqual(candidate2)
+    await waitFor(() => { expect(api.goal).toHaveBeenCalledTimes(2) })
+    await act(async () => { seed2.resolve(ok(full2, true)) })
+    expect(result.current.goal.snapshot?.iterations).toHaveLength(2)
+    expect(result.current.goal.snapshot?.reviews).toHaveLength(2)
   })
 
   it('still takes the seed’s runtime flag when the revision is the same', async () => {

@@ -1,0 +1,70 @@
+/* The composing view reuses the hero geometry; only the project chip, notice
+   and the action row below the card are mink-specific. */
+
+.project {
+  display: inline-flex;
+  align-self: center;
+  align-items: center;
+  gap: 6px;
+  max-width: min(100%, 440px);
+  min-width: 0;
+  margin: 0;
+  padding: 3px 10px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 999px;
+  corner-shape: round;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.project > svg {
+  flex: none;
+}
+
+.projectName {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+  font-weight: 500;
+}
+
+.projectPath {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--ds-font-family-code);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+
+.notice {
+  margin: 0;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 2px 4px 0;
+}
+
+.hint {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.actions > button {
+  flex: none;
+  min-width: 0;
+  padding-inline: 6px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+}

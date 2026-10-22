@@ -1,6 +1,6 @@
 # HTTP 与 SSE API
 
-> 更新日期：2026-10-10
+> 更新日期：2026-10-20
 
 持久输入、快照与服务生命周期。
 
@@ -41,7 +41,8 @@ Core 的新增 `AgentEventKind::ConversationCommitted {conversation_seq,message}
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/sessions` | 会话列表（含运行 phase、未处理输入数、最近活跃终态及 tokens/context 汇总） |
-| POST | `/api/sessions` | 创建会话 `{name, cwd?}`（对 active alias 幂等，不重复创建） |
+| POST | `/api/sessions` | 创建会话；Web 传 `{cwd,draft_id,first_prompt?}`，`draft_id` 是首发送幂等键；无名称时生成唯一内部 alias，不再复用 `unnamed` |
+| GET | `/api/workspace?path=` | 仅校验工作目录并返回 `{cwd,project_key,name}`，不创建项目或会话 |
 | GET | `/api/sessions/{id}` | 会话状态（open/running、runtime generation、当前 turn、能力、阶段与最近终态） |
 | DELETE | `/api/sessions/{id}` | 删除会话（先持有系统文件锁，阻止并发删除） |
 | POST | `/api/sessions/{id}/open` | 打开（建立 session lease） |
@@ -53,12 +54,12 @@ Core 的新增 `AgentEventKind::ConversationCommitted {conversation_seq,message}
 | POST | `/api/sessions/{id}/attachments` | 原始图片字节上传，返回 session 限定描述 |
 | GET | `/api/sessions/{id}/attachments/{attachment_id}` | session 限定的图片预览 |
 | POST | `/api/sessions/{id}/interrupt` | 中断当前 turn |
-| GET / POST | `/api/sessions/{id}/goal` | 读取目标快照（活运行时优先，回退 `goal.json` 的 `current`）/ 创建目标并启用驱动 |
-| POST | `/api/sessions/{id}/goal/{action}` | 目标控制（pause/resume/cancel/clear/budget/approve/reconcile），必须带 `goal_id` + `revision` |
+| GET / POST | `/api/sessions/{id}/goal` | 读取目标快照（活运行时优先，回退 `goal.json` 的 `current`；默认摘要，`?full=true` 取完整契约）/ 创建目标并启用驱动 |
+| POST | `/api/sessions/{id}/goal/{action}` | 目标控制（pause/resume/cancel/clear/budget/approve/reconcile），必须带 `goal_id` + `revision`；响应为流摘要 |
 | POST | `/api/sessions/{id}/model` | 切换会话模型，返回解析后的标签与统计快照 |
 | POST | `/api/sessions/{id}/compact` | 手动压缩当前上下文 |
 | GET | `/api/sessions/{id}/events` | events.jsonl 分页（`from_seq`/`limit`/`tail`/`before_seq`） |
-| GET | `/api/sessions/{id}/conversation` | conversation.jsonl 轮次历史（同分页参数） |
+| GET | `/api/sessions/{id}/conversation` | conversation.jsonl 轮次历史（同分页参数；`turns=true&max_bytes=` 限制单批体积） |
 | GET | `/api/sessions/{id}/plan` / `todo` / `artifacts` | 计划/Todo/Artifacts 读取 |
 | GET | `/api/sessions/{id}/artifacts/{name}` | 单个 artifact 正文（1 MiB 读取上限） |
 | GET | `/api/sessions/{id}/files?path=...&raw=true` | 文件树/内容（raw 取正文） |
@@ -66,7 +67,8 @@ Core 的新增 `AgentEventKind::ConversationCommitted {conversation_seq,message}
 | GET | `/health` | 健康检查 |
 
 - **project 消歧**：所有 session 路由接受可选 `?project=`（0.4.0 起，用于跨项目同名 session）；不传时按 id 唯一匹配。
-- **分页约束**：`limit` 必须在 `1..=2000`，超出返回 400；`tail`/`before_seq` 取“最接近目标”的末尾段，`from_seq` 前向读取保留开头；响应注入真实行号 `seq` 作为稳定 key。
+- **新对话创建**：Web 在首次发送前不创建服务端会话。点击项目/新建项目只进入 composing 视图；首次发送用稳定 `draft_id` 创建会话，`first_prompt` 生成 `title`/`first_prompt`（最多 128 KiB，超出直接 400）。同一 draft id 的网络重试返回同一会话；无文本创建标记 `untitled=true`，后续首个非空文本用户消息回填标题。空名称不再落成共享的 `unnamed` 会话。列表摘要把 `first_prompt` 截到 512 字节并加省略号，避免大首条输入放大会话目录。
+- **分页约束**：`limit` 必须在 `1..=2000`，超出返回 400；`tail`/`before_seq` 取“最接近目标”的末尾段，`from_seq` 前向读取保留开头；响应注入真实行号 `seq` 作为稳定 key。`turns=true` 时 `max_bytes`（默认 512 KiB，上限 16 MiB）限制一批完整轮次的序列化体积：`tail`/`before_seq` 丢最旧轮并保证最新一轮完整，`from_seq` 则从请求起点向后截断。
 - **错误映射**（typed `RegistryError`）：404 NotFound；409 Ambiguous / Locked / Busy；429 Capacity；500 Internal。
 
 ### 持久输入与附件
@@ -92,11 +94,11 @@ Core 的新增 `AgentEventKind::ConversationCommitted {conversation_seq,message}
 | `turn_started` | — | turn 开始 |
 | `thinking` / `text` | content | 流式输出 |
 | `tool_call` | id/name/summary/input | 工具调用（含完整参数，前端结构化渲染） |
-| `tool_result` | tool_use_id/tool_name/content_preview/content/status/exit_code/result_kind/presentation/artifacts | 工具结果（status 为 ToolStatus，presentation 携带 Plan/Todo 结构化状态） |
+| `tool_result` | tool_use_id/tool_name/content/status/exit_code/result_kind/presentation/artifacts | 工具结果（status 为 ToolStatus，presentation 携带 Plan/Todo 结构化状态；实时帧不重复发送前端未使用的 `content_preview`） |
 | `signal` | signal_kind/severity/message | 信念信号 |
 | `stop` / `retry` / `error` / `info` / `prompt` / `clear_line` | reason/message | 生命周期事件 |
 | `title_update` | model/stats | 轮结束权威统计（`StatsSnapshot` 快照） |
-| `sub_agent_status` / `sub_agent_output` | session_id/status/thinking/text/in_tokens/out_tokens | 子代理状态与输出 |
+| `sub_agent_status` / `sub_agent_output` | session_id/status/thinking/text/in_tokens/out_tokens | 子代理状态与输出；`text`/`thinking` 在实时帧中有界（32 KiB） |
 | `turn_final` | outcome | 权威终态：完整 `TurnOutcome`（含 status/error/usage） |
 | `turn_error` | error | 超时/取消后的强制错误终态 |
 | `stream_gap` | missed | 广播落后 N 条；随后连接结束 |
@@ -111,7 +113,9 @@ Core 的新增 `AgentEventKind::ConversationCommitted {conversation_seq,message}
 
 ### 新版原子快照订阅
 
-`GET /stream?snapshot=true` 首帧 `session_snapshot` 与订阅位置在同一 mirror 发布锁下建立，包含 generation、stream_sequence、conversation（最近 20 个真实用户轮次）、progress、current_turn、phase、running、inputs、capabilities、resources（Plan、完整 Todo、Artifact）、diagnostics、activity 与 last_final。`goal` 也来自该镜像：与 `stream_sequence` 在同一临界区更新，渲染快照不获取会话状态锁（锁序固定为 state → projection），`hidden` 目标归一为 `null`。activity 为 `{work_state,wait_elapsed_secs:null|number,active_sub_agents:[]}`，由可靠事件更新并与快照同时发布；active_sub_agents 是未结束子代理 ID 列表，单个子任务结束不抹掉其他活动任务，主动中断后工作状态回到 idle。旧客户端可忽略。diagnostics 保留完整 `title_update.stats`，包括轮次、请求数和独立缓存读取/创建计数。打开时镜像经公开 SessionReader 重建，运行中消费可靠 runtime 事件；best-effort EventSink 不用于权威恢复。
+`GET /stream?snapshot=true` 首帧 `session_snapshot` 与订阅位置在同一 mirror 发布锁下建立，包含 generation、stream_sequence、conversation、has_older、progress、current_turn、phase、running、inputs、capabilities、resources（Plan、完整 Todo、Artifact）、diagnostics、activity 与 last_final。conversation 只带**最近 4 个真实用户轮次且不超过 256 KiB**（最新一轮始终完整保留；超出时丢更早的整轮），has_older 表示还有可用 `/conversation?before_seq=` 加载的历史。`goal` 是流摘要：保留 bar 与状态判断所需字段（含 `iterations_count`、最新 review/continuation、budget 来源），不带 `usage_records`、完整 `reviews`/`iterations`/候选与报告；详情页用 `GET /goal?full=true` 取完整契约。`goal` 与 `stream_sequence` 在同一临界区更新，渲染快照不获取会话状态锁（锁序固定为 state → projection），`hidden` 目标归一为 `null`。activity 为 `{work_state,wait_elapsed_secs:null|number,active_sub_agents:[]}`，由可靠事件更新并与快照同时发布；active_sub_agents 是未结束子代理 ID 列表，单个子任务结束不抹掉其他活动任务，主动中断后工作状态回到 idle。旧客户端可忽略新字段。diagnostics 保留完整 `title_update.stats`，包括轮次、请求数和独立缓存读取/创建计数。打开时镜像经公开 SessionReader 重建，运行中消费可靠 runtime 事件；best-effort EventSink 不用于权威恢复。
+
+快照在锁内只复制字段与建立订阅，JSON 序列化在锁外完成；大 session 不再长时间阻塞 live 发布。REST JSON 与嵌入静态资源经 `CompressionLayer` 压缩；SSE 由默认 predicate 排除，避免压缩缓冲给每一帧增加延迟。
 
 后续新增 `conversation_committed {conversation_seq,message}`、`inputs_updated {inputs}`、`phase_updated {phase}`，与既有 AgentEvent 均携带 generation、stream_sequence 和 after_conversation_seq。正式历史接管暂态 text/thinking，稳定身份为物理 `(seq,block_index)` 或 input_id；诊断保持相邻时序。旧 generation 与重复水位丢弃，gap 后立即重取 snapshot，无需等待 turn 空闲。旧 SSE 模式过滤新增输入/commit/phase 控制事件，仍转发原有协议。运行态、成功与失败由 turn_final/outcome 决定，stop 与 HTTP 成功均不提前完成任务。
 

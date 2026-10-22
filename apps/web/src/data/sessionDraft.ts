@@ -11,6 +11,7 @@
 
 import { useCallback, useState } from 'react'
 import type { SessionSummary } from './api.ts'
+import { requestId } from './request-id.ts'
 import type { HumanInput } from './types.ts'
 
 /** Stable identity of one session across catalog refreshes. */
@@ -68,6 +69,77 @@ export function useSessionDraft(key: string | undefined, initial = ''): {
   }, [key])
 
   return { text: current.text, write }
+}
+
+/** Storage key for one project's unsaved new conversation. */
+export function composeDraftKey(cwd: string): string {
+  return `mink.compose:${cwd}`
+}
+
+/** The unsaved conversation's stable id, text and first-submit request id. */
+export interface ComposeDraft {
+  draftId: string
+  text: string
+  requestId: string
+}
+
+/** Generate a draft id that survives retries and page reloads. */
+export function newComposeDraftId(): string {
+  const cryptoApi = globalThis.crypto
+  if (typeof cryptoApi?.randomUUID === 'function') return `draft-${cryptoApi.randomUUID()}`
+  return `draft-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+/** Read one project's composing draft; a missing record gets a fresh id. */
+export function readComposeDraft(cwd: string): ComposeDraft {
+  try {
+    const raw = localStorage.getItem(composeDraftKey(cwd))
+    if (raw !== null) {
+      const parsed: unknown = JSON.parse(raw)
+      if (typeof parsed === 'object' && parsed !== null) {
+        const draftId = (parsed as { draftId?: unknown }).draftId
+        const text = (parsed as { text?: unknown }).text
+        const request = (parsed as { requestId?: unknown }).requestId
+        if (typeof draftId === 'string' && draftId !== '' && typeof text === 'string') {
+          return {
+            draftId,
+            text,
+            requestId: typeof request === 'string' && request !== '' ? request : requestId(),
+          }
+        }
+      }
+    }
+  } catch {
+    // Storage is optional; a fresh in-memory id still works.
+  }
+  return { draftId: newComposeDraftId(), text: '', requestId: requestId() }
+}
+
+/** Persist a composing draft; the text and id always travel together. */
+export function writeComposeDraft(cwd: string, draft: ComposeDraft): void {
+  try {
+    localStorage.setItem(composeDraftKey(cwd), JSON.stringify(draft))
+  } catch {
+    // Storage is optional.
+  }
+}
+
+/** Drop the composing draft once the conversation has been created. */
+export function clearComposeDraft(cwd: string): void {
+  try {
+    localStorage.removeItem(composeDraftKey(cwd))
+  } catch {
+    // Storage is optional.
+  }
+}
+
+/** Persist a draft directly for a session that has just been created. */
+export function writeSessionDraft(session: Pick<SessionSummary, 'project_key' | 'id'>, text: string): void {
+  try {
+    localStorage.setItem(sessionDraftKey(session), text)
+  } catch {
+    // Storage is optional.
+  }
 }
 
 /** Storage key for one session's drafted attachment ids. */

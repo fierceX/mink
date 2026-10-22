@@ -86,6 +86,10 @@ async fn main() -> Result<()> {
     } else {
         api::router(state).fallback_service(ServeDir::new(web_dir))
     };
+    // JSON answers, history pages and the embedded bundle compress on the wire;
+    // the tower-http default predicate deliberately leaves SSE out, because a
+    // compressor buffering an event stream would add latency to every frame.
+    let app = app.layer(tower_http::compression::CompressionLayer::new());
 
     let addr = bind_address(&cfg.host, cfg.port);
     let listener = TcpListener::bind(&addr).await?;

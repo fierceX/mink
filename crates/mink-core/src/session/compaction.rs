@@ -1488,21 +1488,11 @@ impl CompactionEngine {
             if let Some(review) = &self.review_session {
                 review.check_budget()?;
             }
-            if let Some(store) = &self.goal_store
-                && store
-                    .snapshot()
-                    .is_some_and(|g| g.phase == crate::session::goal::GoalPhase::Verifying)
-            {
-                store.reconcile_usage(&self.usage.all_records()?)?;
-                if let Some(reason) = store
-                    .snapshot()
-                    .and_then(|g| g.review_budget_reason().map(str::to_string))
-                {
-                    return Err(anyhow::Error::new(
-                        crate::runtime::goal::review::GoalReviewBudgetExhausted { reason },
-                    ));
-                }
-            }
+            // Ordinary turns must not be failed by an unrelated Goal's review
+            // budget. Reviewer compactions are gated by `review_session`; the
+            // host adjudication loop checks the same budget before and after
+            // its own turn. A cancelled or paused goal can therefore no longer
+            // poison every following user message with a deadline error.
             self.fault.check()?;
             if retry.deadline_expired() {
                 return Err(SummaryUnavailable::error(format!(

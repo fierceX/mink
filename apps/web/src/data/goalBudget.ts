@@ -22,7 +22,7 @@ export function goalBudget(
     return previous
   }
 
-  const turnsUsed = goal.iterations?.length ?? previous?.turns_used ?? 0
+  const turnsUsed = goal.iterations_count ?? goal.iterations?.length ?? previous?.turns_used ?? 0
   const blockedRounds = goal.blocked_rounds ?? previous?.blocked_rounds ?? 0
   const blockerRounds = goal.blocker_rounds ?? previous?.blocker_rounds ?? previous?.blocked_rounds ?? 0
   const softTokenLimit = limits !== undefined

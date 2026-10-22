@@ -21,18 +21,31 @@ import { readPendingSubmission, sessionIdentity, sessionPendingKey, writePending
 import { setVerifierAvailable } from './commands.ts'
 import { useLatest } from './useLatest.ts'
 
-/** How many conversation rows the tail request asks for. */
-const TAIL_LIMIT = 30
+/** How many conversation turns one history page asks for. */
+const TAIL_LIMIT = 20
+
+/** How the live stream currently stands, for the reconnect control. */
+export type SessionConnection =
+  | 'connecting'
+  | 'connected'
+  | 'disconnected'
+  | 'offline'
+  | 'closed'
+  | 'failed'
 
 export interface SessionView {
   state: SessionState | undefined
-  /** An unresolved submission's body; restores the composer after a return. */
-  pendingDraft: string | undefined
-  /** The server runtime holds this session open; sending requires it. */
+  /** The session runtime holds this session open; sending requires it. */
   open: boolean
+  /** Live-stream state; `closed` means the runtime must be reopened. */
+  connection: SessionConnection
   error: string | undefined
   /** Try the open again after a failure; the projection reloads the same way. */
   retry: () => void
+  /** Reopen the runtime and rebuild the projection from its snapshot. */
+  reconnect: () => void
+  /** An unresolved submission's body; restores the composer after a return. */
+  pendingDraft: string | undefined
   /** Queue a fresh turn; resolves to an error message, or undefined on success. */
   send: (text: string, attachmentIds?: readonly string[]) => Promise<string | undefined>
   /** Queue guidance bound to the running turn. */
@@ -183,6 +196,7 @@ export function receiptStampHolds(started: ReceiptStamp, now: ReceiptStamp): boo
 export function useSessionView(summary: SessionSummary | undefined): SessionView {
   const [state, setState] = useState<SessionState | undefined>(undefined)
   const [open, setOpen] = useState(false)
+  const [connection, setConnection] = useState<SessionConnection>('connecting')
   const [error, setError] = useState<string | undefined>(undefined)
   // Bumping this re-runs the open effect for the same session.
   const [attempt, setAttempt] = useState(0)
@@ -259,6 +273,7 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
     if (summary === undefined) {
       setState(undefined)
       setOpen(false)
+      setConnection('disconnected')
       setError(undefined)
       return
     }
@@ -267,6 +282,7 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
     let client: SseClient | undefined
     setState(emptySession(summary.id, summary.title ?? summary.alias ?? summary.id))
     setOpen(false)
+    setConnection('connecting')
     setError(undefined)
 
     void (async () => {
@@ -303,27 +319,47 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
             if (raw.type === 'session_snapshot' && Array.isArray(raw.conversation)) {
               rows.current = raw.conversation as Record<string, unknown>[]
               const seq = rowSeq(rows.current[0])
-              setHasOlder(rows.current.length > 0 && (!Number.isFinite(seq) || seq > 1))
+              // The server states whether its capped tail dropped history. Older
+              // servers omit the field; the first seq remains the fallback.
+              setHasOlder(typeof raw.has_older === 'boolean'
+                ? raw.has_older
+                : rows.current.length > 0 && (!Number.isFinite(seq) || seq > 1))
+              setConnection('connected')
+              setOpen(true)
+            }
+            if (raw.type === 'phase_updated' && raw.phase === 'closed') {
+              setConnection('closed')
+              setOpen(false)
             }
             setState(previous => (previous === undefined ? previous : reduceWorkbench(previous, raw)))
           },
-          () => {
+          (reason) => {
             if (!current()) return
             // Keep the last known running/work state: the reconnect's
             // authoritative snapshot decides it. Faking `running:false` here
             // flips the composer from guidance back to a new turn.
+            setConnection(reason === 'session_closed'
+              ? 'closed'
+              : reason === 'offline' ? 'offline' : 'disconnected')
+            if (reason === 'session_closed') setOpen(false)
             setState(previous => (previous === undefined
               ? previous
               : { ...previous, desynced: true }))
           },
           summary.project_key,
-          undefined,
+          () => {
+            // `onopen` only proves the transport accepted the subscription;
+            // until the snapshot arrives the projection is still the old one.
+            // Legacy streams have no snapshot frame and keep the old signal.
+            if (current() && !snapshotMode) setConnection('connected')
+          },
           snapshotMode,
         )
         client = stream
         stream.connect()
       } catch (cause) {
         if (!current()) return
+        setConnection('failed')
         setError(messageOf(cause))
       }
     })()
@@ -560,5 +596,28 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
 
   const pendingDraft = summary === undefined ? undefined : storedSubmission(summary)?.text
 
-  return { state, open, error, retry: () => { setAttempt(value => value + 1) }, send, guide, mergeReceipt, hasOlder, loadOlder, refreshGoal, stop, pendingDraft, receiptStamp }
+  const reconnect = useCallback(() => {
+    if (summary === undefined) return
+    setError(undefined)
+    setConnection('connecting')
+    setAttempt(value => value + 1)
+  }, [summary])
+
+  return {
+    state,
+    open,
+    connection,
+    error,
+    retry: reconnect,
+    reconnect,
+    send,
+    guide,
+    mergeReceipt,
+    hasOlder,
+    loadOlder,
+    refreshGoal,
+    stop,
+    pendingDraft,
+    receiptStamp,
+  }
 }

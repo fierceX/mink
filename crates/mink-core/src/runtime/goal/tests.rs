@@ -1954,6 +1954,11 @@ async fn a_live_execution_refuses_a_replacement_until_it_settles() {
     let current = handle.goal_snapshot().unwrap();
     let cancelled = handle.cancel_goal(&current.id, current.revision).unwrap();
     assert_eq!(cancelled.status, GoalStatus::Cancelled);
+    assert_eq!(
+        cancelled.phase,
+        GoalPhase::Idle,
+        "a cancelled goal must not stay verifying"
+    );
     backend.release.notify_one();
     let settled = tokio::time::timeout(std::time::Duration::from_secs(10), handle.wait_goal())
         .await

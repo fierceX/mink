@@ -27,6 +27,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
   streams.length = 0
   localStorage.clear()
+  window.history.replaceState(null, '', '/')
 })
 
 function session(id: string, overrides: Partial<SessionSummary> = {}): SessionSummary {
@@ -98,30 +99,86 @@ describe('session switching and creation', () => {
     expect(field().value).toBe('B 自己的草稿')
   })
 
-  it('creates a session in a working directory the reader types', async () => {
+  it('creates the session only on the first send, with the first prompt as its title', async () => {
     stubShell()
     vi.spyOn(api, 'listSessions').mockResolvedValue(ok([]))
-    const created = session('fresh', { cwd: '/tmp/fresh' })
+    vi.spyOn(api, 'workspace').mockResolvedValue(ok({ cwd: '/tmp/fresh', project_key: 'p', name: 'fresh' }))
+    const created = session('fresh', { cwd: '/tmp/fresh', title: '新目录里的任务' })
     const create = vi.spyOn(api, 'createSession').mockResolvedValue(ok(created))
+    const submit = vi.spyOn(api, 'submitInput').mockResolvedValue(ok({} as never))
     render(<App />)
 
-    // Nothing discovered yet: the empty state still offers the new-task flow.
     const empty = await waitFor(() => {
       const node = document.querySelector('[data-empty-state]')
       expect(node).not.toBeNull()
       return node as HTMLElement
     })
-    fireEvent.click(within(empty).getByRole('button', { name: '新建任务' }))
+    fireEvent.click(within(empty).getByRole('button', { name: '新建项目' }))
     fireEvent.change(screen.getByLabelText('工作目录'), { target: { value: '/tmp/fresh' } })
-    fireEvent.change(screen.getByLabelText('任务名称'), { target: { value: '新目录里的任务' } })
-    fireEvent.click(screen.getByRole('button', { name: '创建' }))
+    fireEvent.click(screen.getByRole('button', { name: '打开目录' }))
 
-    await waitFor(() => { expect(create).toHaveBeenCalledWith('/tmp/fresh', '新目录里的任务') })
+    // Opening a project is browser-only: no session request yet.
+    await waitFor(() => { expect(document.querySelector('[data-new-conversation]')).not.toBeNull() })
+    expect(create).not.toHaveBeenCalled()
+
+    const field = screen.getByLabelText('输入消息') as HTMLTextAreaElement
+    fireEvent.change(field, { target: { value: '新目录里的任务' } })
+    const compose = await waitFor(() => {
+      const stored = JSON.parse(localStorage.getItem('mink.compose:/tmp/fresh') ?? '{}') as { requestId?: string }
+      expect(stored.requestId).toMatch(/[0-9a-f-]{36}/)
+      return stored
+    })
+    fireEvent.keyDown(field, { key: 'Enter' })
+
+    await waitFor(() => { expect(create).toHaveBeenCalledTimes(1) })
+    const request = create.mock.calls[0]![0]
+    expect(request.cwd).toBe('/tmp/fresh')
+    expect(request.firstPrompt).toBe('新目录里的任务')
+    expect(request.draftId).toMatch(/^draft-/)
+    await waitFor(() => { expect(submit).toHaveBeenCalledTimes(1) })
+    expect(submit.mock.calls[0]![1]).toMatchObject({
+      request_id: compose.requestId,
+      text: '新目录里的任务',
+      target_turn_id: null,
+      attachment_ids: [],
+    })
   })
 
-  it('keeps the typed directory and the refusal when the create fails', async () => {
+  it('shows a post-creation first-send failure inside the adopted conversation', async () => {
     stubShell()
     vi.spyOn(api, 'listSessions').mockResolvedValue(ok([]))
+    vi.spyOn(api, 'workspace').mockResolvedValue(ok({ cwd: '/tmp/fresh', project_key: 'p', name: 'fresh' }))
+    vi.spyOn(api, 'createSession').mockResolvedValue(ok(session('fresh', {
+      cwd: '/tmp/fresh', title: '新目录里的任务', project_key: 'p',
+    })))
+    vi.spyOn(api, 'submitInput').mockResolvedValue({ code: 500, message: '首轮入口拒绝', data: undefined as never })
+    render(<App />)
+
+    const empty = await waitFor(() => {
+      const node = document.querySelector('[data-empty-state]')
+      expect(node).not.toBeNull()
+      return node as HTMLElement
+    })
+    fireEvent.click(within(empty).getByRole('button', { name: '新建项目' }))
+    fireEvent.change(screen.getByLabelText('工作目录'), { target: { value: '/tmp/fresh' } })
+    fireEvent.click(screen.getByRole('button', { name: '打开目录' }))
+    await waitFor(() => { expect(document.querySelector('[data-new-conversation]')).not.toBeNull() })
+    const field = screen.getByLabelText('输入消息') as HTMLTextAreaElement
+    fireEvent.change(field, { target: { value: '新目录里的任务' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+
+    await waitFor(() => {
+      expect(screen.getByText('会话已创建，但首条消息提交失败：首轮入口拒绝')).toBeDefined()
+    })
+    // The text is recoverable as the adopted session's draft, and the error is
+    // no longer only in a sidebar notice that a phone may have closed.
+    expect((screen.getByLabelText('输入消息') as HTMLTextAreaElement).value).toBe('新目录里的任务')
+  })
+
+  it('keeps the composing view and the typed text when creation is refused', async () => {
+    stubShell()
+    vi.spyOn(api, 'listSessions').mockResolvedValue(ok([]))
+    vi.spyOn(api, 'workspace').mockResolvedValue(ok({ cwd: '/nope', project_key: 'p', name: 'nope' }))
     vi.spyOn(api, 'createSession').mockResolvedValue({ code: 400, message: '工作目录不可用', data: undefined as never })
     render(<App />)
 
@@ -130,9 +187,34 @@ describe('session switching and creation', () => {
       expect(node).not.toBeNull()
       return node as HTMLElement
     })
-    fireEvent.click(within(empty).getByRole('button', { name: '新建任务' }))
+    fireEvent.click(within(empty).getByRole('button', { name: '新建项目' }))
     fireEvent.change(screen.getByLabelText('工作目录'), { target: { value: '/nope' } })
-    fireEvent.click(screen.getByRole('button', { name: '创建' }))
+    fireEvent.click(screen.getByRole('button', { name: '打开目录' }))
+
+    await waitFor(() => { expect(document.querySelector('[data-new-conversation]')).not.toBeNull() })
+    const field = screen.getByLabelText('输入消息') as HTMLTextAreaElement
+    fireEvent.change(field, { target: { value: '保留这段文字' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+
+    await waitFor(() => { expect(screen.getByRole('alert').textContent).toBe('工作目录不可用') })
+    expect(document.querySelector('[data-new-conversation]')).not.toBeNull()
+    expect((screen.getByLabelText('输入消息') as HTMLTextAreaElement).value).toBe('保留这段文字')
+  })
+
+  it('keeps the typed directory when the new-project validation fails', async () => {
+    stubShell()
+    vi.spyOn(api, 'listSessions').mockResolvedValue(ok([]))
+    vi.spyOn(api, 'workspace').mockResolvedValue({ code: 400, message: '工作目录不可用', data: undefined as never })
+    render(<App />)
+
+    const empty = await waitFor(() => {
+      const node = document.querySelector('[data-empty-state]')
+      expect(node).not.toBeNull()
+      return node as HTMLElement
+    })
+    fireEvent.click(within(empty).getByRole('button', { name: '新建项目' }))
+    fireEvent.change(screen.getByLabelText('工作目录'), { target: { value: '/nope' } })
+    fireEvent.click(screen.getByRole('button', { name: '打开目录' }))
 
     await waitFor(() => { expect(screen.getByRole('alert').textContent).toBe('工作目录不可用') })
     // The dialog stays open with the path the reader typed, so it can be fixed

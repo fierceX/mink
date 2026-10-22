@@ -172,6 +172,7 @@ async fn write_session_metadata(dir: &std::path::Path, id: &str, cwd: &std::path
         cwd: cwd.display().to_string(),
         parent: None,
         first_prompt: None,
+        untitled: false,
         summary: None,
         subagent: None,
     };

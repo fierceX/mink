@@ -112,6 +112,8 @@ describe('row labels', () => {
 
   it('prefers a real title and keeps the id as the last resort', () => {
     expect(sessionTitle(session({ title: '标题', first_prompt: '提示' }))).toBe('标题')
+    expect(sessionTitle(session({ title: null, alias: 'draft-abc', first_prompt: '首次输入' }))).toBe('首次输入')
+    expect(sessionTitle(session({ title: null, alias: 'draft-abc', first_prompt: null, untitled: true }))).toBe('新对话')
     expect(sessionTitle(session({ title: null, alias: null, first_prompt: null }))).toBe('session-1')
   })
 })

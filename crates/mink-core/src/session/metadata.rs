@@ -8,6 +8,11 @@ use crate::session::paths::{
     session_base_dir,
 };
 
+/// One metadata boolean whose false default is omitted from disk.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionMetadata {
     pub id: String,
@@ -22,6 +27,11 @@ pub struct SessionMetadata {
     pub parent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_prompt: Option<String>,
+    /// Created without a display title (a workbench conversation whose first
+    /// input has not arrived yet). The marker keeps a later runtime open from
+    /// filling the title with the internal draft alias.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub untitled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     /// Provenance of a session-backed sub-agent child. Absent for user sessions.
@@ -57,6 +67,8 @@ pub struct SessionSeed {
     pub first_prompt: Option<String>,
     pub parent: Option<String>,
     pub subagent: Option<SubAgentMetadata>,
+    /// The session is intentionally untitled until its first prompt arrives.
+    pub untitled: bool,
 }
 
 /// Typed failure for session-reference resolution.
@@ -110,10 +122,18 @@ pub async fn ensure_metadata(paths: &Paths, cwd: &Path, seed: SessionSeed) -> Re
         metadata.alias = seed.alias;
     }
     if metadata.title.is_none() {
-        metadata.title = seed.title.or_else(|| metadata.alias.clone());
+        if let Some(title) = seed.title {
+            metadata.title = Some(title);
+            metadata.untitled = false;
+        } else if !metadata.untitled && !seed.untitled {
+            metadata.title = metadata.alias.clone();
+        }
     }
     if metadata.first_prompt.is_none() {
         metadata.first_prompt = seed.first_prompt;
+    }
+    if seed.untitled && metadata.first_prompt.is_none() && metadata.title.is_none() {
+        metadata.untitled = true;
     }
     if metadata.parent.is_none() {
         metadata.parent = seed.parent;
@@ -398,6 +418,7 @@ fn new_metadata(paths: &Paths, cwd: &Path, now: &str) -> SessionMetadata {
         cwd: cwd.display().to_string(),
         parent: None,
         first_prompt: None,
+        untitled: false,
         summary: None,
         subagent: None,
     }

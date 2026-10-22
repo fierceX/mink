@@ -15,7 +15,7 @@
 | 服务方式 | `cargo build -p mink-server` 构建并嵌入二进制（`build.rs` → `include_bytes!`，字体等非 UTF-8 资源按字节服务）；开发时可用 `MINK_SERVER_DEV_WEB=<dir>/dist` 从磁盘服务 |
 | 校验 | `npm run test`（vitest）/`npm run typecheck`/`npm run build`；`npx playwright test` 分两条车道：`fixtures`（仅 dev server 的设计核对页）与 `live`（`e2e/global-setup.ts` 自建临时 home + 确定性 provider + `target/debug/mink-server`，从磁盘服务刚构建的 dist；端口冲突直接失败而不是误连旧服务）；`fixtures` 车道还含整页视觉守则（`e2e/visual.spec.ts`，与已提交基线逐像素比较，阈值 0.002，基线按平台存放，无基线平台跳过）；设计核对页覆盖每个卡片家族（终端/文件/差异/搜索/待办/计划/委派/报告）+ 变更文件卡与其 hover 预览 |
 
-`apps/web` 的拷贝清单与来源见该目录 `README.md` 与 `THIRD_PARTY_NOTICES.md`：拷贝文件除导入落点外保持逐字节一致，改动时必须对照上游同名文件。设计核对页 `apps/web/fixtures.html` 只在 dev server 存在（生产构建不包含），用固定 transcript 一次渲染工具卡各家族供截图比对。
+`apps/web` 的拷贝清单与来源见该目录 `README.md` 与 `THIRD_PARTY_NOTICES.md`：拷贝文件除导入落点外保持逐字节一致，改动时必须对照上游同名文件。设计核对页 `apps/web/fixtures.html` 只在 dev server 存在（生产构建不包含），用固定 transcript 一次渲染工具卡各家族供截图比对；`apps/web/table.html` 同样只在 dev server 存在，用真实 conversation 几何验证宽表在 transcript 内横向滚动。
 
 ## 发布候选检查
 

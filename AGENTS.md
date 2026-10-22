@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-10-19
+> 更新日期：2026-10-20
 
 ## 项目概览
 
@@ -115,8 +115,8 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - **草稿与附件按会话身份隔离**：`Conversation` 以会话身份为 key，草稿（`mink.draft:<project>:<id>`）与已上传附件 id（`mink.attachments:<project>:<id>`）随会话保存与恢复，切换会话不串、返回即可继续；存储不可用时退化为内存草稿。草稿必须按 key 在渲染期同步读取（keyed composer 首次挂载即拿到目标会话正文），不得靠 effect 延后换内容。
 - **会话级异步身份与提交幂等**：投影、草稿、附件与在途提交按完整会话身份维护，提交记录（`mink.pending:<project>:<id>`）与草稿同生命周期：离开会话、刷新页面都不丢，只有服务端明确受理或拒绝才删除。发送/引导/回执合并/详情加载/历史分页/命令副作用只在发起它的会话仍是当前视图时落地；发送与 stop 的完成还必须验发起时的视图 epoch + 投影 runtime generation + 当前 turn（新的 `session_snapshot` 是更新的真相，旧 HTTP 失败不得回滚 running/写旧错误）。历史以投影 `messages` 为唯一已提交集合，按 `seq` 合并去重排序，分页不得覆盖快照之后的 committed 消息。提交以稳定 request ID 对账：答复丢失（网络）时先查回执或以同一 ID 重试，已受理不得再当失败恢复草稿；附件上传的非 200 拒绝与网络失败都落到失败条目及原因。
 - **模型座位与目标详情的版本顺序**：模型读取与切换共享单调 request revision（每次 refresh、每次已接受切换与每次视图生命周期都推进），只有最新一次可写，A→B→A 与“先切换后回来”的旧响应一律作废；`/model`、`/flash`、`/pro` 成功后重读运行时。目标页签的 REST seed 在发起时记录投影目标更新计数，计数变化则丢弃 seed（清空/新建也不靠 null 或 ID 猜顺序），revision 相等时仍独立更新 `driven`。
-- **新建任务面板**：接受任意 server 可达的工作目录（名称可选，已发现项目作候选），空目录也能创建第一个会话；`createSession(cwd)` 仍是服务端权威，被拒绝时保留用户输入。
-- **新前端已实现的契约**：会话目录与打开（筛选/搜索四种范围、切换保留关键词、新建与删除）、`/conversation` 历史 + SSE 实时投影（`src/data` 的纯 reducer/SSE 客户端，`/open` 的 snapshot 提议优先）、历史分页（`before_seq` 回溯，翻页保持阅读位置）、composer 的 `/turn` 与 `/interrupt`、运行中引导（`/inputs` 队列：按 revision 编辑/撤回/续发，未取得 turn id 时拒绝并保留草稿）、附件与图片（粘贴/拖放/选择 → `/attachments` 会话副本，id 随输入提交，图片仍只经 Read 进上下文）、斜杠命令（与终端共用 `crates/mink-cli/src/tui/slash_commands.json` 契约）、工具卡家族（终端/文件/差异/搜索/通用）与逐轮「已编辑 N 个文件」摘要卡、消息 chrome（复制与该轮用量；旧轮次悬停显现）、目标条与目标边界卡（拷贝的 GoalBar 样式，暂停/恢复/取消/清除全部按 revision CAS）、详情面板五页签（任务/目标/文件/输出/诊断，诊断与 TUI StatsSnapshot 同口径）、轮次选择器与「返回最新内容」、移动端阅读 chrome（仅用户明确滚动触发，运行中/待处理强制可见，隐藏不 close/interrupt）、设置与偏好（外观/字号/过程展示）。
+- **新建任务面板**：正常路径不再弹目录/名称表单。项目行 ➕ 直接进入 composing 视图，**首次发送才创建服务端会话**：客户端用稳定 `draft_id` 幂等创建，`first_prompt`（≤128 KiB）生成标题；无文本会话标记 `untitled`，后续首个非空文本用户消息回填。空名称不得复用 `unnamed` 会话。composing 复用 `ConversationRoot` 的内容宽度轴并水平/垂直居中，项目名与目录收成输入卡上的胶囊，禁止让 hero 在左缘 shrink-wrap。首条 `request_id` 与 `draft_id` 一起写入 compose draft，刷新后重试仍是同一次提交；暂存附件总字节≤16 MiB，首次发送前图片刷新会丢失，文本与 ids 保留。「新建项目」只校验/选择 server 工作目录，不创建会话；项目仍由会话工作目录派生。
+- **新前端已实现的契约**：会话目录与打开（筛选/搜索四种范围、切换保留关键词、新建与删除）、`/conversation` 历史 + SSE 实时投影（`src/data` 的纯 reducer/SSE 客户端，`/open` 的 snapshot 提议优先）、历史分页（`before_seq` 回溯，翻页保持阅读位置；`turns=true` 批体积上限 512 KiB）、composer 的 `/turn` 与 `/interrupt`、运行中引导（`/inputs` 队列：按 revision 编辑/撤回/续发，未取得 turn id 时拒绝并保留草稿）、附件与图片（粘贴/拖放/选择 → `/attachments` 会话副本，id 随输入提交，图片仍只经 Read 进上下文；新对话首发送前暂存于浏览器）、斜杠命令（与终端共用 `crates/mink-cli/src/tui/slash_commands.json` 契约；无会话的 composing 视图隐藏命令和模型位）、工具卡家族（终端/文件/差异/搜索/通用）与逐轮「已编辑 N 个文件」摘要卡、消息 chrome（复制与该轮用量；旧轮次悬停显现）、目标条与目标边界卡（拷贝的 GoalBar 样式，暂停/恢复/取消/清除全部按 revision CAS；流只传摘要，详情按需 full）、详情面板五页签（任务/目标/文件/输出/诊断，诊断与 TUI StatsSnapshot 同口径）、轮次选择器与「返回最新内容」、移动端阅读 chrome（仅窄布局生效，宽屏点击不得隐藏；运行中/待处理强制可见，隐藏不 close/interrupt）、断线连接按钮（重新 `/open` + 权威 snapshot 重载，不靠浏览器刷新）、主区宽度随中间列发布与宽表列内横向滚动、设置与偏好（外观/字号/过程展示）。
 - **设计对照与校验**：`npm run check:design` 逐字节比对 `apps/web/src/{theme,ui,util,store}` 与 deepseek-harness 源码（`--source` 指定仓库根）；允许的差异只有登记过的导入落点改写，漂移即失败，CI 执行。与上游界面的视觉对照用 `dsh web` 起本地服务后由浏览器自动化截图/读取 `data-slot` 结构；对照图可能含用户私有会话，不得入库。
 - **按「mink 没有的功能不抄」排除**：插件面板、Pin/Archive、权限 pill、`Standard mode` 模式标签、`Chat/Trajectory` 页签、消息时间戳（mink 对话行没有时间数据）。新增这类能力时先补运行时契约，再对齐界面。
 - `InputInbox` 是 session 唯一持久输入准入边界；request ID 绑定原始内容，编辑/撤回比较 revision，仅 pending/unapplied 可修改。applying 先发布，正式历史以 `_mink.input_id` 接管，追加不确定或历史已写但回执发布失败必须闩锁；恢复核对完整预期消息，禁止重复追加。
@@ -141,6 +141,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 ### Goal
 
 - `failed` 表示本 run 已结束，禁止自动调度；宿主显式 resume 可以重试同一目标，不按异常文字或历史版本分流。重试保留契约、iteration、用量、失败/阻断记录与原截止时间；过期或执行轮耗尽必须先明确调整预算，未决副作用先人工对账。completed/cancelled 禁止恢复和改预算；draft 须确认。审核阶段恢复仍复核原候选，最后一个执行轮允许续审；执行阶段恢复开启新轮，不重放已提交工具。当前 runtime 的 Faulted、持久化闩锁、关闭、执行未退出、容量和环境门槛不能被显式重试绕过。
+- 已结束/非活动的 Goal 不得保留 `verifying`：取消与完成在载入/发布时归一 `idle`；paused、blocked、budget_exhausted 与 failed 的 `verifying` 保留，供 resume 重试原审核。普通用户 turn 的压缩只受当前 review 会话预算约束，不得因无关 Goal 的 review 期限失败整轮。
 
 - 独立审核先读取已提交的执行轮最终结论；明确部分完成且有契约内下一步可轻量继续，完成声明、空白/含糊/矛盾或外部阻断必须核对证据。轻量继续只写 continuations，不修改 reviews、验收项通过状态或完成依据；连续三轮相同剩余要求升级检查，指纹不取自然语言措辞。强制检查标志先落盘，同一进程复用原只读子会话；所有阶段共用验收 deadline 与 usage。旧候选恢复仍完整审核，不重置历史或额度。
 
@@ -152,7 +153,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - 独立审核的基础设施失败、无效输出或超时不得记为目标证据失败；持久化审核失败原因与 review_failure_stage 并保留候选；报告有效时只重试宿主提交，显式 resume 只重试审核且不消耗执行轮数。Web 目标条与详情显示审核进行中或可重试状态。
 - 审核报告通过 artifact 保护并交给宿主 agent，主会话只追加带 goal_adjudication 身份的内部消息；宿主提交轮不消费人类输入、不接纳任务执行工具，不额外消耗 Goal 执行轮数，与只读审核共用验收期限和 usage。无有效提交时返回真实宿主终止原因，不把子代理普通文字当成结论。候选绑定执行边界，acceptance_conversation_seq 绑定宿主提交后的历史水位；完成与恢复均核对水位，新引导令完成失效。
 - core SessionLease 在恢复前获取，工具/检查器实际退出前不释放；未知副作用恢复必须 blocked，不能合成成功或自动重放。`start_goal_driver` 只启用调度、不启动 run；宿主容量 run 只能经 `confirm_and_start_goal`/`resume_and_start_goal` 携带许可启动，恢复出的 active goal 只能由显式 resume 重新启动（无容量账本的生命周期宿主用 `start_goal_driver_and_run`）；被拒绝的 resume 不启动 run、不发出 provider 请求，停止意图的发布失败不读作已保存。Rust/Web/Python 默认不自动驱动，终端只在 UI 接入后启动 active。宿主容量随目标 run 转移：`GoalRunLease` 只在对应 run（RunGuard）内存活，且只在 run 结束且 turn gate 空闲后释放；驱动未启用、已有 run、合同/持久化拒绝时激活返回错误且立即销毁租约，不得先启动旧 active 目标或留下无人调度的 active 目标。
-- Goal 在界面只呈现：TUI 状态栏 `goal:<状态> <剩余>/<上限>` 标记可点击打开只读详情（`/goals` 等效），会话打开从 `goal.json` 恢复、运行中由 `GoalUpdated` 更新；Web 经 `GET /api/sessions/{id}/goal` 读取当前快照（活运行时优先，回退 `goal.json` 的 `current`，不含 history），经 `POST .../goal` 与 `POST .../goal/{action}` 以宿主身份创建与控制，每次变更必须是当前 `revision` 的 compare-and-set，且一律经 `AgentRuntimeHandle` 落到 core；SSE 转发 `goal_updated`。界面不得绕过 core 修改契约、额度或状态。
+- Goal 在界面只呈现：TUI 状态栏 `goal:<状态> <剩余>/<上限>` 标记可点击打开只读详情（`/goals` 等效），会话打开从 `goal.json` 恢复、运行中由 `GoalUpdated` 更新；Web 经 `GET /api/sessions/{id}/goal` 读取当前快照（活运行时优先，回退 `goal.json` 的 `current`，不含 history；默认流摘要，`?full=true` 取完整契约），经 `POST .../goal` 与 `POST .../goal/{action}` 以宿主身份创建与控制，每次变更必须是当前 `revision` 的 compare-and-set，且一律经 `AgentRuntimeHandle` 落到 core；SSE 转发 `goal_updated` 摘要（不含 usage_records/完整 reviews；保留 `review_candidate` 供候选匹配），详情按 revision 强制 full 重拉。界面不得绕过 core 修改契约、额度或状态。
 
 ### Plan 与 Todo
 

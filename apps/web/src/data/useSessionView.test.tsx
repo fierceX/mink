@@ -13,10 +13,20 @@ import { receiptStampHolds, useSessionView } from './useSessionView.ts'
 
 // The stream is the only SSE surface the view owns; the tests drive its events.
 const streams = vi.hoisted(() => [] as ((event: Record<string, unknown>) => void)[])
+const disconnects = vi.hoisted(() => [] as ((reason: string) => void)[])
+const opens = vi.hoisted(() => [] as (() => void)[])
 vi.mock('./sse.ts', () => ({
   SseClient: class {
-    constructor(_id: string, onChange: (event: Record<string, unknown>) => void) {
+    constructor(
+      _id: string,
+      onChange: (event: Record<string, unknown>) => void,
+      onDisconnect: (reason: string) => void,
+      _project?: string,
+      onOpen?: () => void,
+    ) {
       streams.push(onChange)
+      disconnects.push(onDisconnect)
+      opens.push(onOpen ?? (() => {}))
     }
     connect(): void {}
     close(): void {}
@@ -27,6 +37,8 @@ afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
   streams.length = 0
+  disconnects.length = 0
+  opens.length = 0
   // The unresolved-submission record is stored with the draft: one test's
   // record must not answer for the next test's session.
   localStorage.clear()
@@ -281,6 +293,38 @@ describe('session view identity and history', () => {
       expect(await loading).toBe(false)
     })
     expect(result.current.state?.messages?.some(message => message.seq === 1)).toBe(false)
+  })
+})
+
+describe('reconnect', () => {
+  it('keeps connecting until the snapshot, not the transport open', async () => {
+    vi.spyOn(api, 'openSession').mockResolvedValue(ok(live('A')))
+    const { result } = renderHook(() => useSessionView(SESSIONS.A))
+    await waitFor(() => { expect(streams.length).toBe(1) })
+    act(() => { opens[0]!() })
+    expect(result.current.connection).toBe('connecting')
+    act(() => { streams[0](snapshot('A')) })
+    expect(result.current.connection).toBe('connected')
+  })
+
+  it('reopens a closed runtime and rebuilds from the new snapshot', async () => {
+    const open = vi.spyOn(api, 'openSession').mockResolvedValue(ok(live('A')))
+    const { result } = renderHook(() => useSessionView(SESSIONS.A))
+    await waitFor(() => { expect(streams.length).toBe(1) })
+    act(() => { streams[0](snapshot('A')) })
+    expect(result.current.connection).toBe('connected')
+
+    act(() => { disconnects[0]!('session_closed') })
+    await waitFor(() => { expect(result.current.connection).toBe('closed') })
+    expect(result.current.open).toBe(false)
+
+    act(() => { result.current.reconnect() })
+    await waitFor(() => { expect(streams.length).toBe(2) })
+    expect(open).toHaveBeenCalledTimes(2)
+    await waitFor(() => { expect(result.current.connection).toBe('connecting') })
+    act(() => { streams[1](snapshot('A')) })
+    expect(result.current.connection).toBe('connected')
+    expect(result.current.open).toBe(true)
   })
 })
 

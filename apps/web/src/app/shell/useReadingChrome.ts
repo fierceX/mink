@@ -7,7 +7,7 @@
  * and never closes the session.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { readingGesture } from '../../data/readingGesture.ts'
 
 /** Layout slot the chrome occupies, so the transcript can keep its position. */
@@ -57,11 +57,15 @@ export function useReadingChrome(enabled: boolean): ReadingChrome {
   }, [])
 
   const hide = useCallback(() => {
+    // Reading chrome exists only in the narrow layout. The transcript's click
+    // handler is mounted whenever the shell passes this object, so a desktop
+    // tap must not be able to hide the header and composer.
+    if (!enabled) return
     // A tap is deliberate: the gesture detector is reset so a following scroll does
     // not read as the same movement.
     gesture.current.reset()
     setHidden(true)
-  }, [])
+  }, [enabled])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -93,5 +97,11 @@ export function useReadingChrome(enabled: boolean): ReadingChrome {
     setHidden(reading)
   }, [enabled, isUserScroll])
 
-  return { hidden, reveal, hide, consumed, armUserScroll, isUserScroll, setInputLocked }
+  // The transcript's effects depend on this object. Keeping it stable across
+  // renders avoids unbinding and rebinding the scroll/click listeners on every
+  // streaming frame.
+  return useMemo(
+    () => ({ hidden, reveal, hide, consumed, armUserScroll, isUserScroll, setInputLocked }),
+    [hidden, reveal, hide, consumed, armUserScroll, isUserScroll, setInputLocked],
+  )
 }

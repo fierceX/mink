@@ -43,6 +43,46 @@ async fn metadata_resolves_alias_and_id_prefix() {
 }
 
 #[tokio::test]
+async fn untitled_session_keeps_its_internal_alias_out_of_the_title() {
+    let home = temp_home("untitled");
+    let cwd = home.join("workspace");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let paths = paths_for(&home, &cwd, "20260604-120000-abcd");
+    tokio::fs::create_dir_all(&paths.session_dir).await.unwrap();
+    ensure_metadata(
+        &paths,
+        &cwd,
+        SessionSeed {
+            alias: Some("draft-abc".into()),
+            untitled: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let metadata = read_metadata(&paths.metadata).await.unwrap().unwrap();
+    assert_eq!(metadata.title, None);
+    assert!(metadata.untitled);
+
+    ensure_metadata(
+        &paths,
+        &cwd,
+        SessionSeed {
+            title: Some("fix the reconnect path".into()),
+            first_prompt: Some("fix the reconnect path\nmore detail".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let metadata = read_metadata(&paths.metadata).await.unwrap().unwrap();
+    assert_eq!(metadata.title.as_deref(), Some("fix the reconnect path"));
+    assert!(!metadata.untitled);
+    let _ = tokio::fs::remove_dir_all(&home).await;
+}
+
+#[tokio::test]
 async fn metadata_resolves_sanitized_alias_reference() {
     let home = temp_home("resolve-sanitized");
     let cwd = home.join("workspace");

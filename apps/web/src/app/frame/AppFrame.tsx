@@ -141,6 +141,7 @@ export function AppFrame({
   onNarrowChange,
 }: AppFrameProps) {
   const frameRef = useRef<HTMLDivElement | null>(null);
+  const centerRef = useRef<HTMLDivElement | null>(null);
   const [viewport, setViewport] = useState(0);
   const [dragging, setDragging] = useState(false);
 
@@ -167,6 +168,29 @@ export function AppFrame({
       disposed = true;
       observer.disconnect();
       if (raf !== null) cancelAnimationFrame(raf);
+    };
+  }, []);
+
+  // The transcript's content width is derived from the centre column, not the
+  // window: a sidebar or detail panel narrowing the centre must narrow the
+  // message column (and the wide-table breakout) with it. The copied sheet
+  // reads --dsh-conversation-column-width; publishing it here keeps the CSS
+  // contract and needs no JS measurement inside every conversation.
+  useLayoutEffect(() => {
+    const el = centerRef.current;
+    if (el === null) return;
+    const publish = (width: number) => {
+      if (width > 0) el.style.setProperty("--dsh-conversation-column-width", `${Math.round(width)}px`);
+    };
+    publish(el.getBoundingClientRect().width);
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? el.getBoundingClientRect().width;
+      publish(width);
+    });
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+      el.style.removeProperty("--dsh-conversation-column-width");
     };
   }, []);
 
@@ -276,7 +300,7 @@ export function AppFrame({
       <div className={css.sidebarCol}>
         {sidebar(narrow ? sidebarWidthForNarrow : cols.sidebar, sidebarCollapsed)}
       </div>
-      <div className={css.centerCol}>{center}</div>
+      <div ref={centerRef} className={css.centerCol}>{center}</div>
       <div className={css.rightbarCol} data-rightbar-col>
         {/* With no track (a frame too narrow to make room) the occupant still
             draws: the column is zero-width and clips nothing, so the panel hangs

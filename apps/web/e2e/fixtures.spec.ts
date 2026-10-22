@@ -109,3 +109,33 @@ test('answers a changed-file row with its hunks', async ({ page }) => {
   await expect(preview).toBeVisible({ timeout: 3000 })
   await expect(preview.locator('[class*="path"]')).toContainText(/\S/)
 })
+
+test('keeps a wide table inside the transcript with its own scrollbar', async ({ page }) => {
+  await page.goto('/table.html')
+  const wrapper = page.locator('.md-table-wide')
+  await expect(wrapper).toHaveCount(1)
+
+  const metrics = await wrapper.evaluate((element) => {
+    const scroller = element.closest('[data-conversation-scroll]') as HTMLElement
+    const style = getComputedStyle(element)
+    return {
+      overflowX: style.overflowX,
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+      wrapperRight: element.getBoundingClientRect().right,
+      scrollerRight: scroller.getBoundingClientRect().right,
+    }
+  })
+  // Only an overflowing table scrolls, and it must not be wider than the box
+  // that clips the transcript.
+  expect(metrics.overflowX).toBe('auto')
+  expect(metrics.scrollWidth).toBeGreaterThan(metrics.clientWidth)
+  expect(metrics.wrapperRight).toBeLessThanOrEqual(metrics.scrollerRight + 1)
+
+  // At maximum scroll the last cell is inside the transcript, which is what the
+  // old viewport-sized breakout made impossible.
+  await wrapper.evaluate((element) => { element.scrollLeft = element.scrollWidth })
+  const lastCell = wrapper.locator('td').last()
+  const lastRight = await lastCell.evaluate((element) => element.getBoundingClientRect().right)
+  expect(lastRight).toBeLessThanOrEqual(metrics.scrollerRight + 1)
+})

@@ -214,18 +214,91 @@ impl Registry {
     /// metadata, then we shut it down, leaving a disk session visible to both
     /// `list()` and the TUI.
     pub async fn create(&self, name: &str, cwd: &Path) -> RegistryResult<SessionSummary> {
-        self.create_inner(name, cwd)
+        let name = name.trim().to_string();
+        self.create_seeded(&name, cwd, Some(name.clone()), Some(name.clone()), false)
             .await
             .map_err(RegistryError::from_resolution)
     }
 
-    async fn create_inner(&self, name: &str, cwd: &Path) -> Result<SessionSummary> {
-        let name = name.trim();
-        if name.is_empty() {
-            anyhow::bail!("session name must not be empty");
+    /// Create (or idempotently resolve) a workbench conversation from a client
+    /// draft id. The alias stays internal; the display title comes from the
+    /// first prompt when there is one. Without a prompt the session is marked
+    /// untitled so a later runtime open does not replace it with the alias.
+    pub async fn create_draft(
+        &self,
+        draft_id: &str,
+        cwd: &Path,
+        first_prompt: Option<&str>,
+    ) -> RegistryResult<SessionSummary> {
+        let prompt = first_prompt
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty())
+            .map(str::to_string);
+        let title = prompt
+            .as_deref()
+            .and_then(runtime_session::title_from_prompt);
+        self.create_seeded(draft_id, cwd, title, prompt.clone(), prompt.is_none())
+            .await
+            .map_err(RegistryError::from_resolution)
+    }
+
+    /// Fill a display title from the first real text message. The operation
+    /// shares open/delete's per-session lock, so a deleted session cannot be
+    /// recreated by a late metadata write. An empty prompt (image-only input)
+    /// leaves the session untitled for the next text message.
+    pub async fn backfill_title(
+        &self,
+        id: &str,
+        project: Option<&str>,
+        prompt: &str,
+    ) -> RegistryResult<bool> {
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return Ok(false);
         }
-        let alias = runtime_session::sanitize_alias(name)
-            .ok_or_else(|| anyhow!("invalid session name: {name}"))?;
+        let dir = self.session_dir(id, project).await?;
+        let locator = locator_from_dir(&dir, id);
+        let operation_lock = self.operation_lock(&locator);
+        let _operation = operation_lock.lock().await;
+        if !dir.is_dir() {
+            return Ok(false);
+        }
+        let metadata = read_session_metadata(&dir).map_err(RegistryError::Internal)?;
+        if metadata.first_prompt.is_some() {
+            return Ok(false);
+        }
+        let Some(title) = runtime_session::title_from_prompt(prompt) else {
+            return Ok(false);
+        };
+        let paths = runtime_session::SessionPaths::from_session_dir(id.to_string(), dir);
+        runtime_session::ensure_metadata(
+            &paths,
+            Path::new(""),
+            runtime_session::SessionSeed {
+                title: Some(title),
+                first_prompt: Some(prompt.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(RegistryError::Internal)?;
+        Ok(true)
+    }
+
+    async fn create_seeded(
+        &self,
+        alias: &str,
+        cwd: &Path,
+        title: Option<String>,
+        first_prompt: Option<String>,
+        untitled: bool,
+    ) -> Result<SessionSummary> {
+        let alias = alias.trim();
+        if alias.is_empty() {
+            anyhow::bail!("session alias must not be empty");
+        }
+        let alias = runtime_session::sanitize_alias(alias)
+            .ok_or_else(|| anyhow!("invalid session alias: {alias}"))?;
         let locator = CreateLocator {
             project_key: runtime_session::project_key(cwd),
             alias,
@@ -279,8 +352,9 @@ impl Registry {
                 cwd,
                 runtime_session::SessionSeed {
                     alias: Some(locator.alias.clone()),
-                    title: Some(name.to_string()),
-                    first_prompt: Some(name.to_string()),
+                    title,
+                    first_prompt,
+                    untitled,
                     ..Default::default()
                 },
             )
@@ -945,6 +1019,7 @@ fn summary_from_metadata(
         cwd: String::new(),
         parent: None,
         first_prompt: None,
+        untitled: false,
         summary: None,
         subagent: None,
     });
@@ -955,7 +1030,8 @@ fn summary_from_metadata(
         id: m.id.clone(),
         alias: m.alias.clone(),
         title: m.title.clone(),
-        first_prompt: m.first_prompt.clone(),
+        first_prompt: summary_first_prompt(m.first_prompt.as_deref()),
+        untitled: m.untitled,
         cwd: m.cwd.clone(),
         created_at: m.created_at.clone(),
         updated_at: m.updated_at.clone(),
@@ -987,6 +1063,19 @@ fn summary_from_metadata(
         cache_read_tokens,
         last_context_tokens,
     }
+}
+
+fn summary_first_prompt(prompt: Option<&str>) -> Option<String> {
+    const MAX_BYTES: usize = 512;
+    let prompt = prompt?;
+    if prompt.len() <= MAX_BYTES {
+        return Some(prompt.to_string());
+    }
+    let mut end = MAX_BYTES;
+    while end > 0 && !prompt.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(format!("{}…", &prompt[..end]))
 }
 
 fn project_key_from_dir(dir: &Path) -> String {
@@ -1088,6 +1177,71 @@ mod tests {
             "mink-server-{label}-{}-{nonce}",
             std::process::id()
         ))
+    }
+
+    #[tokio::test]
+    async fn backfill_title_keeps_image_only_untitled_and_never_resurrects_a_deletion() {
+        let dir = unique_temp_dir("backfill");
+        let cwd = dir.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let registry = Registry::new(dir.clone(), "flash".into(), 4);
+        let created = registry
+            .create_draft("draft-backfill", &cwd, None)
+            .await
+            .unwrap();
+        let session_dir = PathBuf::from(&created.path);
+        let read = || {
+            serde_json::from_str::<SessionMetadata>(
+                &std::fs::read_to_string(session_dir.join("session.json")).unwrap(),
+            )
+            .unwrap()
+        };
+
+        // Image-only input writes no placeholder prompt: a later text turn can
+        // still become the title.
+        assert!(
+            !registry
+                .backfill_title(&created.id, Some(&created.project_key), "   ")
+                .await
+                .unwrap()
+        );
+        assert_eq!(read().first_prompt, None);
+        assert!(read().untitled);
+
+        assert!(
+            registry
+                .backfill_title(
+                    &created.id,
+                    Some(&created.project_key),
+                    "fix the reconnect path"
+                )
+                .await
+                .unwrap()
+        );
+        let metadata = read();
+        assert_eq!(
+            metadata.first_prompt.as_deref(),
+            Some("fix the reconnect path")
+        );
+        assert_eq!(metadata.title.as_deref(), Some("fix the reconnect path"));
+        assert!(!metadata.untitled);
+
+        registry
+            .delete(&created.id, Some(&created.project_key))
+            .await
+            .unwrap();
+        assert!(!session_dir.exists());
+        assert!(
+            registry
+                .backfill_title(&created.id, Some(&created.project_key), "late text")
+                .await
+                .is_err()
+        );
+        assert!(
+            !session_dir.exists(),
+            "a late write must not recreate the session"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1709,6 +1863,7 @@ mod poison_public_tests {
             cwd: "/tmp".into(),
             parent: None,
             first_prompt: Some("把这个会话的标题补上".into()),
+            untitled: false,
             summary: None,
             subagent: None,
         };

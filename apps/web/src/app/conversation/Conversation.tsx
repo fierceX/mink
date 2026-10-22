@@ -8,11 +8,13 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { MarkdownDelegateProvider } from '../../ui/primitives/markdown/MarkdownDelegate.tsx'
 import type { SessionSummary } from '../../data/api.ts'
-import { Button, IconPanelLeftOutlineRegular, StateDot, Tooltip } from '../../ui/primitives/index.ts'
+import { Button, ConnectionIndicator, IconPanelLeftOutlineRegular, StateDot, Tooltip } from '../../ui/primitives/index.ts'
+import type { ConnectionIndicatorState } from '../../ui/primitives/index.ts'
 import type { SessionState } from '../../data/types.ts'
 import type { ProcessDisplay } from '../settings/preferences.ts'
 import type { InputReceipt } from '../../data/types.ts'
 import type { ReceiptStamp } from '../../data/useSessionView.ts'
+import type { SessionConnection } from '../../data/useSessionView.ts'
 import { PendingInputs } from './PendingInputs.tsx'
 import { useAttachments } from './useAttachments.ts'
 import { Composer } from './Composer.tsx'
@@ -36,6 +38,10 @@ export interface ConversationProps {
   title: string
   /** Live session open in the server runtime; sending requires it. */
   open: boolean
+  /** Live-stream state, when the controller reports one. */
+  connection?: SessionConnection | undefined
+  /** Reopen the runtime and rebuild the projection from its snapshot. */
+  onReconnect?: (() => void) | undefined
   /** The session the composer and the pending strip act on. */
   session: SessionSummary | undefined
   /** Load/open/interrupt failure reported by the session view. */
@@ -200,12 +206,40 @@ export function Conversation({
   hasOlder, onLoadOlder, onGoalAction, onOpenFile, onOpenArtifact, onRetryOpen, onOpenSidebar, draft, pendingDraft, onDraftChange,
   receiptStamp,
   modelLabel, modelChoices, modelLoading, modelError, onModelChange, onStop,
+  connection, onReconnect,
   chromeHidden: chromeHiddenProp, onRevealChrome, onOpenSettings,
 }: ConversationProps) {
   const scroller = useRef<HTMLDivElement>(null)
   const [loadingOlder, setLoadingOlder] = useState(false)
   const reading = useStickToBottom(state, scroller, followTick)
   useReadingScroll(chrome, scroller)
+  // The reconnect control is an outage state, except for one short confirmation
+  // after a successful reopen. Tracking the previous connection here keeps the
+  // primitive presentational and the labels in the conversation's own words.
+  const [recovered, setRecovered] = useState(false)
+  const wasDisconnected = useRef(false)
+  useEffect(() => {
+    if (connection === undefined) return
+    if (connection === 'disconnected' || connection === 'offline'
+      || connection === 'closed' || connection === 'failed') {
+      wasDisconnected.current = true
+      setRecovered(false)
+      return
+    }
+    // `connecting` is also the initial state. It must not count as an outage,
+    // or every first open would flash the green recovered confirmation.
+    if (connection !== 'connected') return
+    if (!wasDisconnected.current) return
+    wasDisconnected.current = false
+    setRecovered(true)
+    const timer = window.setTimeout(() => { setRecovered(false) }, 2200)
+    return () => { window.clearTimeout(timer) }
+  }, [connection])
+  const connectionState: ConnectionIndicatorState | undefined = connection === undefined
+    ? undefined
+    : connection === 'connecting' ? 'connecting'
+      : connection === 'connected' ? (recovered ? 'recovered' : undefined)
+        : 'disconnected'
   // The reading controls keep clear of the input card, so its height is published
   // as it changes (the goal bar and the card both move it). A callback ref, because
   // the seat only exists once the session has a transcript to read.
@@ -302,6 +336,19 @@ export function Conversation({
             <span className={rootCss.crumbCurrent}>{title}</span>
             <StateDot state={running ? 'ongoing' : workState === 'error' ? 'error' : 'idle'} />
           </div>
+          {connectionState !== undefined && (
+            <ConnectionIndicator
+              state={connectionState}
+              disconnectedLabel={connection === 'closed'
+                ? '会话已关闭，重新打开'
+                : connection === 'offline' ? '网络离线，重新连接' : '连接已断开，重新连接'}
+              connectingLabel="正在连接"
+              recoveredLabel="已恢复"
+              reconnectActionLabel="重新连接会话"
+              restartActionLabel="重新连接会话"
+              onReconnect={() => { onReconnect?.() }}
+            />
+          )}
           {onOpenSettings !== undefined && (
             <Tooltip label="设置" side="bottom" delayMs={400}>
               <Button
@@ -334,7 +381,7 @@ export function Conversation({
       {notice !== undefined && notice !== '' && (
         <p className={rootCss.notice} role="status">{notice}</p>
       )}
-      {state?.desynced && (
+      {connection === undefined && state?.desynced && (
         <p className={rootCss.notice} role="status">连接已中断，正在重连…</p>
       )}
       <div className={rootCss.body}>
@@ -377,7 +424,7 @@ export function Conversation({
                       hero
                       running={running}
                       targetTurnId={state?.currentTurn ?? null}
-                      disabled={!open}
+                      disabled={!open || connection === 'closed'}
                       pending={pending}
                       attachments={attachments}
                       canAttach={imageLimits !== null}
@@ -475,7 +522,7 @@ export function Conversation({
               hero={false}
               running={running}
               targetTurnId={state?.currentTurn ?? null}
-              disabled={!open}
+              disabled={!open || connection === 'closed'}
               pending={pending}
               attachments={attachments}
               canAttach={imageLimits !== null}

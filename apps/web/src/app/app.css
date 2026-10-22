@@ -190,3 +190,23 @@ header[data-chrome-hidden],
   font: inherit;
   cursor: pointer;
 }
+
+/* The transcript is the container the wide-table breakout measures against.
+   The copied ChatView sheet defines this container on a class the workbench
+   does not render; without it, 100cqw resolves against the viewport and a
+   wide table reaches past the clipped transcript instead of scrolling inside
+   it. */
+[data-conversation-scroll] {
+  container-type: inline-size;
+}
+
+/* A wide table is a scrollable viewer, not a hover-gated one: the bar must be
+   reachable with a touch pointer too, and it appears only when the table is
+   actually wider than the transcript. The copied sheet rests at overflow-x:
+   hidden and flips to scroll on hover; the higher-specificity mink rule below
+   keeps the wrapper's real scrollport inside the visible column. */
+[data-conversation-scroll] .md-table-wide.md-table-wide {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 0;
+}

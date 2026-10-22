@@ -154,11 +154,14 @@ export function groupSessions(sessions: readonly SessionSummary[]): ProjectGroup
  * last resort. A long prompt is cut so the row keeps its shape.
  */
 export function sessionTitle(session: SessionSummary): string {
+  const title = session.title?.trim()
+  if (title !== undefined && title !== '') return title
   const prompt = session.first_prompt?.trim()
-  if (session.title === null && session.alias === null && prompt !== undefined && prompt !== '') {
+  if (prompt !== undefined && prompt !== '') {
     return prompt.length > 60 ? `${prompt.slice(0, 60)}…` : prompt
   }
-  return session.title ?? session.alias ?? session.id
+  if (session.untitled === true) return '新对话'
+  return session.alias ?? session.id
 }
 
 /**

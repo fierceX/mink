@@ -123,23 +123,56 @@ export function useDetails(
   // `null` (a clear) or a fresh goal id cannot express by itself.
   const liveGoal = live?.goal
   const liveVersion = useRef(0)
-  // Count a publication, not a render: the caller may hand over a fresh object
-  // with the same value, which must not retire a seed that is in flight.
-  const liveKey = liveGoal === null
-    ? 'none'
-    : liveGoal === undefined
-      ? undefined
-      : `${liveGoal.id}:${liveGoal.revision}:${liveGoal.status}:${liveGoal.hidden === true ? 'hidden' : 'shown'}`
+  // A full seed for a new revision is fetched by bumping this nonce. It is not
+  // a dependency on the live object: a clear also removes id/revision and must
+  // not start a seed that could resurrect the cleared goal.
+  const [goalSeed, setGoalSeed] = useState(0)
+  const lastSeedGoal = useRef<string | undefined>(
+    liveGoal === null || liveGoal === undefined ? undefined : `${liveGoal.id}:${liveGoal.revision}`,
+  )
+  // A signature, not object identity: the caller may hand over a fresh object
+  // with the same value on every render, and processing it would setGoal in a
+  // loop. The JSON is small (the stream carries a summary) and includes every
+  // field a live publication can change.
+  const liveKey = liveGoal === undefined
+    ? undefined
+    : liveGoal === null
+      ? 'none'
+      : JSON.stringify(liveGoal)
   const lastLiveKey = useRef<string | undefined>(undefined)
   useEffect(() => {
-    if (liveGoal === undefined) return
-    if (lastLiveKey.current !== liveKey) {
-      lastLiveKey.current = liveKey
-      liveVersion.current += 1
+    if (liveGoal === undefined || liveKey === undefined) return
+    if (lastLiveKey.current === liveKey) return
+    lastLiveKey.current = liveKey
+    liveVersion.current += 1
+    if (liveGoal === null) {
+      lastSeedGoal.current = undefined
+    } else {
+      const key = `${liveGoal.id}:${liveGoal.revision}`
+      if (lastSeedGoal.current !== key) {
+        lastSeedGoal.current = key
+        setGoalSeed(seed => seed + 1)
+      }
     }
-    setGoal(current => (goalSupersedes(current.snapshot, liveGoal)
-      ? { snapshot: liveGoal, driven: current.driven }
-      : current))
+    setGoal(current => {
+      if (liveGoal === null) {
+        return current.snapshot === null ? current : { snapshot: null, driven: current.driven }
+      }
+      if (current.snapshot === null || current.snapshot.id !== liveGoal.id) {
+        return { snapshot: liveGoal, driven: current.driven }
+      }
+      if (liveGoal.revision < current.snapshot.revision) return current
+      if (liveGoal.revision === current.snapshot.revision) {
+        // Same contract revision: the stream owns status/waiting fields, while
+        // the full read owns iteration/review history. Merge only here; a
+        // newer revision must not inherit the previous revision's heavy fields.
+        return { snapshot: { ...current.snapshot, ...liveGoal }, driven: current.driven }
+      }
+      // A revision jump replaces the detail snapshot with the summary. The
+      // effect below sees the new revision and fetches `full=true` once, so old
+      // iterations/reports cannot label the new contract.
+      return { snapshot: liveGoal, driven: current.driven }
+    })
   }, [liveGoal, liveKey])
 
   useEffect(() => {
@@ -162,6 +195,10 @@ export function useDetails(
     // The projection's own counter when the seed starts: if it moved while the
     // seed was in flight, the live goal (a clear included) is the newer truth.
     const liveAtStart = liveVersion.current
+    // An empty seed cannot erase a goal the projection announced after the
+    // seed started. A null live value is different: it is the clear itself and
+    // is handled by the live effect above.
+    const liveGoalAtStart = liveGoal
     setLoading(true)
     setError(undefined)
     void (async () => {
@@ -178,7 +215,7 @@ export function useDetails(
           setPlan(planResponse.data)
           setTodo(todoResponse.data.todos ?? {})
         } else if (tab === 'goal') {
-          const response = await api.goal(target.id, target.project_key)
+          const response = await api.goal(target.id, target.project_key, true)
           if (!current()) return
           if (response.code !== 200) throw new Error(response.message || '读取目标失败')
           // The goal endpoint reports the deployment's checker capability; the
@@ -189,9 +226,21 @@ export function useDetails(
             // still describes the same moment, so it may fill the tab (including
             // "no goal"). An equal revision keeps the live snapshot and still
             // takes the seed's runtime flag.
-            setGoal(current => (goalSupersedes(current.snapshot, response.data.goal)
-              ? { snapshot: response.data.goal, driven: response.data.driven }
-              : { ...current, driven: response.data.driven }))
+            setGoal(current => {
+              const seed = response.data.goal
+              if (seed === null && liveGoalAtStart !== undefined && liveGoalAtStart !== null) {
+                return current
+              }
+              if (seed !== null && current.snapshot !== null
+                && seed.id === current.snapshot.id && seed.revision === current.snapshot.revision) {
+                // The seed carries the fields the stream omits: keep the live
+                // summary's newer status and fill the detail history under it.
+                return { snapshot: { ...current.snapshot, ...seed }, driven: response.data.driven }
+              }
+              return goalSupersedes(current.snapshot, seed)
+                ? { snapshot: seed, driven: response.data.driven }
+                : { ...current, driven: response.data.driven }
+            })
           } else {
             // The projection advanced: its goal wins, and only a seed that names
             // exactly the revision now shown may still report the runtime flag.
@@ -243,7 +292,7 @@ export function useDetails(
         if (current()) setLoading(false)
       }
     })()
-  }, [summary, tab, path, ticket, identity, viewEpoch])
+  }, [summary, tab, path, ticket, identity, viewEpoch, goalSeed])
 
   return {
     plan, todo, goal, artifacts, artifact, files, directory, file,

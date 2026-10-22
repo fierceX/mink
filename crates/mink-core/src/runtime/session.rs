@@ -171,6 +171,20 @@ impl SessionReader {
         tail: bool,
         before: Option<u64>,
     ) -> Result<Vec<serde_json::Value>> {
+        self.conversation_turns_bounded(from, limit, tail, before, None)
+    }
+
+    /// Whole user turns with an optional serialized-byte ceiling. The newest
+    /// turn is always returned even when it alone exceeds the ceiling, so a
+    /// paging request can never split a tool call from its result.
+    pub fn conversation_turns_bounded(
+        &self,
+        from: u64,
+        limit: usize,
+        tail: bool,
+        before: Option<u64>,
+        max_bytes: Option<usize>,
+    ) -> Result<Vec<serde_json::Value>> {
         use std::collections::VecDeque;
         use std::io::BufRead;
         let file = std::fs::File::open(self.directory.join("conversation.jsonl"))?;
@@ -216,7 +230,37 @@ impl SessionReader {
             line.clear();
         }
         retain(current, &mut turns);
-        Ok(turns.into_iter().flatten().collect())
+        let turns: Vec<Vec<serde_json::Value>> = turns.into_iter().collect();
+        let mut start = 0usize;
+        if let Some(max_bytes) = max_bytes.filter(|max| *max > 0) {
+            let turn_bytes = |turn: &Vec<serde_json::Value>| {
+                serde_json::to_vec(turn)
+                    .map(|bytes| bytes.len())
+                    .unwrap_or(0)
+            };
+            if keep_tail {
+                let mut total: usize = turns.iter().map(turn_bytes).sum();
+                while start + 1 < turns.len() && total > max_bytes {
+                    total = total.saturating_sub(turn_bytes(&turns[start]));
+                    start += 1;
+                }
+            } else {
+                // A forward page keeps its requested beginning; it must not
+                // silently turn into the newest subset of that page.
+                let mut total = 0usize;
+                let mut end = 0usize;
+                for turn in &turns {
+                    let bytes = turn_bytes(turn);
+                    if end > 0 && total + bytes > max_bytes {
+                        break;
+                    }
+                    total += bytes;
+                    end += 1;
+                }
+                return Ok(turns.into_iter().take(end.max(1)).flatten().collect());
+            }
+        }
+        Ok(turns.into_iter().skip(start).flatten().collect())
     }
 
     /// Read a child session within this parent's isolated subagent collection.
@@ -358,6 +402,71 @@ mod reader_tests {
         );
         let _ = std::fs::remove_dir_all(dir);
     }
+    #[test]
+    fn bounded_turn_pages_keep_whole_turns_and_the_newest_one() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-reader-budget-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = "x".repeat(800);
+        let data = format!(
+            "{}\n{}\n{}\n",
+            serde_json::json!({"role":"user","content":"one"}),
+            serde_json::json!({"role":"assistant","content":&body}),
+            serde_json::json!({"role":"user","content":"two"}),
+        ) + &format!(
+            "{}\n",
+            serde_json::json!({"role":"assistant","content":&body}),
+        );
+        std::fs::write(dir.join("conversation.jsonl"), data).unwrap();
+        let reader = SessionReader::new(&dir);
+        let page = reader
+            .conversation_turns_bounded(0, 2, true, None, Some(900))
+            .unwrap();
+        assert_eq!(
+            page.first().unwrap()["seq"],
+            3,
+            "the newest turn stays whole"
+        );
+        assert_eq!(page.last().unwrap()["role"], "assistant");
+        assert_eq!(page.len(), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bounded_forward_pages_keep_their_beginning() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-reader-forward-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = "x".repeat(800);
+        let mut data = String::new();
+        for turn in 1..=3 {
+            data.push_str(&format!(
+                "{}\n{}\n",
+                serde_json::json!({"role":"user","content":format!("prompt {turn}")}),
+                serde_json::json!({"role":"assistant","content":&body}),
+            ));
+        }
+        std::fs::write(dir.join("conversation.jsonl"), data).unwrap();
+        let page = SessionReader::new(&dir)
+            .conversation_turns_bounded(0, 3, false, None, Some(900))
+            .unwrap();
+        assert_eq!(page.first().unwrap()["seq"], 1, "forward keeps the start");
+        assert_eq!(page.last().unwrap()["seq"], 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn streamed_turn_windows_keep_guidance_internal_and_tool_exchange() {
         let dir = std::env::temp_dir().join(format!(

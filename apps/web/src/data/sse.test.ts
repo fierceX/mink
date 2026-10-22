@@ -32,12 +32,12 @@ describe('SseClient reconnection', () => {
 
   it('reports the gap and reconnects with backoff instead of staying closed', () => {
     const seen: string[] = []
-    const client = new SseClient('s', event => seen.push(String(event.type)), () => seen.push('disconnected'))
+    const client = new SseClient('s', event => seen.push(String(event.type)), (reason) => seen.push(reason))
 
     client.connect()
     expect(FakeEventSource.instances).toHaveLength(1)
     FakeEventSource.instances[0]!.onerror?.()
-    expect(seen).toContain('disconnected')
+    expect(seen).toContain('transport')
     expect(FakeEventSource.instances).toHaveLength(1)
 
     // First retry waits the initial backoff (500ms), not a tight loop.
@@ -57,12 +57,12 @@ describe('SseClient reconnection', () => {
 
   it('offline closes the stream and online reconnects', () => {
     const seen: string[] = []
-    const client = new SseClient('s', event => seen.push(String(event.type)), () => seen.push('disconnected'))
+    const client = new SseClient('s', event => seen.push(String(event.type)), (reason) => seen.push(reason))
     client.connect()
     const first = FakeEventSource.instances[0]!
 
     window.dispatchEvent(new Event('offline'))
-    expect(seen).toContain('disconnected')
+    expect(seen).toContain('offline')
     expect(first.closed).toBe(true)
 
     window.dispatchEvent(new Event('online'))
@@ -73,11 +73,11 @@ describe('SseClient reconnection', () => {
 
   it('a closed session stops the reconnect loop', () => {
     const seen: string[] = []
-    const client = new SseClient('s', event => seen.push(String(event.type)), () => seen.push('disconnected'))
+    const client = new SseClient('s', event => seen.push(String(event.type)), (reason) => seen.push(reason))
     client.connect()
     const first = FakeEventSource.instances[0]!
     first.onmessage?.({ data: JSON.stringify({ type: 'session_closed' }) })
-    expect(seen).toContain('disconnected')
+    expect(seen).toContain('session_closed')
 
     vi.advanceTimersByTime(60_000)
     expect(FakeEventSource.instances).toHaveLength(1)

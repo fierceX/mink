@@ -1,6 +1,6 @@
-/* New-task dialog body: the two fields stack with the settings dialog's rhythm;
-   the card itself comes from the copied Modal, so this module only lays out the
-   form, its labels and the refusal line. */
+/* New-project dialog body: one directory field with the settings dialog's
+   rhythm; the card itself comes from the copied Modal, so this module only
+   lays out the form, its label and the refusal line. */
 
 .dialogSize {
   width: min(480px, 100%);

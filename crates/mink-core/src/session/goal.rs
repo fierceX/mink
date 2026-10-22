@@ -439,6 +439,16 @@ impl GoalSnapshot {
         }
     }
 
+    /// A cancelled/completed goal cannot stay in an execution/verification
+    /// phase. Paused, blocked, budget-exhausted and failed goals preserve it:
+    /// resume uses `Verifying` to retry the interrupted review.
+    pub(crate) fn normalize_phase(&mut self) {
+        if matches!(self.status, GoalStatus::Cancelled | GoalStatus::Completed) {
+            self.phase = GoalPhase::Idle;
+            self.review_stage = None;
+        }
+    }
+
     pub fn remaining_turns(&self) -> u32 {
         self.spec
             .limits
@@ -580,10 +590,13 @@ impl GoalStore {
                 Err(e) => Err(e.into()),
             }
         };
-        let state = read(&path)?.unwrap_or(State {
+        let mut state = read(&path)?.unwrap_or(State {
             version: GOAL_FORMAT_VERSION,
             ..State::default()
         });
+        for goal in state.current.iter_mut().chain(state.history.iter_mut()) {
+            goal.normalize_phase();
+        }
         let (changes, _) = tokio::sync::watch::channel(state.current.clone());
         let store = Self {
             path,
@@ -597,6 +610,10 @@ impl GoalStore {
                 pending.version == GOAL_FORMAT_VERSION,
                 "unsupported goal journal"
             );
+            let mut pending = pending;
+            for goal in pending.current.iter_mut().chain(pending.history.iter_mut()) {
+                goal.normalize_phase();
+            }
             publish_state(&store.path, &serde_json::to_vec(&pending)?, &store.fault)?;
             *store.state.lock().unwrap() = pending.clone();
             store.changes.send_replace(pending.current);
@@ -613,6 +630,10 @@ impl GoalStore {
             .unwrap_or_else(|e| e.into_inner())
             .current
             .clone()
+            .map(|mut goal| {
+                goal.normalize_phase();
+                goal
+            })
     }
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Option<GoalSnapshot>> {
         self.changes.subscribe()
@@ -622,6 +643,7 @@ impl GoalStore {
         next.version = GOAL_FORMAT_VERSION;
         for goal in next.current.iter_mut().chain(next.history.iter_mut()) {
             goal.version = GOAL_FORMAT_VERSION;
+            goal.normalize_phase();
         }
         let bytes = serde_json::to_vec(&next)?;
         publish_state(&self.journal, &bytes, &self.fault)?;
@@ -823,6 +845,7 @@ impl GoalStore {
             .checked_add(1)
             .ok_or_else(|| GoalChangeError::Rejected(anyhow::anyhow!("goal revision overflow")))?;
         g.version = GOAL_FORMAT_VERSION;
+        g.normalize_phase();
         let result = g.clone();
         self.publish(&mut state, next)
             .map_err(GoalChangeError::Publish)?;
@@ -847,6 +870,7 @@ impl GoalStore {
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("goal revision overflow"))?;
         g.version = GOAL_FORMAT_VERSION;
+        g.normalize_phase();
         let result = g.clone();
         self.publish(&mut state, next)?;
         Ok(result)
@@ -881,6 +905,7 @@ impl GoalStore {
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("goal revision overflow"))?;
         goal.version = GOAL_FORMAT_VERSION;
+        goal.normalize_phase();
         let result = goal.clone();
         self.publish(&mut state, next)?;
         Ok(Some(result))
@@ -1339,6 +1364,56 @@ mod tests {
         );
         let restored = GoalStore::load(&dir, PersistenceFault::default()).unwrap();
         assert_eq!(restored.snapshot(), Some(confirmed));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn inactive_goals_cannot_stay_in_verifying_phase() {
+        let (dir, store) = store();
+        let mut goal = store.create(GoalSpec::new("ship"), "env".into()).unwrap();
+        goal.status = GoalStatus::Cancelled;
+        goal.phase = GoalPhase::Verifying;
+        goal.review_stage = Some(GoalReviewStage::Inspecting);
+        goal.normalize_phase();
+        assert_eq!(goal.phase, GoalPhase::Idle);
+        assert_eq!(goal.review_stage, None);
+
+        // Human acceptance deliberately parks in Verifying until the host
+        // decision arrives; normalization must not erase that gate.
+        goal.status = GoalStatus::Blocked;
+        goal.phase = GoalPhase::Verifying;
+        goal.reason = Some("waiting for human acceptance".into());
+        goal.normalize_phase();
+        assert_eq!(goal.phase, GoalPhase::Verifying);
+
+        // Pausing during review must keep Verifying so resume retries the
+        // review rather than starting a fresh execution round.
+        goal.status = GoalStatus::Paused;
+        goal.phase = GoalPhase::Verifying;
+        goal.normalize_phase();
+        assert_eq!(goal.phase, GoalPhase::Verifying);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn loading_a_legacy_cancelled_goal_repairs_its_phase() {
+        let (dir, store) = store();
+        let mut goal = store.create(GoalSpec::new("ship"), "env".into()).unwrap();
+        goal.status = GoalStatus::Cancelled;
+        goal.phase = GoalPhase::Verifying;
+        goal.review_stage = Some(GoalReviewStage::Screening);
+        let state = State {
+            version: GOAL_FORMAT_VERSION,
+            current: Some(goal),
+            history: Vec::new(),
+        };
+        std::fs::write(dir.join("goal.json"), serde_json::to_vec(&state).unwrap()).unwrap();
+        let _ = std::fs::remove_file(dir.join("goal-transaction.json"));
+        let loaded = GoalStore::load(&dir, PersistenceFault::default()).unwrap();
+        let snapshot = loaded.snapshot().unwrap();
+        assert_eq!(snapshot.status, GoalStatus::Cancelled);
+        assert_eq!(snapshot.phase, GoalPhase::Idle);
+        assert_eq!(snapshot.review_stage, None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
