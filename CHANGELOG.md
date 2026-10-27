@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## v0.8.0 (2026-10-27)
+
+本版提高长任务默认额度并重构请求投影，完善子代理身份、生命周期与展示，同时修复 Web 工作台、Goal、压缩与工具边界问题。自定义 LLM backend 存在破坏性 API 变更。
 
 ### 破坏性变更
 
@@ -31,7 +33,6 @@
 - **压缩/输入**：InputInbox 写入的 `_mink` 用户消息重新计入“真实 user”与 `last_real_user_text`，TUI/Web 不再丢失用户切点守卫；应急 checkpoint 显式携带启动边界修复丢掉的消息；`Read` memo 命中要求 hashline 快照仍存在。
 - **工具**：scavenge 裸 JSON 只接受当前 surface 内的工具名（普通 JSON 示例不再变成调用）；空 edits、空/坏 patch、未知 tag 等 decode 后模型输入错误统一计为 `ModelFormat`；VFS `Read` 在调用后端前规范化并拒绝 `..` 逃逸。
 - **Goal**：详情 tab 只在同 id/revision 合并 live 摘要；revision/id 变化时先替换为摘要并强制重拉 `full=true`，避免旧 `iterations`/`review_report` 与新 review 混用；流摘要保留 `review_candidate`，候选验收匹配不再退回“待审核”。已取消/已完成目标载入时清除遗留 `verifying`（paused/blocked/budget_exhausted/failed 保留以供 resume 重审）；普通用户 turn 的压缩不再因无关 Goal 的 review 期限报 `goal review budget exhausted` 而整体失败。宿主租约在 `Running/Stopping/!enabled/closed` 拒绝路径返回错误并走 fault，不再静默丢弃；验收期间合法预算调整以新 revision 重试一次；inconclusive 审核不再直接终结目标；blocker 证据缺失时点名无效引用；`GoalBudget` 新增 `blocker_rounds`，`blocked_rounds` 与快照的连续阻断计数一致。
-- **Web**：SSE 断线自动退避重连，重连快照即权威对账，断开期间不再伪造 `running=false`；未决提交正文在返回会话后恢复；附件不再按会话对象身份重置；回执只在投影已有输入且发起视图 epoch/runtime generation 仍当前时落地；`/artifact` 命令打开指定产物；token 统计缺失时诊断页显示未知。
 - **LLM**：SSE 单行缓冲设上限并在超限时按协议损坏处理；`arguments:null` 不再执行成 `{}`；同一 attempt 的重复 usage 帧只结算一笔；包装过的 `LlmRequestFailure` 保留聚合 `attempt_count`。
 - **CLI/TUI**：`--tui` 与 `--print`/`--agent-jsonl` 在启动前互斥；状态栏目标标记按显示宽度命中；移除依赖不存在 `Diff` 工具的 EditLoop 死条件；强制关闭的会话由 reaper 回收。
 

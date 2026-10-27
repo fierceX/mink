@@ -1,6 +1,6 @@
 # Web 与官网维护
 
-> 更新日期：2026-10-16
+> 更新日期：2026-10-27
 
 仅供仓库维护，不进入官网发布产物。
 
@@ -19,7 +19,7 @@
 
 ## 发布候选检查
 
-`python3 scripts/check-release.py --tag v0.7.0` 核对 Cargo、Python、锁文件、当前安装示例、官网版本和发布记录；历史回放与性能记录保留原版本。`python3 -m unittest discover -s scripts -p 'test_release.py'` 检查版本漂移及 registry/发布错误分支，不发送真实发布请求。
+`python3 scripts/check-release.py --tag v0.8.0` 核对 Cargo、Python、锁文件、当前安装示例、官网版本和发布记录；历史回放与性能记录保留原版本。`python3 -m unittest discover -s scripts -p 'test_release.py'` 检查版本漂移及 registry/发布错误分支，不发送真实发布请求。
 
 CI 在 Rust 1.99 上检查 workspace/all-features 与精简 runtime/SDK，Web 运行单元、类型及隔离 provider E2E；文档 job 使用统一组装命令与五档宽度验收。publish 必须等待 binaries、wheels、pages-check 和 msrv，全渠道版本须与 tag 一致。
 

@@ -1,6 +1,6 @@
 # Rust 集成
 
-> 更新日期：2026-10-16
+> 更新日期：2026-10-27
 
 进程内 runtime 生命周期与可靠事件。前置：Rust 1.99+。
 
@@ -16,7 +16,7 @@ Rust 发布包为 `mink-core`，库 crate 名为 `mink`。发布包只包含可�
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.7.0", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.8.0", default-features = false, features = ["runtime"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
 ```
@@ -148,7 +148,7 @@ Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。`mink-core` 发布�
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.7.0", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.8.0", default-features = false, features = ["runtime"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
 ```

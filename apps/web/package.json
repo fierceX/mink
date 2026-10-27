@@ -1,7 +1,7 @@
 {
   "name": "mink-web",
   "private": true,
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Mink web workbench: React shell whose design layer is copied from the DSH client packages",
   "type": "module",
   "engines": {

@@ -2148,7 +2148,7 @@ dependencies = [
 
 [[package]]
 name = "mink-cli"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2170,7 +2170,7 @@ dependencies = [
 
 [[package]]
 name = "mink-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2204,7 +2204,7 @@ dependencies = [
 
 [[package]]
 name = "mink-server"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-stream",
