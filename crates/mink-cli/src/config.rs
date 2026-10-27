@@ -72,7 +72,7 @@ pub struct ProviderConfigFile {
     pub openai_token_param: Option<String>,
     pub openai_tool_choice: Option<serde_json::Value>,
     pub openai_extra_body: Option<BTreeMap<String, serde_json::Value>>,
-    /// provider HTTP 请求总超时（秒，`0` = 不设总超时），默认 600 秒。
+    /// provider HTTP 请求总超时（秒，`0` = 不设总超时），默认 7200 秒。
     pub http_timeout_secs: Option<u64>,
     /// Explicit image-input capability: "on" | "off". Overrides the
     /// backend declaration (v7 §3.1).
@@ -149,7 +149,7 @@ pub struct ToolsConfigFile {
     pub enabled_tools: Option<Vec<String>>,
     pub skills: Option<Vec<String>>,
     pub tool_timeout: Option<i32>,
-    /// 单次 Bash/Python/自定义工具调用的超时上限（默认 600，至少 5）。
+    /// 单次 Bash/Python/自定义工具调用的超时上限（默认 7200，至少 5）。
     pub tool_timeout_max: Option<i32>,
     pub sub_agent_timeout: Option<i32>,
     pub sub_agent_max_depth: Option<u32>,
@@ -210,7 +210,7 @@ pub struct CliConfig {
     pub provider_http_timeout_secs: u64,
     pub max_tokens: i32,
     pub tool_timeout_secs: i32,
-    /// 单次 Bash/Python/自定义工具调用的超时上限（默认 600 秒，至少 5 秒）。
+    /// 单次 Bash/Python/自定义工具调用的超时上限（默认 7200 秒，至少 5 秒）。
     pub tool_timeout_max_secs: i32,
     pub sub_agent_timeout_secs: i32,
     pub sub_agent_max_depth: u32,
@@ -306,9 +306,9 @@ impl Default for CliConfig {
             openai_extra_body: BTreeMap::new(),
             provider_http_timeout_secs: DEFAULT_PROVIDER_HTTP_TIMEOUT_SECS,
             max_tokens: 81920,
-            tool_timeout_secs: 600,
-            tool_timeout_max_secs: 600,
-            sub_agent_timeout_secs: 300,
+            tool_timeout_secs: 7_200,
+            tool_timeout_max_secs: 7_200,
+            sub_agent_timeout_secs: 1_800,
             sub_agent_max_depth: 1,
             llm_first_event_timeout_secs: 60,
             llm_idle_timeout_secs: 90,
@@ -327,7 +327,7 @@ impl Default for CliConfig {
             api_key: String::new(),
             base_url: String::new(),
             prompt: String::new(),
-            max_turns: 40,
+            max_turns: 200,
             max_context_tokens: 1_000_000,
             context_compact_pct: 94,
             context_reserve_tokens: 64_000,

@@ -222,7 +222,7 @@ pub struct OpenAiCompatibleOptions {
     pub include_usage: bool,
     pub token_param: TokenParamKind,
     pub parallel_tool_calls: Option<bool>,
-    /// provider HTTP 请求总超时（秒，`0` = 不设总超时）。默认 600 秒；长流式
+    /// provider HTTP 请求总超时（秒，`0` = 不设总超时）。默认 7200 秒；长流式
     /// 生成（如文档生成）应调大或设 `0`，由首事件/空闲期限兜底。
     pub http_timeout_secs: u64,
 }

@@ -1188,6 +1188,14 @@ fn apply_presentation(resources: &mut serde_json::Value, presentation: &serde_js
     }
 }
 
+const DEFAULT_TURN_TIMEOUT_SECS: u64 = 7_200;
+
+fn turn_timeout_secs(value: Option<&str>) -> u64 {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_TURN_TIMEOUT_SECS)
+}
+
 async fn run_turn_guarded(
     tx: &broadcast::Sender<String>,
     stream_sequence: &AtomicU64,
@@ -1196,10 +1204,7 @@ async fn run_turn_guarded(
     mut stream: AgentEventStream,
     session: SessionInfo,
 ) -> GuardedTurnResult {
-    let timeout_secs = std::env::var("MINK_SERVER_TURN_TIMEOUT")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(1200);
+    let timeout_secs = turn_timeout_secs(std::env::var("MINK_SERVER_TURN_TIMEOUT").ok().as_deref());
     let deadline = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs));
     tokio::pin!(deadline);
     let mut saw_stop = false;
@@ -1365,6 +1370,13 @@ impl mink::runtime::EventSink for GoalTurnSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_timeout_defaults_to_two_hours_and_accepts_overrides() {
+        assert_eq!(turn_timeout_secs(None), 7_200);
+        assert_eq!(turn_timeout_secs(Some("30")), 30);
+        assert_eq!(turn_timeout_secs(Some("not-a-number")), 7_200);
+    }
 
     #[test]
     fn bounded_text_keeps_utf8_boundaries_and_marks_the_cut() {

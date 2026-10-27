@@ -315,8 +315,9 @@ pub struct ResolvedConfig {
     pub max_tokens: i32,
     pub tool_timeout_secs: i32,
     /// 单次 Bash/Python/自定义工具调用的超时上限（显式 `timeout` 与全局
-    /// `tool_timeout_secs` 都不得超过该值）。默认 600 秒。
+    /// `tool_timeout_secs` 都不得超过该值）。默认 7200 秒。
     pub tool_timeout_max_secs: i32,
+    /// 子代理执行超时（秒），默认 30 分钟。
     pub sub_agent_timeout_secs: i32,
     /// Maximum delegation depth for sub-agents. `0` disables delegation;
     /// the default `1` preserves the historical single-level behavior.
@@ -400,9 +401,9 @@ impl Default for ResolvedConfig {
             openai_extra_body: BTreeMap::new(),
             provider_http_timeout_secs: DEFAULT_PROVIDER_HTTP_TIMEOUT_SECS,
             max_tokens: 81920,
-            tool_timeout_secs: 600,
-            tool_timeout_max_secs: 600,
-            sub_agent_timeout_secs: 300,
+            tool_timeout_secs: 7_200,
+            tool_timeout_max_secs: 7_200,
+            sub_agent_timeout_secs: 1_800,
             sub_agent_max_depth: 1,
             llm_first_event_timeout_secs: 60,
             llm_idle_timeout_secs: 90,
@@ -420,7 +421,7 @@ impl Default for ResolvedConfig {
             api_key: String::new(),
             base_url: String::new(),
             prompt: String::new(),
-            max_turns: 40,
+            max_turns: 200,
             max_context_tokens: 1_000_000,
             context_compact_pct: 94,
             context_reserve_tokens: 64_000,
@@ -451,7 +452,7 @@ impl Default for ResolvedConfig {
 
 /// provider HTTP 请求总超时的默认值（秒）。单次物理请求（含流式响应体读取）超过该值
 /// 会被传输层中断并归入可重试故障；长文档生成等长流式场景应调大或设 `0`。
-pub const DEFAULT_PROVIDER_HTTP_TIMEOUT_SECS: u64 = 600;
+pub const DEFAULT_PROVIDER_HTTP_TIMEOUT_SECS: u64 = 7_200;
 
 pub fn api_url(cfg: &ResolvedConfig) -> String {
     let base = if cfg.base_url.is_empty() {
@@ -581,7 +582,7 @@ impl Default for SandboxConfig {
             allow_network: true,
             max_memory_mb: 1024,
             max_pids: 64,
-            timeout_secs: 600,
+            timeout_secs: 7_200,
         }
     }
 }
@@ -688,6 +689,17 @@ mod validation_tests {
         );
         cfg.tool_timeout_max_secs = 5;
         assert!(validate_runtime_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn long_run_defaults_allow_extended_work() {
+        let cfg = ResolvedConfig::default();
+        assert_eq!(cfg.max_turns, 200);
+        assert_eq!(cfg.sub_agent_timeout_secs, 1_800);
+        assert_eq!(cfg.tool_timeout_secs, 7_200);
+        assert_eq!(cfg.tool_timeout_max_secs, 7_200);
+        assert_eq!(cfg.provider_http_timeout_secs, 7_200);
+        assert_eq!(cfg.sandbox.timeout_secs, 7_200);
     }
 
     #[test]

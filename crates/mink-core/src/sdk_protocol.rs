@@ -75,7 +75,7 @@ pub struct SdkContextOptions {
 #[serde(default, deny_unknown_fields)]
 pub struct SdkToolOptions {
     pub tool_timeout: Option<i32>,
-    /// 单次 Bash/Python/自定义工具调用的超时上限（默认 600，至少 5）。
+    /// 单次 Bash/Python/自定义工具调用的超时上限（默认 7200，至少 5）。
     pub tool_timeout_max: Option<i32>,
     pub sub_agent_timeout: Option<i32>,
     pub sub_agent_max_depth: Option<u32>,

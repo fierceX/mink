@@ -1,6 +1,16 @@
 use super::*;
 
 #[test]
+fn cli_long_run_defaults_match_the_requested_limits() {
+    let cli = CliConfig::default();
+    assert_eq!(cli.max_turns, 200);
+    assert_eq!(cli.sub_agent_timeout_secs, 1_800);
+    assert_eq!(cli.tool_timeout_secs, 7_200);
+    assert_eq!(cli.tool_timeout_max_secs, 7_200);
+    assert_eq!(cli.provider_http_timeout_secs, 7_200);
+}
+
+#[test]
 fn cli_defaults_track_runtime_option_defaults() {
     let cli = CliConfig::default();
 

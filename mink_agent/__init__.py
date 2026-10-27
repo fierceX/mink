@@ -186,15 +186,15 @@ class SandboxConfig:
     max_pids:
         Maximum number of processes (nsjail cgroup only).
     timeout_secs:
-        Hard timeout for the entire agent run.
+        Hard timeout for the entire agent run (default 2 hours).
     tool_timeout:
         Default timeout (seconds) for a single Bash/Python/custom tool call.
     tool_timeout_max:
         Upper limit (seconds) for a single Bash/Python/custom tool call.
-        Explicit per-call timeouts above this value fail closed; default 600.
+        Explicit per-call timeouts above this value fail closed; default 7200.
     provider_http_timeout_secs:
         Provider HTTP total timeout in seconds (``0`` disables it). ``None``
-        keeps the Rust default (600). Not part of the recovery policy.
+        keeps the Rust default (7200). Not part of the recovery policy.
     llm_first_event_timeout:
         Seconds to wait for the first model stream event.
     llm_idle_timeout:
@@ -254,16 +254,16 @@ class SandboxConfig:
     # Resource limits
     max_memory_mb: int = 1024
     max_pids: int = 64
-    timeout_secs: int = 600
-    tool_timeout: int = 600
-    tool_timeout_max: int = 600
-    sub_agent_timeout: int = 300
+    timeout_secs: int = 7_200
+    tool_timeout: int = 7_200
+    tool_timeout_max: int = 7_200
+    sub_agent_timeout: int = 1_800
     sub_agent_max_depth: int = 1
     llm_first_event_timeout: int = 60
     llm_idle_timeout: int = 90
     llm_wait_heartbeat: int = 30
     max_tokens: int = 81920
-    max_turns: int = 40
+    max_turns: int = 200
     max_context: int = 1_000_000
     context_compact_pct: int = 94
     context_reserve_tokens: int = 64_000
@@ -283,7 +283,7 @@ class SandboxConfig:
     api_url: str = ""
     model: str = ""
     # Provider transport: HTTP 请求总超时（秒，0 = 不设）。
-    # None 沿用 Rust 默认值（600）；与 recovery.request_timeout_secs 无关。
+    # None 沿用 Rust 默认值（7200）；与 recovery.request_timeout_secs 无关。
     provider_http_timeout_secs: Optional[int] = None
 
     # Session
@@ -820,7 +820,7 @@ class AgentSession:
             provider["http_timeout_secs"] = self._config.provider_http_timeout_secs
         if self._config.max_tokens != 81920:
             generation["max_tokens"] = self._config.max_tokens
-        if self._config.max_turns != 40:
+        if self._config.max_turns != 200:
             generation["max_turns"] = self._config.max_turns
         if self._config.max_context != 1_000_000:
             context["max_context"] = self._config.max_context
@@ -836,11 +836,11 @@ class AgentSession:
             )
         if self._config.context_compact_input_reduction:
             context["context_compact_input_reduction"] = True
-        if self._config.tool_timeout != 600:
+        if self._config.tool_timeout != 7_200:
             tools["tool_timeout"] = self._config.tool_timeout
-        if self._config.tool_timeout_max != 600:
+        if self._config.tool_timeout_max != 7_200:
             tools["tool_timeout_max"] = self._config.tool_timeout_max
-        if self._config.sub_agent_timeout != 300:
+        if self._config.sub_agent_timeout != 1_800:
             tools["sub_agent_timeout"] = self._config.sub_agent_timeout
         if self._config.sub_agent_max_depth != 1:
             tools["sub_agent_max_depth"] = self._config.sub_agent_max_depth

@@ -54,7 +54,7 @@ pub struct ContextPolicy {
 #[derive(Debug, Clone)]
 pub struct ToolOptions {
     pub timeout_secs: i32,
-    /// 单次 Bash/Python/自定义工具调用的超时上限（默认 600 秒）。
+    /// 单次 Bash/Python/自定义工具调用的超时上限（默认 7200 秒）。
     pub timeout_max_secs: i32,
     pub sub_agent_timeout_secs: i32,
     pub sub_agent_max_depth: u32,
@@ -424,7 +424,7 @@ impl AgentOptions {
     }
 
     /// provider HTTP 请求总超时（秒）；`0` 表示不设总超时（长流式生成只受
-    /// 首事件 / 空闲期限兜底）。默认 600 秒。
+    /// 首事件 / 空闲期限兜底）。默认 7200 秒。
     pub fn with_provider_http_timeout_secs(mut self, seconds: u64) -> Self {
         self.config.provider_http_timeout_secs = seconds;
         self
@@ -575,7 +575,7 @@ impl AgentOptions {
         self
     }
 
-    /// 设置单次 Bash/Python/自定义工具调用的超时上限（默认 600 秒，至少 5 秒）。
+    /// 设置单次 Bash/Python/自定义工具调用的超时上限（默认 7200 秒，至少 5 秒）。
     pub fn with_tool_timeout_max_secs(mut self, secs: i32) -> Self {
         self.config.tool_timeout_max_secs = secs;
         self

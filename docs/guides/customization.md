@@ -144,7 +144,7 @@ Thinking: ...
 Text: ...
 ```
 
-Token 用量计入父会话统计。默认超时 300 秒（`sub_agent_timeout` 可调）。超时后标记为 `failed`。
+Token 用量计入父会话统计。默认超时 1800 秒（30 分钟，`sub_agent_timeout` 可调）。超时后标记为 `failed`。
 
 ## 下一步
 

@@ -32,7 +32,7 @@ allow_network = true
 # 仅 Linux nsjail cgroup：
 max_memory_mb = 1024
 max_pids = 64
-timeout_secs = 600
+timeout_secs = 7200
 ```
 
 ### 平台差异
@@ -98,7 +98,7 @@ package_dirs = ["./packages"]
 - **单二进制分发**：`target/release/mink-server` 即可（含前端），无需 node/npm
 - **重启更新前端**：嵌入产物随 `cargo build` 更新——修改前端后需**重新构建 mink-server** 再重启
 - **多进程一致性**：core lease 锁文件是跨进程稳定对象，不依赖 PID 存活判断；CLI、Rust、Python worker 和 server 的可写 runtime 在恢复前互斥，server 冲突返回 409。只读 Reader 不持锁或自动续跑；运行中的工具实际退出前保留租约。详见 [Goal 契约](../reference/goals.md)。
-- **超时保护**：`MINK_SERVER_TURN_TIMEOUT`（默认 1200s）防止 LLM/工具挂起卡死 running 状态；
+- **超时保护**：`MINK_SERVER_TURN_TIMEOUT`（默认 7200s，2 小时）防止 LLM/工具挂起卡死 running 状态；
   超时后进入 forced terminal 并关闭该会话 runtime
 - **安全**：单用户部署假设；`sk-fake`/受限 key 可用于测试环境
 

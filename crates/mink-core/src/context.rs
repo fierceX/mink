@@ -33,7 +33,7 @@ use crate::config::SandboxPythonConfig;
 #[derive(Clone)]
 pub struct ToolConfig {
     pub tool_timeout_secs: i32,
-    /// 单次 Bash/Python/自定义工具调用的超时上限（默认 600 秒）。
+    /// 单次 Bash/Python/自定义工具调用的超时上限（默认 7200 秒）。
     pub tool_timeout_max_secs: i32,
     pub sub_agent_timeout_secs: i32,
     /// Maximum delegation depth (0 disables delegation).

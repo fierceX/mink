@@ -46,7 +46,7 @@ openai_reasoning_effort = "max"
 openai_include_usage = true
 openai_token_param = "max_tokens"
 openai_tool_choice = "auto"
-http_timeout_secs = 600                # provider HTTP 请求总超时（秒）；0 = 不设总超时（长流式生成）
+http_timeout_secs = 7200                # provider HTTP 请求总超时（秒）；0 = 不设总超时（长流式生成）
 image_input = "on"                     # 可选：显式开启/关闭图片能力（覆盖 backend 声明）
 vision_models = ["deepseek-v4-flash-vision-exp"]  # 可选：视觉模型列表（空列表=全部关闭）
 
@@ -123,7 +123,7 @@ read_dirs = ["./data"]
 - 模型输出格式错误采用滑动的 round 窗口：`format_window_size`（默认 10）与 `format_max_errors`（默认 3）。每个完成判定的 round 只占一个槽；坏参数工具调用返回 `ArgumentInvalid` 失败结果让模型重发，缺名/缺 ID/重复 ID 的候选批整体丢弃并反馈一次内部诊断，`length`/`max_tokens` 候选整体废弃，空正文/未知 stop 不再静默成功；错误数超过 K 以 `format_recovery_exhausted` 结束，已执行工具不回滚。
 - 请求暂时故障（408/409/425/429/500/502/503/504、连接重置、首事件/idle 超时、响应协议损坏）自动重试：`request_max_retries`（默认 3）表示首次之外允许的重试调用数，退避 1s/2s/4s…上限 10s，`Retry-After`（秒数或 HTTP-date）作为最早重试时间；401/403、模型不存在、未知 provider 错误不重试。
 - `request_timeout_secs`（默认不设）限定一个逻辑请求的总期限，包含全部重试与等待，重试不会延长它。
-- 传输层还有一道**provider HTTP 总超时**（`[provider] http_timeout_secs`，默认 600 秒，`0` = 不设）：单次物理请求（含流式响应体读取）超过它就中断并归入可重试故障。它先于 `request_timeout_secs` 生效，长流式生成（文档生成、长思考）必须调大或设 `0`，否则每次尝试都会被固定墙钟时间砍断（表现为 `request_timeout: … error decoding response body … operation timed out`，且耗时呈 600s 的整数倍）。该字段属于传输层配置，不是 `[recovery]` 恢复策略。
+- 传输层还有一道**provider HTTP 总超时**（`[provider] http_timeout_secs`，默认 7200 秒，`0` = 不设）：单次物理请求（含流式响应体读取）超过它就中断并归入可重试故障。它先于 `request_timeout_secs` 生效，长流式生成（文档生成、长思考）必须调大或设 `0`，否则每次尝试都会被固定墙钟时间砍断（表现为 `request_timeout: … error decoding response body … operation timed out`，且耗时呈 7200s 的整数倍）。该字段属于传输层配置，不是 `[recovery]` 恢复策略。
 - 参数错反馈与请求重试是两条独立分支：参数错不会原样重发同一请求，502 也不会靠给模型追加提示恢复。
 - 取消、持久化闩锁与 `max_turns` 优先：取消立即结束等待中的重试；格式恢复消耗正常 round/max_turns，超限时返回 `format_recovery_exhausted`，未超限但轮次用尽仍是 `MaxTurnsExceeded`。
 
@@ -230,7 +230,7 @@ policy = "full"                      # off | evidence | state_ops | restart | fu
 ```
 
 `tool_timeout` 是 Bash/Python/自定义工具未显式指定 `timeout` 时的默认值；`tool_timeout_max`
-是单次工具调用的硬上限（默认 600 秒）。显式 `timeout` 或默认值超过该上限时 fail closed /
+是单次工具调用的硬上限（默认 7200 秒）。显式 `timeout` 或默认值超过该上限时 fail closed /
 钳制到上限，`tool_timeout_max` 最低可设为 5 秒。
 
 `openai_extra_body` 会合并到 `/chat/completions` 请求体中。`model`、`messages`、`stream`、`tools`、`tool_choice`、`max_tokens`、`max_completion_tokens` 不会被 extra body 覆盖。
@@ -390,7 +390,7 @@ surface 解析阶段 fail closed。
 | 默认模型 | `MODEL` | `[agent] model` / `~/.minkrc` `[provider] model` | `flash` |
 | 最大并发会话 | `MINK_SERVER_MAX_RUNNING` | `[server] max_running` | `4` |
 | 闲置自动关闭 | — | `[server] idle_close_secs` | `1800` |
-| turn 超时 | `MINK_SERVER_TURN_TIMEOUT` | — | `1200`（秒） |
+| turn 超时 | `MINK_SERVER_TURN_TIMEOUT` | — | `7200`（秒） |
 
 监听地址可用 `mink-server --host <IP>` 覆盖以上来源（仅接受 IPv4/IPv6 字面量，未知参数在绑定前拒绝）；
 默认仍为 `0.0.0.0`。端口**没有**启动参数，继续由 `MINK_SERVER_PORT` / `[server] port` 决定；
@@ -451,16 +451,16 @@ IPv6 地址在启动日志中按 `[::1]:8765` 形式显示。
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `timeout_secs` | `600` | agent 运行总超时（秒），超时会终止 agent 进程组 |
-| `tool_timeout` | `600` | 单次工具调用超时（秒） |
-| `tool_timeout_max` | `600` | 单次 Bash/Python/自定义工具调用的超时上限（秒，最低 5） |
-| `sub_agent_timeout` | `300` | 子代理执行超时（秒，必须 >0；从获得并发名额后起算，覆盖 setup+run，不含排队） |
+| `timeout_secs` | `7200` | agent 运行总超时（秒），超时会终止 agent 进程组 |
+| `tool_timeout` | `7200` | 单次工具调用超时（秒） |
+| `tool_timeout_max` | `7200` | 单次 Bash/Python/自定义工具调用的超时上限（秒，最低 5） |
+| `sub_agent_timeout` | `1800` | 子代理执行超时（秒，必须 >0；从获得并发名额后起算，覆盖 setup+run，不含排队） |
 | `sub_agent_max_depth` | `1` | 子代理最大委派深度（`0` 禁用，范围 0..=3） |
 | `llm_first_event_timeout` | `60` | 等待首个模型 stream event 的秒数 |
 | `llm_idle_timeout` | `90` | 模型 stream 空闲超时（秒） |
 | `llm_wait_heartbeat` | `30` | 等待模型响应的提示间隔；设为 `0` 关闭提示 |
 | `max_tokens` | `81920` | 输出 token 上限 |
-| `max_turns` | `40` | 最大循环轮数 |
+| `max_turns` | `200` | 最大循环轮数 |
 | `max_context` | `1000000` | 模型上下文 token 上限；设为 `0` 时禁用自动压缩和本地输入预算限制 |
 | `context_compact_pct` | `94` | 自动压缩触发百分比，范围 1-100 |
 | `context_reserve_tokens` | `64000` | 主请求响应预留，同时限制主请求输出预算 |
@@ -662,16 +662,16 @@ macOS `write_dirs`、临时目录和会话存储的写入规则包含字面路�
 | `python_sandbox_timeout` | `int` | `30` |
 | `max_memory_mb` | `int` | `1024` |
 | `max_pids` | `int` | `64` |
-| `timeout_secs` | `int` | `600` |
-| `tool_timeout` | `int` | `600` |
-| `tool_timeout_max` | `int` | `600` |
-| `sub_agent_timeout` | `int` | `300` |
+| `timeout_secs` | `int` | `7200` |
+| `tool_timeout` | `int` | `7200` |
+| `tool_timeout_max` | `int` | `7200` |
+| `sub_agent_timeout` | `int` | `1800` |
 | `sub_agent_max_depth` | `int` | `1` |
 | `llm_first_event_timeout` | `int` | `60` |
 | `llm_idle_timeout` | `int` | `90` |
 | `llm_wait_heartbeat` | `int` | `30` |
 | `max_tokens` | `int` | `81920` |
-| `max_turns` | `int` | `40` |
+| `max_turns` | `int` | `200` |
 | `max_context` | `int` | `1000000` |
 | `context_compact_pct` | `int` | `94` |
 | `context_reserve_tokens` | `int` | `64000` |

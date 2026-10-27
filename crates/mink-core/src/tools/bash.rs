@@ -64,7 +64,7 @@ fn execute_with_interrupt_in_dir(
 
     // Explicit model-provided timeouts must honor the configured ceiling;
     // oversized values fail closed instead of running unbounded. The ceiling
-    // defaults to 600s and is configurable via `tool_timeout_max`.
+    // defaults to the configured `tool_timeout_max` (7200s unless overridden).
     let timeout =
         crate::tools::process::resolve_tool_timeout(timeout_secs, default_timeout, max_timeout)?;
 

@@ -121,7 +121,7 @@ pub(crate) struct ToolsConfigFile {
     pub enabled_tools: Option<Vec<String>>,
     pub skills: Option<Vec<String>>,
     pub tool_timeout: Option<i32>,
-    /// 单次 Bash/Python/自定义工具调用的超时上限（默认 600，至少 5）。
+    /// 单次 Bash/Python/自定义工具调用的超时上限（默认 7200，至少 5）。
     pub tool_timeout_max: Option<i32>,
     pub sub_agent_timeout: Option<i32>,
     pub sub_agent_max_depth: Option<u32>,
@@ -1202,7 +1202,7 @@ max_pixels = "4M"
         );
 
         // 文件层解析：Some(0) 必须保留为 Some(0)（0 = 不设总超时），
-        // 未配置时为 None（由 Rust 默认 600 接管）。
+        // 未配置时为 None（由 Rust 默认 7200 接管）。
         let file: MinkConfigFile = toml::from_str("[provider]\nhttp_timeout_secs = 0\n").unwrap();
         assert_eq!(from_file(&file).http_timeout_secs, Some(0));
         let none: MinkConfigFile = toml::from_str("[provider]\nmodel = \"flash\"\n").unwrap();
