@@ -56,12 +56,12 @@ function live(id: string): SessionLiveState & { snapshot: boolean } {
   return { id, open: true, running: false, snapshot: true }
 }
 
-function snapshot(id: string): Record<string, unknown> {
+function snapshot(id: string, conversation: Record<string, unknown>[] = []): Record<string, unknown> {
   return {
     type: 'session_snapshot',
     generation: id,
     stream_sequence: 1,
-    conversation: [],
+    conversation,
     inputs: [],
     running: false,
     phase: 'idle',
@@ -142,6 +142,140 @@ describe('session switching and creation', () => {
       target_turn_id: null,
       attachment_ids: [],
     })
+  })
+
+  it('opens a new session before uploading its first-send images', async () => {
+    stubShell()
+    vi.spyOn(api, 'listSessions').mockResolvedValue(ok([]))
+    vi.spyOn(api, 'workspace').mockResolvedValue(ok({ cwd: '/tmp/fresh', project_key: 'p', name: 'fresh' }))
+    const order: string[] = []
+    vi.spyOn(api, 'createSession').mockImplementation(async () => {
+      order.push('create')
+      return ok(session('fresh', { cwd: '/tmp/fresh', project_key: 'p' }))
+    })
+    vi.spyOn(api, 'openSession').mockImplementation(async (id) => {
+      if (id === 'fresh' && !order.includes('open')) order.push('open')
+      return ok(live(id))
+    })
+    vi.spyOn(api, 'upload').mockImplementation(async () => {
+      order.push('upload')
+      return ok({ id: 'attachment-1', name: 'tiny.png' } as never)
+    })
+    vi.spyOn(api, 'submitInput').mockImplementation(async () => {
+      order.push('submit')
+      return ok({} as never)
+    })
+    render(<App />)
+
+    const empty = await waitFor(() => {
+      const node = document.querySelector('[data-empty-state]')
+      expect(node).not.toBeNull()
+      return node as HTMLElement
+    })
+    fireEvent.click(within(empty).getByRole('button', { name: '新建项目' }))
+    fireEvent.change(screen.getByLabelText('工作目录'), { target: { value: '/tmp/fresh' } })
+    fireEvent.click(screen.getByRole('button', { name: '打开目录' }))
+    await waitFor(() => { expect(document.querySelector('[data-new-conversation]')).not.toBeNull() })
+    fireEvent.change(screen.getByLabelText('选择图片'), {
+      target: { files: [new File(['image'], 'tiny.png', { type: 'image/png' })] },
+    })
+    const field = screen.getByLabelText('输入消息') as HTMLTextAreaElement
+    fireEvent.change(field, { target: { value: '带图的首条消息' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+
+    await waitFor(() => { expect(order).toEqual(['create', 'open', 'upload', 'submit']) })
+    expect(localStorage.getItem('mink.attachments:p:fresh')).toBe('[]')
+  })
+
+  it('keeps completed first-send uploads as session drafts when a later upload fails', async () => {
+    stubShell()
+    vi.spyOn(api, 'listSessions').mockResolvedValue(ok([]))
+    vi.spyOn(api, 'workspace').mockResolvedValue(ok({ cwd: '/tmp/fresh', project_key: 'p', name: 'fresh' }))
+    vi.spyOn(api, 'createSession').mockResolvedValue(ok(session('fresh', {
+      cwd: '/tmp/fresh', project_key: 'p',
+    })))
+    let uploadCount = 0
+    vi.spyOn(api, 'upload').mockImplementation(async () => {
+      uploadCount += 1
+      if (uploadCount === 1) return ok({ id: 'attachment-1' } as never)
+      return { code: 413, message: '第二张图片上传失败', data: undefined as never }
+    })
+    const submit = vi.spyOn(api, 'submitInput').mockResolvedValue(ok({} as never))
+    render(<App />)
+
+    const empty = await waitFor(() => {
+      const node = document.querySelector('[data-empty-state]')
+      expect(node).not.toBeNull()
+      return node as HTMLElement
+    })
+    fireEvent.click(within(empty).getByRole('button', { name: '新建项目' }))
+    fireEvent.change(screen.getByLabelText('工作目录'), { target: { value: '/tmp/fresh' } })
+    fireEvent.click(screen.getByRole('button', { name: '打开目录' }))
+    await waitFor(() => { expect(document.querySelector('[data-new-conversation]')).not.toBeNull() })
+    fireEvent.change(screen.getByLabelText('选择图片'), {
+      target: { files: [
+        new File(['first'], 'first.png', { type: 'image/png' }),
+        new File(['second'], 'second.png', { type: 'image/png' }),
+      ] },
+    })
+    fireEvent.change(screen.getByLabelText('输入消息'), { target: { value: '带两张图' } })
+    fireEvent.keyDown(screen.getByLabelText('输入消息'), { key: 'Enter' })
+
+    await waitFor(() => { expect(screen.getByText('会话已创建，但附件上传失败：第二张图片上传失败')).toBeDefined() })
+    expect(submit).not.toHaveBeenCalled()
+    expect(JSON.parse(localStorage.getItem('mink.attachments:p:fresh') ?? '[]')).toEqual([
+      { id: 'attachment-1', name: 'first.png' },
+    ])
+  })
+
+  it('does not let a late first-send response take over a later session selection', async () => {
+    vi.stubGlobal('matchMedia', (media: string) => ({
+      media,
+      matches: false,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }))
+    stubShell()
+    vi.spyOn(api, 'listSessions').mockResolvedValue(ok([session('B')]))
+    vi.spyOn(api, 'workspace').mockResolvedValue(ok({ cwd: '/tmp/fresh', project_key: 'p', name: 'fresh' }))
+    let resolveCreate!: (value: ApiResponse<SessionSummary>) => void
+    vi.spyOn(api, 'createSession').mockImplementation(() => new Promise((resolve) => {
+      resolveCreate = resolve
+    }))
+    vi.spyOn(api, 'submitInput').mockResolvedValue(ok({} as never))
+    render(<App />)
+
+    await waitFor(() => { expect(screen.getByText('B')).toBeDefined() })
+    fireEvent.click(screen.getByRole('button', { name: '新建项目' }))
+    fireEvent.change(screen.getByLabelText('工作目录'), { target: { value: '/tmp/fresh' } })
+    fireEvent.click(screen.getByRole('button', { name: '打开目录' }))
+    await waitFor(() => { expect(document.querySelector('[data-new-conversation]')).not.toBeNull() })
+    const field = screen.getByLabelText('输入消息') as HTMLTextAreaElement
+    fireEvent.change(field, { target: { value: '迟到的首条消息' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+    await waitFor(() => { expect(resolveCreate).toBeTypeOf('function') })
+
+    fireEvent.click(screen.getByText('B'))
+    await waitFor(() => {
+      expect(new URLSearchParams(window.location.search).get('session')).toBe('B')
+    })
+    await waitFor(() => { expect(streams.length).toBeGreaterThan(0) })
+    const bStreamCount = streams.length
+    act(() => { streams[bStreamCount - 1]!(snapshot('B', [
+      { seq: 1, role: 'user', content: 'B 会话仍在当前视图' },
+    ])) })
+    await waitFor(() => { expect(screen.getByText('B 会话仍在当前视图')).toBeDefined() })
+    await act(async () => {
+      resolveCreate(ok(session('fresh', { cwd: '/tmp/fresh', project_key: 'p' })))
+    })
+    await waitFor(() => { expect(api.submitInput).toHaveBeenCalled() })
+    expect(new URLSearchParams(window.location.search).get('session')).toBe('B')
+    expect(screen.getByText('B 会话仍在当前视图')).toBeDefined()
+    expect(streams).toHaveLength(bStreamCount)
   })
 
   it('shows a post-creation first-send failure inside the adopted conversation', async () => {

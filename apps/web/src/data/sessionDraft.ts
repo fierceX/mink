@@ -125,9 +125,15 @@ export function writeComposeDraft(cwd: string, draft: ComposeDraft): void {
 }
 
 /** Drop the composing draft once the conversation has been created. */
-export function clearComposeDraft(cwd: string): void {
+export function clearComposeDraft(cwd: string, expected?: ComposeDraft): void {
   try {
-    localStorage.removeItem(composeDraftKey(cwd))
+    const key = composeDraftKey(cwd)
+    if (expected !== undefined) {
+      const current = readComposeDraft(cwd)
+      if (current.draftId !== expected.draftId || current.requestId !== expected.requestId
+        || current.text !== expected.text) return
+    }
+    localStorage.removeItem(key)
   } catch {
     // Storage is optional.
   }
@@ -177,6 +183,20 @@ export function writeAttachments(key: string, entries: readonly StoredAttachment
     localStorage.setItem(key, JSON.stringify(entries))
   } catch {
     // Storage is optional.
+  }
+}
+
+/** Remove attachments accepted by the server and notify mounted session rails. */
+export function forgetAcceptedAttachments(key: string, ids: readonly string[]): void {
+  if (ids.length === 0) return
+  const consumed = new Set(ids)
+  const current = readAttachments(key)
+  const remaining = current.filter(attachment => !consumed.has(attachment.id))
+  if (remaining.length !== current.length) writeAttachments(key, remaining)
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('mink:attachments-consumed', {
+      detail: { key, ids: [...consumed] },
+    }))
   }
 }
 

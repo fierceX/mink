@@ -17,7 +17,14 @@ import { SseClient } from './sse.ts'
 import { emptySession, type GoalSnapshot, type HumanInput, type InputReceipt, type SessionState } from './types.ts'
 import { applyGoalRead, projectMessages, reduceWorkbench } from './workbenchReducer.ts'
 import { requestId } from './request-id.ts'
-import { readPendingSubmission, sessionIdentity, sessionPendingKey, writePendingSubmission } from './sessionDraft.ts'
+import {
+  forgetAcceptedAttachments as forgetStoredAttachments,
+  readPendingSubmission,
+  sessionAttachmentsKey,
+  sessionIdentity,
+  sessionPendingKey,
+  writePendingSubmission,
+} from './sessionDraft.ts'
 import { setVerifierAvailable } from './commands.ts'
 import { useLatest } from './useLatest.ts'
 
@@ -261,6 +268,12 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
     writePendingSubmission(key, undefined)
   }
 
+  /** Remove only attachments from an accepted input, preserving newer drafts. */
+  const forgetAcceptedAttachments = (target: SessionSummary, input: HumanInput): void => {
+    if (input.attachment_ids.length === 0) return
+    forgetStoredAttachments(sessionAttachmentsKey(target), input.attachment_ids)
+  }
+
   useEffect(() => {
     // The boundary rows belong to one identity; a switch starts them over. A
     // submission record outlives the view, so it is deliberately not cleared
@@ -386,6 +399,7 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
       const reconciled = await receiptState(target, stored.request_id)
       if (reconciled === 'accepted') {
         forgetSubmission(target, stored.request_id)
+        forgetAcceptedAttachments(target, stored)
         return undefined
       }
       if (reconciled === 'unknown') return UNKNOWN_SEND
@@ -414,6 +428,7 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
         outcome = { status: 'refused', message: response.message || `code ${response.code}` }
       } else {
         forgetSubmission(target, input.request_id)
+        forgetAcceptedAttachments(target, input)
         outcome = { status: 'accepted' }
       }
     } catch (cause) {
@@ -443,6 +458,7 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
       // the queue, and the strip above the composer shows it.
       if (reconciled === 'accepted') {
         forgetSubmission(target, stored.request_id)
+        forgetAcceptedAttachments(target, stored)
         return undefined
       }
       if (reconciled === 'unknown') return UNKNOWN_GUIDE
@@ -464,6 +480,7 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
         outcome = { status: 'refused', message: `提交失败：${response.message || `code ${response.code}`}` }
       } else {
         forgetSubmission(target, input.request_id)
+        forgetAcceptedAttachments(target, input)
         outcome = { status: 'accepted' }
       }
     } catch (cause) {
@@ -471,6 +488,7 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
       const reconciled = await receiptState(target, input.request_id)
       if (reconciled === 'accepted') {
         forgetSubmission(target, input.request_id)
+        forgetAcceptedAttachments(target, input)
         outcome = { status: 'accepted' }
       } else if (reconciled === 'absent') {
         forgetSubmission(target, input.request_id)

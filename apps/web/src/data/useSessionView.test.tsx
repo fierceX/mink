@@ -2,8 +2,9 @@ import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api, type ApiResponse, type SessionLiveState, type SessionSummary } from './api.ts'
 import { isVerifierAvailable, setVerifierAvailable } from './commands.ts'
-import type { HumanInput, InputReceipt } from './types.ts'
+import type { Attachment, HumanInput, ImageLimits, InputReceipt } from './types.ts'
 import { receiptStampHolds, useSessionView } from './useSessionView.ts'
+import { useAttachments } from '../app/conversation/useAttachments.ts'
 
 /**
  * Regressions from the workbench audit (W2, W3, W4): the view keeps one
@@ -65,6 +66,14 @@ function session(id: string): SessionSummary {
  * effect on the session, so a fresh object per render would loop.
  */
 const SESSIONS = { A: session('A'), B: session('B') } as const
+
+const IMAGE_LIMITS: ImageLimits = {
+  kind: 'supported',
+  allowed_mime: ['image/png'],
+  max_image_bytes: 4 * 1024 * 1024,
+  max_image_bytes_per_request: 8 * 1024 * 1024,
+  max_images_per_request: 8,
+}
 
 function ok<T>(data: T): ApiResponse<T> {
   return { code: 200, message: '', data }
@@ -271,6 +280,58 @@ describe('session view identity and history', () => {
     // A receipt in the queue is a delivered guidance, not a failure: the
     // composer must clear its draft rather than offer the same words again.
     expect(outcome).toBeUndefined()
+  })
+
+  it('clears only accepted pending attachments while preserving later drafts', async () => {
+    vi.spyOn(api, 'openSession').mockResolvedValue(ok(live('A')))
+    let requested = ''
+    vi.spyOn(api, 'submitInput').mockImplementationOnce(async (_id, input) => {
+      requested = input.request_id
+      throw new Error('回复丢失')
+    })
+    vi.spyOn(api, 'inputs').mockImplementation(async (_id, _project, requestId) => ok(
+      requestId === requested
+        ? [receiptFor({
+            request_id: requested,
+            text: '带图',
+            target_turn_id: null,
+            attachment_ids: ['attachment-1'],
+          })]
+        : [],
+    ))
+    vi.spyOn(api, 'upload').mockResolvedValue(ok<Attachment>({
+      id: 'attachment-3', mime: 'image/png', width: 1, height: 1, bytes: 1,
+    }))
+    Object.defineProperty(URL, 'createObjectURL', { value: () => 'blob:later', configurable: true })
+    Object.defineProperty(URL, 'revokeObjectURL', { value: () => {}, configurable: true })
+    const attachmentsKey = 'mink.attachments:p:A'
+    localStorage.setItem(attachmentsKey, JSON.stringify([
+      { id: 'attachment-1', name: 'sent.png' },
+      { id: 'attachment-2', name: 'later.png' },
+    ]))
+    const { result } = renderHook(() => ({
+      view: useSessionView(SESSIONS.A),
+      attachments: useAttachments(SESSIONS.A, IMAGE_LIMITS),
+    }))
+    await waitFor(() => { expect(streams.length).toBe(1) })
+    act(() => { streams[0](snapshot('A')) })
+
+    await act(async () => { await result.current.view.send('带图', ['attachment-1']) })
+    expect(JSON.parse(localStorage.getItem(attachmentsKey) ?? '[]')).toHaveLength(2)
+    await act(async () => { await result.current.view.send('带图', ['attachment-1']) })
+
+    expect(JSON.parse(localStorage.getItem(attachmentsKey) ?? '[]')).toEqual([
+      { id: 'attachment-2', name: 'later.png' },
+    ])
+    await act(async () => {
+      result.current.attachments.add([new File(['x'], 'new.png', { type: 'image/png' })])
+    })
+    await waitFor(() => { expect(result.current.attachments.ids).toEqual(['attachment-2', 'attachment-3']) })
+    expect(JSON.parse(localStorage.getItem(attachmentsKey) ?? '[]')).toEqual([
+      { id: 'attachment-2', name: 'later.png' },
+      { id: 'attachment-3', name: 'new.png' },
+    ])
+    expect(result.current.attachments.ids).not.toContain('attachment-1')
   })
 
   it('drops a history page that answers after the view was reopened', async () => {

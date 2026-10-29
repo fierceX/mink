@@ -9,9 +9,11 @@ import { api, type GoalSnapshot, type SessionSummary } from '../data/api.ts'
 import { useNow, useSessionCatalog } from '../data/useSessionCatalog.ts'
 import {
   clearComposeDraft,
+  sessionAttachmentsKey,
   sessionDraftKey,
   sessionPendingKey,
   useSessionDraft,
+  writeAttachments,
   writePendingSubmission,
   writeSessionDraft,
 } from '../data/sessionDraft.ts'
@@ -100,6 +102,9 @@ export function App() {
   // Session verbs are one at a time: a second click while the first request is
   // in flight would duplicate the session or the delete.
   const pending = useRef(false)
+  // First-send requests can outlive the composing view. Their completion may
+  // adopt the created session only while that same navigation is still current.
+  const navigationEpoch = useRef(0)
   // The session in force now, for completions that resolve after a switch.
   const currentRef = useLatest(current)
 
@@ -211,6 +216,7 @@ export function App() {
   }, [catalog.loading, catalog.sessions, current])
 
   const openSession = useCallback((session: SessionSummary) => {
+    navigationEpoch.current += 1
     setCurrent(session)
     setComposing(undefined)
     setNotice(undefined)
@@ -229,6 +235,7 @@ export function App() {
 
   /** Enter the browser-only conversation under one project. */
   const startComposing = useCallback((cwd: string, name: string) => {
+    navigationEpoch.current += 1
     setCurrent(undefined)
     setComposing({ cwd, name })
     setNotice(undefined)
@@ -242,6 +249,7 @@ export function App() {
   }, [])
 
   const cancelComposing = useCallback(() => {
+    navigationEpoch.current += 1
     setComposing(undefined)
     const params = new URLSearchParams(window.location.search)
     params.delete('compose')
@@ -269,13 +277,17 @@ export function App() {
     if (composing === undefined) return '未选择项目'
     if (pending.current) return '正在创建会话，请稍候'
     pending.current = true
+    const startedAtEpoch = navigationEpoch.current
+    const mayAdopt = (): boolean => navigationEpoch.current === startedAtEpoch
     const project = composing
     let created: SessionSummary | undefined
     const adopt = (session: SessionSummary, message: string): void => {
       writeSessionDraft(session, text)
-      clearComposeDraft(project.cwd)
-      openSession(session)
-      setSessionNotice(message)
+      if (mayAdopt()) {
+        clearComposeDraft(project.cwd, { draftId, requestId: firstRequestId, text })
+        openSession(session)
+        setSessionNotice(message)
+      }
       void catalog.refresh()
     }
     try {
@@ -287,7 +299,15 @@ export function App() {
       })
       if (response.code !== 200) return response.message || `code ${response.code}`
       created = response.data
+      // Attachment upload requires an active server runtime. Opening first also
+      // makes a first-send with images follow the same session lifecycle as text.
+      const opened = await api.openSession(created.id, created.project_key)
+      if (opened.code !== 200) {
+        adopt(created, `会话已创建，但打开失败：${opened.message || `code ${opened.code}`}`)
+        return undefined
+      }
       const attachmentIds: string[] = []
+      const storedAttachments: { id: string; name: string }[] = []
       for (const file of files) {
         const upload = await api.upload(created.id, file, created.project_key)
         if (upload.code !== 200) {
@@ -295,11 +315,10 @@ export function App() {
           return undefined
         }
         attachmentIds.push(upload.data.id)
-      }
-      const opened = await api.openSession(created.id, created.project_key)
-      if (opened.code !== 200) {
-        adopt(created, `会话已创建，但打开失败：${opened.message || `code ${opened.code}`}`)
-        return undefined
+        storedAttachments.push({ id: upload.data.id, name: file.name })
+        // Keep each successful upload recoverable if a later image fails or
+        // the browser reloads before the first input reaches the server.
+        writeAttachments(sessionAttachmentsKey(created), storedAttachments)
       }
       const input = {
         request_id: firstRequestId,
@@ -314,8 +333,9 @@ export function App() {
         adopt(created, `会话已创建，但首条消息提交失败：${submitted.message || `code ${submitted.code}`}`)
         return undefined
       }
-      clearComposeDraft(project.cwd)
-      openSession(created)
+      writeAttachments(sessionAttachmentsKey(created), [])
+      clearComposeDraft(project.cwd, { draftId, requestId: firstRequestId, text })
+      if (mayAdopt()) openSession(created)
       void catalog.refresh()
       return undefined
     } catch (cause) {

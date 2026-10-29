@@ -81,6 +81,19 @@ export function useAttachments(session: SessionSummary | undefined, limits: Imag
       entry.attachment === undefined ? [] : [{ id: entry.attachment.id, name: entry.name }]))
   }, [entries, storageKey])
 
+  useEffect(() => {
+    if (storageKey === undefined) return
+    const onConsumed = (event: Event): void => {
+      const detail = (event as CustomEvent<{ key: string; ids: string[] }>).detail
+      if (detail?.key !== storageKey) return
+      const consumed = new Set(detail.ids)
+      setEntries(current => current.filter(entry =>
+        entry.attachment === undefined || !consumed.has(entry.attachment.id)))
+    }
+    window.addEventListener('mink:attachments-consumed', onConsumed)
+    return () => window.removeEventListener('mink:attachments-consumed', onConsumed)
+  }, [storageKey])
+
   const add = useCallback((files: readonly File[]) => {
     if (session === undefined) return
     setNotice(undefined)
