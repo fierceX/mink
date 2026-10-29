@@ -1,6 +1,6 @@
 # Web 与官网维护
 
-> 更新日期：2026-10-27
+> 更新日期：2026-10-29
 
 仅供仓库维护，不进入官网发布产物。
 
@@ -10,12 +10,12 @@
 
 | 项 | 说明 |
 | --- | --- |
-| 设计来源 | 逐字节拷贝 deepseek-harness 客户端包（`src/theme`、`src/ui/primitives`、各屏 CSS module） |
+| 设计来源 | 初期设计参考外部设计快照；`src/theme`、`src/ui/primitives`、部分屏幕 CSS module 与 `src/app/frame/columns.ts` 是直接拷入仓库的源码（vendored，非库依赖；来源与许可清单见 `apps/web/THIRD_PARTY_NOTICES.md`）。后续由 mink 独立演进，与参考实现再同步为可选维护动作 |
 | 数据层 | `/api` REST + SSE；事件投影 `reducer`/`toolFormat`/`transcriptProjection`/`sse` 为纯模块，供工作台与测试共用 |
 | 服务方式 | `cargo build -p mink-server` 构建并嵌入二进制（`build.rs` → `include_bytes!`，字体等非 UTF-8 资源按字节服务）；开发时可用 `MINK_SERVER_DEV_WEB=<dir>/dist` 从磁盘服务 |
 | 校验 | `npm run test`（vitest）/`npm run typecheck`/`npm run build`；`npx playwright test` 分两条车道：`fixtures`（仅 dev server 的设计核对页）与 `live`（`e2e/global-setup.ts` 自建临时 home + 确定性 provider + `target/debug/mink-server`，从磁盘服务刚构建的 dist；端口冲突直接失败而不是误连旧服务）；`fixtures` 车道还含整页视觉守则（`e2e/visual.spec.ts`，与已提交基线逐像素比较，阈值 0.002，基线按平台存放，无基线平台跳过）；设计核对页覆盖每个卡片家族（终端/文件/差异/搜索/待办/计划/委派/报告）+ 变更文件卡与其 hover 预览 |
 
-`apps/web` 的拷贝清单与来源见该目录 `README.md` 与 `THIRD_PARTY_NOTICES.md`：拷贝文件除导入落点外保持逐字节一致，改动时必须对照上游同名文件。设计核对页 `apps/web/fixtures.html` 只在 dev server 存在（生产构建不包含），用固定 transcript 一次渲染工具卡各家族供截图比对；`apps/web/table.html` 同样只在 dev server 存在，用真实 conversation 几何验证宽表在 transcript 内横向滚动。
+`apps/web` 的拷贝清单与来源见该目录 `README.md` 与 `THIRD_PARTY_NOTICES.md`：拷贝文件保留来源与 MIT 署名；拷贝代码由 mink 维护并独立演进。设计核对页 `apps/web/fixtures.html` 只在 dev server 存在（生产构建不包含），用固定 transcript 一次渲染工具卡各家族供截图比对；`apps/web/table.html` 同样只在 dev server 存在，用真实 conversation 几何验证宽表在 transcript 内横向滚动。
 
 ## 发布候选检查
 
@@ -201,19 +201,12 @@ trace/error-context 供定位。截图通过 `testInfo.outputPath()` 写入每�
 
 预览：先 `make docs-site`，再 `python3 -m http.server 8026 --bind 127.0.0.1 --directory target/docs-site`，打开 `http://127.0.0.1:8026/#docs/start/overview.md`。`make docs-browser` 对该预览运行验收；可用 `MINK_DOCS_URL` 指定 Pages 子路径预览。
 
-## 与上游界面的对照
+## 与参考设计的视觉对照（可选）
 
-先在本机运行 `dsh web`，再用
-
-```bash
-cd apps/web && npm run dsh:snapshot -- --url "<dsh web 打印的带 token URL>" [--out 目录] [--session 标题]
-```
-
-抓取上游的主页、会话、composer、工具卡与设置面板：脚本打印清单与脱敏后的 URL，截图可能含私有会话，
-默认写入临时目录，不入库。对照结论再落到本仓自己的界面与基线（见「校验」一行的视觉守则）。
+如仍需与参考实现做视觉比对，可在本地参考客户端上截图后与本仓自己的基线对照；截图可能含私有会话，不入库。
 
 ## 迁移与排除项
 
 上一代 Vue 工作台已从树中移除：`crates/mink-server/web` 不再存在，CI 与文档链路（npm/typecheck/build/e2e、版本一致性检查）一并删除，服务器只服务 `apps/web`。其产品行为已由 `apps/web` 承接：目录与打开、新建任务（输入 server 工作目录，已有项目作候选）、历史与分页、实时投影、composer（发送/停止/引导/附件/斜杠命令）、工具卡与改动文件卡、目标条与目标边界卡、详情面板五页签、轮次选择器、设置与偏好、窄屏阅读 chrome。
 
-按「只抄 mink 具有的功能」的口径，上游以下的界面不在前端出现：插件面板、Pin/Archive、权限 pill、Standard mode 标签、Chat/Trajectory 页签、消息时间戳。设计层仍逐字节同步，用 `npm run check:design -- --source <deepseek-harness root>` 守住（比对基线是 `apps/web/THIRD_PARTY_NOTICES.md` 记录的 revision，CI 按该 revision 浅克隆上游后执行）；视觉对照用 `dsh web` + 浏览器自动化（截图与 `data-slot`）。
+按「只抄 mink 具有的功能」的口径，参考实现以下的界面不在前端出现：插件面板、Pin/Archive、权限 pill、Standard mode 标签、Chat/Trajectory 页签、消息时间戳。设计层以固定快照为参考，拷贝后由 mink 独立演进。

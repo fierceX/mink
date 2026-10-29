@@ -88,23 +88,11 @@ jobs:
         run: npm ci
         working-directory: apps/web
 
-      # The design-parity check compares the copied design layer against the
-      # revision recorded in apps/web/THIRD_PARTY_NOTICES.md; that upstream
-      # checkout is not part of this repository.
-      - name: Fetch design-parity upstream (pinned deepseek-harness)
-        uses: actions/checkout@v4
-        with:
-          repository: deepseek-ai/deepseek-harness
-          ref: 5badb15009ae1756c3afe0ae0cef1faafc290ccc
-          path: design-source
-          fetch-depth: 1
-
       - name: Workbench unit lane (served frontend)
         run: |
           npm run test
           npm run typecheck
           npm run build
-          npm run check:design -- --source "$GITHUB_WORKSPACE/design-source"
         working-directory: apps/web
       - name: Install Web E2E browser
         working-directory: apps/web

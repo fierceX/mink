@@ -15,11 +15,11 @@ export interface CommandContext {
 }
 
 /**
- * Frozen contract of the client command surface, derived from deepseek-harness'
- * `ui-commands` contract. Types only, with two differences: the client context
- * and session context types upstream takes from its own runtime packages are
- * absent here (mink's command surface is one session-agnostic popup), and the
- * icon type points at the local primitives.
+ * Frozen contract of the client command surface, derived from the reference
+ * client's `ui-commands` contract. Types only, with two differences: the client
+ * context and session context types the reference takes from its own runtime
+ * packages are absent here (mink's command surface is one session-agnostic
+ * popup), and the icon type points at the local primitives.
  */
 import type { ComponentType } from 'react'
 import type { IconProps } from '../../ui/primitives/icons/props.ts'

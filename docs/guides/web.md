@@ -1,6 +1,6 @@
 # Web 工作台
 
-> 更新日期：2026-10-20
+> 更新日期：2026-10-29
 
 启动服务，浏览会话、文件与执行状态。
 
@@ -15,14 +15,13 @@ composer（发送/停止/运行中引导/附件/斜杠命令）、工具卡与�
 选中只写入草稿）；图标按钮 hover/聚焦显示名称；工具卡与变更文件行提供 hover 预览；
 草稿与附件按会话身份保存，切换会话不丢；尚未确定的提交与草稿同生命周期，切换会话或刷新后用同一内容重试仍是同一次提交；打开失败时错误行可重试。左侧「新建任务」或项目头的 ➕ 直接在对应项目进入空白新对话，**首次发送才创建服务端会话**，标题由首条输入生成；新对话沿用会话内容宽度轴居中，项目名与工作目录收在输入卡上方的胶囊里。没有项目时用「新建项目」只选择 server 上的工作目录，项目在校会话落盘后出现。
 
-两个校验入口：
+浏览器验收：
 
 ```bash
-cd apps/web && npm run check:design -- --source <deepseek-harness root>   # 逐字节比对拷贝来源（基线 revision 见 apps/web/THIRD_PARTY_NOTICES.md），任何漂移即失败
-cd apps/web && npx playwright test    # fixtures（设计核对页）+ live（隔离 home 的真实服务端）
+cd apps/web && npx playwright test    # UI 验收（fixtures + live；CI 浏览器车道执行）
 ```
 
-`dsh web` 可用来做与上游界面的视觉对照（截图与 `data-slot` 结构）；对照图可能含私有会话，不入库。
+本地视觉对照产生的截图可能含私有会话，不入库。
 
 ## 操作起点
 
@@ -85,7 +84,7 @@ MINK_SERVER_PORT=9000 ./target/debug/mink-server
 MINK_SERVER_DEV_WEB=1 ./target/debug/mink-server   # 开发模式：服务磁盘 web/dist
 ```
 
-- 配置优先级：环境变量 > `mink-server.toml` > 项目 `<cwd>/.minkrc` > 用户 `~/.minkrc` > 默认；agent 配置（`[provider]`/`[generation]`/`[context]`/`[tools]`/`[signal]`/`[sandbox]`）与 CLI 同一分组 schema
+- 配置优先级：环境变量 > `mink-server.toml` > 项目 `<cwd>/.minkrc` > 用户 `~/.minkrc` > 默认；Rust CLI/server 共用 `mink::config_file` 的严格分组 schema，缺失配置可忽略，已有配置不可读或无效会明确报错
 - 关键环境变量：`MINK_SERVER_HOST/PORT`、`MINK_HOME`、`MODEL`、`MINK_SERVER_MAX_RUNNING`、`MINK_SERVER_TURN_TIMEOUT`、`MINK_SERVER_DEV_WEB`
 - REST/SSE API 与事件格式详见 [HTTP API](../reference/http-api.md)
 

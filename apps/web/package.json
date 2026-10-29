@@ -2,7 +2,7 @@
   "name": "mink-web",
   "private": true,
   "version": "0.8.0",
-  "description": "Mink web workbench: React shell whose design layer is copied from the DSH client packages",
+  "description": "Mink web workbench: React shell with a vendored reference design snapshot (no runtime dependency)",
   "type": "module",
   "engines": {
     "node": ">=22.22.2"
@@ -13,9 +13,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "e2e": "playwright test",
-    "typecheck": "tsc --noEmit",
-    "check:design": "node scripts/check-design-parity.mjs",
-    "dsh:snapshot": "node scripts/dsh-snapshot.mjs"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "anser": "^2.3.5",
