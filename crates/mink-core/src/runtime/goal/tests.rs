@@ -285,7 +285,7 @@ async fn settled_review_recovery_preserves_next_execution_phase() {
     handle
         .goal_ctx
         .goal_store
-        .recover(&goal.environment, &[])
+        .recover(&goal.environment, &[], 0)
         .unwrap();
     let recovered = handle.goal_snapshot().unwrap();
     close_fixture(runtime, &handle, root).await;
@@ -306,6 +306,7 @@ async fn external_blocker_requires_inspected_evidence() {
         handle.goal_ctx.usage.clone(),
     );
     let ctx = crate::context::ToolContext::from(handle.goal_ctx.as_ref());
+    let evidence_ctx = ctx.goal_review_tool_context().unwrap();
     let call = crate::protocol::ToolCallEvent {
         id: "proof-read".into(),
         name: "Read".into(),
@@ -315,11 +316,11 @@ async fn external_blocker_requires_inspected_evidence() {
         raw_arguments_digest: None,
     };
     session
-        .finish_read(session.capture_read(&call, &ctx).unwrap().unwrap())
+        .finish_read(session.capture_read(&call, &evidence_ctx).unwrap().unwrap())
         .unwrap();
     let mut claimed = goal.reviews[0].clone();
     claimed.blocker.as_mut().unwrap().evidence.clear();
-    let accepted = session.submit(claimed, &ctx);
+    let accepted = session.submit(claimed, &evidence_ctx);
     close_fixture(runtime, &handle, root).await;
     assert!(
         accepted.is_err(),
@@ -703,7 +704,7 @@ async fn goal_state_control_matrix_preserves_terminal_and_retry_boundaries() {
             let goal = handle
                 .goal_ctx
                 .goal_store
-                .update(|g| {
+                .update_for_test(|g| {
                     g.status = status.clone();
                     g.phase = GoalPhase::Idle;
                     g.hidden = status == GoalStatus::Failed && action == "resume";
@@ -812,7 +813,7 @@ async fn failed_goal_retries_after_restart_and_explicit_budget_adjustment() {
     handle
         .goal_ctx
         .goal_store
-        .update(|g| {
+        .update_for_test(|g| {
             g.spec.limits.deadline_unix_secs = goal_now() - 1;
             Ok(())
         })
@@ -930,7 +931,7 @@ async fn resume_phase_matrix_allows_last_round_review_without_an_extra_execution
             let goal = handle
                 .goal_ctx
                 .goal_store
-                .update(|g| {
+                .update_for_test(|g| {
                     g.status = status.clone();
                     g.phase = phase.clone();
                     g.spec.limits.max_turns = 1;
@@ -1671,7 +1672,7 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
     handle
         .goal_ctx
         .goal_store
-        .recover(&after.environment, &[])
+        .recover(&after.environment, &[], 0)
         .unwrap();
     let restored = handle.goal_snapshot().unwrap();
     assert_eq!(restored.phase, GoalPhase::Idle);
@@ -1859,18 +1860,18 @@ async fn unknown_goal_format_version_fails_closed() {
 #[test]
 fn screening_uses_only_final_committed_response_at_execution_boundary() {
     let history = vec![
-        serde_json::json!({"role":"assistant","content":[{"type":"text","text":"old turn"}]}),
-        serde_json::json!({"role":"assistant","content":[{"type":"text","text":"progress is not a final conclusion"},{"type":"tool_use","name":"Read"}]}),
-        serde_json::json!({"role":"user","content":[{"type":"tool_result","content":"file"}]}),
-        serde_json::json!({"role":"assistant","content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"Partial completion."},{"type":"text","text":"Next finish criterion-1."}]}),
-        serde_json::json!({"role":"assistant","content":[{"type":"text","text":"later host adjudication"}]}),
+        serde_json::json!({"seq":1,"role":"assistant","content":[{"type":"text","text":"old turn"}]}),
+        serde_json::json!({"seq":3,"role":"assistant","content":[{"type":"text","text":"progress is not a final conclusion"},{"type":"tool_use","name":"Read"}]}),
+        serde_json::json!({"seq":4,"role":"user","content":[{"type":"tool_result","content":"file"}]}),
+        serde_json::json!({"seq":5,"role":"assistant","content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"Partial completion."},{"type":"text","text":"Next finish criterion-1."}]}),
+        serde_json::json!({"seq":6,"role":"assistant","content":[{"type":"text","text":"later host adjudication"}]}),
     ];
     assert_eq!(
-        super::review::execution_conclusion(&history, 1, 4),
+        super::review::execution_conclusion(&history, 3, 5),
         "Partial completion.\nNext finish criterion-1."
     );
-    assert_eq!(super::review::execution_conclusion(&history, 1, 3), "");
-    assert_eq!(super::review::execution_conclusion(&history, 4, 4), "");
+    assert_eq!(super::review::execution_conclusion(&history, 3, 4), "");
+    assert_eq!(super::review::execution_conclusion(&history, 5, 5), "");
 }
 
 /// A backend that holds the first (execution) request until the test releases
@@ -2047,7 +2048,8 @@ async fn interrupt_during_an_active_round_pauses_without_admitting_another() {
 
 #[test]
 fn inconclusive_review_keeps_active_and_preserves_candidate() {
-    use crate::session::goal::{GoalPhase, GoalStatus, GoalStore};
+    use crate::session::goal::{GoalPhase, GoalStatus, GoalStore, GoalTransition};
+    use crate::session::goal_protocol::{GoalReview, GoalReviewVerdict};
 
     let dir = std::env::temp_dir().join(format!(
         "mink-goal-inconclusive-{}",
@@ -2059,26 +2061,45 @@ fn inconclusive_review_keeps_active_and_preserves_candidate() {
         crate::session::persistence::PersistenceFault::default(),
     )
     .unwrap();
-    let mut goal = store
+    let goal = store
         .create(
             crate::session::goal::GoalSpec::new("inconclusive"),
             "env".into(),
         )
         .unwrap();
-    let candidate = crate::session::goal_protocol::GoalReviewCandidate {
-        generation: 1,
-        goal_id: goal.id.clone(),
-        contract_revision: goal.contract_revision,
-        iteration: 0,
-        conversation_seq: 0,
-        reviewer_id: "reviewer".into(),
-    };
-    goal.review_candidate = Some(candidate.clone());
-
-    super::verification::settle_non_satisfied_review(
-        &mut goal,
-        crate::session::goal_protocol::GoalReviewVerdict::Inconclusive,
-    );
+    let goal = store
+        .transition(
+            &goal.id,
+            goal.revision,
+            GoalTransition::PrepareReview {
+                conversation_seq: 0,
+                reviewer_id: "reviewer".into(),
+            },
+        )
+        .unwrap();
+    let candidate = goal.review_candidate.clone().unwrap();
+    let goal = store
+        .transition(
+            &goal.id,
+            goal.revision,
+            GoalTransition::CommitReview {
+                review: GoalReview {
+                    candidate: candidate.clone(),
+                    verdict: GoalReviewVerdict::Inconclusive,
+                    report: None,
+                    original_request: None,
+                    criteria: Vec::new(),
+                    constraints: Vec::new(),
+                    summary: "review could not reach a conclusion".into(),
+                    next_step: "repeat the evidence review".into(),
+                    blocker: None,
+                },
+                evidence_versions: Vec::new(),
+                expected_conversation_seq: 0,
+                blocker_fingerprint: None,
+            },
+        )
+        .unwrap();
 
     assert_eq!(
         goal.status,

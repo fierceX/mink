@@ -1378,7 +1378,7 @@ async fn huge_plan_checkpoint_is_bounded_in_the_projection() -> anyhow::Result<(
     )
     .await?;
     // 权威 plan 正文：远超窗口（≈200k 字符）。路径与引擎读取的权威位置一致。
-    let plan_path = ctx.summary_path.with_file_name("plan.md");
+    let plan_path = ctx.store.path().with_file_name("plan.md");
     let plan_body = format!(
         "# plan\n{}\nMIDDLE-MARKER\n{}\nTAIL-MARKER\n",
         "p".repeat(100_000),

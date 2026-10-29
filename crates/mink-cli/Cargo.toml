@@ -25,7 +25,7 @@ crossterm = { workspace = true, optional = true, features = ["event-stream"] }
 futures = { workspace = true, optional = true }
 unicode-segmentation = { version = "1.13", optional = true }
 ignore = { workspace = true, optional = true }
-mink = { package = "mink-core", version = "0.8.0", path = "../mink-core", default-features = false }
+mink = { package = "mink-core", version = "0.8.0", path = "../mink-core", default-features = false, features = ["config-file"] }
 ratatui = { workspace = true, optional = true }
 rustyline = { workspace = true, optional = true }
 serde_json.workspace = true

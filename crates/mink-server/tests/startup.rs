@@ -243,15 +243,15 @@ fn environment_host_wins_over_config_without_the_flag() {
 }
 
 #[test]
-fn default_listener_stays_on_all_interfaces() {
+fn default_listener_is_loopback_only() {
     let _serial = serial();
     let fixture = Fixture::new();
     let (server, banner, port) = start_server(&fixture, &[], &[]);
     assert!(
-        banner.contains(&format!("http://0.0.0.0:{port}")),
+        banner.contains(&format!("http://127.0.0.1:{port}")),
         "banner: {banner}"
     );
-    TcpStream::connect(("127.0.0.1", port)).expect("all-interface listener accepts loopback");
+    TcpStream::connect(("127.0.0.1", port)).expect("server accepts loopback connections");
     drop(server);
 }
 

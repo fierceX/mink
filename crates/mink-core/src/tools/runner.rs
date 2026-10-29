@@ -345,7 +345,10 @@ impl ToolRunner {
             .map(|t| t.as_ref())
     }
 
-    fn find_custom_tool(&self, name: &str) -> Option<&crate::runtime::RegisteredCustomTool> {
+    fn find_custom_tool(
+        &self,
+        name: &str,
+    ) -> Option<&crate::tools::extension::RegisteredCustomTool> {
         self.ctx
             .custom_tools
             .iter()
@@ -403,7 +406,7 @@ impl ToolRunner {
             }
             let metadata = self.metadata_for(&call.name);
             let custom_sequential = self.find_custom_tool(&call.name).is_some_and(|tool| {
-                tool.definition.execution == crate::runtime::ToolExecutionMode::Sequential
+                tool.definition.execution == crate::tools::extension::ToolExecutionMode::Sequential
             });
             if custom_sequential
                 || (self
@@ -724,7 +727,11 @@ impl ToolRunner {
             Err(error) => return prepare_error(error),
         };
         let review_capture = if let Some(review) = self.ctx.review_evidence() {
-            match review.capture_read(&call, &self.ctx) {
+            let evidence_context = match self.ctx.goal_review_tool_context() {
+                Ok(context) => context,
+                Err(error) => return prepare_error(error),
+            };
+            match review.capture_read(&call, &evidence_context) {
                 Ok(capture) => capture,
                 Err(error) => return prepare_error(error),
             }
@@ -948,7 +955,7 @@ impl ToolRunner {
 
         if matches!(call.name.as_str(), "Read" | "Glob" | "Grep")
             && let Some(review) = &self.ctx.goal_review
-            && let Err(error) = review.set_stage(crate::session::goal::GoalReviewStage::Inspecting)
+            && let Err(error) = review.mark_inspecting()
         {
             return PreparedCall::Immediate(failed_tool_result(
                 call.id,
@@ -965,14 +972,15 @@ impl ToolRunner {
         call: &ToolCallEvent,
         tool_fn: Option<&dyn ToolExec>,
     ) -> Result<ToolExecution> {
-        let captured = if let Some(review) = ctx.review_evidence() {
-            review.capture_read(call, ctx)?
+        let review = ctx.review_evidence();
+        let captured = if let Some(review) = review {
+            review.capture_read(call, &ctx.goal_review_tool_context()?)?
         } else {
             None
         };
         let raw = dispatch_tool(ctx, call, tool_fn);
         if raw.status == ToolStatus::Succeeded
-            && let (Some(review), Some(captured)) = (ctx.review_evidence(), captured)
+            && let (Some(review), Some(captured)) = (review, captured)
         {
             review.finish_read(captured)?;
         }
@@ -1049,7 +1057,7 @@ impl ToolRunner {
 async fn execute_custom(
     ctx: &ToolContext,
     call: &ToolCallEvent,
-    tool: crate::runtime::RegisteredCustomTool,
+    tool: crate::tools::extension::RegisteredCustomTool,
 ) -> Result<ToolExecution> {
     let definition = &tool.definition;
     let started = std::time::Instant::now();
@@ -1061,7 +1069,7 @@ async fn execute_custom(
     let timeout_secs = timeout.as_secs();
     let execution = tool.executor.execute(
         call.input_json.clone(),
-        crate::runtime::ToolExecutionContext::new(ctx.cwd.clone(), ctx.interrupt.clone()),
+        crate::tools::extension::ToolExecutionContext::new(ctx.cwd.clone(), ctx.interrupt.clone()),
     );
     tokio::pin!(execution);
     let deadline = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs));
@@ -1070,14 +1078,14 @@ async fn execute_custom(
         tokio::select! {
             result = &mut execution => break result,
             _ = &mut deadline => {
-                break Err(crate::runtime::ToolError::new(format!(
+                break Err(crate::tools::extension::ToolError::new(format!(
                     "custom tool {} timed out after {timeout_secs}s",
                     definition.name
                 )));
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
                 if ctx.interrupt.load(std::sync::atomic::Ordering::SeqCst) {
-                    break Err(crate::runtime::ToolError::new(format!(
+                    break Err(crate::tools::extension::ToolError::new(format!(
                         "custom tool {} interrupted",
                         definition.name
                     )));
@@ -1281,8 +1289,8 @@ fn dispatch_tool(
                 // shared decode helper or an explicit `ToolError::argument`
                 // guarantees no side effect happened before the error.
                 let argument_error = crate::tools::args::is_argument_error(&e)
-                    || e.downcast_ref::<crate::runtime::ToolError>()
-                        .is_some_and(crate::runtime::ToolError::is_argument);
+                    || e.downcast_ref::<crate::tools::extension::ToolError>()
+                        .is_some_and(crate::tools::extension::ToolError::is_argument);
                 let status = if argument_error {
                     ToolStatus::Failed(ToolFailureKind::ArgumentInvalid)
                 } else {

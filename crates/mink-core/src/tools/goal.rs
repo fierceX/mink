@@ -14,10 +14,8 @@ impl ToolExec for GoalReadTool {
         struct Args {}
         let _: Args = crate::tools::args::decode_args(input)?;
         let goal = ctx
-            .goal_review
-            .as_ref()
-            .or(ctx.goal_adjudication.as_ref())
-            .map(|r| r.snapshot_for_read())
+            .review_evidence()
+            .map(|review| review.snapshot_for_read())
             .or_else(|| ctx.goal_store.snapshot())
             .filter(|g| !g.hidden);
         let snapshot = goal
@@ -55,7 +53,7 @@ impl ToolExec for GoalDraftTool {
             spec: GoalDraftSpec,
         }
         let args: Args = crate::tools::args::decode_args(input)?;
-        anyhow::ensure!(ctx.goal_review.is_none(), "reviewers cannot edit contracts");
+        anyhow::ensure!(!ctx.is_review_agent(), "reviewers cannot edit contracts");
         let draft = ctx
             .goal_store
             .replace_draft(&args.draft_id, args.revision, args.spec)?;
@@ -73,7 +71,7 @@ impl ToolExec for GoalReviewTool {
     fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> anyhow::Result<ToolOutcome> {
         let submission: GoalReviewSubmission =
             crate::tools::args::decode_args(input).map_err(|error| {
-                if let Some(session) = &ctx.goal_adjudication {
+                if let Some(session) = ctx.goal_adjudication.as_ref() {
                     session.record_rejection(format!("{error:#}"));
                 }
                 error
@@ -85,9 +83,11 @@ impl ToolExec for GoalReviewTool {
         })?;
         let result = match submission {
             GoalReviewSubmission::Decision(conclusion) => {
-                session.submit_conclusion(conclusion, ctx)
+                session.submit_conclusion(conclusion, &ctx.goal_review_tool_context()?)
             }
-            GoalReviewSubmission::Full(review) => session.submit(review, ctx),
+            GoalReviewSubmission::Full(review) => {
+                session.submit(review, &ctx.goal_review_tool_context()?)
+            }
             GoalReviewSubmission::Continue(proposal) => session.submit_continue(proposal),
         };
         // A decoded but rejected conclusion is protocol feedback, not damaged

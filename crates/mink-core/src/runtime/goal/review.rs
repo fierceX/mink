@@ -1,6 +1,5 @@
 //! Host-owned, read-only reviews of one durable execution boundary.
 use super::*;
-use crate::context::ToolContext;
 use crate::resources::selector::split_read_path_selection;
 use std::collections::BTreeMap;
 
@@ -61,19 +60,18 @@ impl GoalReviewSession {
             "review candidate is no longer active"
         );
         if current.review_stage != Some(stage) {
-            let next = self
-                .parent_goal_store
-                .change(&current.id, current.revision, |g| {
-                    g.review_stage = Some(stage);
-                    if stage == GoalReviewStage::Inspecting {
-                        g.review_requires_full = true;
-                        if g.review_escalation_reason.is_none() {
-                            g.review_escalation_reason =
-                                Some("reviewer entered evidence inspection".into());
-                        }
-                    }
-                    Ok(())
-                })?;
+            let next = self.parent_goal_store.transition(
+                &current.id,
+                current.revision,
+                GoalTransition::SetReviewStage {
+                    expected: self
+                        .goal
+                        .review_candidate
+                        .clone()
+                        .ok_or_else(|| anyhow::anyhow!("missing review candidate"))?,
+                    stage,
+                },
+            )?;
             if let Some(observer) = self.observer.lock().unwrap().as_ref() {
                 observer(&next);
             }
@@ -136,7 +134,7 @@ impl GoalReviewSession {
     pub(crate) fn capture_read(
         &self,
         call: &crate::protocol::ToolCallEvent,
-        ctx: &ToolContext,
+        ctx: &crate::goal_review::GoalReviewToolContext<'_>,
     ) -> Result<Option<(String, PathBuf, String)>> {
         if call.name != "Read" {
             return Ok(None);
@@ -152,12 +150,7 @@ impl GoalReviewSession {
             );
             (
                 selection.path.clone(),
-                ctx.store
-                    .path()
-                    .parent()
-                    .ok_or_else(|| anyhow::anyhow!("session directory missing"))?
-                    .join("artifacts")
-                    .join(format!("{id}.txt")),
+                ctx.artifact_dir.join(format!("{id}.txt")),
             )
         } else if selection.path.contains("://") {
             return Ok(None);
@@ -311,7 +304,7 @@ impl GoalReviewSession {
     pub(crate) fn submit_conclusion(
         &self,
         conclusion: GoalHostConclusion,
-        ctx: &ToolContext,
+        ctx: &crate::goal_review::GoalReviewToolContext<'_>,
     ) -> Result<()> {
         let current = self.snapshot_for_read();
         ensure!(
@@ -428,7 +421,11 @@ impl GoalReviewSession {
         Ok(())
     }
 
-    pub(crate) fn submit(&self, feedback: GoalReview, ctx: &ToolContext) -> Result<()> {
+    pub(crate) fn submit(
+        &self,
+        feedback: GoalReview,
+        ctx: &crate::goal_review::GoalReviewToolContext<'_>,
+    ) -> Result<()> {
         ensure!(
             self.continuation.lock().unwrap().is_none(),
             "continuation already submitted"
@@ -459,12 +456,7 @@ impl GoalReviewSession {
                 );
                 (
                     reference.clone(),
-                    ctx.store
-                        .path()
-                        .parent()
-                        .ok_or_else(|| anyhow::anyhow!("session directory missing"))?
-                        .join("artifacts")
-                        .join(format!("{id}.txt")),
+                    ctx.artifact_dir.join(format!("{id}.txt")),
                 )
             } else {
                 let path = Path::new(reference.strip_prefix("file://").unwrap_or(&reference));
@@ -496,6 +488,64 @@ impl GoalReviewSession {
     }
 }
 
+impl crate::goal_review::GoalReviewToolSession for GoalReviewSession {
+    fn billing_turn_id(&self) -> String {
+        format!(
+            "goal-review:{}:{}",
+            self.goal.id,
+            self.goal.iterations.len()
+        )
+    }
+
+    fn snapshot_for_read(&self) -> GoalSnapshot {
+        GoalReviewSession::snapshot_for_read(self)
+    }
+
+    fn mark_inspecting(&self) -> anyhow::Result<()> {
+        self.set_stage(GoalReviewStage::Inspecting)
+    }
+
+    fn check_budget(&self) -> anyhow::Result<()> {
+        GoalReviewSession::check_budget(self)
+    }
+
+    fn record_rejection(&self, reason: String) {
+        GoalReviewSession::record_rejection(self, reason)
+    }
+
+    fn submit_continue(&self, proposal: GoalContinueProposal) -> Result<()> {
+        GoalReviewSession::submit_continue(self, proposal)
+    }
+
+    fn submit(
+        &self,
+        review: GoalReview,
+        ctx: &crate::goal_review::GoalReviewToolContext<'_>,
+    ) -> Result<()> {
+        GoalReviewSession::submit(self, review, ctx)
+    }
+
+    fn submit_conclusion(
+        &self,
+        conclusion: GoalHostConclusion,
+        ctx: &crate::goal_review::GoalReviewToolContext<'_>,
+    ) -> Result<()> {
+        GoalReviewSession::submit_conclusion(self, conclusion, ctx)
+    }
+
+    fn capture_read(
+        &self,
+        call: &crate::protocol::ToolCallEvent,
+        ctx: &crate::goal_review::GoalReviewToolContext<'_>,
+    ) -> Result<Option<(String, PathBuf, String)>> {
+        GoalReviewSession::capture_read(self, call, ctx)
+    }
+
+    fn finish_read(&self, captured: (String, PathBuf, String)) -> Result<()> {
+        GoalReviewSession::finish_read(self, captured)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct GoalReviewBudgetExhausted {
     pub(crate) reason: String,
@@ -516,8 +566,11 @@ pub(super) fn execution_conclusion(
 ) -> String {
     history
         .iter()
-        .take(end)
-        .skip(start)
+        .filter(|message| {
+            message["seq"]
+                .as_u64()
+                .is_some_and(|sequence| (start as u64) < sequence && sequence <= end as u64)
+        })
         .rfind(|m| m["role"] == "assistant")
         .and_then(|m| m["content"].as_array())
         .filter(|blocks| !blocks.iter().any(|b| b["type"] == "tool_use"))
@@ -542,24 +595,28 @@ impl AgentRuntimeHandle {
             .review_candidate
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("missing review candidate"))?;
-        let history = self.goal_ctx.store.lines().await?;
+        let session_dir = self
+            .goal_ctx
+            .store
+            .path()
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("conversation path has no session directory"))?;
+        let (history, committed_sequence) =
+            crate::runtime::session::SessionReader::new(session_dir.to_path_buf())
+                .conversation_with_sequence()?;
         let start = goal.iterations.last().map_or(0, |i| i.conversation_start);
         ensure!(
-            candidate.conversation_seq <= history.len() && start <= candidate.conversation_seq,
+            candidate.conversation_seq <= committed_sequence && start <= candidate.conversation_seq,
             "execution conclusion boundary is outside committed history"
         );
         let conclusion = execution_conclusion(&history, start, candidate.conversation_seq);
         if conclusion.trim().is_empty() && !session.snapshot_for_read().review_requires_full {
             let current = session.snapshot_for_read();
-            let next = self
-                .goal_ctx
-                .goal_store
-                .change(&current.id, current.revision, |g| {
-                    g.review_requires_full = true;
-                    g.review_escalation_reason =
-                        Some("execution has no unambiguous final conclusion".into());
-                    Ok(())
-                })?;
+            let next = self.goal_ctx.goal_store.transition(
+                &current.id,
+                current.revision,
+                GoalTransition::MarkReviewAmbiguous,
+            )?;
             self.announce_goal(&next);
         }
         let conclusion_artifact = self.goal_ctx.artifacts.write_text(
@@ -576,7 +633,7 @@ impl AgentRuntimeHandle {
             let cached = current.review_report.clone().filter(|r| {
                 r.candidate == *candidate
                     && r.conversation_seq == current.acceptance_conversation_seq
-                    && history.len() <= r.conversation_seq
+                    && committed_sequence <= r.conversation_seq
                     && self
                         .goal_ctx
                         .artifacts
@@ -588,22 +645,17 @@ impl AgentRuntimeHandle {
                     })
             });
             if current.review_report.is_some() && cached.is_none() {
-                let next = self
-                    .goal_ctx
-                    .goal_store
-                    .change(&current.id, current.revision, |g| {
-                        g.review_report = None;
-                        g.review_requires_full = true;
-                        g.review_escalation_reason =
-                            Some("cached report, evidence or history boundary changed".into());
-                        Ok(())
-                    })?;
+                let next = self.goal_ctx.goal_store.transition(
+                    &current.id,
+                    current.revision,
+                    GoalTransition::InvalidateReviewReport,
+                )?;
                 self.announce_goal(&next);
                 current = session.snapshot_for_read();
             }
             let report = if let Some(report) = cached {
                 ensure!(
-                    self.goal_ctx.store.lines().await?.len() == report.conversation_seq,
+                    self.goal_ctx.store.committed_len().await? == report.conversation_seq,
                     "conversation changed before host adjudication"
                 );
                 for (reference, hash) in &report.evidence_versions {
@@ -678,7 +730,7 @@ impl AgentRuntimeHandle {
                     "independent reviewer returned an empty report"
                 );
                 let (reads, mapping) = session.import_evidence(self)?;
-                let seq = self.goal_ctx.store.lines().await?.len();
+                let seq = self.goal_ctx.store.committed_len().await?;
                 ensure!(
                     seq == current.acceptance_conversation_seq,
                     "conversation changed before host adjudication"
@@ -736,7 +788,7 @@ impl AgentRuntimeHandle {
                 )
                 .await;
             self.goal_ctx.store.sync().await?;
-            let seq = self.goal_ctx.store.lines().await?.len();
+            let seq = self.goal_ctx.store.committed_len().await?;
             // Bind a reusable report to the host history even when submission failed.
             let mut report = report;
             report.conversation_seq = seq;
@@ -771,14 +823,13 @@ impl AgentRuntimeHandle {
                     1
                 };
                 if rounds >= 3 {
-                    let next = self.goal_ctx.goal_store.change(&current.id, current.revision, |g| {
-                        g.review_requires_full = true;
-                        g.review_escalation_reason = Some("three consecutive rounds leave the same requirements unfinished; inspect actual progress".into());
-                        g.review_report = None;
-                        g.review_stage = Some(GoalReviewStage::Inspecting);
-                        g.acceptance_conversation_seq = seq;
-                        Ok(())
-                    })?;
+                    let next = self.goal_ctx.goal_store.transition(
+                        &current.id,
+                        current.revision,
+                        GoalTransition::EscalateRepeatedContinuation {
+                            conversation_seq: seq,
+                        },
+                    )?;
                     self.announce_goal(&next);
                     *session.continuation.lock().unwrap() = None;
                     continue;
@@ -794,19 +845,11 @@ impl AgentRuntimeHandle {
         report: GoalReviewReport,
     ) -> Result<()> {
         let current = session.snapshot_for_read();
-        let next = self
-            .goal_ctx
-            .goal_store
-            .change(&current.id, current.revision, |g| {
-                ensure!(
-                    g.status == GoalStatus::Active
-                        && g.review_candidate.as_ref() == Some(&report.candidate),
-                    "review candidate is no longer active"
-                );
-                g.acceptance_conversation_seq = report.conversation_seq;
-                g.review_report = Some(report);
-                Ok(())
-            })?;
+        let next = self.goal_ctx.goal_store.transition(
+            &current.id,
+            current.revision,
+            GoalTransition::PublishReviewReport { report },
+        )?;
         self.announce_goal(&next);
         Ok(())
     }

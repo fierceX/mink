@@ -27,13 +27,12 @@ impl AgentRuntimeHandle {
                 // identity; if even that cannot be published the run still
                 // stops, with both causes reported.
                 let (publish_error, replaced) =
-                    match self.goal_ctx.goal_store.update_if_current(&goal_id, |g| {
-                        if g.status == GoalStatus::Active {
-                            g.status = GoalStatus::Failed;
-                            g.reason = Some(format!("{error:#}"));
-                        }
-                        Ok(())
-                    }) {
+                    match self.goal_ctx.goal_store.transition_if_current(
+                        &goal_id,
+                        GoalTransition::FailRun {
+                            reason: format!("{error:#}"),
+                        },
+                    ) {
                         Ok(Some(goal)) => {
                             self.announce_goal(&goal);
                             (None, false)
@@ -229,15 +228,12 @@ impl AgentRuntimeHandle {
             if let Some(id) = checker_id
                 && !self.goal_driver.verifiers.iter().any(|v| v.id() == id)
             {
-                let Some(updated) = self.goal_ctx.goal_store.update_if_current(&goal.id, |g| {
-                    if g.status == GoalStatus::Active {
-                        g.status = GoalStatus::Blocked;
-                        g.reason = Some(format!(
-                            "goal verifier unavailable or identity changed: {id}"
-                        ));
-                    }
-                    Ok(())
-                })?
+                let Some(updated) = self.goal_ctx.goal_store.transition_if_current(
+                    &goal.id,
+                    GoalTransition::MarkVerifierUnavailable {
+                        verifier_id: id.clone(),
+                    },
+                )?
                 else {
                     return Ok(());
                 };
@@ -254,38 +250,37 @@ impl AgentRuntimeHandle {
                 continue;
             }
             if let Some(reason) = goal.budget_reason() {
-                let Some(updated) = self.goal_ctx.goal_store.update_if_current(&goal.id, |g| {
-                    if g.status == GoalStatus::Active {
-                        g.status = GoalStatus::BudgetExhausted;
-                        g.reason = Some(reason.into());
-                    }
-                    Ok(())
-                })?
+                let Some(updated) = self.goal_ctx.goal_store.transition_if_current(
+                    &goal.id,
+                    GoalTransition::ExhaustBudget {
+                        reason: reason.into(),
+                    },
+                )?
                 else {
                     return Ok(());
                 };
                 self.announce_goal(&updated);
                 break;
             }
-            let stream = match self.stream_goal_iteration(self.goal_ctx.store.lines().await?.len())
-            {
-                Ok(stream) => stream,
-                Err(RuntimeError::Closed) => break,
-                Err(error) => {
-                    if self
-                        .goal_snapshot()
-                        .is_some_and(|g| g.status != GoalStatus::Active)
-                    {
-                        break;
+            let stream =
+                match self.stream_goal_iteration(self.goal_ctx.store.committed_len().await?) {
+                    Ok(stream) => stream,
+                    Err(RuntimeError::Closed) => break,
+                    Err(error) => {
+                        if self
+                            .goal_snapshot()
+                            .is_some_and(|g| g.status != GoalStatus::Active)
+                        {
+                            break;
+                        }
+                        // A stop latched while the iteration was being admitted:
+                        // no new work may start, only the stable fault may settle.
+                        if !self.run_scheduled(run_id) {
+                            break;
+                        }
+                        return Err(error.into());
                     }
-                    // A stop latched while the iteration was being admitted:
-                    // no new work may start, only the stable fault may settle.
-                    if !self.run_scheduled(run_id) {
-                        break;
-                    }
-                    return Err(error.into());
-                }
-            };
+                };
 
             self.goal_driver.turn_active.send_replace(true);
             // Activity must be cleared on every exit path. A sink error or a
@@ -311,7 +306,12 @@ impl AgentRuntimeHandle {
             let _result = tokio::select! {
                 result = &mut outcome => result?,
                 _ = self.wait_goal_deadline() => {
-                    if let Some(budget) = self.goal_ctx.goal_store.update_if_current(&goal.id, |g| { if g.status == GoalStatus::Active { g.status = GoalStatus::BudgetExhausted; g.reason = Some("goal deadline reached during execution".into()); } Ok(()) })? {
+                    if let Some(budget) = self.goal_ctx.goal_store.transition_if_current(
+                        &goal.id,
+                        GoalTransition::ExhaustBudget {
+                            reason: "goal deadline reached during execution".into(),
+                        },
+                    )? {
                         self.announce_goal(&budget);
                     }
                     self.turn_gate.interrupt();

@@ -25,7 +25,7 @@ impl ServerConfig {
     pub fn load(toml_path: Option<&std::path::Path>) -> anyhow::Result<Self> {
         let file_cfg = toml_path.map(parse_toml).transpose()?.unwrap_or_default();
         // 用户层 agent 配置：~/.minkrc（分组格式，与 CLI 同一文件）。
-        let user_layer = crate::session::agent_config::load_user_layer();
+        let user_layer = crate::session::agent_config::load_user_layer()?;
 
         let mink_home = env_or("MINK_HOME")
             .map(PathBuf::from)
@@ -41,7 +41,7 @@ impl ServerConfig {
         Ok(ServerConfig {
             host: env_or("MINK_SERVER_HOST")
                 .or(file_cfg.host)
-                .unwrap_or_else(|| "0.0.0.0".to_string()),
+                .unwrap_or_else(|| "127.0.0.1".to_string()),
             port: env_parsed_or("MINK_SERVER_PORT", file_cfg.port).unwrap_or(8765),
             mink_home,
             model,
@@ -145,6 +145,18 @@ mod tests {
         assert!(cfg.port > 0);
         if let Some(home) = home {
             unsafe { std::env::set_var("MINK_HOME", home) };
+        }
+    }
+
+    #[test]
+    fn default_host_is_loopback() {
+        let _guard = crate::session::TEST_ENV_LOCK.blocking_lock();
+        let saved = std::env::var_os("MINK_SERVER_HOST");
+        unsafe { std::env::remove_var("MINK_SERVER_HOST") };
+        let cfg = ServerConfig::load(None).unwrap();
+        assert_eq!(cfg.host, "127.0.0.1");
+        if let Some(value) = saved {
+            unsafe { std::env::set_var("MINK_SERVER_HOST", value) };
         }
     }
 }

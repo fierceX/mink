@@ -1,8 +1,11 @@
 //! Public library entry points for embedding mink.
 //!
-//! The public surface is deliberately limited to [`runtime`], [`prelude`], and
-//! [`sdk_protocol`].
+//! The embedding surface is deliberately limited to [`runtime`], [`prelude`],
+//! and [`sdk_protocol`]. The optional `config-file` feature also exposes the
+//! shared `.minkrc` schema for host applications that need to parse it.
 
+#[cfg(feature = "config-file")]
+pub mod config_file;
 pub mod runtime;
 pub mod sdk_protocol;
 
@@ -44,6 +47,7 @@ mod config;
 mod context;
 mod errors;
 mod events;
+mod goal_review;
 mod guard;
 mod llm;
 mod prompt;

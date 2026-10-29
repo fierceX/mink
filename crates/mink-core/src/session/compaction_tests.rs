@@ -1678,7 +1678,7 @@ async fn strict_feasibility_accounts_for_active_plan() -> anyhow::Result<()> {
     ctx.plan_store
         .set_draft(&format!("# Plan\n{}", "p".repeat(6_000)), 64_000)?;
     ctx.plan_store.confirm()?;
-    let plan_before = std::fs::read_to_string(&ctx.plan_path)?;
+    let plan_before = std::fs::read_to_string(ctx.store.path().with_file_name("plan.md"))?;
     assert!(plan_before.contains(&"p".repeat(1_000)));
 
     // 旧轮次 + 两个 22,000 字符 user 轮次：裸尾部看似可行，加上 Plan 后超额。
@@ -1725,7 +1725,10 @@ async fn strict_feasibility_accounts_for_active_plan() -> anyhow::Result<()> {
     assert_eq!(backend.requests.lock().unwrap().len(), 1);
 
     // 权威 Plan 与原始历史不得被改写。
-    assert_eq!(std::fs::read_to_string(&ctx.plan_path)?, plan_before);
+    assert_eq!(
+        std::fs::read_to_string(ctx.store.path().with_file_name("plan.md"))?,
+        plan_before
+    );
     let history = serde_json::to_string(&ctx.store.lines().await?)?;
     assert!(history.contains(&"y".repeat(1_000)));
     Ok(())
@@ -1831,17 +1834,20 @@ async fn startup_rebuilds_missing_or_stale_summary_projection() -> anyhow::Resul
         summary_backend(),
     )
     .await?;
-    let state_path = ctx.summary_path.with_file_name("context-state.json");
+    let state_path = ctx.store.path().with_file_name("context-state.json");
     let state = CompactionState {
         active_start: 0,
         summary: "authoritative summary".into(),
     };
     crate::session::atomic_file::atomic_replace(&state_path, &serde_json::to_vec_pretty(&state)?)?;
-    std::fs::write(&ctx.summary_path, "stale projection\n")?;
+    std::fs::write(
+        ctx.store.path().with_file_name("summary.txt"),
+        "stale projection\n",
+    )?;
 
     let engine = CompactionEngine::new(
         ctx.store.clone(),
-        ctx.summary_path.clone(),
+        ctx.store.path().with_file_name("summary.txt"),
         ctx.config.base_url.clone(),
         &ctx.config,
         ctx.stats.clone(),
@@ -1859,7 +1865,7 @@ async fn startup_rebuilds_missing_or_stale_summary_projection() -> anyhow::Resul
         Some("authoritative summary")
     );
     assert_eq!(
-        std::fs::read_to_string(&ctx.summary_path)?,
+        std::fs::read_to_string(ctx.store.path().with_file_name("summary.txt"))?,
         "authoritative summary\n"
     );
     Ok(())
@@ -1926,7 +1932,7 @@ async fn startup_repairs_legacy_cut_on_internal_user_message() -> anyhow::Result
         .add_assistant("next safe boundary", "", &[])
         .await?;
 
-    let state_path = ctx.summary_path.with_file_name("context-state.json");
+    let state_path = ctx.store.path().with_file_name("context-state.json");
     let state = CompactionState {
         active_start: 2,
         summary: "authoritative summary".into(),
@@ -1936,7 +1942,7 @@ async fn startup_repairs_legacy_cut_on_internal_user_message() -> anyhow::Result
     let writer = crate::session::event_log::EventLogWriter::start(ctx.events_path.clone());
     let engine = CompactionEngine::new(
         ctx.store.clone(),
-        ctx.summary_path.clone(),
+        ctx.store.path().with_file_name("summary.txt"),
         ctx.config.base_url.clone(),
         &ctx.config,
         ctx.stats.clone(),
@@ -2008,11 +2014,13 @@ async fn compaction_keeps_full_history_and_persists_state() -> anyhow::Result<()
 
     let projected = ctx.compaction.active_messages().await?;
     assert!(projected.len() < full_history.len());
-    let persisted = load_state(&ctx.summary_path.with_file_name("context-state.json"))?;
+    let persisted = load_state(&ctx.store.path().with_file_name("context-state.json"))?;
     assert!(persisted.active_start > 0);
     assert!(!persisted.summary.is_empty());
     assert!(
-        !ctx.summary_path
+        !ctx.store
+            .path()
+            .with_file_name("summary.txt")
             .with_file_name("context-state.json")
             .with_extension("json.tmp")
             .exists()
@@ -2054,7 +2062,7 @@ async fn compaction_interrupts_pending_summary_without_committing() -> anyhow::R
         .to_string();
     assert!(error.contains("compaction interrupted"), "{error}");
     assert_eq!(
-        load_state(&ctx.summary_path.with_file_name("context-state.json"))?.active_start,
+        load_state(&ctx.store.path().with_file_name("context-state.json"))?.active_start,
         0
     );
     Ok(())
@@ -2174,7 +2182,7 @@ async fn repeated_compaction_advances_boundary_and_merges_previous_summary() -> 
     }
 
     assert!(compact(&ctx, "manual", 0).await?.0);
-    let state_path = ctx.summary_path.with_file_name("context-state.json");
+    let state_path = ctx.store.path().with_file_name("context-state.json");
     let first_state = load_state(&state_path)?;
     assert!(first_state.active_start > 0);
 
@@ -2268,7 +2276,11 @@ async fn compacted_history_projects_active_plan_after_summary_and_removes_it_on_
             .await?;
         ctx.store.add_assistant("progress", "", &[]).await?;
     }
-    tokio::fs::write(&ctx.plan_path, "# Active plan\n1. implement\n2. verify\n").await?;
+    tokio::fs::write(
+        &ctx.store.path().with_file_name("plan.md"),
+        "# Active plan\n1. implement\n2. verify\n",
+    )
+    .await?;
     assert!(compact(&ctx, "manual", 0).await?.0);
 
     let projected = ctx.compaction.active_messages().await?;
@@ -2287,7 +2299,7 @@ async fn compacted_history_projects_active_plan_after_summary_and_removes_it_on_
     assert_eq!(projected[0]["internal"], true);
     assert_eq!(projected[1]["internal"], true);
 
-    tokio::fs::remove_file(&ctx.plan_path).await?;
+    tokio::fs::remove_file(&ctx.store.path().with_file_name("plan.md")).await?;
     let cleared = ctx.compaction.active_messages().await?;
     assert!(cleared.iter().all(|message| {
         !message["content"]
@@ -2376,7 +2388,7 @@ async fn manual_compact_refuses_latched_session() -> anyhow::Result<()> {
             .add_assistant(&format!("progress {index}: {}", "y".repeat(6_000)), "", &[])
             .await?;
     }
-    let state_path = ctx.summary_path.with_file_name("context-state.json");
+    let state_path = ctx.store.path().with_file_name("context-state.json");
     let _ = ctx
         .persistence_fault
         .raise(&state_path, "injected publish fault");
@@ -2416,8 +2428,8 @@ async fn summary_projection_failure_fails_compaction() -> anyhow::Result<()> {
     // context-state write succeeds, but the projection write cannot, and the
     // compaction must report an error instead of returning success with only
     // a dirty marker.
-    let _ = std::fs::remove_file(&ctx.summary_path);
-    std::fs::create_dir(&ctx.summary_path)?;
+    let _ = std::fs::remove_file(ctx.store.path().with_file_name("summary.txt"));
+    std::fs::create_dir(ctx.store.path().with_file_name("summary.txt"))?;
 
     let error = compact(&ctx, "manual", 50_000).await.unwrap_err();
 
@@ -2426,7 +2438,7 @@ async fn summary_projection_failure_fails_compaction() -> anyhow::Result<()> {
         message.contains("directory") || message.contains("projection"),
         "{message}"
     );
-    let state = load_state(&ctx.summary_path.with_file_name("context-state.json"))?;
+    let state = load_state(&ctx.store.path().with_file_name("context-state.json"))?;
     assert!(
         state.active_start > 0,
         "authoritative state is committed before the derived projection fails"
@@ -2624,7 +2636,7 @@ async fn startup_repair_loss_cleared_only_after_successful_commit() -> anyhow::R
     ctx.store.add_assistant("mid2", "", &[]).await?;
     ctx.store.add_user("fourth constraint").await?;
 
-    let state_path = ctx.summary_path.with_file_name("context-state.json");
+    let state_path = ctx.store.path().with_file_name("context-state.json");
     let state = CompactionState {
         active_start: 2,
         summary: "authoritative summary".into(),
@@ -2633,7 +2645,7 @@ async fn startup_repair_loss_cleared_only_after_successful_commit() -> anyhow::R
 
     let engine = CompactionEngine::new(
         ctx.store.clone(),
-        ctx.summary_path.clone(),
+        ctx.store.path().with_file_name("summary.txt"),
         ctx.config.base_url.clone(),
         &ctx.config,
         ctx.stats.clone(),

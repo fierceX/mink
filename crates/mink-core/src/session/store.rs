@@ -1,6 +1,7 @@
 use crate::protocol::ToolCallEvent;
 use anyhow::Result;
 use serde_json::{Value, json};
+use std::io::{BufRead, BufReader as StdBufReader};
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, RwLock};
@@ -23,6 +24,7 @@ pub struct ConversationStore {
 #[derive(Debug, Clone)]
 struct CachedLines {
     start: usize,
+    sequence: usize,
     lines: Vec<Value>,
 }
 
@@ -59,10 +61,7 @@ impl ConversationStore {
         let path = self.path.clone();
         let sequence = tokio::task::spawn_blocking(move || -> Result<usize> {
             crate::session::jsonl::repair_unterminated_tail(&path)?;
-            Ok(std::fs::read(path)?
-                .iter()
-                .filter(|byte| **byte == b'\n')
-                .count())
+            count_sequence_positions_from_disk(&path)
         })
         .await??;
         *self.observer.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -191,6 +190,46 @@ impl ConversationStore {
         self.lines_from(0).await
     }
 
+    /// Current conversation sequence. Runtime sessions install an observer
+    /// during recovery, so sequence-only consumers avoid
+    /// reparsing the complete append-only history after compaction.
+    pub async fn committed_len(&self) -> Result<usize> {
+        if let Some(sequence) = self
+            .observer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|observer| observer.sequence)
+        {
+            return Ok(sequence);
+        }
+        {
+            let cache = self.cache.read().await;
+            if let Some(cache) = cache.as_ref() {
+                return Ok(cache.sequence);
+            }
+        }
+
+        let _guard = self.write_lock.lock().await;
+        if let Some(sequence) = self
+            .observer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|observer| observer.sequence)
+        {
+            return Ok(sequence);
+        }
+        {
+            let cache = self.cache.read().await;
+            if let Some(cache) = cache.as_ref() {
+                return Ok(cache.sequence);
+            }
+        }
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || count_sequence_positions_from_disk(&path)).await?
+    }
+
     pub async fn lines_from(&self, start: usize) -> Result<Vec<Value>> {
         {
             let cache = self.cache.read().await;
@@ -217,11 +256,12 @@ impl ConversationStore {
             }
         }
 
-        let lines = self.read_lines_from_disk(start).await?;
+        let (lines, sequence) = self.read_lines_from_disk(start).await?;
         let mut cache = self.cache.write().await;
         if cache.is_none() || cache.as_ref().is_some_and(|cached| start >= cached.start) {
             *cache = Some(CachedLines {
                 start,
+                sequence,
                 lines: lines.clone(),
             });
         }
@@ -271,11 +311,12 @@ impl ConversationStore {
         ))
     }
 
-    async fn read_lines_from_disk(&self, start: usize) -> Result<Vec<Value>> {
+    async fn read_lines_from_disk(&self, start: usize) -> Result<(Vec<Value>, usize)> {
         let file = tokio::fs::File::open(&self.path).await?;
         let mut reader = BufReader::new(file);
         let mut lines = Vec::new();
         let mut physical_line = 0usize;
+        let mut sequence = 0usize;
         let mut message_index = 0usize;
         let mut line = String::new();
         loop {
@@ -286,6 +327,7 @@ impl ConversationStore {
             }
             physical_line += 1;
             if line.trim().is_empty() {
+                sequence = physical_line;
                 continue;
             }
             let terminated = line.ends_with('\n');
@@ -301,6 +343,7 @@ impl ConversationStore {
                     ));
                 }
             };
+            sequence = physical_line;
             if message_index >= start {
                 lines.push(value);
             }
@@ -313,7 +356,7 @@ impl ConversationStore {
                 message_index
             ));
         }
-        Ok(lines)
+        Ok((lines, sequence))
     }
 
     async fn read_last_assistant_with_text_from_disk(&self) -> Result<Option<Value>> {
@@ -375,6 +418,7 @@ impl ConversationStore {
         let mut cache = self.cache.write().await;
         if let Some(cache) = cache.as_mut() {
             cache.lines.push(value.clone());
+            cache.sequence += 1;
         }
         drop(cache);
         let mut observer = self.observer.lock().unwrap_or_else(|e| e.into_inner());
@@ -440,6 +484,40 @@ impl ConversationStore {
         self.append_line(&serde_json::json!({"role": "user", "content": content}))
             .await
     }
+}
+
+fn count_sequence_positions_from_disk(path: &std::path::Path) -> Result<usize> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = StdBufReader::new(file);
+    let mut sequence = 0usize;
+    let mut physical_line = 0usize;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes = reader.read_line(&mut line)?;
+        if bytes == 0 {
+            break;
+        }
+        physical_line += 1;
+        if line.trim().is_empty() {
+            sequence = physical_line;
+            continue;
+        }
+        let terminated = line.ends_with('\n');
+        match serde_json::from_str::<Value>(&line) {
+            Ok(_) => sequence = physical_line,
+            Err(_) if !terminated => break,
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "invalid JSONL in {} at line {}: {}",
+                    path.display(),
+                    physical_line,
+                    error
+                ));
+            }
+        }
+    }
+    Ok(sequence)
 }
 
 pub fn first_line(s: &str) -> &str {

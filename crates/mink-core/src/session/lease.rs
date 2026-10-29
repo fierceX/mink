@@ -25,8 +25,7 @@ impl SessionLease {
             .truncate(false)
             .open(&path)
             .with_context(|| format!("open session lock {}", path.display()))?;
-        fs2::FileExt::try_lock_exclusive(&file)
-            .map_err(|error| anyhow::anyhow!("session is locked by another process: {error}"))?;
+        fs2::FileExt::try_lock_exclusive(&file).context("session is locked by another process")?;
         Ok(Self {
             _file: file,
             _parent: None,

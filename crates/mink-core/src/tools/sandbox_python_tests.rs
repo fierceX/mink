@@ -10,6 +10,58 @@ fn synthetic_infinite_loop_wasm(path: &Path) {
     std::fs::write(path, WASM).unwrap();
 }
 
+fn synthetic_noop_wasm(path: &Path) {
+    // (module (func (export "_start")))
+    const WASM: &[u8] = &[
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03,
+        0x02, 0x01, 0x00, 0x07, 0x0a, 0x01, 0x06, b'_', b's', b't', b'a', b'r', b't', 0x00, 0x00,
+        0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b,
+    ];
+    std::fs::write(path, WASM).unwrap();
+}
+
+#[test]
+fn synthetic_wasm_starts_with_multiple_package_mounts() {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "mink-sandbox-mounts-{}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    for dir in ["stdlib", "read", "write", "package-a", "package-b"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    let wasm = root.join("noop.wasm");
+    synthetic_noop_wasm(&wasm);
+
+    let read_dirs = [root.join("read").to_string_lossy().into_owned()];
+    let write_dirs = [root.join("write").to_string_lossy().into_owned()];
+    let package_dirs = [
+        root.join("package-a").to_string_lossy().into_owned(),
+        root.join("package-b").to_string_lossy().into_owned(),
+    ];
+    let result = execute_in_sandbox_at(
+        "ignored by the synthetic module",
+        &wasm,
+        &root.join("stdlib"),
+        &read_dirs,
+        &write_dirs,
+        &package_dirs,
+        &root,
+        1024,
+        5,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(result, (String::new(), String::new(), Some(0)));
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn synthetic_wasm_timeout_and_cancel_terminate_execution() {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

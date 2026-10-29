@@ -224,6 +224,64 @@ async fn cache_appended_not_invalidated() {
 }
 
 #[tokio::test]
+async fn committed_len_uses_the_recovered_sequence_without_reopening_history() {
+    let store = temp_store();
+    store.ensure().await.unwrap();
+    store.add_user("a").await.unwrap();
+    store.add_assistant("b", "", &[]).await.unwrap();
+    store.add_user("c").await.unwrap();
+    store
+        .observe_commits(std::sync::Arc::new(|_, _| {}))
+        .await
+        .unwrap();
+    store.add_user("d").await.unwrap();
+    store.prune_cache_before(4).await;
+
+    let path = store.path().to_path_buf();
+    let moved = path.with_extension("jsonl.moved");
+    std::fs::rename(&path, &moved).unwrap();
+    assert_eq!(store.committed_len().await.unwrap(), 4);
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn committed_len_falls_back_to_the_active_suffix_cache() {
+    let store = temp_store();
+    store.ensure().await.unwrap();
+    for value in ["a", "b", "c", "d"] {
+        store.add_user(value).await.unwrap();
+    }
+    assert_eq!(store.lines_from(2).await.unwrap().len(), 2);
+    store.prune_cache_before(4).await;
+
+    let path = store.path().to_path_buf();
+    let moved = path.with_extension("jsonl.moved");
+    std::fs::rename(&path, &moved).unwrap();
+    assert_eq!(store.committed_len().await.unwrap(), 4);
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn committed_len_cache_preserves_physical_sequence_positions() {
+    let store = temp_store();
+    store.ensure().await.unwrap();
+    store.add_user("a").await.unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(store.path())
+        .unwrap();
+    std::io::Write::write_all(&mut file, b"\n").unwrap();
+    store.add_user("b").await.unwrap();
+    assert_eq!(store.lines_from(1).await.unwrap().len(), 1);
+
+    let path = store.path().to_path_buf();
+    let moved = path.with_extension("jsonl.moved");
+    std::fs::rename(&path, &moved).unwrap();
+    assert_eq!(store.committed_len().await.unwrap(), 3);
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[tokio::test]
 async fn active_suffix_cache_stays_pruned_when_full_history_is_read() {
     let store = temp_store();
     store.ensure().await.unwrap();

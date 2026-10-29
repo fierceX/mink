@@ -6557,11 +6557,12 @@ async fn identity_bound_updates_never_touch_a_replacement() {
     let applied = handle
         .goal_ctx
         .goal_store
-        .update_if_current(&first.id, |g| {
-            g.status = GoalStatus::Failed;
-            g.reason = Some("stale decision".into());
-            Ok(())
-        })
+        .transition_if_current(
+            &first.id,
+            crate::session::goal::GoalTransition::FailRun {
+                reason: "stale decision".into(),
+            },
+        )
         .unwrap();
     assert!(applied.is_none(), "a stale update must apply to nothing");
     let current = handle.goal_snapshot().unwrap();
@@ -7509,7 +7510,7 @@ async fn audit3_recover_normal_end_after_idle_publication() {
     runtime
         .ctx
         .goal_store
-        .update(|s| {
+        .update_for_test(|s| {
             s.phase = GoalPhase::Idle;
             s.iterations.push(crate::session::goal::GoalIteration {
                 iteration: 1,
@@ -8072,6 +8073,7 @@ async fn goal_review_rejects_unread_forged_or_changed_evidence() {
     ));
     let mut ctx = crate::context::ToolContext::from(handle.goal_ctx.as_ref());
     ctx.goal_adjudication = Some(session.clone());
+    let evidence_ctx = ctx.goal_review_tool_context().unwrap();
     let review = GoalReview {
         candidate,
         verdict: GoalReviewVerdict::Satisfied,
@@ -8098,7 +8100,7 @@ async fn goal_review_rejects_unread_forged_or_changed_evidence() {
         blocker: None,
     };
     assert!(
-        session.submit(review.clone(), &ctx).is_err(),
+        session.submit(review.clone(), &evidence_ctx).is_err(),
         "file existence is not inspection"
     );
     let call = crate::protocol::ToolCallEvent {
@@ -8110,7 +8112,7 @@ async fn goal_review_rejects_unread_forged_or_changed_evidence() {
         raw_arguments_digest: None,
     };
     session
-        .finish_read(session.capture_read(&call, &ctx).unwrap().unwrap())
+        .finish_read(session.capture_read(&call, &evidence_ctx).unwrap().unwrap())
         .unwrap();
     let host_goal_before_submission = handle.goal_snapshot().unwrap();
     for bad in [
@@ -8150,13 +8152,13 @@ async fn goal_review_rejects_unread_forged_or_changed_evidence() {
             r
         },
     ] {
-        assert!(session.submit(bad, &ctx).is_err());
+        assert!(session.submit(bad, &evidence_ctx).is_err());
     }
     assert!(
         serde_json::from_value::<GoalReview>(serde_json::to_value(&review).unwrap()).is_ok(),
         "the host tool protocol accepts its explicit verdict"
     );
-    session.submit(review.clone(), &ctx).unwrap();
+    session.submit(review.clone(), &evidence_ctx).unwrap();
     assert_eq!(
         handle.goal_snapshot().unwrap(),
         host_goal_before_submission,
@@ -8164,7 +8166,7 @@ async fn goal_review_rejects_unread_forged_or_changed_evidence() {
     );
     assert!(session.submission.lock().unwrap().is_some());
     std::fs::write(cwd.join("proof.txt"), "changed after inspection").unwrap();
-    assert!(session.submit(review, &ctx).is_err());
+    assert!(session.submit(review, &evidence_ctx).is_err());
     runtime.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);

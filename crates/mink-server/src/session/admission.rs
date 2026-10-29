@@ -39,6 +39,7 @@ pub(crate) enum EntryPhase {
 
 struct Entry {
     id: PermiId,
+    #[cfg(test)]
     owner: CapacityOwner,
     phase: EntryPhase,
 }
@@ -47,6 +48,7 @@ struct Entry {
 pub(crate) struct PermiId(u64);
 
 impl PermiId {
+    #[cfg(test)]
     pub(crate) fn get(self) -> u64 {
         self.0
     }
@@ -89,7 +91,7 @@ impl CapacityPool {
     pub(crate) fn try_reserve(
         self: &Arc<Self>,
         instance: SessionInstanceKey,
-        owner: CapacityOwner,
+        _owner: CapacityOwner,
     ) -> Result<ExecutionPermit, ReserveError> {
         let mut state = self.lock();
         if state.entries.contains_key(&instance) {
@@ -107,7 +109,8 @@ impl CapacityPool {
             instance.clone(),
             Entry {
                 id,
-                owner,
+                #[cfg(test)]
+                owner: _owner,
                 phase: EntryPhase::Reserved,
             },
         );
@@ -135,18 +138,17 @@ impl CapacityPool {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn occupied(&self) -> usize {
         self.lock().entries.len()
     }
 
-    pub(crate) fn limit(&self) -> usize {
-        self.lock().limit
-    }
-
+    #[cfg(test)]
     pub(crate) fn phase_of(&self, instance: &SessionInstanceKey) -> Option<EntryPhase> {
         self.lock().entries.get(instance).map(|entry| entry.phase)
     }
 
+    #[cfg(test)]
     pub(crate) fn owner_of(&self, instance: &SessionInstanceKey) -> Option<CapacityOwner> {
         self.lock().entries.get(instance).map(|entry| entry.owner)
     }
@@ -179,12 +181,9 @@ pub(crate) struct ExecutionPermit {
 }
 
 impl ExecutionPermit {
+    #[cfg(test)]
     pub(crate) fn id(&self) -> PermiId {
         self.id
-    }
-
-    pub(crate) fn instance(&self) -> &SessionInstanceKey {
-        &self.instance
     }
 
     /// The execution actually started. Reserved -> Running.
@@ -193,6 +192,7 @@ impl ExecutionPermit {
     }
 
     /// A stop was requested but the execution has not exited yet.
+    #[cfg(test)]
     pub(crate) fn mark_draining(&self) -> bool {
         self.transition(EntryPhase::Running, EntryPhase::Draining)
     }
@@ -221,6 +221,8 @@ impl Drop for ExecutionPermit {
 /// The host side of `mink::runtime::GoalRunLease`: a pool permit that stays
 /// alive for exactly as long as the goal run core keeps the lease.
 pub(crate) struct PermitLease {
+    // Retaining this RAII value is the capacity claim; dropping the lease frees it.
+    #[allow(dead_code)]
     permit: ExecutionPermit,
 }
 
@@ -230,12 +232,9 @@ impl PermitLease {
     }
 
     /// The execution actually started; the run keeps occupying capacity.
+    #[cfg(test)]
     pub(crate) fn mark_running(&self) -> bool {
         self.permit.mark_running()
-    }
-
-    pub(crate) fn mark_draining(&self) -> bool {
-        self.permit.mark_draining()
     }
 }
 

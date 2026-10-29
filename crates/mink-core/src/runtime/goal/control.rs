@@ -98,18 +98,7 @@ impl AgentRuntimeHandle {
             .filter(|g| g.status == GoalStatus::Draft)
     }
     pub fn cancel_goal_draft(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
-        self.goal_control(
-            id,
-            revision,
-            |g| {
-                GoalCommand::CancelDraft {
-                    id: id.into(),
-                    revision,
-                }
-                .apply_to(g)
-            },
-            true,
-        )
+        self.goal_control(id, revision, GoalTransition::CancelDraft, true)
     }
     pub fn confirm_goal(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
         self.confirm_goal_inner(id, revision, None)
@@ -207,10 +196,11 @@ impl AgentRuntimeHandle {
             }
             self.goal_ctx
                 .goal_store
-                .change(&current.id, current.revision, |g| {
-                    g.draft_ready = false;
-                    Ok(())
-                })
+                .transition(
+                    &current.id,
+                    current.revision,
+                    GoalTransition::SetDraftReady { ready: false },
+                )
                 .map_err(command_error)?
         };
         self.announce_goal(&goal);
@@ -247,35 +237,10 @@ impl AgentRuntimeHandle {
         Ok(draft)
     }
     pub fn pause_goal(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
-        self.goal_control(
-            id,
-            revision,
-            |g| {
-                ensure!(
-                    !g.status.is_terminal() && g.status != GoalStatus::Draft,
-                    "confirm or cancel a draft before pausing"
-                );
-                g.status = GoalStatus::Paused;
-                g.review_stage = None;
-                g.reason = Some("paused by user".into());
-                Ok(())
-            },
-            true,
-        )
+        self.goal_control(id, revision, GoalTransition::Pause, true)
     }
     pub fn cancel_goal(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
-        self.goal_control(
-            id,
-            revision,
-            |g| {
-                ensure!(!g.status.is_terminal(), "goal has ended");
-                g.status = GoalStatus::Cancelled;
-                g.review_stage = None;
-                g.reason = Some("cancelled by user".into());
-                Ok(())
-            },
-            true,
-        )
+        self.goal_control(id, revision, GoalTransition::Cancel, true)
     }
     pub fn resume_goal(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
         self.resume_goal_inner(id, revision, None)
@@ -308,51 +273,8 @@ impl AgentRuntimeHandle {
         let g = self.goal_control(
             id,
             revision,
-            |g| {
-                // `active` is the restored goal of a crashed run: recovery
-                // leaves it idle and only an explicit resume starts a run
-                // again. A live run is refused earlier (the host activation
-                // check or the active-turn check below), so this branch can
-                // never start a second run.
-                ensure!(
-                    g.status.can_resume(),
-                    "goal cannot resume from status {:?}; drafts require confirmation and completed/cancelled goals cannot resume. Original reason: {}",
-                    g.status,
-                    g.reason.as_deref().unwrap_or("not recorded")
-                );
-                ensure!(
-                    self.active_turn_id().is_none(),
-                    "previous goal execution has not exited"
-                );
-                ensure!(
-                    g.pending_effects.is_empty(),
-                    "side effect result unknown; explicit reconciliation required"
-                );
-                let retry_review = g.review_failure_reason.is_some() || g.phase == GoalPhase::Verifying;
-                ensure!(
-                    if retry_review {
-                        g.review_budget_reason().is_none()
-                    } else {
-                        g.budget_reason().is_none()
-                    },
-                    "adjust exhausted goal limits before resume"
-                );
-                ensure!(
-                    g.environment
-                        == goal_environment(&self.goal_ctx.cwd, &self.goal_ctx.tool_surface),
-                    "goal environment changed; cancel and recreate with the new permissions"
-                );
-                ensure!(
-                    !g.needs_confirmation && g.draft_duration_secs.is_none(),
-                    "goal requires explicit contract confirmation"
-                );
-                g.status = GoalStatus::Active;
-                g.hidden = false;
-                g.reason = None;
-                g.phase = if retry_review { GoalPhase::Verifying } else { GoalPhase::Idle };
-                g.review_failure_reason = None;
-                g.review_failure_stage = None;
-                Ok(())
+            GoalTransition::Resume {
+                environment: goal_environment(&self.goal_ctx.cwd, &self.goal_ctx.tool_surface),
             },
             false,
         )?;
@@ -378,23 +300,7 @@ impl AgentRuntimeHandle {
         limits: GoalLimits,
     ) -> RuntimeResult<GoalSnapshot> {
         limits.validate().map_err(command_error)?;
-        self.goal_control(
-            id,
-            revision,
-            |g| {
-                ensure!(
-                    g.status.can_adjust_limits(),
-                    "completed or cancelled goal limits cannot change"
-                );
-                if g.status == GoalStatus::Draft && g.draft_duration_secs.is_some() {
-                    g.draft_duration_secs =
-                        Some(limits.deadline_unix_secs.saturating_sub(goal_now()).max(1));
-                }
-                g.spec.limits = limits;
-                Ok(())
-            },
-            false,
-        )
+        self.goal_control(id, revision, GoalTransition::UpdateLimits { limits }, false)
     }
     /// Explicit host reconciliation after investigating an unknown side effect.
     /// Does not synthesize tool results or automatically resume execution.
@@ -407,36 +313,12 @@ impl AgentRuntimeHandle {
         self.goal_control(
             id,
             revision,
-            |g| {
-                ensure!(
-                    matches!(
-                        g.status,
-                        GoalStatus::Blocked | GoalStatus::Draft | GoalStatus::Failed
-                    ) && !g.pending_effects.is_empty(),
-                    "no unknown effects to reconcile"
-                );
-                ensure!(
-                    !evidence.trim().is_empty(),
-                    "reconciliation requires human evidence"
-                );
-                g.pending_effects.clear();
-                g.reason = Some(format!("human effect reconciliation: {evidence}"));
-                Ok(())
-            },
+            GoalTransition::ReconcileEffects { evidence },
             false,
         )
     }
     pub fn clear_goal(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
-        self.goal_control(
-            id,
-            revision,
-            |g| {
-                ensure!(g.status.is_terminal(), "only ended goals can be cleared");
-                g.hidden = true;
-                Ok(())
-            },
-            false,
-        )
+        self.goal_control(id, revision, GoalTransition::Clear, false)
     }
     pub fn approve_goal(
         &self,
@@ -451,7 +333,7 @@ impl AgentRuntimeHandle {
                 "human approval requires evidence".into(),
             ));
         }
-        self.goal_control(
+        self.goal_control_with(
             id,
             revision,
             |g| {
@@ -464,26 +346,20 @@ impl AgentRuntimeHandle {
                             .is_some_and(|r| r.verdict == GoalReviewVerdict::Satisfied),
                     "no pending human acceptance"
                 );
-                ensure!(
-                    self.validate_review_evidence(g)? == g.evidence_versions,
-                    "completion evidence changed since human acceptance was requested"
-                );
-                if g.spec.checker_id.is_some() {
-                    ensure!(
-                        self.checker_snapshot_matches(g)?,
-                        "configured checker has not passed this candidate"
-                    );
-                }
-                ensure!(
-                    goal_now() < g.spec.limits.deadline_unix_secs,
-                    "goal deadline expired; explicitly adjust the budget before approval"
-                );
-                g.status = GoalStatus::Completed;
-                g.phase = GoalPhase::Idle;
-                g.completion_basis = Some(GoalCompletionBasis::HumanApproved);
-                g.reason = Some(evidence.join("\n"));
-                Ok(())
+                let evidence_versions = self.validate_review_evidence(g)?;
+                let checker_evidence_valid = if g.spec.checker_id.is_some() {
+                    self.checker_snapshot_matches(g)?
+                } else {
+                    false
+                };
+                Ok(GoalTransition::Approve {
+                    evidence: evidence.clone(),
+                    evidence_versions,
+                    checker_evidence_valid,
+                    now_unix_secs: goal_now(),
+                })
             },
+            false,
             false,
         )
     }
@@ -491,8 +367,26 @@ impl AgentRuntimeHandle {
         &self,
         id: &str,
         revision: u64,
-        f: impl FnOnce(&mut GoalSnapshot) -> Result<()>,
+        transition: GoalTransition,
         interrupt: bool,
+    ) -> RuntimeResult<GoalSnapshot> {
+        let check_idle_turn = matches!(transition, GoalTransition::Resume { .. });
+        self.goal_control_with(
+            id,
+            revision,
+            move |_| Ok(transition),
+            interrupt,
+            check_idle_turn,
+        )
+    }
+
+    fn goal_control_with(
+        &self,
+        id: &str,
+        revision: u64,
+        prepare: impl FnOnce(&GoalSnapshot) -> Result<GoalTransition>,
+        interrupt: bool,
+        check_idle_turn: bool,
     ) -> RuntimeResult<GoalSnapshot> {
         let _guard = self
             .goal_driver
@@ -508,7 +402,25 @@ impl AgentRuntimeHandle {
             }
             return Err(error);
         }
-        let g = match self.goal_ctx.goal_store.change_classified(id, revision, f) {
+        let g = match self
+            .goal_ctx
+            .goal_store
+            .transition_from_snapshot_classified(id, revision, |goal| {
+                if check_idle_turn {
+                    ensure!(
+                        goal.status.can_resume(),
+                        "goal cannot resume from status {:?}; drafts require confirmation and completed/cancelled goals cannot resume. Original reason: {}",
+                        goal.status,
+                        goal.reason.as_deref().unwrap_or("not recorded")
+                    );
+                    ensure!(
+                        self.active_turn_id().is_none(),
+                        "previous goal execution has not exited"
+                    );
+                }
+                prepare(goal)
+            })
+        {
             Ok(goal) => goal,
             Err(GoalChangeError::Rejected(error)) => {
                 // A stale revision or an invalid transition rejects the

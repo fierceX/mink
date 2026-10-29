@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const ALLOWED_ROOTS: &[&str] = &["prelude", "runtime", "sdk_protocol"];
+const ALLOWED_ROOTS: &[&str] = &["config_file", "prelude", "runtime", "sdk_protocol"];
 
 /// Collect every Rust file under `root`.
 ///

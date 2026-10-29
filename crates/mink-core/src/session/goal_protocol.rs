@@ -51,19 +51,15 @@ pub enum GoalCommand {
         revision: u64,
         environment: String,
     },
-    CancelDraft {
-        id: String,
-        revision: u64,
-    },
 }
 
 impl GoalCommand {
     pub(crate) fn identity(&self) -> Option<(&str, u64)> {
         match self {
             Self::CreateDraft { .. } => None,
-            Self::Draft { id, revision, .. }
-            | Self::Confirm { id, revision, .. }
-            | Self::CancelDraft { id, revision } => Some((id, *revision)),
+            Self::Draft { id, revision, .. } | Self::Confirm { id, revision, .. } => {
+                Some((id, *revision))
+            }
         }
     }
     pub(crate) fn apply_to(self, goal: &mut super::goal::GoalSnapshot) -> Result<()> {
@@ -133,7 +129,6 @@ impl GoalCommand {
                 goal.environment = environment;
                 goal.reason = Some("contract confirmed by host".into());
             }
-            Self::CancelDraft { .. } => goal.status = GoalStatus::Cancelled,
         }
         Ok(())
     }

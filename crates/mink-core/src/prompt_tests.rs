@@ -589,21 +589,66 @@ fn generated_sections_declare_every_embedded_tool_name() {
 
 #[test]
 fn every_valid_surface_preserves_combination_invariants() {
+    assert_surface_combination_invariants(false);
+}
+
+/// Full compiled-tool mask sweep. This is intentionally kept as an explicit
+/// slow-lane check; the regular test exhausts all semantic provider states.
+#[test]
+#[ignore = "slow exhaustive compiled-tool surface sweep; run make test-surface-exhaustive"]
+fn every_compiled_surface_preserves_combination_invariants_exhaustively() {
+    assert_surface_combination_invariants(true);
+}
+
+fn assert_surface_combination_invariants(exhaustive: bool) {
     let catalog = ToolCatalog::builtin().unwrap();
     let names: Vec<_> = catalog
         .iter_compiled()
         .map(|(_, metadata)| metadata.name.to_string())
         .collect();
+    // Capability bindings depend only on the tools that offer those
+    // capabilities. Keep every other compiled tool enabled and enumerate all
+    // provider combinations; toggling unrelated tools here repeats identical
+    // capability states exponentially without adding invariant coverage.
+    let provider_tools = ToolCapabilityRegistry::builtin()
+        .builtin_provider_tools()
+        .into_iter()
+        .filter(|name| names.iter().any(|compiled| compiled.as_str() == *name))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mask_tools = if exhaustive { &names } else { &provider_tools };
+    let (shard, shard_count) = if exhaustive {
+        std::env::var("MINK_SURFACE_SHARD")
+            .map(|value| {
+                let (index, count) = value
+                    .split_once('/')
+                    .expect("MINK_SURFACE_SHARD must be INDEX/COUNT");
+                let index = index.parse::<usize>().expect("invalid surface shard index");
+                let count = count.parse::<usize>().expect("invalid surface shard count");
+                assert!(count > 0 && index < count, "invalid surface shard {value}");
+                (index, count)
+            })
+            .unwrap_or((0, 1))
+    } else {
+        (0, 1)
+    };
     for role in [AgentRole::Primary, AgentRole::SubAgent] {
         for vfs in [false, true] {
-            for mask in 0usize..(1usize << names.len()) {
+            for mask in
+                (0usize..(1usize << mask_tools.len())).filter(|mask| mask % shard_count == shard)
+            {
                 let mut config = ToolConfig::from_config(&Config::default());
                 config.enabled_tools = Some(
                     names
                         .iter()
-                        .enumerate()
-                        .filter(|(index, _)| mask & (1usize << index) != 0)
-                        .map(|(_, name)| (*name).to_string())
+                        .filter(|name| {
+                            let Some(index) = mask_tools.iter().position(|tool| tool == *name)
+                            else {
+                                return !exhaustive;
+                            };
+                            mask & (1usize << index) != 0
+                        })
+                        .cloned()
                         .collect(),
                 );
                 let resolution = ToolResolutionContext::from_runtime(role, &config, vfs);

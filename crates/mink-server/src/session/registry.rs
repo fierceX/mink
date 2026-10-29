@@ -63,9 +63,13 @@ impl RegistryError {
     }
 
     fn from_lease(error: anyhow::Error) -> Self {
-        let message = error.to_string();
-        if message.contains("locked by another process") {
-            Self::Locked(message)
+        let is_lock_contention = error.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+        });
+        if is_lock_contention {
+            Self::Locked(error.to_string())
         } else {
             Self::Internal(error)
         }
@@ -361,7 +365,7 @@ impl Registry {
             .await?;
             drop(seed_lease);
             let runtime = SessionRuntime::open(
-                self.build_options(&session_id, cwd)
+                self.build_options(&session_id, cwd)?
                     .with_session(SessionPolicy::Resume(session_id.clone())),
             )
             .await?;
@@ -422,7 +426,7 @@ impl Registry {
         // 正确的 project 布局下解析，而不是服务启动目录）。
         let session_cwd = session_cwd_from_dir(&dir).map_err(RegistryError::Internal)?;
         let runtime = SessionRuntime::open(
-            self.build_options(id, &session_cwd)
+            self.build_options(id, &session_cwd)?
                 .with_session(SessionPolicy::Resume(id.to_string())),
         )
         .await
@@ -949,7 +953,7 @@ impl Registry {
         }
     }
 
-    fn build_options(&self, session_ref: &str, cwd: &Path) -> AgentOptions {
+    fn build_options(&self, session_ref: &str, cwd: &Path) -> anyhow::Result<AgentOptions> {
         use crate::session::agent_config;
 
         // Layered merge mirroring the CLI: project .minkrc overrides user
@@ -957,7 +961,7 @@ impl Registry {
         // precedence: env > mink-server.toml > project .minkrc > user .minkrc).
         let mut cfg = agent_config::merge(
             self.agent_layer.clone(),
-            agent_config::load_project_layer(cwd),
+            agent_config::load_project_layer(cwd)?,
         );
         agent_config::apply_env_overrides(&mut cfg);
         let model = cfg.model.clone().unwrap_or_else(|| self.model.clone());
@@ -995,7 +999,7 @@ impl Registry {
         if let Some(backend) = &self.llm_backend {
             options = options.with_llm_backend(backend.clone());
         }
-        options
+        Ok(options)
     }
 }
 
@@ -1167,6 +1171,21 @@ fn scan_all_sessions(home: &Path) -> Result<Vec<ScannedSession>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lease_errors_are_classified_by_io_kind() {
+        let locked = RegistryError::from_lease(
+            anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+                .context("session is locked by another process"),
+        );
+        assert!(matches!(locked, RegistryError::Locked(_)));
+
+        let failed = RegistryError::from_lease(
+            anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                .context("session is locked by another process"),
+        );
+        assert!(matches!(failed, RegistryError::Internal(_)));
+    }
 
     fn unique_temp_dir(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -1665,12 +1684,13 @@ mod tests {
         let user_layer = agent_config::parse_layer(
             "[provider]\nmodel = \"user-model\"\napi_key = \"user-key\"\n",
             "test",
-        );
+        )
+        .unwrap();
         let mut registry = Registry::new(home.clone(), "server-default".to_string(), 4);
         registry.agent_layer = user_layer;
         registry.llm_backend = Some(Arc::new(CapturingBackend { seen: seen.clone() }));
 
-        let options = registry.build_options("cfg-test", &cwd);
+        let options = registry.build_options("cfg-test", &cwd).unwrap();
         let runtime = mink::runtime::AgentRuntime::start(options).await.unwrap();
         runtime.run_turn("hi").await.unwrap();
         runtime.shutdown().await.unwrap();
@@ -1690,7 +1710,7 @@ mod tests {
         // 环境变量覆盖文件层（server 文档化优先级：env 最高）。
         unsafe { std::env::set_var("MODEL", "env-model") };
         unsafe { std::env::set_var("DEEPSEEK_API_KEY", "env-key") };
-        let options = registry.build_options("cfg-test", &cwd);
+        let options = registry.build_options("cfg-test", &cwd).unwrap();
         let runtime = mink::runtime::AgentRuntime::start(options).await.unwrap();
         runtime.run_turn("hi").await.unwrap();
         runtime.shutdown().await.unwrap();
@@ -1705,6 +1725,26 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn invalid_project_minkrc_prevents_runtime_options_from_being_built() {
+        let root = unique_temp_dir("invalid-project-config");
+        let home = root.join("home");
+        let cwd = root.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(
+            cwd.join(".minkrc"),
+            "[tools]\nenabled_tools = []\nunknown_key = true\n",
+        )
+        .unwrap();
+        let registry = Registry::new(home, "flash".into(), 1);
+        let error = match registry.build_options("config-test", &cwd) {
+            Ok(_) => panic!("invalid project config must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("unknown_key"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

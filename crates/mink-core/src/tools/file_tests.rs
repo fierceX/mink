@@ -224,7 +224,8 @@ async fn hashline_partial_commit_bumps_mutation_for_committed_files() -> anyhow:
     let input =
         format!("[a.txt#{tag_a}]\nPUT 1.=1:\n+new\n[readonly/b.txt#{tag_b}]\nPUT 1.=1:\n+newer");
 
-    let error = super::execute_hashline_edit(&serde_json::json!({"input": input}), &tool_ctx)
+    let edit_context = tool_ctx.file_edit_context();
+    let error = super::execute_hashline_edit(&serde_json::json!({"input": input}), &edit_context)
         .expect_err("the read-only second file must fail the batch");
     let message = format!("{error:#}");
     assert!(message.contains("committed [a.txt]"), "{message}");

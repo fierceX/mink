@@ -319,6 +319,18 @@ impl ToolCapabilityRegistry {
     }
 
     #[cfg(test)]
+    pub(crate) fn builtin_provider_tools(&self) -> Vec<&'static str> {
+        let mut tools = self
+            .offers
+            .iter()
+            .map(|offer| offer.provider_tool)
+            .collect::<Vec<_>>();
+        tools.sort_unstable();
+        tools.dedup();
+        tools
+    }
+
+    #[cfg(test)]
     pub fn resolve(
         &self,
         surface: &ModelToolSurface,
@@ -331,7 +343,7 @@ impl ToolCapabilityRegistry {
         &self,
         surface: &ModelToolSurface,
         context: &ToolResolutionContext,
-        custom_tools: &[crate::runtime::RegisteredCustomTool],
+        custom_tools: &[crate::tools::extension::RegisteredCustomTool],
     ) -> Result<ResolvedToolCapabilities> {
         self.validate()?;
         let catalog = ToolCatalog::builtin()?;

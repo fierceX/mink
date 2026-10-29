@@ -144,23 +144,34 @@ impl SessionReader {
     }
 
     pub fn conversation(&self) -> Result<Vec<serde_json::Value>> {
+        self.conversation_with_sequence().map(|(rows, _)| rows)
+    }
+
+    /// Read committed conversation rows with their physical JSONL sequence.
+    /// The returned boundary includes blank physical lines, which still occupy
+    /// sequence positions for persisted goal and reader cursors.
+    pub(crate) fn conversation_with_sequence(&self) -> Result<(Vec<serde_json::Value>, usize)> {
         let path = self.directory.join("conversation.jsonl");
         let data = std::fs::read_to_string(&path)?;
         let mut rows = Vec::new();
+        let mut committed_sequence = 0;
         for (index, line) in data.split_inclusive('\n').enumerate() {
+            let sequence = index + 1;
             if line.trim().is_empty() {
+                committed_sequence = sequence;
                 continue;
             }
             match serde_json::from_str::<serde_json::Value>(line) {
                 Ok(mut value) => {
-                    value["seq"] = (index + 1).into();
+                    value["seq"] = sequence.into();
                     rows.push(value);
+                    committed_sequence = sequence;
                 }
                 Err(_) if !line.ends_with('\n') => break,
                 Err(e) => return Err(e.into()),
             }
         }
-        Ok(rows)
+        Ok((rows, committed_sequence))
     }
     /// Whole user turns for workbench pagination, retaining internal messages,
     /// guidance, and complete tool exchanges inside their original turn.
@@ -364,6 +375,34 @@ pub async fn ensure_metadata(paths: &SessionPaths, cwd: &Path, seed: SessionSeed
 #[cfg(test)]
 mod reader_tests {
     use super::*;
+
+    #[test]
+    fn conversation_reader_keeps_physical_sequence_across_blank_lines() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-reader-sequence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("conversation.jsonl"),
+            "{\"role\":\"user\",\"content\":\"one\"}\n\n{\"role\":\"assistant\",\"content\":\"answer\"}\n",
+        )
+        .unwrap();
+
+        let (rows, committed_sequence) = SessionReader::new(&dir)
+            .conversation_with_sequence()
+            .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["seq"], 1);
+        assert_eq!(rows[1]["seq"], 3);
+        assert_eq!(committed_sequence, 3);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn subagent_catalog_is_a_public_reader_api_and_tolerates_legacy_events() {

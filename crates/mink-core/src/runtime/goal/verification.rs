@@ -2,26 +2,6 @@
 
 use super::*;
 
-/// Settle a non-satisfied review without inventing a terminal state.
-///
-/// `Inconclusive` has no evidence-backed dependency: keep the goal active,
-/// preserve the candidate and record a re-audit failure. Legacy data must not
-/// bypass the consecutive-blocker threshold by ending the goal here.
-pub(super) fn settle_non_satisfied_review(g: &mut GoalSnapshot, verdict: GoalReviewVerdict) {
-    if verdict == GoalReviewVerdict::Satisfied {
-        return;
-    }
-    g.phase = GoalPhase::Idle;
-    if verdict == GoalReviewVerdict::Inconclusive {
-        g.review_failure_reason =
-            Some("independent review returned inconclusive; re-audit required".into());
-        g.review_failure_stage = Some(crate::session::goal_protocol::GoalReviewStage::Adjudicating);
-        g.reason = Some(
-            "review was inconclusive; the candidate is preserved for an explicit re-audit".into(),
-        );
-    }
-}
-
 pub(super) fn blocker_evidence_versions(
     references: &[String],
     version: impl Fn(&str) -> Result<String>,
@@ -111,37 +91,14 @@ impl AgentRuntimeHandle {
                 .review_candidate
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("missing review candidate"))?;
-            let next = self
-                .goal_ctx
-                .goal_store
-                .change(&current.id, current.revision, |g| {
-                    g.review_generation = g
-                        .review_generation
-                        .max(previous.generation)
-                        .checked_add(1)
-                        .ok_or_else(|| anyhow::anyhow!("review generation overflow"))?;
-                    let candidate = GoalReviewCandidate {
-                        generation: g.review_generation,
-                        ..previous
-                    };
-                    g.checker_passed_candidate = carry_checker.then(|| candidate.clone());
-                    if !carry_checker {
-                        g.checker_evidence_versions.clear();
-                    }
-                    g.review_candidate = Some(candidate);
-                    g.review_requires_full = true;
-                    g.review_escalation_reason = Some("checker or evidence version changed".into());
-                    g.review_report = None;
-                    g.review_stage = Some(GoalReviewStage::Inspecting);
-                    g.evidence_versions.clear();
-                    g.review_failure_reason = None;
-                    g.review_failure_stage = None;
-                    g.phase = GoalPhase::Verifying;
-                    g.reason = Some(
-                        "evidence changed; independently re-audit this execution round".into(),
-                    );
-                    Ok(())
-                })?;
+            let next = self.goal_ctx.goal_store.transition(
+                &current.id,
+                current.revision,
+                GoalTransition::RestartReview {
+                    expected: previous,
+                    carry_checker,
+                },
+            )?;
             self.announce_goal(&next);
             restarted = Some(next);
             Ok(())
@@ -227,7 +184,7 @@ impl AgentRuntimeHandle {
         if !self.run_scheduled(run_id) {
             return Ok(());
         }
-        let seq = self.goal_ctx.store.lines().await?.len();
+        let seq = self.goal_ctx.store.committed_len().await?;
         let reviewer_id = format!(
             "goal-review:{}:{}",
             self.goal_ctx
@@ -244,36 +201,14 @@ impl AgentRuntimeHandle {
                 || goal.acceptance_conversation_seq != seq
                 || c.reviewer_id != reviewer_id
         }) {
-            goal = self
-                .goal_ctx
-                .goal_store
-                .change(&goal.id, goal.revision, |g| {
-                    g.review_generation = g
-                        .review_generation
-                        .checked_add(1)
-                        .ok_or_else(|| anyhow::anyhow!("review generation overflow"))?;
-                    g.review_candidate = Some(GoalReviewCandidate {
-                        generation: g.review_generation,
-                        goal_id: g.id.clone(),
-                        contract_revision: g.contract_revision,
-                        iteration: g.iterations.len() as u32,
-                        conversation_seq: seq,
-                        reviewer_id,
-                    });
-                    g.acceptance_conversation_seq = seq;
-                    g.review_report = None;
-                    g.review_stage = Some(if g.review_requires_full {
-                        GoalReviewStage::Inspecting
-                    } else {
-                        GoalReviewStage::Screening
-                    });
-                    g.evidence_versions.clear();
-                    g.review_failure_reason = None;
-                    g.review_failure_stage = None;
-                    g.checker_passed_candidate = None;
-                    g.checker_evidence_versions.clear();
-                    Ok(())
-                })?;
+            goal = self.goal_ctx.goal_store.transition(
+                &goal.id,
+                goal.revision,
+                GoalTransition::PrepareReview {
+                    conversation_seq: seq,
+                    reviewer_id,
+                },
+            )?;
         }
         self.announce_goal(&goal);
         let candidate = goal
@@ -308,7 +243,7 @@ impl AgentRuntimeHandle {
                         self.goal_review_failure(
                             &candidate,
                             format!("goal review failed: {error:#}"),
-                            GoalStatus::Blocked,
+                            crate::session::goal::GoalReviewFailureStatus::Blocked,
                         )
                     })?,
                     Err(error) => self.apply_if_run_scheduled(run_id, || {
@@ -320,7 +255,7 @@ impl AgentRuntimeHandle {
                         self.goal_review_failure(
                             &candidate,
                             format!("independent review task failed: {error}"),
-                            GoalStatus::Blocked,
+                            crate::session::goal::GoalReviewFailureStatus::Blocked,
                         )
                     })?,
                 }
@@ -332,13 +267,13 @@ impl AgentRuntimeHandle {
                         self.goal_review_failure(
                             &candidate,
                             "goal deadline reached during review; execution ownership retained until exit".into(),
-                            GoalStatus::BudgetExhausted,
+                            crate::session::goal::GoalReviewFailureStatus::BudgetExhausted,
                         )
                     } else {
                         self.goal_review_failure(
                             &candidate,
                             "review timed out; execution ownership retained until exit".into(),
-                            GoalStatus::Blocked,
+                            crate::session::goal::GoalReviewFailureStatus::Blocked,
                         )
                     }
                 })?;
@@ -388,57 +323,17 @@ impl AgentRuntimeHandle {
                 );
             }
             let fingerprint = proposal.fingerprint()?;
-            let next = self
-                .goal_ctx
-                .goal_store
-                .change(&current.id, current.revision, |g| {
-                    ensure!(
-                        !g.reviews.iter().any(|r| r.candidate == proposal.candidate),
-                        "full decision already committed"
-                    );
-                    if !g
-                        .continuations
-                        .iter()
-                        .any(|r| r.proposal.candidate == proposal.candidate)
-                    {
-                        g.continuation_rounds =
-                            if g.continuation_fingerprint.as_ref() == Some(&fingerprint) {
-                                g.continuation_rounds.saturating_add(1)
-                            } else {
-                                1
-                            };
-                        ensure!(
-                            g.continuation_rounds < 3,
-                            "repeated continuation requires evidence review"
-                        );
-                        g.continuation_fingerprint = Some(fingerprint.clone());
-                        g.continuations.push(GoalContinueRecord {
-                            proposal: proposal.clone(),
-                            report: report.artifact.clone(),
-                            fingerprint,
-                            consecutive_rounds: g.continuation_rounds,
-                            conversation_seq: seq,
-                        });
-                    }
-                    g.reason = Some(format!(
-                        "Partial completion; continue: {}\nNext: {}",
-                        proposal.summary, proposal.next_step
-                    ));
-                    g.review_failure_reason = None;
-                    g.review_failure_stage = None;
-                    g.acceptance_conversation_seq = seq;
-                    g.phase = GoalPhase::Idle;
-                    g.review_stage = None;
-                    g.blocked_rounds = 0;
-                    g.blocker_rounds = 0;
-                    g.blocker_fingerprint = None;
-                    if let Some(reason) = g.budget_reason() {
-                        g.status = GoalStatus::BudgetExhausted;
-                        g.reason =
-                            Some(format!("{}\n{}", g.reason.as_deref().unwrap_or(""), reason));
-                    }
-                    Ok(())
-                })?;
+            let report_artifact = report.artifact.clone();
+            let next = self.goal_ctx.goal_store.transition(
+                &current.id,
+                current.revision,
+                GoalTransition::CommitContinuation {
+                    proposal,
+                    report: report_artifact,
+                    fingerprint,
+                    conversation_seq: seq,
+                },
+            )?;
             self.announce_goal(&next);
             Ok(())
         })
@@ -454,7 +349,7 @@ impl AgentRuntimeHandle {
                 && record.proposal.candidate == candidate
             {
                 ensure!(
-                    self.goal_ctx.store.lines().await?.len() == record.conversation_seq,
+                    self.goal_ctx.store.committed_len().await? == record.conversation_seq,
                     "continued decision history changed"
                 );
                 self.apply_if_run_scheduled(run_id, || {
@@ -466,14 +361,13 @@ impl AgentRuntimeHandle {
                             && current.review_candidate.as_ref() == Some(&candidate),
                         "continued candidate changed"
                     );
-                    let next =
-                        self.goal_ctx
-                            .goal_store
-                            .change(&current.id, current.revision, |g| {
-                                g.phase = GoalPhase::Idle;
-                                g.review_stage = None;
-                                Ok(())
-                            })?;
+                    let next = self.goal_ctx.goal_store.transition(
+                        &current.id,
+                        current.revision,
+                        GoalTransition::FinishContinuation {
+                            expected: candidate.clone(),
+                        },
+                    )?;
                     self.announce_goal(&next);
                     Ok(())
                 })?;
@@ -514,7 +408,7 @@ impl AgentRuntimeHandle {
                         self.goal_review_failure(
                             &candidate,
                             format!("review budget exhausted: {reason}"),
-                            GoalStatus::BudgetExhausted,
+                            crate::session::goal::GoalReviewFailureStatus::BudgetExhausted,
                         )
                     })?;
                     return Ok(());
@@ -541,7 +435,7 @@ impl AgentRuntimeHandle {
                         self.goal_review_failure(
                             &candidate,
                             exhausted.to_string(),
-                            GoalStatus::BudgetExhausted,
+                            crate::session::goal::GoalReviewFailureStatus::BudgetExhausted,
                         )
                     })?;
                     return Ok(());
@@ -555,7 +449,7 @@ impl AgentRuntimeHandle {
                 let (review, reads) = session.export(self)?;
                 (review, reads, expected_conversation_seq)
             };
-            let conversation_seq = self.goal_ctx.store.lines().await?.len();
+            let conversation_seq = self.goal_ctx.store.committed_len().await?;
             self.apply_if_run_scheduled(run_id, || {
                 let Some(current) = self.goal_snapshot() else {
                     return Ok(());
@@ -587,96 +481,65 @@ impl AgentRuntimeHandle {
                         "evidence changed during review"
                     );
                 }
-                goal = self
-                    .goal_ctx
-                    .goal_store
-                    .change(&current.id, current.revision, |g| {
-                        ensure!(
-                            !g.continuations
-                                .iter()
-                                .any(|r| r.proposal.candidate == candidate),
-                            "continuation already committed for this candidate"
-                        );
-                        // The review and its round decision are published together.
-                        // Reusing that record on recovery must not count a new round.
-                        let newly_recorded =
-                            g.reviews.last().is_none_or(|r| r.candidate != candidate);
-                        if newly_recorded {
-                            g.reviews.push(review.clone());
-                        }
-                        if newly_recorded {
-                            g.continuation_rounds = 0;
-                            g.continuation_fingerprint = None;
-                        }
-                        g.review_stage = None;
-                        g.evidence_versions = reads.clone();
-                        g.acceptance_conversation_seq = expected_conversation_seq;
-                        g.review_failure_reason = None;
-                        g.review_failure_stage = None;
-                        g.reason = Some(format!("{}\nNext: {}", review.summary, review.next_step));
-                        if newly_recorded && review.verdict == GoalReviewVerdict::Blocked {
-                            let blocker = review
-                                .blocker
-                                .as_ref()
-                                .ok_or_else(|| anyhow::anyhow!("missing blocker"))?;
-                            let mut ids = blocker.criterion_ids.clone();
-                            ids.sort();
-                            ids.dedup();
-                            let versions =
-                                blocker_evidence_versions(&blocker.evidence, |reference| {
-                                    self.evidence_version(reference)
-                                })?;
-                            let fingerprint = if review.report.is_some() {
-                                // Descriptions can vary while the dependency is
-                                // unchanged. Fresh artifact IDs are not new facts.
-                                let facts: std::collections::BTreeSet<_> = versions
-                                    .iter()
-                                    .map(|(r, h)| {
-                                        (
-                                            if r.starts_with("artifact://") {
-                                                "artifact"
-                                            } else {
-                                                *r
-                                            },
-                                            h,
-                                        )
-                                    })
-                                    .collect();
-                                hash_bytes(&serde_json::to_vec(&(
-                                    g.contract_revision,
-                                    &blocker.category,
-                                    ids,
-                                    facts,
-                                ))?)
-                            } else {
-                                hash_bytes(&serde_json::to_vec(&(
-                                    &blocker.category,
-                                    ids,
-                                    &blocker.dependency,
-                                    versions,
-                                ))?)
-                            };
-                            g.blocked_rounds = g.blocked_rounds.saturating_add(1);
-                            g.blocker_rounds =
-                                if g.blocker_fingerprint.as_ref() == Some(&fingerprint) {
-                                    g.blocker_rounds.saturating_add(1)
-                                } else {
-                                    1
-                                };
-                            g.blocker_fingerprint = Some(fingerprint);
-                            if g.blocker_rounds >= g.spec.limits.blocked_after_consecutive_rounds {
-                                g.status = GoalStatus::Blocked;
-                            }
-                        } else if newly_recorded {
-                            g.blocked_rounds = 0;
-                            g.blocker_rounds = 0;
-                            g.blocker_fingerprint = None;
-                        }
-                        if review.verdict != GoalReviewVerdict::Satisfied {
-                            settle_non_satisfied_review(g, review.verdict.clone());
-                        }
-                        Ok(())
+                let blocker_fingerprint = if current
+                    .reviews
+                    .last()
+                    .is_none_or(|r| r.candidate != candidate)
+                    && review.verdict == GoalReviewVerdict::Blocked
+                {
+                    let blocker = review
+                        .blocker
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("missing blocker"))?;
+                    let mut ids = blocker.criterion_ids.clone();
+                    ids.sort();
+                    ids.dedup();
+                    let versions = blocker_evidence_versions(&blocker.evidence, |reference| {
+                        self.evidence_version(reference)
                     })?;
+                    Some(if review.report.is_some() {
+                        // Descriptions can vary while the dependency is unchanged.
+                        // Fresh artifact IDs are not new facts.
+                        let facts: std::collections::BTreeSet<_> = versions
+                            .iter()
+                            .map(|(reference, hash)| {
+                                (
+                                    if reference.starts_with("artifact://") {
+                                        "artifact"
+                                    } else {
+                                        *reference
+                                    },
+                                    hash,
+                                )
+                            })
+                            .collect();
+                        hash_bytes(&serde_json::to_vec(&(
+                            current.contract_revision,
+                            &blocker.category,
+                            ids,
+                            facts,
+                        ))?)
+                    } else {
+                        hash_bytes(&serde_json::to_vec(&(
+                            &blocker.category,
+                            ids,
+                            &blocker.dependency,
+                            versions,
+                        ))?)
+                    })
+                } else {
+                    None
+                };
+                goal = self.goal_ctx.goal_store.transition(
+                    &current.id,
+                    current.revision,
+                    GoalTransition::CommitReview {
+                        review: review.clone(),
+                        evidence_versions: reads.clone(),
+                        expected_conversation_seq,
+                        blocker_fingerprint,
+                    },
+                )?;
                 self.announce_goal(&goal);
                 Ok(())
             })?;
@@ -713,17 +576,13 @@ impl AgentRuntimeHandle {
                     candidate.iteration, candidate.generation, id
                 );
                 self.apply_if_run_scheduled(run_id, || {
-                    if let Some(g) = self.goal_ctx.goal_store.update_if_current(&goal.id, |g| {
-                        ensure!(
-                            g.status == GoalStatus::Active
-                                && g.review_candidate.as_ref() == Some(&candidate),
-                            "checker superseded"
-                        );
-                        if !g.pending_effects.contains(&effect_id) {
-                            g.pending_effects.push(effect_id.clone());
-                        }
-                        Ok(())
-                    })? {
+                    if let Some(g) = self.goal_ctx.goal_store.transition_if_current(
+                        &goal.id,
+                        GoalTransition::BeginChecker {
+                            expected: candidate.clone(),
+                            effect_id: effect_id.clone(),
+                        },
+                    )? {
                         self.announce_goal(&g);
                     }
                     Ok(())
@@ -751,32 +610,26 @@ impl AgentRuntimeHandle {
                 let saved_versions = checked_versions
                     .as_ref()
                     .map_or_else(|_| Vec::new(), Clone::clone);
-                if let Some(updated) =
-                    self.goal_ctx.goal_store.update_if_current(&goal.id, |g| {
-                        // A known checker result is durable before its marker closes.
-                        g.checker_records.push(GoalCheckerRecord {
-                            candidate: candidate.clone(),
-                            checker_id: id.clone(),
-                            status: match result.status {
-                                GoalVerificationStatus::Pass => GoalCriterionStatus::Pass,
-                                GoalVerificationStatus::Fail => GoalCriterionStatus::Fail,
-                                GoalVerificationStatus::Inconclusive => {
-                                    GoalCriterionStatus::Unknown
-                                }
-                            },
-                            reason: result.reason.clone(),
-                            evidence: result.evidence.clone(),
-                        });
-                        if result.status != GoalVerificationStatus::Inconclusive {
-                            g.pending_effects.retain(|e| e != &effect_id);
-                        }
-                        if g.review_candidate.as_ref() == Some(&candidate) {
-                            g.checker_passed_candidate = trusted_checker.then(|| candidate.clone());
-                            g.checker_evidence_versions = saved_versions;
-                        }
-                        Ok(())
-                    })?
-                {
+                let checker_record = GoalCheckerRecord {
+                    candidate: candidate.clone(),
+                    checker_id: id.clone(),
+                    status: match result.status {
+                        GoalVerificationStatus::Pass => GoalCriterionStatus::Pass,
+                        GoalVerificationStatus::Fail => GoalCriterionStatus::Fail,
+                        GoalVerificationStatus::Inconclusive => GoalCriterionStatus::Unknown,
+                    },
+                    reason: result.reason.clone(),
+                    evidence: result.evidence.clone(),
+                };
+                if let Some(updated) = self.goal_ctx.goal_store.transition_if_current(
+                    &goal.id,
+                    GoalTransition::RecordCheckerResult {
+                        effect_id: effect_id.clone(),
+                        record: checker_record,
+                        trusted: trusted_checker,
+                        evidence_versions: saved_versions,
+                    },
+                )? {
                     self.announce_goal(&updated);
                     goal = updated;
                 }
@@ -819,7 +672,7 @@ impl AgentRuntimeHandle {
                     continue;
                 }
             }
-            let conversation_seq = self.goal_ctx.store.lines().await?.len();
+            let conversation_seq = self.goal_ctx.store.committed_len().await?;
             self.apply_if_run_scheduled(run_id, || {
                 let Some(current) = self.goal_snapshot() else {
                     return Ok(());
@@ -837,33 +690,14 @@ impl AgentRuntimeHandle {
                         && (checker.is_none() || self.checker_snapshot_matches(&current)?),
                     "candidate changed before completion"
                 );
-                let completed =
-                    self.goal_ctx
-                        .goal_store
-                        .change(&current.id, current.revision, |g| {
-                            if goal_now() >= g.spec.limits.deadline_unix_secs {
-                                g.status = GoalStatus::BudgetExhausted;
-                                g.phase = GoalPhase::Idle;
-                                g.reason = Some("goal deadline reached during review".into());
-                            } else {
-                                if checker.is_some() {
-                                    g.checker_passed_candidate = Some(candidate.clone());
-                                }
-                                if g.spec.acceptance == GoalAcceptance::Human {
-                                    g.status = GoalStatus::Blocked;
-                                    g.reason = Some("waiting for human acceptance".into());
-                                } else {
-                                    g.status = GoalStatus::Completed;
-                                    g.phase = GoalPhase::Idle;
-                                    g.completion_basis = Some(if checker.is_some() {
-                                        GoalCompletionBasis::Verified
-                                    } else {
-                                        GoalCompletionBasis::AgentReviewed
-                                    });
-                                }
-                            }
-                            Ok(())
-                        })?;
+                let completed = self.goal_ctx.goal_store.transition(
+                    &current.id,
+                    current.revision,
+                    GoalTransition::CompleteReview {
+                        expected: candidate.clone(),
+                        checker: checker.is_some(),
+                    },
+                )?;
                 self.announce_goal(&completed);
                 Ok(())
             })?;
@@ -879,24 +713,16 @@ impl AgentRuntimeHandle {
         &self,
         candidate: &GoalReviewCandidate,
         reason: String,
-        status: GoalStatus,
+        outcome: crate::session::goal::GoalReviewFailureStatus,
     ) -> Result<()> {
-        let Some(goal) = self
-            .goal_ctx
-            .goal_store
-            .update_if_current(&candidate.goal_id, |g| {
-                if g.status != GoalStatus::Active || g.review_candidate.as_ref() != Some(candidate)
-                {
-                    return Ok(());
-                }
-                g.status = status.clone();
-                g.review_failure_stage = g.review_stage;
-                g.review_stage = None;
-                g.phase = GoalPhase::Idle;
-                g.review_failure_reason = Some(reason.clone());
-                g.reason = Some(format!("independent review did not complete: {reason}"));
-                Ok(())
-            })?
+        let Some(goal) = self.goal_ctx.goal_store.transition_if_current(
+            &candidate.goal_id,
+            GoalTransition::ReviewFailure {
+                expected: candidate.clone(),
+                reason,
+                outcome,
+            },
+        )?
         else {
             return Ok(());
         };
@@ -926,29 +752,14 @@ impl AgentRuntimeHandle {
             .filter_map(|r| self.evidence_version(r).ok().map(|v| (r, v)))
             .collect();
         let fingerprint = hash_bytes(&serde_json::to_vec(&(reason.as_str(), versions))?);
-        let Some(g) = self.goal_ctx.goal_store.update_if_current(goal_id, |g| {
-            if g.status != GoalStatus::Active {
-                return Ok(());
-            }
-            g.repeated_failures = if g.failure_fingerprint.as_ref() == Some(&fingerprint) {
-                g.repeated_failures + 1
-            } else {
-                1
-            };
-            g.failure_fingerprint = Some(fingerprint);
-            if blocked || g.repeated_failures >= 3 {
-                g.status = GoalStatus::Blocked;
-            }
-            g.phase = GoalPhase::Idle;
-            g.evidence_versions.clear();
-            g.review_candidate = None;
-            g.review_failure_reason = None;
-            g.review_failure_stage = None;
-            g.checker_passed_candidate = None;
-            g.checker_evidence_versions.clear();
-            g.reason = Some(format!("goal evidence failure: {reason}"));
-            Ok(())
-        })?
+        let Some(g) = self.goal_ctx.goal_store.transition_if_current(
+            goal_id,
+            GoalTransition::VerificationFailure {
+                reason,
+                fingerprint,
+                blocked,
+            },
+        )?
         else {
             return Ok(());
         };

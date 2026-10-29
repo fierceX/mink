@@ -1,15 +1,8 @@
-//! Full replica of the CLI's `.minkrc` agent configuration for mink-server.
+//! Server adapter for shared `.minkrc` configuration and runtime options.
 //!
-//! The CLI (`mink-cli/src/config.rs`) owns the canonical `MinkConfigFile`
-//! parsing, but mink-server cannot depend on the `publish = false` CLI crate.
-//! This module mirrors that file shape field-for-field (grouped TOML sections,
-//! `deny_unknown_fields`), resolves the same layered precedence
-//! (project `.minkrc` overrides user `~/.minkrc`), applies the server's
-//! documented environment overrides (env wins), and converts the result into
-//! the same grouped `AgentOptions` the CLI builds.
-//!
-//! Keep the structs below in sync with `mink-cli::config::MinkConfigFile`;
-//! `crates/mink-server/tests/config_parity.rs` fails when a field is missing.
+//! The file schema and strict TOML parser live in `mink::config_file`. This
+//! module owns server layer precedence, environment overrides, and conversion
+//! into runtime options.
 
 use mink::runtime::{
     AgentOptions, ContextPolicy, EditMode, GenerationOptions, ImageDetail, ImageInputCapability,
@@ -21,155 +14,9 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// TOML config file structure — grouped format, same as the CLI.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct MinkConfigFile {
-    #[serde(default)]
-    pub provider: ProviderConfigFile,
-    #[serde(default)]
-    pub generation: GenerationConfigFile,
-    #[serde(default)]
-    pub context: ContextConfigFile,
-    #[serde(default)]
-    pub tools: ToolsConfigFile,
-    #[serde(default)]
-    pub signal: SignalPolicyFile,
-    #[serde(default)]
-    pub recovery: RecoveryConfigFile,
-    #[serde(default)]
-    pub sandbox: SandboxConfigFile,
-    #[serde(default)]
-    pub sandbox_python: SandboxPythonConfigFile,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct ProviderConfigFile {
-    pub api_key: Option<String>,
-    pub base_url: Option<String>,
-    pub model: Option<String>,
-    pub model_aliases: Option<BTreeMap<String, String>>,
-    pub openai_reasoning_effort: Option<String>,
-    pub openai_include_usage: Option<bool>,
-    pub openai_token_param: Option<String>,
-    pub openai_tool_choice: Option<Value>,
-    pub openai_extra_body: Option<BTreeMap<String, Value>>,
-    /// provider HTTP 请求总超时（秒，`0` = 不设总超时）。
-    pub http_timeout_secs: Option<u64>,
-    /// Explicit image-input capability: "on" | "off". Overrides the backend
-    /// declaration (v7 §3.1).
-    pub image_input: Option<String>,
-    /// Model ids declared image-capable. When set, this replaces the built-in
-    /// vision model list (empty list disables image capture entirely).
-    pub vision_models: Option<Vec<String>>,
-    /// `[provider.image]` — per-field image limit overrides applied on top
-    /// of the resolved capability (never enables an Unsupported session).
-    pub image: ImageConfigFile,
-}
-
-/// `[provider.image]` TOML section (all fields optional). Byte/pixel values
-/// accept plain integers or K/M/G suffixes (e.g. "32M").
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct ImageConfigFile {
-    pub detail: Option<String>,
-    pub max_images_per_request: Option<usize>,
-    pub max_image_bytes_per_request: Option<String>,
-    pub max_image_bytes: Option<String>,
-    pub max_dimension: Option<u32>,
-    pub max_pixels: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct GenerationConfigFile {
-    pub max_tokens: Option<i32>,
-    pub max_turns: Option<i32>,
-    pub llm_first_event_timeout: Option<i32>,
-    pub llm_idle_timeout: Option<i32>,
-    pub llm_wait_heartbeat: Option<i32>,
-    pub log_events: Option<bool>,
-    pub output_format: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct ContextConfigFile {
-    pub max_context: Option<String>,
-    pub context_compact_pct: Option<u8>,
-    pub context_reserve_tokens: Option<usize>,
-    pub context_compact_tail_tokens: Option<usize>,
-    pub context_compact_max_output_tokens: Option<i32>,
-    pub context_compact_input_reduction: Option<bool>,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct EditConfigFile {
-    pub mode: Option<EditMode>,
-    pub fuzzy_match: Option<bool>,
-    pub fuzzy_threshold: Option<f64>,
-    pub enforce_seen_lines: Option<bool>,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct ToolsConfigFile {
-    pub approval_mode: Option<ToolApprovalMode>,
-    pub approval: Option<BTreeMap<String, ToolApprovalPolicy>>,
-    pub enabled_tools: Option<Vec<String>>,
-    pub skills: Option<Vec<String>>,
-    pub tool_timeout: Option<i32>,
-    /// 单次 Bash/Python/自定义工具调用的超时上限（默认 7200，至少 5）。
-    pub tool_timeout_max: Option<i32>,
-    pub sub_agent_timeout: Option<i32>,
-    pub sub_agent_max_depth: Option<u32>,
-    pub max_search_files: Option<usize>,
-    pub max_search_results: Option<usize>,
-    pub edit: EditConfigFile,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct SignalPolicyFile {
-    pub policy: Option<SignalPolicy>,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct SandboxConfigFile {
-    pub enabled: Option<bool>,
-    pub backend: Option<String>,
-    pub read_dirs: Option<Vec<String>>,
-    pub write_dirs: Option<Vec<String>>,
-    pub allow_network: Option<bool>,
-    pub max_memory_mb: Option<u64>,
-    pub max_pids: Option<u32>,
-    pub timeout_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct SandboxPythonConfigFile {
-    pub wasm_path: Option<String>,
-    pub stdlib_dir: Option<String>,
-    pub timeout: Option<u64>,
-    pub read_dirs: Option<Vec<String>>,
-    pub write_dirs: Option<Vec<String>>,
-    pub package_dirs: Option<Vec<String>>,
-}
-
-/// `[recovery]`: bounded format-error window and request retries (all fields
-/// optional; unset fields keep the single Rust-side defaults).
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct RecoveryConfigFile {
-    pub format_window_size: Option<usize>,
-    pub format_max_errors: Option<usize>,
-    pub request_max_retries: Option<u32>,
-    pub request_timeout_secs: Option<u64>,
-}
+use mink::config_file::{
+    ImageConfigFile, MinkConfigFile, RecoveryConfigFile, SandboxConfigFile, SandboxPythonConfigFile,
+};
 
 /// Merge two recovery sections per field (higher layer wins).
 fn merge_recovery(base: RecoveryConfigFile, over: RecoveryConfigFile) -> RecoveryConfigFile {
@@ -229,37 +76,38 @@ pub(crate) struct AgentConfig {
     pub sandbox_python: SandboxPythonConfigFile,
 }
 
-/// Parse a `.minkrc` file body into a resolved layer. `None` on read/parse
-/// failure (non-blocking, same as the CLI's per-file tolerance for missing
-/// files; malformed files warn instead of failing startup).
-pub(crate) fn parse_layer(text: &str, origin: &str) -> AgentConfig {
-    match toml::from_str::<MinkConfigFile>(text) {
-        Ok(file) => from_file(&file),
-        Err(error) => {
-            eprintln!("[mink-server] warning: failed to parse {origin}: {error}");
-            AgentConfig::default()
-        }
-    }
+/// Parse a `.minkrc` file body into a resolved layer.
+///
+/// A malformed existing file is an error: silently replacing it with an empty
+/// layer can remove an explicit tool restriction and restore the default tool
+/// set. Only an absent file is treated as an empty layer by the loaders below.
+pub(crate) fn parse_layer(text: &str, origin: &str) -> anyhow::Result<AgentConfig> {
+    let file = mink::config_file::parse_config_file(text)
+        .map_err(|error| anyhow::anyhow!("failed to parse {origin}: {error}"))?;
+    Ok(from_file(&file))
 }
 
 /// Read the user-level layer from `~/.minkrc`（与 TUI/CLI 同一配置文件）。
-pub(crate) fn load_user_layer() -> AgentConfig {
+pub(crate) fn load_user_layer() -> anyhow::Result<AgentConfig> {
     let Ok(home) = std::env::var("HOME") else {
-        return AgentConfig::default();
+        return Ok(AgentConfig::default());
     };
     let path = Path::new(&home).join(".minkrc");
-    match std::fs::read_to_string(&path) {
-        Ok(text) => parse_layer(&text, &path.display().to_string()),
-        Err(_) => AgentConfig::default(),
-    }
+    load_layer(&path)
 }
 
 /// Read the project-level layer from `<cwd>/.minkrc`（CLI 同款项目级覆盖）。
-pub(crate) fn load_project_layer(cwd: &Path) -> AgentConfig {
+pub(crate) fn load_project_layer(cwd: &Path) -> anyhow::Result<AgentConfig> {
     let path = cwd.join(".minkrc");
-    match std::fs::read_to_string(&path) {
+    load_layer(&path)
+}
+
+fn load_layer(path: &Path) -> anyhow::Result<AgentConfig> {
+    match std::fs::read_to_string(path) {
         Ok(text) => parse_layer(&text, &path.display().to_string()),
-        Err(_) => AgentConfig::default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(AgentConfig::default()),
+        Err(error) => Err(error)
+            .map_err(|error| anyhow::anyhow!("failed to read {}: {error}", path.display())),
     }
 }
 
@@ -903,6 +751,10 @@ mod merge_tests {
 mod tests {
     use super::*;
 
+    fn parse_layer(text: &str, origin: &str) -> AgentConfig {
+        super::parse_layer(text, origin).expect("valid test configuration")
+    }
+
     #[test]
     fn grouped_config_parses_all_sections() {
         let layer = parse_layer(
@@ -1022,9 +874,29 @@ timeout = 60
 
     #[test]
     fn flat_keys_are_rejected_like_the_cli() {
-        let layer = parse_layer("model = \"pro\"\n", "test");
-        assert_eq!(layer.model, None, "flat top-level keys must be rejected");
-        assert_eq!(layer.api_key, None);
+        let error = super::parse_layer("model = \"pro\"\n", "test").unwrap_err();
+        assert!(error.to_string().contains("model"));
+    }
+
+    #[test]
+    fn invalid_layer_is_rejected_instead_of_dropping_tool_restrictions() {
+        let error = super::parse_layer("[tools]\nenabled_tools = []\nunknown_key = true\n", "test")
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown_key"));
+    }
+
+    #[test]
+    fn layer_loader_ignores_only_missing_files() {
+        let root = std::env::temp_dir().join(format!("mink-agent-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = root.join("missing.minkrc");
+        assert!(load_layer(&missing).unwrap().model.is_none());
+        assert!(
+            load_layer(&root).is_err(),
+            "reading a directory must not look like a missing config"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

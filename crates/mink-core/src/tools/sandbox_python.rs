@@ -106,8 +106,8 @@ fn execute_in_sandbox_at(
     }
 
     // 包目录
-    let mut pythonpath = String::new();
-    for dir in package_dirs {
+    let mut pythonpath = Vec::new();
+    for (index, dir) in package_dirs.iter().enumerate() {
         let p = Path::new(dir);
         let abs = if p.is_absolute() {
             p.to_path_buf()
@@ -115,15 +115,16 @@ fn execute_in_sandbox_at(
             cwd.join(p)
         };
         if abs.exists() {
-            builder.preopened_dir(&abs, "/packages", DirPerms::READ, FilePerms::READ)?;
-            if !pythonpath.is_empty() {
-                pythonpath.push(':');
-            }
-            pythonpath.push_str("/packages");
+            // Each mount needs its own guest path. Reusing `/packages` makes
+            // every PYTHONPATH entry resolve to the first preopen, hiding
+            // later configured package directories.
+            let guest_path = format!("/packages/{index}");
+            builder.preopened_dir(&abs, &guest_path, DirPerms::READ, FilePerms::READ)?;
+            pythonpath.push(guest_path);
         }
     }
     if !pythonpath.is_empty() {
-        builder.env("PYTHONPATH", &pythonpath);
+        builder.env("PYTHONPATH", pythonpath.join(":"));
     }
 
     // ── 执行 ──

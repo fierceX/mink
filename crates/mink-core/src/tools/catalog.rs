@@ -181,7 +181,9 @@ pub fn validate_tool_config(config: &ToolConfig) -> Result<()> {
     ToolCatalog::builtin()?.validate_configured_names(config)
 }
 
-pub(crate) fn validate_custom_tools(tools: &[crate::runtime::RegisteredCustomTool]) -> Result<()> {
+pub(crate) fn validate_custom_tools(
+    tools: &[crate::tools::extension::RegisteredCustomTool],
+) -> Result<()> {
     let builtin = ToolCatalog::builtin()?;
     let mut names = BTreeSet::new();
     for tool in tools {
@@ -216,7 +218,7 @@ pub(crate) fn validate_custom_tools(tools: &[crate::runtime::RegisteredCustomToo
         );
         ensure!(
             !definition.mutating
-                || definition.execution == crate::runtime::ToolExecutionMode::Sequential,
+                || definition.execution == crate::tools::extension::ToolExecutionMode::Sequential,
             "mutating custom tool '{}' must be Sequential",
             definition.name
         );

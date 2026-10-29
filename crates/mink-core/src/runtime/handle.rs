@@ -33,6 +33,7 @@ impl fmt::Display for TurnId {
 #[derive(Debug)]
 pub enum RuntimeError {
     Busy { active_turn_id: TurnId },
+    GoalActive,
     Closed,
     Command(String),
     Join(String),
@@ -46,6 +47,7 @@ impl fmt::Display for RuntimeError {
             Self::Busy { active_turn_id } => {
                 write!(f, "runtime is busy with turn {active_turn_id}")
             }
+            Self::GoalActive => f.write_str("goal owns session; pause before control commands"),
             Self::Closed => f.write_str("runtime is closed"),
             Self::Command(message) => write!(f, "runtime command failed: {message}"),
             Self::Join(message) => write!(f, "runtime task failed: {message}"),
@@ -566,9 +568,7 @@ impl AgentRuntimeHandle {
                     || (g.status == crate::runtime::GoalStatus::Blocked
                         && g.phase == crate::session::goal::GoalPhase::Verifying)
             }) {
-                return Err(RuntimeError::Busy {
-                    active_turn_id: TurnId::new("goal owns session; pause before control commands"),
-                });
+                return Err(RuntimeError::GoalActive);
             }
             self.turn_gate.acquire(self.next_turn_id())?
         };
@@ -649,9 +649,7 @@ impl AgentRuntimeHandle {
                     || (g.status == crate::runtime::GoalStatus::Blocked
                         && g.phase == crate::session::goal::GoalPhase::Verifying)
             }) {
-                return Err(RuntimeError::Busy {
-                    active_turn_id: TurnId::new("goal owns session; pause before control commands"),
-                });
+                return Err(RuntimeError::GoalActive);
             }
             self.turn_gate.acquire(self.next_turn_id())?
         };

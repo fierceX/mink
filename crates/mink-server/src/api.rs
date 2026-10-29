@@ -776,7 +776,7 @@ async fn set_session_model(
             "label": outcome.label,
             "stats": outcome.stats,
         })),
-        Err(error) => ApiResponse::err(409, switch_error(&error)),
+        Err(error) => ApiResponse::err(409, control_error(&error)),
     }
 }
 
@@ -796,7 +796,7 @@ async fn compact_session(
     };
     match handle.compact().await {
         Ok(outcome) => ApiResponse::ok(json!({ "compacted": true, "outcome": outcome })),
-        Err(error) => ApiResponse::err(409, switch_error(&error)),
+        Err(error) => ApiResponse::err(409, control_error(&error)),
     }
 }
 
@@ -804,16 +804,11 @@ async fn compact_session(
 ///
 /// A raw core error surfaces English identifiers in an otherwise Chinese
 /// interface, and the actionable ones need to say what to do next.
-fn switch_error(error: &mink::runtime::RuntimeError) -> String {
-    let text = format!("{error}");
-    if text.contains("goal") && text.contains("active") {
-        "当前目标执行中，先暂停目标再切换".to_string()
-    } else if text.contains("max_context_tokens") || text.to_lowercase().contains("disabled") {
-        "该会话未启用上下文压缩".to_string()
-    } else if text.contains("busy") || text.contains("turn") {
-        "本轮尚未结束，请稍后重试".to_string()
-    } else {
-        text
+fn control_error(error: &mink::runtime::RuntimeError) -> String {
+    match error {
+        mink::runtime::RuntimeError::GoalActive => "当前目标执行中，先暂停目标再操作".to_string(),
+        mink::runtime::RuntimeError::Busy { .. } => "本轮尚未结束，请稍后重试".to_string(),
+        _ => error.to_string(),
     }
 }
 
@@ -1597,6 +1592,20 @@ mod tests {
     use http_body_util::BodyExt;
     use std::path::PathBuf;
     use tower::ServiceExt;
+
+    #[test]
+    fn control_error_uses_runtime_error_variants() {
+        assert_eq!(
+            control_error(&mink::runtime::RuntimeError::GoalActive),
+            "当前目标执行中，先暂停目标再操作"
+        );
+        assert_eq!(
+            control_error(&mink::runtime::RuntimeError::Busy {
+                active_turn_id: mink::runtime::TurnId::new("turn-1"),
+            }),
+            "本轮尚未结束，请稍后重试"
+        );
+    }
 
     struct MockRuntimeBackend;
 

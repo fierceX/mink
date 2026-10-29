@@ -125,7 +125,7 @@ impl ModelToolSurface {
         catalog: &ToolCatalog,
         config: &ToolConfig,
         context: &ToolResolutionContext,
-        custom_tools: &[crate::runtime::RegisteredCustomTool],
+        custom_tools: &[crate::tools::extension::RegisteredCustomTool],
     ) -> Result<Self> {
         let custom_names = custom_tools
             .iter()
@@ -152,7 +152,7 @@ impl ModelToolSurface {
                 continue;
             }
             if whitelist.is_none()
-                && definition.activation == crate::runtime::ToolActivation::ExplicitOnly
+                && definition.activation == crate::tools::extension::ToolActivation::ExplicitOnly
             {
                 continue;
             }
@@ -164,7 +164,7 @@ impl ModelToolSurface {
                 storm_exempt: definition.storm_exempt,
                 spawns_sub_agent: false,
                 explicit_only: definition.activation
-                    == crate::runtime::ToolActivation::ExplicitOnly,
+                    == crate::tools::extension::ToolActivation::ExplicitOnly,
             };
             match authorize_tool(&metadata, config) {
                 ToolAuthorization::Allowed => {}

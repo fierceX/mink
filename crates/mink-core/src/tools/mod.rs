@@ -2,6 +2,7 @@ pub mod approval;
 pub mod args;
 pub mod bash;
 pub mod catalog;
+pub mod extension;
 pub mod file;
 pub mod hashline;
 pub mod image;

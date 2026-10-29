@@ -129,9 +129,13 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
             .snapshot()
             .is_some_and(|g| !g.status.is_terminal())
     {
+        let (history, committed_sequence) =
+            crate::runtime::session::SessionReader::new(paths.session_dir.clone())
+                .conversation_with_sequence()?;
         goal_store.recover(
             &crate::runtime::goal::goal_environment(&params.cwd, &tool_surface),
-            &store.lines().await?,
+            &history,
+            committed_sequence,
         )?;
     }
     let vfs_scope = VfsScope {
@@ -207,7 +211,9 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
 
     let ctx = Arc::new(AgentSharedContext {
         active_model: Mutex::new(crate::config::model_resolver(&config).resolve(&config.model)),
-        goal_review: params.goal_review,
+        goal_review: params
+            .goal_review
+            .map(|review| review as Arc<dyn crate::goal_review::GoalReviewToolSession>),
         session_lease: Arc::new(Mutex::new(params.session_lease)),
         input_inbox,
         goal_store,
@@ -248,9 +254,6 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         this_turn_image_ids,
         warned_image_ids,
         events_path: paths.events.clone(),
-        summary_path: paths.summary.clone(),
-        plan_path: paths.plan.clone(),
-        plan_draft_path: paths.plan_draft.clone(),
         immutable_prefix: Mutex::new(None),
         is_sub_agent: params.is_sub_agent,
         sub_agent_depth: params.sub_agent_depth,

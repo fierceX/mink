@@ -620,20 +620,20 @@ async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()
     assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());
     assert_eq!(
-        tokio::fs::read_to_string(&h.ctx.plan_draft_path).await?,
+        tokio::fs::read_to_string(&h.ctx.store.path().with_file_name("plan.draft")).await?,
         "1. ship it\n"
     );
-    assert!(!h.ctx.plan_path.exists());
+    assert!(!h.ctx.store.path().with_file_name("plan.md").exists());
 
     // Turn 2: PlanConfirm commits the file and appends the transition.
     let (decision, effects) = executor.execute("confirm the plan", None).await?;
     assert_eq!(decision, TurnDecision::Stop);
     assert_eq!(effects, vec!["Plan confirmed."]);
     assert_eq!(
-        tokio::fs::read_to_string(&h.ctx.plan_path).await?,
+        tokio::fs::read_to_string(&h.ctx.store.path().with_file_name("plan.md")).await?,
         "1. ship it\n"
     );
-    assert!(!h.ctx.plan_draft_path.exists());
+    assert!(!h.ctx.store.path().with_file_name("plan.draft").exists());
     let rows = h.ctx.store.lines().await?;
     let confirmed_index = rows
         .iter()
@@ -660,7 +660,7 @@ async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()
     let (decision, effects) = executor.execute("clear the plan", None).await?;
     assert_eq!(decision, TurnDecision::Stop);
     assert_eq!(effects, vec!["Plan cleared."]);
-    assert!(!h.ctx.plan_path.exists());
+    assert!(!h.ctx.store.path().with_file_name("plan.md").exists());
     let rows = h.ctx.store.lines().await?;
     let cleared_index = rows
         .iter()
@@ -729,7 +729,11 @@ async fn plan_transition_survives_a_compaction_in_the_same_turn() -> anyhow::Res
             .add_assistant(&format!("history response {index}"), "", &[])
             .await?;
     }
-    tokio::fs::write(&h.ctx.plan_draft_path, "1. execute\n").await?;
+    tokio::fs::write(
+        &h.ctx.store.path().with_file_name("plan.draft"),
+        "1. execute\n",
+    )
+    .await?;
 
     let mut executor = TurnExecutor::new(h.ctx.clone());
     let (decision, effects) = executor.execute("confirm the plan", None).await?;
@@ -739,8 +743,8 @@ async fn plan_transition_survives_a_compaction_in_the_same_turn() -> anyhow::Res
     // 同一输入内的压缩不再被次数互锁限制：这里只要求确实压过，
     // 且 Plan 交接在压缩之后仍然完整。
     assert!(!requests.lock().unwrap().is_empty());
-    assert!(h.ctx.plan_path.exists());
-    assert!(!h.ctx.plan_draft_path.exists());
+    assert!(h.ctx.store.path().with_file_name("plan.md").exists());
+    assert!(!h.ctx.store.path().with_file_name("plan.draft").exists());
     Ok(())
 }
 
@@ -768,14 +772,18 @@ async fn plan_confirm_does_not_force_compaction() -> anyhow::Result<()> {
             .add_assistant(&format!("history response {index}"), "", &[])
             .await?;
     }
-    tokio::fs::write(&h.ctx.plan_draft_path, "1. execute\n").await?;
+    tokio::fs::write(
+        &h.ctx.store.path().with_file_name("plan.draft"),
+        "1. execute\n",
+    )
+    .await?;
 
     let mut executor = TurnExecutor::new(h.ctx.clone());
     let (decision, _) = executor.execute("confirm the plan", None).await?;
 
     assert_eq!(decision, TurnDecision::Stop);
-    assert!(h.ctx.plan_path.exists());
-    assert!(!h.ctx.plan_draft_path.exists());
+    assert!(h.ctx.store.path().with_file_name("plan.md").exists());
+    assert!(!h.ctx.store.path().with_file_name("plan.draft").exists());
     let rows = h.ctx.store.lines().await?;
     let transition_index = rows
         .iter()
@@ -826,7 +834,7 @@ async fn plan_draft_empty_content_cancels_and_reports_cancellation() -> anyhow::
         &serde_json::json!({"content": "1. inspect\n"}),
         &tool_ctx,
     )?;
-    assert!(h.ctx.plan_draft_path.exists());
+    assert!(h.ctx.store.path().with_file_name("plan.draft").exists());
 
     let outcome = crate::tools::runner::ToolExec::execute(
         &crate::tools::plan::PlanDraftTool,
@@ -842,7 +850,7 @@ async fn plan_draft_empty_content_cancels_and_reports_cancellation() -> anyhow::
             content: None,
         }))
     ));
-    assert!(!h.ctx.plan_draft_path.exists());
+    assert!(!h.ctx.store.path().with_file_name("plan.draft").exists());
     Ok(())
 }
 

@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
     validate_runtime_config(&cfg)?;
 
     let cwd = std::env::current_dir()?;
-    let user_layer = session::agent_config::load_user_layer();
+    let user_layer = session::agent_config::load_user_layer()?;
     let registry = Arc::new(
         Registry::new(cfg.mink_home.clone(), cfg.model.clone(), cfg.max_running)
             .with_agent_layer(user_layer),
@@ -221,7 +221,7 @@ fn print_usage() {
     println!();
     println!("Options:");
     println!(
-        "  --host IP           Listen address (overrides MINK_SERVER_HOST and config; default 0.0.0.0)"
+        "  --host IP           Listen address (overrides MINK_SERVER_HOST and config; default 127.0.0.1)"
     );
     println!("  -V, --version       Show version");
     println!("  -h, --help          Show this help");

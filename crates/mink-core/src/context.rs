@@ -82,7 +82,7 @@ pub(crate) fn resolve_tool_runtime(
     role: AgentRole,
     read_only_fs_present: bool,
     sub_agent_depth: u32,
-    custom_tools: &[crate::runtime::RegisteredCustomTool],
+    custom_tools: &[crate::tools::extension::RegisteredCustomTool],
 ) -> anyhow::Result<(
     ToolResolutionContext,
     Arc<ModelToolSurface>,
@@ -115,9 +115,9 @@ pub(crate) fn resolve_tool_runtime(
 #[derive(Clone)]
 pub struct ToolContext {
     pub(crate) goal_drafting: bool,
-    pub(crate) goal_review: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
+    pub(crate) goal_review: Option<Arc<dyn crate::goal_review::GoalReviewToolSession>>,
     /// Present only in the host's candidate-bound adjudication turn.
-    pub(crate) goal_adjudication: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
+    pub(crate) goal_adjudication: Option<Arc<dyn crate::goal_review::GoalReviewToolSession>>,
     pub(crate) _session_lease: Option<Arc<crate::session::lease::SessionLease>>,
     pub cwd: PathBuf,
     pub home: PathBuf,
@@ -142,13 +142,33 @@ pub struct ToolContext {
     pub tool_resolution_context: ToolResolutionContext,
     pub tool_surface: Arc<ModelToolSurface>,
     pub tool_capabilities: Arc<ResolvedToolCapabilities>,
-    pub(crate) custom_tools: Arc<Vec<crate::runtime::RegisteredCustomTool>>,
+    pub(crate) custom_tools: Arc<Vec<crate::tools::extension::RegisteredCustomTool>>,
     pub(crate) model_capabilities:
         Arc<crate::capabilities::model_capabilities::SessionModelCapabilities>,
     pub(crate) image_cache: Arc<crate::session::image_cache::ImageCache>,
     /// Image ids captured during the current user input (v7 §9.5). Reset per
     /// input; fresh-attachment materialization failures fail the request.
     pub(crate) this_turn_image_ids: Arc<Mutex<std::collections::HashSet<String>>>,
+}
+
+/// The session state and options that the file editing implementations need.
+/// Keeping this view separate prevents edit strategies from depending on the
+/// rest of the tool/session context.
+pub(crate) struct FileEditContext<'a> {
+    pub(crate) cwd: &'a Path,
+    pub(crate) snapshots: &'a Mutex<FileSnapshotStore>,
+    pub(crate) file_write_max_bytes: usize,
+    pub(crate) edit_fuzzy_match: bool,
+    pub(crate) edit_fuzzy_threshold: f64,
+    pub(crate) edit_enforce_seen_lines: bool,
+    pub(crate) tool_result_max_bytes: usize,
+    memo_mutation: &'a AtomicU64,
+}
+
+impl FileEditContext<'_> {
+    pub(crate) fn bump_mutation(&self) {
+        self.memo_mutation.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 impl From<&AgentSharedContext> for ToolContext {
@@ -158,7 +178,7 @@ impl From<&AgentSharedContext> for ToolContext {
                 .goal_store
                 .snapshot()
                 .is_some_and(|g| g.status == crate::session::goal::GoalStatus::Draft),
-            goal_review: ctx.goal_review.clone(),
+            goal_review: ctx.goal_review.as_ref().cloned(),
             goal_adjudication: None,
             _session_lease: ctx
                 .session_lease
@@ -195,12 +215,45 @@ impl From<&AgentSharedContext> for ToolContext {
 }
 
 impl ToolContext {
+    pub(crate) fn file_edit_context(&self) -> FileEditContext<'_> {
+        FileEditContext {
+            cwd: &self.cwd,
+            snapshots: &self.snapshots,
+            file_write_max_bytes: self.tool_config.file_write_max_bytes,
+            edit_fuzzy_match: self.tool_config.edit_fuzzy_match,
+            edit_fuzzy_threshold: self.tool_config.edit_fuzzy_threshold,
+            edit_enforce_seen_lines: self.tool_config.edit_enforce_seen_lines,
+            tool_result_max_bytes: self.tool_config.tool_result_max_bytes,
+            memo_mutation: &self.memo_mutation,
+        }
+    }
+
     pub(crate) fn review_evidence(
         &self,
-    ) -> Option<&Arc<crate::runtime::goal::review::GoalReviewSession>> {
+    ) -> Option<&Arc<dyn crate::goal_review::GoalReviewToolSession>> {
         self.goal_review
             .as_ref()
             .or(self.goal_adjudication.as_ref())
+    }
+
+    pub(crate) fn goal_review_tool_context(
+        &self,
+    ) -> anyhow::Result<crate::goal_review::GoalReviewToolContext<'_>> {
+        let artifact_dir = self
+            .store
+            .path()
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("session directory missing"))?
+            .join("artifacts");
+        Ok(crate::goal_review::GoalReviewToolContext {
+            cwd: &self.cwd,
+            artifact_dir,
+            artifacts: &self.artifacts,
+        })
+    }
+
+    pub(crate) fn is_review_agent(&self) -> bool {
+        self.goal_review.is_some()
     }
     /// When the file is byte-identical and an earlier read covers the requested
     /// range, return a short behavioral "reuse that content" response. This is
@@ -301,7 +354,7 @@ impl ToolContext {
 
     /// Invalidate every memo of this agent after a successful Write/Edit.
     pub fn bump_mutation(&self) {
-        self.memo_mutation.fetch_add(1, Ordering::SeqCst);
+        self.file_edit_context().bump_mutation();
     }
 }
 
@@ -315,7 +368,7 @@ fn display_tool_path(cwd: &Path, path: &Path) -> String {
 /// AgentSharedContext holds all shared resources accessible by every component.
 pub struct AgentSharedContext {
     pub(crate) active_model: Mutex<crate::config::ResolvedModel>,
-    pub(crate) goal_review: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
+    pub(crate) goal_review: Option<Arc<dyn crate::goal_review::GoalReviewToolSession>>,
     pub(crate) session_lease: Arc<Mutex<Option<Arc<crate::session::lease::SessionLease>>>>,
     pub input_inbox: Arc<crate::session::input::InputInbox>,
     pub config: Config,
@@ -355,7 +408,7 @@ pub struct AgentSharedContext {
     pub tool_resolution_context: ToolResolutionContext,
     pub tool_surface: Arc<ModelToolSurface>,
     pub tool_capabilities: Arc<ResolvedToolCapabilities>,
-    pub(crate) custom_tools: Arc<Vec<crate::runtime::RegisteredCustomTool>>,
+    pub(crate) custom_tools: Arc<Vec<crate::tools::extension::RegisteredCustomTool>>,
     pub(crate) prefix_source: Option<Arc<dyn crate::runtime::PrefixSource>>,
     pub(crate) model_capabilities:
         Arc<crate::capabilities::model_capabilities::SessionModelCapabilities>,
@@ -366,9 +419,6 @@ pub struct AgentSharedContext {
     /// request (cross-request dedup, review fix).
     pub(crate) warned_image_ids: Arc<Mutex<std::collections::HashSet<String>>>,
     pub events_path: PathBuf,
-    pub summary_path: PathBuf,
-    pub plan_path: PathBuf,
-    pub plan_draft_path: PathBuf,
     pub immutable_prefix: Mutex<Option<ImmutablePrefix>>,
     /// 是否为子代理上下文。为 true 时禁止递归调用 SubAgent。
     pub is_sub_agent: bool,
@@ -464,11 +514,7 @@ impl AgentSharedContext {
     pub fn usage_scope(&self, kind: UsageKind) -> UsageScope {
         let mut scope = self.usage.scope(kind, self.config.session_id.clone());
         if let Some(review) = &self.goal_review {
-            scope.billing_turn_id = format!(
-                "goal-review:{}:{}",
-                review.goal.id,
-                review.goal.iterations.len()
-            );
+            scope.billing_turn_id = review.billing_turn_id();
         }
         scope
     }

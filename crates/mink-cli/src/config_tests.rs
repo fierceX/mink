@@ -1,4 +1,5 @@
 use super::*;
+use mink::config_file::*;
 
 #[test]
 fn cli_long_run_defaults_match_the_requested_limits() {
