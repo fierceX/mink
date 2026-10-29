@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **配置与 server 边界**：CLI/server 共用 core `.minkrc` schema 和严格解析；已有配置读取/解析失败时 fail closed。server 默认监听地址为 `127.0.0.1`。
+- **新对话首发**：服务端会话先打开再上传图片；已成功上传的图片逐张保存为会话草稿，部分上传失败可恢复；迟到的首次发送回执不能切换当前导航或清除后来编辑的 compose 草稿，输入确认受理后只清掉该输入消耗的图片。
+- **Python WASI 沙箱**：多个 `package_dirs` 现在分别挂载并全部加入 `PYTHONPATH`，避免后续目录被首个挂载遮蔽；增加无需外部 CPython wasm 文件的 WASI 启动回归。
+- **Rust 嵌入 API**：增加可选 `mink::config_file` 入口，用于解析共享 `.minkrc` schema；`RuntimeError` 增加 `GoalActive` 变体，穷举匹配的下游代码需要处理该变体。
+- **Web 设计层维护方式**：设计层源码作为 mink 维护的 vendored 代码保留（MIT 署名保留），后续独立演进。
+
 ## v0.8.0 (2026-10-27)
 
 本版提高长任务默认额度并重构请求投影，完善子代理身份、生命周期与展示，同时修复 Web 工作台、Goal、压缩与工具边界问题。自定义 LLM backend 存在破坏性 API 变更。
@@ -48,7 +56,7 @@
 
 ### Web 工作台（新的默认前端）
 
-服务器默认服务 `apps/web`（React 18 + Vite）：`crates/mink-server` 的 build.rs 构建其产物并按字节嵌入二进制（字体等非 UTF-8 资源照常服务）；开发时仍可用 `MINK_SERVER_DEV_WEB=<dir>/dist` 从磁盘服务做前端热迭代。设计层与原子组件逐字节拷贝自 deepseek-harness（来源与许可见 `apps/web/THIRD_PARTY_NOTICES.md`，`npm run check:design` 与 CI 守漂移）。
+服务器默认服务 `apps/web`（React 18 + Vite）：`crates/mink-server` 的 build.rs 构建其产物并按字节嵌入二进制（字体等非 UTF-8 资源照常服务）；开发时仍可用 `MINK_SERVER_DEV_WEB=<dir>/dist` 从磁盘服务做前端热迭代。设计层与原子组件按固定快照拷入（来源与许可清单见 `apps/web/THIRD_PARTY_NOTICES.md`）。
 
 - **能力**：会话目录与筛选/搜索（四种范围、切换保留关键词、新建/删除）、历史与 `before_seq` 分页（翻页保持阅读位置）、`/conversation` + SSE 实时投影、composer（发送/停止/运行中引导/附件与图片/斜杠命令/模型位）、工具卡家族（终端/文件/差异/搜索/待办/计划/委派/报告）与逐轮「已编辑 N 个文件」摘要、消息 chrome（复制与该轮用量）、目标条与目标边界卡、详情面板五页签（任务/目标/文件/输出/诊断，诊断与 TUI `StatsSnapshot` 同口径）、轮次选择器与「返回最新内容」、设置与偏好、窄屏阅读 chrome（仅外层明确滚动触发，运行中/待处理强制可见，隐藏不 close/interrupt）。
 - **会话级正确性**：投影、草稿、附件与在途提交按完整会话身份维护；发送、停止、引导、详情加载、历史分页与命令副作用只在发起它们的会话与 runtime generation 仍是当前时落地；历史以投影 `messages` 为唯一已提交集合按 `seq` 合并去重排序；提交以稳定 request ID 幂等对账（答复丢失先查回执或以同一 ID 重试），模型读取/切换与目标详情的 REST seed 按单调 request revision 定新旧。

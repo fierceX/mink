@@ -1,0 +1,71 @@
+{
+  "failures": [],
+  "meta": {
+    "arch": "aarch64",
+    "commit": "b9c646d+dirty",
+    "fd_limit": "8192",
+    "kernel": "24.6.0",
+    "logical_cores": 12,
+    "machine": "arm64",
+    "mock_calls": 0,
+    "os": "macOS 15.7.7",
+    "quick": false,
+    "report_version": 2,
+    "reps_override": 5,
+    "rss_metric": "ps_rss_kb",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "suite": "mink-core/runtime_bench",
+    "summary_calls": 0,
+    "timestamp_epoch_secs": 1793245954
+  },
+  "samples": [
+    {
+      "case": "goal_history_0",
+      "extra": {
+        "archived_goals_before_measurement": 0,
+        "measurement": "draft_goal clone, serialization, and durable publish"
+      },
+      "max": 20.149957999999998,
+      "mean": 18.38625,
+      "min": 16.948332999999998,
+      "n": 5,
+      "p50": 17.997,
+      "p95": 20.149957999999998,
+      "unit": "ms"
+    },
+    {
+      "case": "goal_history_10",
+      "extra": {
+        "archived_goals_before_measurement": 10,
+        "measurement": "draft_goal clone, serialization, and durable publish"
+      },
+      "max": 21.041875,
+      "mean": 19.7773666,
+      "min": 18.949709,
+      "n": 5,
+      "p50": 19.901416,
+      "p95": 21.041875,
+      "unit": "ms"
+    },
+    {
+      "case": "goal_history_100",
+      "extra": {
+        "archived_goals_before_measurement": 100,
+        "measurement": "draft_goal clone, serialization, and durable publish"
+      },
+      "max": 21.128125,
+      "mean": 19.80885,
+      "min": 15.015832999999999,
+      "n": 5,
+      "p50": 20.970958000000003,
+      "p95": 21.128125,
+      "unit": "ms"
+    }
+  ],
+  "selected_cases": [
+    "goal_history_0",
+    "goal_history_10",
+    "goal_history_100"
+  ],
+  "skipped_cases": []
+}

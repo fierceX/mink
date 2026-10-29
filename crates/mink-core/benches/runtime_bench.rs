@@ -21,6 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::stream;
 use mink::prelude::*;
+use mink::runtime::GoalSpec;
 use serde_json::json;
 
 static MOCK_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -371,6 +372,11 @@ fn case_names(quick: bool) -> Vec<String> {
     names.push("compact_10".to_string());
     if !quick {
         names.push("compact_100".to_string());
+    }
+    names.push("goal_history_0".to_string());
+    names.push("goal_history_10".to_string());
+    if !quick {
+        names.push("goal_history_100".to_string());
     }
     names.push("concurrent_32".to_string());
     names.push("concurrent_64".to_string());
@@ -760,6 +766,43 @@ async fn case_session_create(args: &Args) -> anyhow::Result<Sample> {
     }
     cleanup(&root);
     Ok(summarize("session_create", "ms", &durations, json!({})))
+}
+
+async fn case_goal_history(history_goals: usize, args: &Args) -> anyhow::Result<Sample> {
+    let count = reps(args, 5, 2);
+    let mut durations = Vec::with_capacity(count);
+    for repetition in 0..count {
+        let root = temp_root(&format!("goal-history-{history_goals}-{repetition}"));
+        let home = root.join("home");
+        let runtime = AgentRuntime::start(options(&home, &root, MockMode::Echo)).await?;
+        let handle = runtime.handle();
+
+        // Each new draft archives the prior terminal Goal. Seed one extra so
+        // the timed mutation starts with the requested number already in history.
+        for index in 0..=history_goals {
+            let draft =
+                handle.draft_goal(GoalSpec::new(format!("benchmark goal {index}")), 3_600)?;
+            handle.cancel_goal_draft(&draft.id, draft.revision)?;
+        }
+
+        let start = Instant::now();
+        let measured = handle.draft_goal(GoalSpec::new("measured benchmark goal"), 3_600)?;
+        durations.push(start.elapsed());
+        handle.cancel_goal_draft(&measured.id, measured.revision)?;
+        runtime.shutdown().await?;
+        cleanup(&root);
+    }
+
+    let case = format!("goal_history_{history_goals}");
+    Ok(summarize(
+        &case,
+        "ms",
+        &durations,
+        json!({
+            "archived_goals_before_measurement": history_goals,
+            "measurement": "draft_goal clone, serialization, and durable publish",
+        }),
+    ))
 }
 
 async fn case_idle(count: usize) -> anyhow::Result<Sample> {
@@ -1437,6 +1480,9 @@ async fn run_case(name: &str, args: &Args) -> anyhow::Result<Option<Sample>> {
         "turns_2000" => Some(case_turns(2_000).await?),
         "compact_10" => Some(case_compact(10).await?),
         "compact_100" => Some(case_compact(100).await?),
+        "goal_history_0" => Some(case_goal_history(0, args).await?),
+        "goal_history_10" => Some(case_goal_history(10, args).await?),
+        "goal_history_100" => Some(case_goal_history(100, args).await?),
         "concurrent_32" => Some(case_concurrent(32).await?),
         "concurrent_64" => Some(case_concurrent(64).await?),
         "concurrent_128" => Some(case_concurrent(128).await?),

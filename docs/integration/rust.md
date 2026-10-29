@@ -1,6 +1,6 @@
 # Rust 集成
 
-> 更新日期：2026-10-27
+> 更新日期：2026-10-29
 
 进程内 runtime 生命周期与可靠事件。前置：Rust 1.99+。
 
@@ -10,8 +10,9 @@
 
 ### Rust 库嵌入
 
-Rust 发布包为 `mink-core`，库 crate 名为 `mink`。发布包只包含可嵌入 runtime 和
-`AgentEventStream` / `EventSink` 事件协议；终端 REPL/TUI 和二进制入口在 `mink-cli` workspace 包。
+Rust 发布包为 `mink-core`，库 crate 名为 `mink`。发布包提供可嵌入 runtime 和
+`AgentEventStream` / `EventSink` 事件协议；启用 `config-file` 时还提供共享配置 schema
+解析入口。终端 REPL/TUI 和二进制入口在 `mink-cli` workspace 包。
 服务端嵌入时推荐只启用 runtime：
 
 ```toml
@@ -21,7 +22,12 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
 ```
 
-公开入口为 `mink::prelude`、`mink::runtime`、`mink::sdk_protocol` 和 `mink::ui`。
+公开入口为 `mink::prelude`、`mink::runtime`、`mink::sdk_protocol` 和 `mink::ui`。启用
+`config-file` feature 后还可使用 `mink::config_file`，它提供与 CLI/server 共用的
+`.minkrc` schema 解析入口。
+
+`RuntimeError` 包含 `GoalActive`，表示当前会话已有活动目标而拒绝该 runtime 操作。
+新增公开 enum 变体会要求下游穷举 `match` 增加对应分支。
 
 ### 只读输入变更与历史窗口
 

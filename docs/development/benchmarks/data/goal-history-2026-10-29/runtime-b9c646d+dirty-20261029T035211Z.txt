@@ -1,0 +1,19 @@
+# mink runtime benchmark
+# machine:  arm64 (unknown cores, unknown)
+# os:       macOS 15.7.7 (kernel 24.6.0)
+# commit:   b9c646d+dirty
+# rustc:    rustc 1.99.0 (b940084d7 2026-09-28)
+# cargo:    cargo 1.99.0 (5f94df478 2026-08-27)
+# rss:      ps_rss_kb (current) + 20ms sampler peak; macOS RSS overstates footprint
+# fd limit: 8192
+# quick:    0
+# reps:     5
+
+warning: mink-core@0.8.0: Generated embedded_skills.rs with 4 skills
+    Finished `bench` profile [optimized] target(s) in 0.08s
+     Running benches/runtime_bench.rs (target/release/deps/runtime_bench-22ac2b713f4e7ee0)
+# mink runtime bench | os=macOS 15.7.7 arch=aarch64 cores=12 rss_metric=ps_rss_kb reps=5 quick=false
+[case] goal_history_0 n=5 p50=18.00ms p95=20.15ms min=16.95 max=20.15 mean=18.39 extra={"archived_goals_before_measurement":0,"measurement":"draft_goal clone, serialization, and durable publish"}
+[case] goal_history_10 n=5 p50=19.90ms p95=21.04ms min=18.95 max=21.04 mean=19.78 extra={"archived_goals_before_measurement":10,"measurement":"draft_goal clone, serialization, and durable publish"}
+[case] goal_history_100 n=5 p50=20.97ms p95=21.13ms min=15.02 max=21.13 mean=19.81 extra={"archived_goals_before_measurement":100,"measurement":"draft_goal clone, serialization, and durable publish"}
+[report] <repo>/target/bench/runtime-b9c646d+dirty-20261029T035211Z.json

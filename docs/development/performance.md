@@ -1,6 +1,6 @@
 # 性能与验证
 
-> 更新日期：2026-10-19；维护文档，不进入官网发布产物。
+> 更新日期：2026-10-29；维护文档，不进入官网发布产物。
 
 此页维护测量方法与结果索引。架构说明运行机制，集成页说明 API 契约；性能数字按日期保存在独立记录中，避免随实现说明更新而失去测试环境和版本边界。
 
@@ -11,6 +11,7 @@
 | [运行时：2026-10-03](benchmarks/runtime-2026-10-03.md) | Apple M4 Pro 全量矩阵、独立密度测试、部分失败/中断记录；脱敏 JSON 和日志随仓库保存 |
 | [TUI：2026-10-04](benchmarks/tui-2026-10-04.md) | 渲染、可变尾部、PTY/tmux/SSH 输入延迟和正确性检查；保留原维护者的测量口径与限制 |
 | [请求投影重构：2026-10-19](benchmarks/request-projection-2026-10-19.md) | mock backend 的 `tool_loop_20/50` 前后对照；同源 bench 用例在基线 commit 与重构工作树上各跑一次，保留 dirty 标记与单次观测限制 |
+| [Goal 历史写入成本：2026-10-29](benchmarks/goal-history-2026-10-29.md) | 0/10/100 条已归档 Goal 历史下创建新草案的克隆、序列化与持久化耗时；mock runtime，多次独立 session 样本 |
 
 Goal 调度与可靠性模拟记录见 [2026-10-09](benchmarks/goal-2026-10-09.md)，不作为真实模型效果或性能结论。
 
@@ -47,6 +48,7 @@ make bench-quick                                             # 同上，缩减�
 | `replay_1k/10k/100k` | 会话恢复（读盘 + 首请求投影） |
 | `turns_500/2000` | 长会话内存曲线 |
 | `compact_10/100` | 达到目标摘要请求数的整段工作负载成本与内存 |
+| `goal_history_0/10/100` | GoalStore 历史增长时创建新草案的状态克隆、序列化与持久化成本 |
 | `concurrent_32/64/128` | 新建 runtime + 一轮 mock turn + shutdown 的并发吞吐 |
 | `subagent_fanout_2/4/8` | 子代理扇出调度 |
 | `sandbox_start` | 隔离 worker 成本（sandbox re-exec + runtime + 回合） |

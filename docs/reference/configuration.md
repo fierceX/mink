@@ -1,6 +1,6 @@
 # 配置参考
 
-> 更新日期：2026-10-27
+> 更新日期：2026-10-29
 
 参数、默认值、优先级与校验。
 
@@ -364,9 +364,9 @@ surface 解析阶段 fail closed。
 
 ---
 
-### 配置语义矩阵与前端收敛决策
+### 配置语义矩阵与前端优先级
 
-四个前端各有映射（core `AgentOptions`/`ResolvedConfig`、CLI `CliConfig`+TOML+overrides、server `AgentConfig` 分层 merge+env、Python dict）。字段语义按类固定，边界由对照测试钉住：
+各入口保留自己的运行时映射（core `AgentOptions`/`ResolvedConfig`、CLI `CliConfig`+overrides、server `AgentConfig` 分层 merge+env、Python dict）。Rust CLI 与 server 共用 `mink::config_file` 中的 `.minkrc` 数据结构和严格 TOML parser；字段语义按类固定，宿主优先级由各自的适配层处理：
 
 | 语义类别 | 代表字段 | 缺省（未提供） | 显式空 | 合并/替换 |
 |---|---|---|---|---|
@@ -376,7 +376,7 @@ surface 解析阶段 fail closed。
 | 子表 | `sandbox`、`sandbox_python` | —— | —— | 逐字段 pick 合并 |
 | 前端专属优先级 | CLI `--config`、server env | —— | —— | env > project > user > defaults |
 
-**决策 D2＝暂缓统一入口（选项 C）**：共享 patch 需要为上述每类语义建模并跨 crate 公开新类型；当前没有证据表明收敛能减少映射点（各前端的解析与层级合并本身不可省）。本轮以矩阵 + 边界测试收尾（`enabled_tools_none_is_default_set_and_empty_list_disables_all`、`merge_overrides_present_fields_and_keeps_absent_ones`、`merge_container_semantics_are_explicit`）；若后续跨端不一致频繁出现，再以本矩阵为规格引入 additive overrides。
+共享 parser 统一 TOML schema、未知字段拒绝与解析失败行为；CLI/server 的层级优先级和运行时字段转换仍由宿主适配层决定。Rust 宿主可启用 `mink-core` 的 `config-file` feature，通过 `mink::config_file::{MinkConfigFile, parse_config_file}` 读取同一 schema。JSONL/Python 配置是不同协议入口，继续在各自边界映射到同一组 core `Config` 参数。
 
 ## Server 配置
 
@@ -384,7 +384,7 @@ surface 解析阶段 fail closed。
 
 | 配置项 | 环境变量 | mink-server.toml | 默认 |
 |--------|----------|------------------|------|
-| 监听地址 | `MINK_SERVER_HOST` | `[server] host` | `0.0.0.0` |
+| 监听地址 | `MINK_SERVER_HOST` | `[server] host` | `127.0.0.1` |
 | 端口 | `MINK_SERVER_PORT` | `[server] port` | `8765` |
 | Mink home | `MINK_HOME` | `[agent] mink_home` | `$HOME` |
 | 默认模型 | `MODEL` | `[agent] model` / `~/.minkrc` `[provider] model` | `flash` |
@@ -393,7 +393,7 @@ surface 解析阶段 fail closed。
 | turn 超时 | `MINK_SERVER_TURN_TIMEOUT` | — | `7200`（秒） |
 
 监听地址可用 `mink-server --host <IP>` 覆盖以上来源（仅接受 IPv4/IPv6 字面量，未知参数在绑定前拒绝）；
-默认仍为 `0.0.0.0`。端口**没有**启动参数，继续由 `MINK_SERVER_PORT` / `[server] port` 决定；
+默认监听 loopback `127.0.0.1`；需要远程访问时显式设置监听地址，并配置网络访问控制。端口**没有**启动参数，继续由 `MINK_SERVER_PORT` / `[server] port` 决定；
 IPv6 地址在启动日志中按 `[::1]:8765` 形式显示。
 
 `~/.minkrc` 与 TUI/CLI 共享同一配置文件，**schema 完全一致**（分组格式，扁平键拒绝，与 CLI 相同的 `deny_unknown_fields` 规则）：
@@ -402,11 +402,12 @@ IPv6 地址在启动日志中按 `[::1]:8765` 形式显示。
   `[provider]`（model/api_key/base_url/model_aliases/openai_*/http_timeout_secs/image_input/vision_models/`[provider.image]`）、`[generation]`、`[context]`、
   `[tools]` / `[tools.edit]`、`[signal]`、`[recovery]`、`[sandbox]` / `[sandbox_python]`。
 - 会话运行时选项（provider/generation/context/tools/signal/recovery/sandbox/image）完整应用到 `AgentOptions`，
-  与 CLI 的 `assemble_runtime_options` 行为一致；schema 对齐由 `crates/mink-server/tests/config_parity.rs` 机械校验。
+  与 CLI 的 `assemble_runtime_options` 行为一致；schema 与未知字段规则由 `mink::config_file::parse_config_file` 统一实现。
 - 环境变量 `MODEL` / `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `MINK_IMAGE_INPUT` /
   `MINK_VISION_MODELS` / `MINK_SIGNAL_POLICY` /
   `LOG_EVENTS` 在文件层之上覆盖（server 文档化优先级：环境变量 > `mink-server.toml` >
   项目 `.minkrc` > 用户 `~/.minkrc` > 默认值）。
+- 缺少 `.minkrc` 按空层处理；已有文件无法读取或解析时，CLI 拒绝加载配置，server 拒绝启动或创建/打开该工作区会话，避免把明确配置静默替换成默认工具集。
 
 ## 上下文参数
 
@@ -633,6 +634,8 @@ macOS `write_dirs`、临时目录和会话存储的写入规则包含字面路�
 | `read_dirs` | `Option<Vec<String>>` |
 | `write_dirs` | `Option<Vec<String>>` |
 | `package_dirs` | `Option<Vec<String>>` |
+
+每个存在的 `package_dirs` 目录会挂载到独立的 `/packages/<索引>` 路径，并按配置顺序加入 `PYTHONPATH`；多个目录可同时提供 Python 包。
 
 ## Python 字段索引
 

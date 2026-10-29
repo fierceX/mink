@@ -13,7 +13,7 @@
 
 ### mink-server 跨网部署
 
-`mink-server` 自身不提供登录、Token 或 TLS，默认监听 `0.0.0.0`；会话工具可以执行 Bash/Python 并读写 server 文件系统，因此不要把端口直接暴露到不可信网络。浏览器与 server 不在一台机器时，应放在带 TLS 与身份认证的反向代理之后（或只监听受信内网），由部署侧限制访问源；REST 与 SSE 走同一入口。服务端现已对 REST/静态资源启用 gzip/brotli，SSE 不压缩以避免逐帧缓冲。
+`mink-server` 自身不提供登录、Token 或 TLS，默认只监听 loopback 地址 `127.0.0.1`。会话工具可以执行 Bash/Python 并读写 server 文件系统。需要从其他机器访问时，显式设置 `MINK_SERVER_HOST` 或 `--host`，并放在带 TLS 与身份认证的反向代理之后，或限制在受信内网；部署侧负责限制访问源。REST 与 SSE 走同一入口。服务端现已对 REST/静态资源启用 gzip/brotli，SSE 不压缩以避免逐帧缓冲。
 
 ### 进程级沙箱
 

@@ -33,7 +33,7 @@ class RuntimeBenchTests(unittest.TestCase):
     def test_case_catalogue_and_invalid_arguments(self):
         listed = self.run_bench('--list')
         self.assertEqual(listed.returncode, 0, listed.stderr)
-        self.assertEqual(len(listed.stdout.splitlines()), 28)
+        self.assertEqual(len(listed.stdout.splitlines()), 31)
         for args, diagnostic in [(['--reps', '0'], '--reps must be greater than zero'),
                                  (['--case', 'missing-case'], 'no case matched')]:
             result = self.run_bench(*args)
@@ -42,7 +42,8 @@ class RuntimeBenchTests(unittest.TestCase):
 
     def test_mock_workloads_complete(self):
         cases = ['process_start', 'runtime_start', 'mock_turn_1_tool', 'sse_1k',
-                 'replay_1k', 'compact_10', 'subagent_fanout_2']
+                 'replay_1k', 'compact_10', 'goal_history_0', 'goal_history_10',
+                 'subagent_fanout_2']
         # process_start also selects process_start_cli by prefix; force an explicit skip.
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory) / 'report.json'
@@ -57,6 +58,9 @@ class RuntimeBenchTests(unittest.TestCase):
             fanout = next(sample for sample in data['samples'] if sample['case'] == 'subagent_fanout_2')
             self.assertEqual(fanout['extra']['subagent_requests'], 2)
             self.assertEqual(fanout['extra']['tool_errors'], 0)
+            goal_history = next(sample for sample in data['samples']
+                                if sample['case'] == 'goal_history_10')
+            self.assertEqual(goal_history['extra']['archived_goals_before_measurement'], 10)
 
     def test_failed_case_retains_report_and_exits_unsuccessfully(self):
         with tempfile.TemporaryDirectory() as directory:

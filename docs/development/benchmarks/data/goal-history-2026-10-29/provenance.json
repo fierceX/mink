@@ -1,0 +1,27 @@
+{
+  "source_directory": "target/bench",
+  "recorded_commit": "b9c646d+dirty",
+  "captured_at_utc": "2026-10-29T03:52:11Z",
+  "note": "Dirty workspace benchmark; each latency sample used a fresh runtime session. Only the absolute report path in the text log was redacted.",
+  "files": [
+    {
+      "file": "runtime-b9c646d+dirty-20261029T035211Z.json",
+      "original_sha256": "84a8377b318c2f88dbd30b8d6dd8a1fd9a0d3a8c37c2da625cfccf030dd7fce1",
+      "archived_sha256": "84a8377b318c2f88dbd30b8d6dd8a1fd9a0d3a8c37c2da625cfccf030dd7fce1",
+      "redactions": []
+    },
+    {
+      "file": "runtime-b9c646d+dirty-20261029T035211Z.txt",
+      "original_sha256": "ec99a2738b9751f5202247930811688afdd80fb7cb5ed01336be7fb82904a4f1",
+      "archived_sha256": "198640b441bcab2a8223593e1cc385e23b86ad56e06b11f1030b58813b452c23",
+      "redactions": [
+        "absolute repository path replaced with <repo>"
+      ]
+    }
+  ],
+  "source_sha256": {
+    "crates/mink-core/benches/runtime_bench.rs": "6bb748e44f6698d88ae80b754c33085b5d643bafcbcb5b76de6ca5d2ef00ff30",
+    "scripts/bench-runtime.sh": "9a901ebea1a595ffb53e65257c0a86b51280535027f936dadedf4b332c607a05",
+    "scripts/test_runtime_bench.py": "f4674e38a60e089ac0e140959e3739d181b88f128b8244098ce7b6914feeea31"
+  }
+}

@@ -1,7 +1,7 @@
-.PHONY: build check test clippy feature-matrix bench bench-quick regression-mock regression-client regression-api regression-all coverage coverage-core coverage-with-ignored clean \
+.PHONY: build check test clippy feature-matrix test-surface-exhaustive bench bench-quick regression-mock regression-client regression-api regression-all coverage coverage-core coverage-with-ignored clean \
         pip-build pip-wheel pip-install pip-publish pip-clean
 
-CORE_COVERAGE_IGNORE := (main\.rs|tui/|ui/|tools/(web|search|runner|bash|file)\.rs|llm/(client|transport)\.rs|sse/toolcall\.rs|session/compaction\.rs|config\.rs|prompt\.rs|assets\.rs|context\.rs|errors\.rs|events\.rs|session/(paths|init)\.rs|regression\.rs|agent/(orchestrator|prefix|compactor|sub_coordinator|sub_executor)\.rs|.*_tests\.rs)
+CORE_COVERAGE_IGNORE := (main\.rs|tui/|ui/|tools/(web|search|runner|bash)\.rs|tools/file(\.rs|/.*)|llm/(client|transport)\.rs|sse/toolcall\.rs|session/compaction(\.rs|/.*)|config\.rs|prompt\.rs|assets\.rs|context\.rs|errors\.rs|events\.rs|session/(paths|init)\.rs|regression\.rs|agent/(orchestrator|prefix|compactor|sub_coordinator|sub_executor)\.rs|.*_tests\.rs)
 
 build:
 	cargo build --release
@@ -36,6 +36,11 @@ feature-matrix:
 		exit 1; \
 	fi
 
+# Explicit slow lane. CI may split the exhaustive mask space with
+# MINK_SURFACE_SHARD=INDEX/COUNT while the local target checks it in one run.
+test-surface-exhaustive:
+	cargo test -p mink-core --all-features every_compiled_surface_preserves_combination_invariants_exhaustively -- --ignored
+
 regression-mock:
 	cargo test regression:: -- --nocapture
 
@@ -49,6 +54,7 @@ regression-api:
 
 regression-all: regression-mock regression-client test clippy
 
+# Full workspace coverage: all targets/features with no source exclusions.
 coverage:
 	@if command -v cargo-llvm-cov >/dev/null 2>&1; then \
 		cargo llvm-cov --all-targets --all-features; \
@@ -57,6 +63,8 @@ coverage:
 		exit 1; \
 	fi
 
+# Focused 90% gate for the maintained subset below; this is not a whole-core
+# coverage claim. Use `make coverage` to include orchestration, tools and IO.
 coverage-core:
 	@if command -v cargo-llvm-cov >/dev/null 2>&1; then \
 		cargo llvm-cov --all-targets --all-features --ignore-filename-regex '$(CORE_COVERAGE_IGNORE)' --fail-under-lines 90; \
