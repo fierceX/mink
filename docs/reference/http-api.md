@@ -14,6 +14,8 @@ Core 的新增 `AgentEventKind::ConversationCommitted {conversation_seq,message}
 
 附件 POST 发送原始图片字节，返回内容寻址描述 `{id,mime,width,height,bytes}`，GET `/attachments/{id}` 只预览本 session 的传输文件；上传不会生成模型图片块。`/conversation?turns=true` 可按真实非 internal、非 guidance 用户轮次分页，保留完整工具交换；旧行分页参数与默认行为保持兼容。
 
+plan/todo/goal/artifacts 的读取区分“不存在”与“存在但不可读”：只有 `NotFound` 返回缺失表示（`null` 或空集合，artifact 正文为 404）；权限拒绝、无效 UTF-8、把目录当文件、读取中断等返回 500 并在 `message` 中命名资源，不降级为空状态。artifact 超过 1 MiB 仍为 413；`artifacts/index.jsonl` 的既有逐行容错不变（坏行跳过，整份不可读才是错误）。前端读取失败时保留已展示的可信状态并给出错误。
+
 ## 概述
 
 `mink-server` 延续 Mink 的轻量定位：单二进制、低运行时依赖，把同一个 runtime 暴露为 Web 服务——与 CLI/TUI/Python SDK 共享内核，多端行为一致：

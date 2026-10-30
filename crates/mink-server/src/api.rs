@@ -989,8 +989,14 @@ async fn get_plan(
         Ok(dir) => dir,
         Err(response) => return response,
     };
-    let plan = read_optional(&dir.join("plan.md")).await;
-    let draft = read_optional(&dir.join("plan.draft")).await;
+    let plan = match resource_text(&dir, "plan.md").await {
+        Ok(plan) => plan,
+        Err(response) => return response,
+    };
+    let draft = match resource_text(&dir, "plan.draft").await {
+        Ok(draft) => draft,
+        Err(response) => return response,
+    };
     ApiResponse::ok(json!({ "plan": plan, "draft": draft }))
 }
 
@@ -1003,7 +1009,10 @@ async fn get_todo(
         Ok(dir) => dir,
         Err(response) => return response,
     };
-    let todo = read_optional(&dir.join("todos.json")).await;
+    let todo = match resource_text(&dir, "todos.json").await {
+        Ok(todo) => todo,
+        Err(response) => return response,
+    };
     match todo {
         Some(text) => match serde_json::from_str::<serde_json::Value>(&text) {
             Ok(v) => ApiResponse::ok(json!({ "todos": v })),
@@ -1042,10 +1051,14 @@ async fn get_goal(
         Ok(dir) => dir,
         Err(response) => return response,
     };
-    let Some(text) = read_optional(&dir.join("goal.json")).await else {
-        return ApiResponse::ok(
-            json!({ "goal": serde_json::Value::Null, "driven": false, "verifier": state.registry.verifier_configured() }),
-        );
+    let text = match resource_text(&dir, "goal.json").await {
+        Ok(Some(text)) => text,
+        Ok(None) => {
+            return ApiResponse::ok(
+                json!({ "goal": serde_json::Value::Null, "driven": false, "verifier": state.registry.verifier_configured() }),
+            );
+        }
+        Err(response) => return response,
     };
     match serde_json::from_str::<serde_json::Value>(&text) {
         Ok(value) => {
@@ -1462,7 +1475,10 @@ async fn list_artifacts(
         Err(response) => return response,
     };
     let artifacts_dir = dir.join("artifacts");
-    let index = read_optional(&artifacts_dir.join("index.jsonl")).await;
+    let index = match resource_text(&artifacts_dir, "index.jsonl").await {
+        Ok(index) => index,
+        Err(response) => return response,
+    };
     let mut records = Vec::new();
     if let Some(index) = index {
         for line in index.lines() {
@@ -1509,11 +1525,20 @@ async fn get_artifact(
                 ),
             );
         }
-        _ => {}
+        Ok(_) => {}
+        // A missing artifact is the only "absent" answer; anything else (a
+        // permission refusal, an unreadable directory entry) is a real failure.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ApiResponse::err(404, format!("artifact {name} not found"));
+        }
+        Err(error) => {
+            return ApiResponse::err(500, format!("failed to inspect artifact {name}: {error}"));
+        }
     }
     match read_optional(&path).await {
-        Some(text) => ApiResponse::ok(json!({ "name": filename, "content": text })),
-        None => ApiResponse::err(404, format!("artifact {name} not found")),
+        Ok(Some(text)) => ApiResponse::ok(json!({ "name": filename, "content": text })),
+        Ok(None) => ApiResponse::err(404, format!("artifact {name} not found")),
+        Err(error) => ApiResponse::err(500, format!("failed to read artifact {name}: {error}")),
     }
 }
 
@@ -1594,8 +1619,28 @@ async fn get_files(
     }
 }
 
-async fn read_optional(path: &std::path::Path) -> Option<String> {
-    tokio::fs::read_to_string(path).await.ok()
+/// Read an optional resource file.
+///
+/// Only `NotFound` means "absent". Every other failure — permission denied,
+/// invalid UTF-8, a directory where a file belongs, an interrupted read — is
+/// returned so the caller can report a real error instead of an empty state.
+async fn read_optional(path: &std::path::Path) -> std::io::Result<Option<String>> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Read one authoritative resource file, naming it when the read fails.
+async fn resource_text(dir: &std::path::Path, name: &str) -> Result<Option<String>, ApiResponse> {
+    match read_optional(&dir.join(name)).await {
+        Ok(text) => Ok(text),
+        Err(error) => Err(ApiResponse::err(
+            500,
+            format!("failed to read {name}: {error}"),
+        )),
+    }
 }
 
 /// Join `rel` onto `root`, refusing any path that escapes `root`.
@@ -2063,6 +2108,27 @@ mod tests {
         let status = response.status();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// Like [`post_json`], but the body is sent verbatim so a test can exercise
+    /// values the JSON value type cannot express (overflow) and assert a body
+    /// that is not an API envelope (decoder rejection).
+    async fn post_raw(app: &Router, uri: &str, body: &str) -> (StatusCode, String) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
     /// One router over a fresh home, for tests that create real sessions.
@@ -3225,6 +3291,118 @@ mod tests {
         let (s, body) = req(&app, Method::GET, "/api/sessions/test-session/plan").await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(body["data"]["plan"], serde_json::Value::Null);
+    }
+
+    /// A resource file that exists but cannot be read is an error, not an empty
+    /// state: the workbench must be able to tell "nothing here" from
+    /// "unreadable", or a broken session looks like an empty one.
+    #[tokio::test]
+    async fn unreadable_resources_are_not_reported_as_absent() {
+        let (app, dir) = test_router_with_session_dir();
+        let uri = |suffix: &str| format!("/api/sessions/test-session{suffix}");
+
+        // Missing files keep their existing absent representation.
+        let (status, body) = req(&app, Method::GET, &uri("/plan")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["data"]["plan"].is_null(), "{body}");
+        assert!(body["data"]["draft"].is_null(), "{body}");
+        let (status, body) = req(&app, Method::GET, &uri("/todo")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["data"]["todos"].is_null(), "{body}");
+        let (status, body) = req(&app, Method::GET, &uri("/goal")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["data"]["goal"].is_null(), "{body}");
+        let (status, body) = req(&app, Method::GET, &uri("/artifacts")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["artifacts"], serde_json::json!([]), "{body}");
+
+        // A permission refusal is a read failure. A privileged test runner can
+        // still read the file, so the assertion is skipped there instead of
+        // passing on a false premise.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let draft = dir.join("plan.draft");
+            std::fs::write(&draft, "draft body").unwrap();
+            std::fs::set_permissions(&draft, std::fs::Permissions::from_mode(0o000)).unwrap();
+            if std::fs::read_to_string(&draft).is_err() {
+                let (status, body) = req(&app, Method::GET, &uri("/plan")).await;
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+                assert!(
+                    body["message"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("plan.draft"),
+                    "the refusal must name the resource: {body}"
+                );
+            } else {
+                eprintln!("skipping permission assertion: the test runner can read mode 000");
+            }
+            std::fs::set_permissions(&draft, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::remove_file(&draft).unwrap();
+        }
+
+        // A directory where a file belongs is an I/O error, not "no plan".
+        std::fs::create_dir_all(dir.join("plan.md")).unwrap();
+        let (status, body) = req(&app, Method::GET, &uri("/plan")).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert!(
+            body["message"].as_str().unwrap_or("").contains("plan.md"),
+            "{body}"
+        );
+
+        // Invalid UTF-8 is a read/decoding failure, not an empty resource.
+        std::fs::write(dir.join("todos.json"), [0xff, 0xfe, 0xfd]).unwrap();
+        let (status, body) = req(&app, Method::GET, &uri("/todo")).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("todos.json"),
+            "{body}"
+        );
+        std::fs::write(dir.join("goal.json"), [0xff]).unwrap();
+        let (status, body) = req(&app, Method::GET, &uri("/goal")).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert!(
+            body["message"].as_str().unwrap_or("").contains("goal.json"),
+            "{body}"
+        );
+
+        // A missing artifact stays 404; an unreadable one does not.
+        let (status, body) = req(&app, Method::GET, &uri("/artifacts/nope")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        std::fs::create_dir_all(dir.join("artifacts/broken.txt")).unwrap();
+        let (status, body) = req(&app, Method::GET, &uri("/artifacts/broken")).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert!(
+            body["message"].as_str().unwrap_or("").contains("broken"),
+            "{body}"
+        );
+        // The read ceiling is unchanged for a readable but oversized artifact.
+        std::fs::write(
+            dir.join("artifacts/big.txt"),
+            vec![b'x'; FILE_RAW_MAX_BYTES as usize + 1],
+        )
+        .unwrap();
+        let (status, body) = req(&app, Method::GET, &uri("/artifacts/big")).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+
+        // A corrupted artifact index is still tolerated line by line (the
+        // documented index format), but an unreadable index is an error.
+        std::fs::write(
+            dir.join("artifacts/index.jsonl"),
+            "{\"id\":\"abc\"}\nnot-json\n",
+        )
+        .unwrap();
+        let (status, body) = req(&app, Method::GET, &uri("/artifacts")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["data"]["artifacts"].as_array().unwrap().len(),
+            1,
+            "{body}"
+        );
     }
 
     #[tokio::test]
