@@ -18,6 +18,7 @@ import type { SessionConnection } from '../../data/useSessionView.ts'
 import { PendingInputs } from './PendingInputs.tsx'
 import { useAttachments } from './useAttachments.ts'
 import { Composer } from './Composer.tsx'
+import type { ComposerOperationState } from './Composer.tsx'
 import { MinkMark } from '../brand/MinkMark.tsx'
 import { IconChevronDownOutlineRegular, IconSettingsOutlineRegular } from '../../ui/primitives/index.ts'
 import { Transcript } from './Transcript.tsx'
@@ -295,13 +296,27 @@ export function Conversation({
   useEffect(() => {
     if (composerFocused && !withinComposer(document.activeElement)) setComposerFocused(false)
   })
+  // Composer-local operations (a command in flight, a refused command or send)
+  // pin the chrome too. The composer reports state, not display text, so a
+  // successful notice never locks the reading mode.
+  const [composerOperation, setComposerOperation] = useState<ComposerOperationState>({
+    pending: false,
+    failed: false,
+  })
+  const onComposerOperation = useCallback((operation: ComposerOperationState) => {
+    setComposerOperation(current => (
+      current.pending === operation.pending && current.failed === operation.failed
+        ? current
+        : operation
+    ))
+  }, [])
   const chromePinned = readingChromePinned({
     composerFocused,
     attachmentCount: attachments.entries.length,
     running,
     awaitingInputs: awaitingReceipts.length,
-    submissionPending: pendingDraft !== undefined,
-    hasError: error !== undefined,
+    submissionPending: pendingDraft !== undefined || composerOperation.pending,
+    hasError: error !== undefined || composerOperation.failed,
     // A first open is not a recovery: only an outage (or its brief recovered
     // confirmation) keeps the chrome on screen.
     connectionNotice: recovered
@@ -481,6 +496,7 @@ export function Conversation({
                       initialDraft={draft !== '' ? draft : (pendingDraft ?? '')}
                       onDraftChange={onDraftChange}
                       onStop={onStop}
+                      onOperationStateChange={onComposerOperation}
                     />
                   </div>
                 </div>
@@ -583,6 +599,7 @@ export function Conversation({
               modelError={modelError}
               onModelChange={onModelChange}
               onStop={onStop}
+              onOperationStateChange={onComposerOperation}
             />
             <StatsPills state={state} />
           </div>

@@ -134,7 +134,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - Web 工具卡片按实际参数与 ToolPresentation 展示，Replace/Hashline 均须支持；JSON 参数保留手动核对入口，正文不通用解码为参数，旧未知状态不得渲染为成功，Artifact 入口不得丢失。
 - Web 轮次选择须为限高纵向列表，标题不得撑宽弹层；支持菜单内滚动、方向键/Home/End、选择关闭与焦点恢复。
 - Web 正文/过程组须限制在可用列宽；自动换行只改展示并保存偏好，不改复制/发送/文件/工具结果的原始字节；关闭换行后的横向滚动只属于内部内容块。
-- 手机操作栏只由外层明确手势（用户滚动或轻点正文）隐藏，内层/布局/流式滚动不得触发；运行中的轮次、输入焦点（含输入卡内菜单与附件控件）、草稿附件、待处理或失败回执、在途提交、打开失败与连接中断/恢复提示一律阻止隐藏（单一派生判据，解除锁定不自动隐藏），隐藏只改展示、保留恢复入口、草稿与阅读锚点，不调用 close/interrupt。
+- 手机操作栏只由外层明确手势（用户滚动或轻点正文）隐藏，内层/布局/流式滚动不得触发；运行中的轮次、输入焦点（含输入卡内菜单与附件控件）、草稿附件、待处理或失败回执、在途提交或在途命令、打开/发送/命令失败与连接中断/恢复提示一律阻止隐藏（单一派生判据，状态由 Composer 汇报而非解析提示文本；成功提示不锁定），解除锁定不自动隐藏，隐藏只改展示、保留恢复入口、草稿与阅读锚点，不调用 close/interrupt。
 - Web 会话扫描与查找共用子代理过滤：目录名或 metadata.id 为 sub_/replan_ 前缀、或 metadata.parent 存在时排除；不能因缺失、损坏或继承 metadata 将旧子代理展示为用户会话。
 - CLI/TUI/Web 共用 core AttachmentStore：上传仅保存 session attachments 原始字节与绝对路径，图片上下文唯一入口仍为 Read。会话限定预览不得扩大工作目录文件访问范围。
 - Full/Inline TUI 任务与运行中 Enter 引导均走 stream_input，准入不排到下一轮；仅正式 ConversationCommitted 才回显引导，Final 才结束轮次。尚未应用输入由 Inbox 保留，/resume ID 明确续发，/withdraw ID 按 revision 撤回；拒绝提交保留草稿及图片，不封口当前流。

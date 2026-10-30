@@ -587,6 +587,67 @@ test('keeps the chrome while a drafted image waits for the next message', async 
   await expect(header).toBeHidden()
 })
 
+test('keeps the mobile chrome while a refused command needs attention', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(`/?session=${E2E_LONG_ID}`)
+  await expect(page.locator('[class*="flowItem"]').first()).toBeVisible()
+  await waitForSettledChrome(page)
+  await page.route('**/api/sessions/*/compact?*', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ code: 400, message: 'review command refused', data: null }),
+  }))
+  const composer = page.getByLabel('输入消息')
+  await composer.fill('/compact')
+  await composer.press('Enter')
+  await expect(page.locator('[data-composer-error]')).toContainText('review command refused')
+  await composer.press('Escape')
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+  await page.locator('[class*="flowItem"]').last().click()
+  // A command failure is operation state, not decoration: the chrome stays.
+  await expect(page.locator('header').first()).toBeVisible()
+
+  // Editing the draft dismisses the failure; the next deliberate gesture owns
+  // the chrome again.
+  await composer.fill('改过的草稿')
+  await expect(page.locator('[data-composer-error]')).toHaveCount(0)
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+  await page.locator('[class*="flowItem"]').last().click()
+  await expect(page.locator('header').first()).toBeHidden()
+})
+
+test('keeps the mobile chrome while a command is in flight and releases it afterwards', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(`/?session=${E2E_LONG_ID}`)
+  await expect(page.locator('[class*="flowItem"]').first()).toBeVisible()
+  await waitForSettledChrome(page)
+
+  let releaseReceipt!: () => void
+  const held = new Promise<void>((resolve) => { releaseReceipt = resolve })
+  let receiptArrived!: () => void
+  const arrived = new Promise<void>((resolve) => { receiptArrived = resolve })
+  await page.route('**/api/sessions/*/compact?*', async (route) => {
+    const response = await route.fetch()
+    receiptArrived()
+    await held
+    await route.fulfill({ response })
+  })
+  const composer = page.getByLabel('输入消息')
+  await composer.fill('/compact')
+  await composer.press('Enter')
+  await arrived
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+  await page.locator('[class*="flowItem"]').last().click()
+  await expect(page.locator('header').first()).toBeVisible()
+
+  releaseReceipt()
+  await expect(page.locator('[data-composer-notice]')).toBeVisible()
+  // A success notice is not a failure: the next gesture may hide the chrome.
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+  await page.locator('[class*="flowItem"]').last().click()
+  await expect(page.locator('header').first()).toBeHidden()
+})
+
 test('keeps the composer on screen while a turn runs on a narrow viewport', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   // The long fixture, not the short one: the streaming specs write to that session,

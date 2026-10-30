@@ -329,4 +329,70 @@ describe('a submission that fails', () => {
   
 })
 
+  it('reports a failed submission as operation state until the draft is edited', async () => {
+    let resolveSend!: (value: string | undefined) => void
+    const onSend = vi.fn(() => new Promise<string | undefined>((resolve) => { resolveSend = resolve }))
+    const operation = vi.fn()
+    render(
+      <Composer
+        hero
+        running={false}
+        targetTurnId={null}
+        disabled={false}
+        attachments={noAttachments()}
+        canAttach
+        model="deepseek-flash"
+        onSend={onSend}
+        onGuide={async () => undefined}
+        onCommand={async () => ({ ok: true, message: '' })}
+        onOperationStateChange={operation}
+        onStop={() => {}}
+      />,
+    )
+    const field = screen.getByLabelText('输入消息') as HTMLTextAreaElement
+    fireEvent.change(field, { target: { value: '发送失败场景' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => { expect(operation).toHaveBeenLastCalledWith({ pending: true, failed: false }) })
+
+    resolveSend('提交失败：场景拒绝')
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toContain('提交失败')
+      expect(operation).toHaveBeenLastCalledWith({ pending: false, failed: true })
+    })
+
+    // Editing dismisses the failure, so the next reading gesture may hide the chrome.
+    fireEvent.change(field, { target: { value: '改过的草稿' } })
+    await waitFor(() => {
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(operation).toHaveBeenLastCalledWith({ pending: false, failed: false })
+    })
+  })
+
+  it('shows a successful command as a notice, never as a failure', async () => {
+    const operation = vi.fn()
+    render(
+      <Composer
+        hero
+        running={false}
+        targetTurnId={null}
+        disabled={false}
+        attachments={noAttachments()}
+        canAttach
+        model="deepseek-flash"
+        onSend={async () => undefined}
+        onGuide={async () => undefined}
+        onCommand={async () => ({ ok: true, message: '已打开计划' })}
+        onOperationStateChange={operation}
+        onStop={() => {}}
+      />,
+    )
+    const field = screen.getByLabelText('输入消息')
+    fireEvent.change(field, { target: { value: '/plan' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+    await waitFor(() => {
+      expect(document.querySelector('[data-composer-notice]')?.textContent).toBe('已打开计划')
+    })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(operation).toHaveBeenLastCalledWith({ pending: false, failed: false })
+  })
 })

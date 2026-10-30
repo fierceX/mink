@@ -97,7 +97,17 @@ export interface ComposerProps {
   commandsEnabled?: boolean | undefined
   /** The model seat belongs to a session's runtime. */
   showModelSeat?: boolean | undefined
+  /** Report whether the composer itself is mid-operation or showing a failure. */
+  onOperationStateChange?: ((state: ComposerOperationState) => void) | undefined
   onStop: () => void
+}
+
+/** Operation state the owner needs for read-mode pins (never display text). */
+export interface ComposerOperationState {
+  /** A command or submission is in flight. */
+  pending: boolean
+  /** The current error line is a failure, not a success notice. */
+  failed: boolean
 }
 
 /**
@@ -108,14 +118,17 @@ export interface ComposerProps {
 export function Composer({
   hero, running, targetTurnId, disabled, pending, attachments, canAttach, model,
   modelChoices, modelLoading, modelError, onModelChange, initialDraft, onDraftChange, onSend, onGuide, onCommand, onStop,
-  commandsEnabled = true, showModelSeat = true,
+  commandsEnabled = true, showModelSeat = true, onOperationStateChange,
 }: ComposerProps) {
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   // The owner keys this composer by session identity, so the initial draft is
   // this session's own; every write is reported so it survives a switch.
   const [text, setText] = useState(initialDraft ?? '')
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | undefined>(undefined)
+  // A failure and a success notice are different states: only the failure pins
+  // the reading chrome, and only until the reader edits or retries.
+  const [failure, setFailure] = useState<string | undefined>(undefined)
+  const [notice, setNotice] = useState<string | undefined>(undefined)
   // Draft revision: every write bumps it, so a late failure only restores text
   // the reader has not replaced in the meantime.
   const revision = useRef(0)
@@ -125,8 +138,16 @@ export function Composer({
   const write = useCallback((value: string) => {
     revision.current += 1
     setText(value)
+    setFailure(undefined)
+    setNotice(undefined)
     onDraftChange?.(value)
   }, [onDraftChange])
+
+  // The owner derives reading-chrome pins from the operation, not from the
+  // text of a message: success notices must not lock the chrome forever.
+  useEffect(() => {
+    onOperationStateChange?.({ pending: busy, failed: failure !== undefined })
+  }, [busy, failure, onOperationStateChange])
 
   // The add control opens the copied popupSelect shell: one surface for the whole
   // command contract, with its own search, highlight and single-flight pick.
@@ -151,18 +172,19 @@ export function Composer({
   const runCommand = useCallback((line: string) => {
     const payload = line.trim()
     if (payload === '' || busy) return
-    setError(undefined)
+    setFailure(undefined)
+    setNotice(undefined)
     setBusy(true)
     const submittedAt = revision.current
     write('')
     void onCommand(payload).then((result) => {
       if (!result.ok) {
         // A refused command keeps the draft so the reader can fix it in place.
-        setError(result.message)
         if (revision.current === submittedAt + 1) write(payload)
+        setFailure(result.message)
         return
       }
-      setError(result.message)
+      setNotice(result.message)
     }).finally(() => {
       setBusy(false)
     })
@@ -180,11 +202,12 @@ export function Composer({
     const submittedKeys = attachments.entries.map(entry => entry.key)
     if ((payload === '' && attachments.entries.length === 0) || disabled || busy || attachments.blocked) return
     if (running && targetTurnId === null) {
-      setError('当前会话尚未取得引导能力，请等待同步')
+      setFailure('当前会话尚未取得引导能力，请等待同步')
       return
     }
     const submittedAt = revision.current
-    setError(undefined)
+    setFailure(undefined)
+    setNotice(undefined)
     setBusy(true)
     write('')
     const call = running && targetTurnId !== null
@@ -193,14 +216,14 @@ export function Composer({
     void call.then((failure) => {
       if (failure === undefined) return
       // Restore only a draft nobody has replaced since the submission.
-      setError(failure)
       if (revision.current === submittedAt + 1) write(payload)
+      setFailure(failure)
     }).catch((cause: unknown) => {
       // A rejected submission (the request never reached the runtime, or its
       // answer was unreadable) is the same situation for the reader: the words
       // come back with a reason instead of a silently emptied box.
-      setError(cause instanceof Error ? cause.message : String(cause))
       if (revision.current === submittedAt + 1) write(payload)
+      setFailure(cause instanceof Error ? cause.message : String(cause))
     }).finally(() => {
       setBusy(false)
     })
@@ -222,8 +245,11 @@ export function Composer({
       {/* A submission that was refused (or never reached the runtime) says so here,
           above the card: on a phone the trailing status line is out of the
           reader's sight, and an emptied box with no reason reads as a dead UI. */}
-      {error !== undefined && (
-        <p className={css.submitError} role="alert" data-composer-error="">{error}</p>
+      {failure !== undefined && (
+        <p className={css.submitError} role="alert" data-composer-error="">{failure}</p>
+      )}
+      {notice !== undefined && notice !== '' && (
+        <p className={css.notice} role="status" data-composer-notice="">{notice}</p>
       )}
       <div className={css.card} data-mink-composer data-composer-card>
         {/* The copied shell renders its own card above the composer while open. */}
