@@ -41,6 +41,9 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 _CAPTURE_LIMIT_BYTES = 1_000_000
+# Terminal task statuses defined by the Agent JSONL protocol. Only a valid
+# ``final`` event carrying one of these values describes the task outcome.
+_FINAL_STATUSES = frozenset({"ok", "failed", "interrupted", "max_turns_exceeded"})
 # ── Exceptions ───────────────────────────────────────────────────────
 
 class AgentError(RuntimeError):
@@ -636,6 +639,7 @@ class AgentSession:
             final_event: Optional[dict[str, Any]] = None
             timed_out = False
             post_final_exit_timeout = False
+            unparsable_stdout_lines = 0
             deadline = time.monotonic() + max(1, int(self._config.timeout_secs))
 
             while True:
@@ -660,6 +664,10 @@ class AgentSession:
                     try:
                         event = json.loads(line)
                     except json.JSONDecodeError:
+                        unparsable_stdout_lines += 1
+                        continue
+                    if not isinstance(event, dict):
+                        unparsable_stdout_lines += 1
                         continue
 
                     if event.get("type") == "final":
@@ -689,17 +697,39 @@ class AgentSession:
                 )
 
             if final_event is None:
-                error_text = None
+                # No protocol terminal event: the task outcome is unknown, so
+                # the process status alone can only describe a failure.
                 if timed_out:
                     error_text = f"agent timed out after {self._config.timeout_secs} seconds"
-                elif proc.returncode != 0:
+                elif proc.returncode:
                     error_text = f"agent exited with code {proc.returncode}"
+                elif unparsable_stdout_lines:
+                    error_text = (
+                        "agent produced no valid final event "
+                        f"({unparsable_stdout_lines} unparsable stdout line(s))"
+                    )
+                else:
+                    error_text = "agent produced no final event"
                 final_event = {
                     "type": "final",
                     "version": 3,
-                    "status": "failed" if proc.returncode else "ok",
+                    "status": "failed",
                     "error": error_text,
                 }
+            else:
+                status = final_event.get("status")
+                if not isinstance(status, str) or status not in _FINAL_STATUSES:
+                    final_event["error"] = final_event.get("error") or (
+                        f"invalid final event: unsupported status {status!r}"
+                    )
+                    final_event["status"] = "failed"
+                elif status == "ok" and proc.returncode:
+                    # The protocol claimed success, but the process did not
+                    # exit cleanly; that is never a complete success.
+                    final_event["error"] = final_event.get("error") or (
+                        f"agent reported ok but exited with code {proc.returncode}"
+                    )
+                    final_event["status"] = "failed"
             final_event["exit_code"] = proc.returncode
             final_event["stderr"] = stderr_text
             if post_final_exit_timeout:

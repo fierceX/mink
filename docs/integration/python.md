@@ -1,6 +1,6 @@
 # Python 集成
 
-> 更新日期：2026-10-10
+> 更新日期：2026-10-29
 
 子进程调用、流式接口与磁盘会话复用。
 
@@ -108,6 +108,13 @@ Rust core 会在 `conversation.jsonl` 中完整保留历史，并通过 `context
 | `exit_code` | `int` | 进程退出码（0 表示成功） |
 | `error` | `str or None` | 错误信息（如有） |
 | `stderr` | `str` | 进程原始错误输出（调试用） |
+
+**终态判定**：`status` 只来自合法的 `final` 事件，`final.status` 必须是
+`ok` / `failed` / `interrupted` / `max_turns_exceeded` 之一；未知扩展字段原样保留。
+stdout 结束前没有 `final`、`final` 缺少或使用非法 `status`、`status` 为 `ok` 但进程
+非零退出，都返回 `status="failed"` 并在 `error` 中给出受限诊断（缺 `final`、无法解析的
+stdout 行数、退出码等）。此时已收到的事件内容（`text` / `thinking` / 工具事件）仍然保留，
+但不再表示任务成功。合法 `failed` / `interrupted` 不会被退出码 0 升级为成功。
 
 ### `stream(prompt, *, extra_options=None) -> Iterator[dict]`
 

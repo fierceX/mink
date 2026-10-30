@@ -37,6 +37,7 @@ jobs:
           python3 -m unittest discover -s scripts -p 'test_release.py'
           python3 -m unittest discover -s scripts -p 'test_doc_tool_inputs.py'
           python3 -m unittest discover -s scripts -p 'test_sdk_defaults.py'
+          python3 -m unittest discover -s scripts -p 'test_sdk_protocol.py'
       - name: Homepage interaction regressions
         run: |
           node scripts/test-homepage.mjs
