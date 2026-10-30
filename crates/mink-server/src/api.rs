@@ -1252,8 +1252,46 @@ struct GoalActionBody {
     max_turns: Option<u32>,
     #[serde(default)]
     max_minutes: Option<u64>,
-    #[serde(default)]
-    soft_token_limit: Option<u64>,
+    /// Three-state budget patch: absent keeps the current limit, a number sets
+    /// it, an explicit `null` clears it. `Option<u64>` alone cannot express the
+    /// difference — serde maps both a missing field and `null` to `None`.
+    #[serde(default, deserialize_with = "deserialize_nullable_u64")]
+    soft_token_limit: Option<Option<u64>>,
+}
+
+/// Deserialize an absent/`null`/number field into the three-state patch above.
+fn deserialize_nullable_u64<'de, D>(deserializer: D) -> Result<Option<Option<u64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct NullableU64;
+
+    impl<'de> serde::de::Visitor<'de> for NullableU64 {
+        type Value = Option<Option<u64>>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("null or a non-negative integer")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E> {
+            Ok(Some(None))
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(Some(None))
+        }
+
+        fn visit_some<D2>(self, value: D2) -> Result<Self::Value, D2::Error>
+        where
+            D2: serde::Deserializer<'de>,
+        {
+            serde::Deserialize::deserialize(value).map(|limit| Some(Some(limit)))
+        }
+    }
+
+    // The outer `Option` is the field's own absence, handled by `default`; this
+    // visitor is only reached when the field is present.
+    deserializer.deserialize_option(NullableU64)
 }
 
 fn now_unix() -> u64 {
@@ -1399,8 +1437,8 @@ async fn goal_action(
             if let Some(minutes) = body.max_minutes {
                 limits.deadline_unix_secs = now_unix().saturating_add(minutes.saturating_mul(60));
             }
-            if body.soft_token_limit.is_some() {
-                limits.soft_token_limit = body.soft_token_limit;
+            if let Some(limit) = body.soft_token_limit {
+                limits.soft_token_limit = limit;
             }
             handle.update_goal_limits(&current.id, revision, limits)
         }
@@ -1793,6 +1831,143 @@ mod tests {
             snapshot["data"]["snapshot"]["goal"].is_null(),
             "the snapshot must not carry a cleared goal: {snapshot}"
         );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// Budget patches distinguish an omitted `soft_token_limit` (keep the
+    /// current value) from an explicit `null` (clear it). Both must survive the
+    /// HTTP layer unchanged, while invalid values and stale revisions leave the
+    /// authoritative snapshot alone.
+    #[tokio::test]
+    async fn goal_budget_patches_soft_token_limit_as_missing_set_or_null() {
+        let (app, home, sid) = open_goal_router().await;
+        let g = |suffix: &str| format!("/api/sessions/{sid}{suffix}");
+        let (status, body) = post_json(
+            &app,
+            &g("/goal"),
+            serde_json::json!({
+                "objective": "budget tri-state",
+                "protocol_version": 2,
+                "generate": false,
+                "max_turns": 3,
+                "max_minutes": 30
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let id = body["data"]["goal"]["id"].as_str().unwrap().to_string();
+        let mut revision = body["data"]["goal"]["revision"].as_u64().unwrap();
+
+        // A number sets the limit.
+        let (status, body) = post_json(
+            &app,
+            &g("/goal/budget"),
+            serde_json::json!({"goal_id": id, "revision": revision, "soft_token_limit": 500}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["data"]["goal"]["spec"]["limits"]["soft_token_limit"], 500,
+            "{body}"
+        );
+        revision = body["data"]["goal"]["revision"].as_u64().unwrap();
+
+        // Omitting the field leaves it in place.
+        let (status, body) = post_json(
+            &app,
+            &g("/goal/budget"),
+            serde_json::json!({"goal_id": id, "revision": revision, "max_turns": 4}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["data"]["goal"]["spec"]["limits"]["soft_token_limit"], 500,
+            "{body}"
+        );
+        revision = body["data"]["goal"]["revision"].as_u64().unwrap();
+
+        // An explicit null clears it.
+        let (status, body) = post_json(
+            &app,
+            &g("/goal/budget"),
+            serde_json::json!({"goal_id": id, "revision": revision, "soft_token_limit": null}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body["data"]["goal"]["spec"]["limits"]["soft_token_limit"].is_null(),
+            "null must clear the limit: {body}"
+        );
+        revision = body["data"]["goal"]["revision"].as_u64().unwrap();
+
+        // Zero follows the core rule: it is not a valid soft limit.
+        let (status, body) = post_json(
+            &app,
+            &g("/goal/budget"),
+            serde_json::json!({"goal_id": id, "revision": revision, "soft_token_limit": 0}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+        // Negative, overflowing and wrongly typed values are refused by the
+        // body decoder before any state change.
+        for raw in [
+            format!("{{\"goal_id\":\"{id}\",\"revision\":{revision},\"soft_token_limit\":-1}}"),
+            format!(
+                "{{\"goal_id\":\"{id}\",\"revision\":{revision},\"soft_token_limit\":18446744073709551616}}"
+            ),
+            format!(
+                "{{\"goal_id\":\"{id}\",\"revision\":{revision},\"soft_token_limit\":\"500\"}}"
+            ),
+        ] {
+            let (status, text) = post_raw(&app, &g("/goal/budget"), &raw).await;
+            assert!(
+                status.is_client_error(),
+                "invalid soft_token_limit must be refused, got {status}: {text}"
+            );
+        }
+
+        // A stale revision or a replaced goal is refused without a snapshot
+        // change.
+        let (status, body) = post_json(
+            &app,
+            &g("/goal/budget"),
+            serde_json::json!({"goal_id": id, "revision": revision - 1, "soft_token_limit": 700}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        let (status, body) = post_json(
+            &app,
+            &g("/goal/budget"),
+            serde_json::json!({"goal_id": "other-goal", "revision": revision, "soft_token_limit": 700}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        let (status, body) = req(&app, Method::GET, &g("/goal")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["goal"]["revision"], revision, "{body}");
+        assert!(
+            body["data"]["goal"]["spec"]["limits"]["soft_token_limit"].is_null(),
+            "refused patches must not alter the snapshot: {body}"
+        );
+
+        // A cancelled goal cannot be re-budgeted.
+        let (status, body) = post_json(
+            &app,
+            &g("/goal/cancel"),
+            serde_json::json!({"goal_id": id, "revision": revision}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let revision = body["data"]["goal"]["revision"].as_u64().unwrap();
+        let (status, body) = post_json(
+            &app,
+            &g("/goal/budget"),
+            serde_json::json!({"goal_id": id, "revision": revision, "soft_token_limit": 900}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
         let _ = std::fs::remove_dir_all(home);
     }
 

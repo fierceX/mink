@@ -18,7 +18,7 @@ Core 的新增 `AgentEventKind::ConversationCommitted {conversation_seq,message}
 
 `mink-server` 延续 Mink 的轻量定位：单二进制、低运行时依赖，把同一个 runtime 暴露为 Web 服务——与 CLI/TUI/Python SDK 共享内核，多端行为一致：
 
-- **REST API**：会话管理（列表/创建/删除/打开/关闭/中断）、conversation/plan/todo/goal/artifacts/files 读取，goal 的创建与控制，以及工作台的模型切换与手动压缩（`POST /api/sessions/{id}/model`、`POST /api/sessions/{id}/compact`）。控制请求**同时要求 `goal_id` 与 `revision`**：替换目标的 revision 从 1 重启，只有 id 能区分二者，缺 `goal_id` 返回 400、id 不匹配返回 409。`resume` 可继续 paused/blocked/budget_exhausted，也用于接起服务重启后恢复出的 active goal：先按容量账本预约许可、再 arm 驱动，由 core 携带租约启动唯一 run；被拒绝的 resume 不启动 run、不发出 provider 请求、也不释放不属于本次尝试的容量。读取响应带 `verifier` 表示该部署是否配置检查器。
+- **REST API**：会话管理（列表/创建/删除/打开/关闭/中断）、conversation/plan/todo/goal/artifacts/files 读取，goal 的创建与控制，以及工作台的模型切换与手动压缩（`POST /api/sessions/{id}/model`、`POST /api/sessions/{id}/compact`）。控制请求**同时要求 `goal_id` 与 `revision`**：替换目标的 revision 从 1 重启，只有 id 能区分二者，缺 `goal_id` 返回 400、id 不匹配返回 409。`budget` 的 `soft_token_limit` 是三态补丁：省略字段保持当前上限、JSON 数字设置、显式 `null` 清除；`0`、负数、溢出与错误类型均被拒绝且不改变快照。`resume` 可继续 paused/blocked/budget_exhausted，也用于接起服务重启后恢复出的 active goal：先按容量账本预约许可、再 arm 驱动，由 core 携带租约启动唯一 run；被拒绝的 resume 不启动 run、不发出 provider 请求、也不释放不属于本次尝试的容量。读取响应带 `verifier` 表示该部署是否配置检查器。
 - **SSE 实时流**：`/api/sessions/{id}/stream` 转发 core `AgentEvent` envelope（带 `stream_sequence` 传输序号、心跳与 gap 对账）
 - **嵌入前端**：Vue SPA 构建产物直接嵌入二进制，单文件分发
 - **共享会话布局**：与 TUI/CLI 使用同一 `~/.mink/projects` 目录，终端与浏览器无缝交接
