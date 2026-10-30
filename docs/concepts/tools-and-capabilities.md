@@ -61,8 +61,10 @@ revision 领先活跃历史，则追加一次 TodoSync；历史领先文件时 f
 因此不修改 immutable prefix，也不改写旧消息，已有请求仍是后续请求的稳定前缀。
 
 跨工具规则依赖 `ToolSemanticCapability`，不枚举工具 pair。专用 provider 按 tier、priority、
-catalog order 和名称稳定决胜；fallback 只填补未绑定能力。workflow 只使用正向事实，并在互斥
-winner 决定后提交上游 workflow fact。所有生成 section 都携带 `referenced_tools` 和
+catalog order 和名称稳定决胜；fallback 只填补未绑定能力。workflow 事实只由能力绑定一次求出，
+选择是单次判定：requirements 满足的非互斥项全部保留，每个互斥组按 priority 降序、声明顺序
+决胜后取一个，输出按声明顺序。不存在“选择过程新增事实”的固定点迭代；
+所有生成 section 都携带 `referenced_tools` 和
 `consumed_facts`，装配时校验其属于当前 surface/事实闭包。
 
 MISSION 不再支持旧 section alias。它只能覆盖 allowlist 中当前存在的 core：

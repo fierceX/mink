@@ -712,6 +712,25 @@ fn assert_surface_combination_invariants(exhaustive: bool) {
                         .map(|spec| spec.id)
                         .collect::<Vec<_>>()
                 );
+                // The single-pass selection must equal the former fixed-point
+                // loop on every surface combination: same ordered ids and, via
+                // the fingerprint, the same facts.
+                let legacy = workflows::PromptWorkflowResolver::builtin()
+                    .resolve_legacy(&capabilities)
+                    .unwrap();
+                assert_eq!(
+                    first
+                        .ordered()
+                        .iter()
+                        .map(|spec| spec.id)
+                        .collect::<Vec<_>>(),
+                    legacy
+                        .ordered()
+                        .iter()
+                        .map(|spec| spec.id)
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(first.fingerprint(), legacy.fingerprint());
             }
         }
     }

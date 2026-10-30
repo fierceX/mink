@@ -196,6 +196,86 @@ impl PromptWorkflowResolver {
     pub fn resolve(&self, tools: &ResolvedToolCapabilities) -> Result<ResolvedPromptWorkflows> {
         self.validate()?;
         let facts = facts_from_capabilities(tools);
+        let active = self.select_specs(&facts);
+        let ordered = self
+            .specs
+            .iter()
+            .filter(|spec| active.contains(spec.id))
+            .collect::<Vec<_>>();
+        let fingerprint = workflow_fingerprint(&ordered, &facts);
+        Ok(ResolvedPromptWorkflows {
+            ordered,
+            facts,
+            fingerprint,
+        })
+    }
+
+    /// Select the active specs in one pass.
+    ///
+    /// Facts are a fixed set computed from the resolved capabilities; no spec
+    /// adds facts, so a spec rejected for its requirement can never become
+    /// eligible later. An exclusive group claims at most one spec, and any spec
+    /// rejected by a claim stays rejected. One pass therefore reaches the same
+    /// fixed point the former fixed-point loop computed.
+    fn select_specs(&self, facts: &BTreeSet<PromptFact>) -> BTreeSet<&'static str> {
+        let mut active = BTreeSet::new();
+        let mut group_winners: BTreeMap<&'static str, (usize, &'static PromptWorkflowSpec)> =
+            BTreeMap::new();
+        for (index, spec) in self.specs.iter().enumerate() {
+            if !spec.requires.satisfied_by(facts) {
+                continue;
+            }
+            let Some(group) = spec.exclusive_group else {
+                active.insert(spec.id);
+                continue;
+            };
+            let candidate = (index, spec);
+            // Higher priority wins; equal priority keeps the spec declared
+            // first, which is the order the former loop's `min_by_key`
+            // produced.
+            let better = group_winners
+                .get(group)
+                .is_none_or(|(winner_index, winner)| {
+                    (spec.priority, std::cmp::Reverse(index))
+                        > (winner.priority, std::cmp::Reverse(*winner_index))
+                });
+            if better {
+                group_winners.insert(group, candidate);
+            }
+        }
+        for (_, (_, spec)) in group_winners {
+            active.insert(spec.id);
+        }
+        active
+    }
+
+    /// The fixed-point selection this resolver used to run, kept only as a
+    /// test oracle: new behaviour must match it on every compiled surface
+    /// combination.
+    #[cfg(test)]
+    pub(crate) fn resolve_legacy(
+        &self,
+        tools: &ResolvedToolCapabilities,
+    ) -> Result<ResolvedPromptWorkflows> {
+        self.validate()?;
+        let facts = facts_from_capabilities(tools);
+        let active = self.select_specs_legacy(&facts);
+        let ordered = self
+            .specs
+            .iter()
+            .filter(|spec| active.contains(spec.id))
+            .collect::<Vec<_>>();
+        let fingerprint = workflow_fingerprint(&ordered, &facts);
+        Ok(ResolvedPromptWorkflows {
+            ordered,
+            facts,
+            fingerprint,
+        })
+    }
+
+    /// The former fixed-point loop, verbatim.
+    #[cfg(test)]
+    fn select_specs_legacy(&self, facts: &BTreeSet<PromptFact>) -> BTreeSet<&'static str> {
         let mut active = BTreeSet::new();
         let mut claimed_exclusive_groups = BTreeSet::new();
         loop {
@@ -208,7 +288,7 @@ impl PromptWorkflowResolver {
                     spec.exclusive_group
                         .is_none_or(|group| !claimed_exclusive_groups.contains(group))
                 })
-                .filter(|(_, spec)| spec.requires.satisfied_by(&facts))
+                .filter(|(_, spec)| spec.requires.satisfied_by(facts))
                 .collect();
             if eligible.is_empty() {
                 break;
@@ -247,17 +327,7 @@ impl PromptWorkflowResolver {
                 break;
             }
         }
-        let ordered = self
-            .specs
-            .iter()
-            .filter(|spec| active.contains(spec.id))
-            .collect::<Vec<_>>();
-        let fingerprint = workflow_fingerprint(&ordered, &facts);
-        Ok(ResolvedPromptWorkflows {
-            ordered,
-            facts,
-            fingerprint,
-        })
+        active
     }
 
     fn validate(&self) -> Result<()> {
@@ -662,4 +732,127 @@ fn workflow_fingerprint(ordered: &[&PromptWorkflowSpec], facts: &BTreeSet<Prompt
 
 pub(super) fn workflow_section_ids() -> impl Iterator<Item = &'static str> {
     WORKFLOWS.iter().map(|spec| spec.id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FACT_A: &[PromptFact] = &[ToolCapability(ContentSearch)];
+    const FACT_B: &[PromptFact] = &[ToolCapability(PathRead)];
+
+    fn spec(
+        id: &'static str,
+        requires: WorkflowRequirement,
+        exclusive_group: Option<&'static str>,
+        priority: u16,
+    ) -> PromptWorkflowSpec {
+        PromptWorkflowSpec {
+            id,
+            requires,
+            exclusive_group,
+            priority,
+            render: render_memory_recall,
+        }
+    }
+
+    fn facts(items: &[PromptFact]) -> BTreeSet<PromptFact> {
+        items.iter().copied().collect()
+    }
+
+    /// Test-only tables are leaked to satisfy the resolver's `'static` spec
+    /// slice; the amount is a few structs per test.
+    fn leak(specs: Vec<PromptWorkflowSpec>) -> &'static [PromptWorkflowSpec] {
+        Box::leak(specs.into_boxed_slice())
+    }
+
+    #[test]
+    fn single_pass_matches_the_fixed_point_selection() {
+        let specs = leak(vec![
+            spec(
+                "group-first",
+                WorkflowRequirement::All(FACT_A),
+                Some("edit"),
+                100,
+            ),
+            spec(
+                "group-tie",
+                WorkflowRequirement::All(FACT_A),
+                Some("edit"),
+                100,
+            ),
+            spec(
+                "group-high",
+                WorkflowRequirement::All(FACT_B),
+                Some("edit"),
+                120,
+            ),
+            spec(
+                "group-low",
+                WorkflowRequirement::All(FACT_A),
+                Some("edit"),
+                90,
+            ),
+            spec("plain", WorkflowRequirement::All(FACT_A), None, 100),
+        ]);
+        let resolver = PromptWorkflowResolver { specs };
+        for available in [
+            facts(&[]),
+            facts(FACT_A),
+            facts(FACT_B),
+            facts(&[FACT_A[0], FACT_B[0]]),
+        ] {
+            assert_eq!(
+                resolver.select_specs(&available),
+                resolver.select_specs_legacy(&available),
+                "selection differs for {available:?}"
+            );
+        }
+        // A tie keeps the spec declared first; a higher priority wins outright.
+        assert_eq!(
+            resolver.select_specs(&facts(FACT_A)),
+            BTreeSet::from(["group-first", "plain"])
+        );
+        assert_eq!(
+            resolver.select_specs(&facts(&[FACT_A[0], FACT_B[0]])),
+            BTreeSet::from(["group-high", "plain"])
+        );
+    }
+
+    #[test]
+    fn requirements_that_no_fact_satisfies_select_nothing() {
+        let specs = leak(vec![spec(
+            "needs",
+            WorkflowRequirement::Any(FACT_A),
+            None,
+            100,
+        )]);
+        let resolver = PromptWorkflowResolver { specs };
+        assert!(resolver.select_specs(&facts(FACT_B)).is_empty());
+        // Any() and All() are both handled: one matching fact is enough here.
+        assert_eq!(
+            resolver.select_specs(&facts(FACT_A)),
+            BTreeSet::from(["needs"])
+        );
+    }
+
+    #[test]
+    fn invalid_tables_fail_validation() {
+        let duplicate = leak(vec![
+            spec("same", WorkflowRequirement::All(FACT_A), None, 100),
+            spec("same", WorkflowRequirement::All(FACT_B), None, 100),
+        ]);
+        assert!(
+            PromptWorkflowResolver { specs: duplicate }
+                .validate()
+                .is_err()
+        );
+        let empty = leak(vec![spec(
+            "empty",
+            WorkflowRequirement::All(&[]),
+            None,
+            100,
+        )]);
+        assert!(PromptWorkflowResolver { specs: empty }.validate().is_err());
+    }
 }
