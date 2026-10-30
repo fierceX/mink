@@ -17,7 +17,7 @@ config = next(n for n in sdk.body if isinstance(n, ast.ClassDef) and n.name == '
 fields = {n.target.id for n in config.body if isinstance(n, ast.AnnAssign)}
 cli = (ROOT / 'crates/mink-cli/src/cli.rs').read_text()
 cli += (ROOT / 'crates/mink-cli/src/config.rs').read_text()
-config_source = (ROOT / 'crates/mink-cli/src/config.rs').read_text()
+config_source = (ROOT / 'crates/mink-core/src/config_file.rs').read_text()
 struct_names = {
     'provider': 'ProviderConfigFile', 'provider.image': 'ImageConfigFile',
     'generation': 'GenerationConfigFile', 'context': 'ContextConfigFile',
