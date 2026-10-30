@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **workflow 解析**：提示词 workflow 选择改为一次 eligibility 筛选 + 每个互斥组择优的声明顺序输出，移除不再需要新增事实的固定点循环；选择、facts、顺序与 fingerprint 由测试期旧实现 oracle 在全部已编译 surface 组合上对比验证。
+- **Web 闲置代码清理**：删除无消费者的 `ConfigField`、`settings-form` 组件族，store 中未使用的 `defineStore`/`shallowEqual`/slot 契约类型（保留命令面板仍用的 `createSnapshotStore` 与 `SnapshotStore`），以及前端闲置的 `api.sendTurn`/`api.closeSession` 包装。命令面板、模型座位与后端路由不变；同配置构建的 JS 产物共减少 168 字节（4464859 → 4464691）。
+- **内嵌前端构建**：`build.rs` 现在传播 npm、复制、枚举与读取失败，在本次 `OUT_DIR` 的暂存目录验证后可发布完整资源集，清单稳定排序且路径只转义一次；损坏符号链接与目录循环明确失败，`MINK_SERVER_ALLOW_EMPTY_WEB=1` 只生成确定的空清单而不读取历史 dist。`rerun-if-changed` 补齐 `vite.config.ts`、`package-lock.json` 与 `tsconfig.json`。新增 `scripts/test_web_embed.py`、`tests/embedded_web.rs` 与 `scripts/verify-embedded-web.py`，CI 用字节包含检查替代单纯二进制大小断言。
+- **server 资源读取错误分类**：`/plan`、`/todo`、`/goal`（磁盘回退）、`/artifacts` 与 artifact 正文不再把权限拒绝、无效 UTF-8、目录误当文件等读盘失败当作“没有资源”。只有 `NotFound` 返回缺失表示，其余返回 500 并命名资源；artifact 超限仍为 413，坏索引行的既有容错不变。
+- **Goal 预算三态**：`POST /api/sessions/{id}/goal/budget` 的 `soft_token_limit` 现在区分省略（保留）、数字（设置）与显式 `null`（清除）；此前 `null` 与缺失同义，无法清除已有上限。非法值、旧 revision、不匹配 goal_id 与已完成/已取消目标仍拒绝且不改变快照。
+- **Web 移动阅读栏**：隐藏条件收敛为一个共享谓词。宽屏不隐藏；运行中轮次、输入焦点（含输入卡内菜单/附件控件）、草稿附件、待处理或失败回执、在途提交、打开失败与连接中断/恢复都会阻止隐藏，解除锁定后不自动隐藏；菜单处理的键盘事件不计作阅读手势。
+- **Web 附件消费**：提交成功只消费该次提交在发起时捕获的附件集合；等待回执期间新增或仍在上传的图片保留给下一条消息，失败提交保留全部内容，用户主动移除的条目不复活。
+- **Python SDK 终态**：`run()` / `raw_stream()` 不再用进程退出码 0 合成 `status="ok"`。缺少 `final`、`final.status` 缺失/非法、或 `ok` 伴随非零退出都写入 `status="failed"` 与受限诊断；已收到的 `text`/`thinking`/工具事件仍保留，合法 `failed`/`interrupted` 不被退出码 0 升级。新增 `scripts/test_sdk_protocol.py` 并纳入 CI。
 - **配置与 server 边界**：CLI/server 共用 core `.minkrc` schema 和严格解析；已有配置读取/解析失败时 fail closed。server 默认监听地址为 `127.0.0.1`。
 - **新对话首发**：服务端会话先打开再上传图片；已成功上传的图片逐张保存为会话草稿，部分上传失败可恢复；迟到的首次发送回执不能切换当前导航或清除后来编辑的 compose 草稿，输入确认受理后只清掉该输入消耗的图片。
 - **Python WASI 沙箱**：多个 `package_dirs` 现在分别挂载并全部加入 `PYTHONPATH`，避免后续目录被首个挂载遮蔽；增加无需外部 CPython wasm 文件的 WASI 启动回归。
