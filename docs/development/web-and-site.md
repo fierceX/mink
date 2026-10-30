@@ -128,10 +128,12 @@ CLI、Python、Rust、Server 示例共用可键盘操作的标签页，复制保
 
 ## 6. 静态资源与嵌入
 
-- **自动构建**：`build.rs` 在 `cargo build` 时自动执行 `npm run build`（web/），产物复制到 `OUT_DIR/assets` 并生成 `assets.rs`（`include_str!` 内容表）
-- **嵌入服务**：默认从二进制内容服务静态资源（content-type 映射、`index.html` no-cache、静态资源 immutable 缓存、SPA fallback 到 index.html）
-- **开发模式**：`MINK_SERVER_DEV_WEB=1` 时回退磁盘 `web/dist`（前端热迭代，改完强刷即可）
-- E2E 使用 `MINK_SERVER_DEV_WEB=1` 保证测试服务最新构建产物
+- **自动构建**：`build.rs` 在 `cargo build` 时自动执行 `npm run build`（`apps/web`），把 `dist` 复制到本次 `OUT_DIR` 的暂存目录、逐个验证可读后再发布为 `assets/` 并生成 `assets.rs`（`include_bytes!` 内容表，按路径稳定排序，路径转义只做一次）；半成品清单不会被本次编译接受。
+- **失败传播**：npm 缺失/非零退出、空或缺失 `index.html`、复制/枚举/读取失败、损坏符号链接与目录循环都以非零退出结束默认构建；`MINK_SERVER_ALLOW_EMPTY_WEB=1` 是唯一例外，它生成确定的空清单并删除旧 `assets/`，不会回退读取历史 `dist`。
+- **输入追踪**：`rerun-if-changed` 覆盖 `src`、`index.html`、`package.json`、`package-lock.json`、`vite.config.ts`、`tsconfig.json` 与 git 溯源文件；只改构建配置或锁文件也会重新生成嵌入产物。
+- **嵌入服务**：默认从二进制内容服务静态资源（content-type 映射、`index.html` no-cache、静态资源 immutable 缓存、SPA fallback 到 index.html）。
+- **校验**：`crates/mink-server/tests/embedded_web.rs` 启动真实二进制，比对 `/`、index 引用资产的 HTTP 字节；`scripts/verify-embedded-web.py` 在 release 构建矩阵中逐个二进制验证 index、引用资产与全部 dist 文件字节均已嵌入（大小检查只作辅助）；`scripts/test_web_embed.py` 用真实 Cargo 增量构建验证重跑规则与故障传播。
+- **开发模式**：`MINK_SERVER_DEV_WEB=<apps/web/dist>` 从磁盘服务该目录（前端热迭代，改完强刷即可）；E2E 使用该模式保证测试服务最新构建产物。
 
 ## 9. 测试
 

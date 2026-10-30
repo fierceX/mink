@@ -38,6 +38,7 @@ jobs:
           python3 -m unittest discover -s scripts -p 'test_doc_tool_inputs.py'
           python3 -m unittest discover -s scripts -p 'test_sdk_defaults.py'
           python3 -m unittest discover -s scripts -p 'test_sdk_protocol.py'
+          python3 -m unittest discover -s scripts -p 'test_web_embed.py'
       - name: Homepage interaction regressions
         run: |
           node scripts/test-homepage.mjs
@@ -196,7 +197,9 @@ jobs:
           cargo zigbuild -p mink-server --release --target ${{ matrix.target }}
           cp target/${{ matrix.target }}/release/mink dist/mink-${{ matrix.suffix }}
           cp target/${{ matrix.target }}/release/mink-server dist/mink-server-${{ matrix.suffix }}
-          # 内嵌前端校验：server 二进制大小应显著大于纯 Rust 骨架（> 1MB 视为含 dist）
+          # 内嵌前端校验：二进制必须包含产物中的 index、引用资产和全部资源字节。
+          # 大小检查只作辅助，不能证明资源集完整。
+          python3 scripts/verify-embedded-web.py "dist/mink-server-${{ matrix.suffix }}" apps/web/dist
           test "$(stat -c%s dist/mink-server-${{ matrix.suffix }} 2>/dev/null || stat -f%z dist/mink-server-${{ matrix.suffix }})" -gt 1000000
 
       - uses: actions/upload-artifact@v4
