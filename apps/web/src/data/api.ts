@@ -113,15 +113,8 @@ export const api = {
     request<SessionLiveState>(sessionUrl(id, '', project), signal === undefined ? {} : { signal }),
   openSession: (id: string, project?: string) =>
     request<SessionLiveState>(sessionUrl(id, '/open', project), { method: 'POST' }),
-  closeSession: (id: string, project?: string) =>
-    request<SessionLiveState>(sessionUrl(id, '/close', project), { method: 'POST' }),
   deleteSession: (id: string, project?: string) =>
     request<unknown>(sessionUrl(id, '', project), { method: 'DELETE' }),
-  sendTurn: (id: string, input: string, project?: string) =>
-    request<unknown>(sessionUrl(id, '/turn', project), {
-      method: 'POST',
-      body: JSON.stringify({ input }),
-    }),
   interrupt: (id: string, project?: string) =>
     request<unknown>(sessionUrl(id, '/interrupt', project), { method: 'POST' }),
   /** Pending inputs (guidance) for the session; `requestId` looks one up. */

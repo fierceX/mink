@@ -11,7 +11,7 @@
 | `src/theme/styles/*.css`、`src/ui/primitives/**/*.css` | `packages/client/ui-theme/src/styles`、`packages/client/ui-primitives/src` |
 | `src/theme/styles/montserrat-*.woff2` | 同上目录，字体本体按 SIL Open Font License 1.1 分发（见 `src/theme/styles/Montserrat-OFL.txt`） |
 | `src/app/conversation/running-whale@2x.png` | `packages/client/ui-chat/src/client/chat/running-whale@2x.png` |
-| `src/ui/primitives/**` | `packages/client/ui-primitives/src`（含 `icons/`、`markdown/`、`settings-form/`） |
+| `src/ui/primitives/**` | `packages/client/ui-primitives/src`（含 `icons/`、`markdown/`；`settings-form/` 与 `ConfigField` 已移除） |
 | `src/util/code-language.ts` | `packages/util/code-language/src/index.ts` |
 | `src/util/workspace-path/{index.ts,file-address.ts}` | `packages/util/workspace-path/src/{index.ts,file-address.ts}` |
 | `src/store/{index.ts,contract.ts}` | `packages/client/store/src/{index.ts,contract.ts}` |
