@@ -30,6 +30,16 @@ async function fixtureCwd(page: Page): Promise<string> {
   return fixture!.cwd
 }
 
+/**
+ * Wait until no connection notice pins the reading chrome. Opening a session can
+ * pass through a brief reconnect, and the recovered confirmation is a state that
+ * deliberately keeps the chrome on screen.
+ */
+async function waitForSettledChrome(page: Page): Promise<void> {
+  await expect(page.locator('[data-phase]')).toHaveCount(0)
+  await expect(page.getByLabel('已恢复')).toHaveCount(0)
+}
+
 test('centers the composing hero in the conversation column', async ({ page }) => {
   await page.goto('/')
   await page.getByRole('button', { name: /^在 .* 新建任务$/ }).click()
@@ -424,6 +434,7 @@ test('steps the mobile chrome aside for reading and brings it back', async ({ pa
   if (await older.count() > 0) await older.click()
   const header = page.locator('header').first()
   await expect(header).toBeVisible()
+  await waitForSettledChrome(page)
 
   // The transcript opens at its tail, so the reading gesture is a scroll back
   // into the history and then forward again — matching how the chrome hides
@@ -446,28 +457,72 @@ test('steps the mobile chrome aside for reading and brings it back', async ({ pa
   await page.screenshot({ path: 'test-results/live-mobile-restored.png' })
 })
 
-test('reads while a turn runs, and leaves by the corner control', async ({ browser }) => {
-  // Reading a streaming answer is the common case: the chrome steps aside for a
-  // running turn too, and a tap on the content brings it back (the toggle works in
-  // both directions — scrolling back is reading, not a state change).
+test('steps the mobile chrome aside for reading and reveals it from the corner control', async ({ browser }) => {
+  // Nothing is waiting on this reader: no focused composer, no drafted image, no
+  // running turn. Reading gestures therefore own the chrome (the pinning cases
+  // are covered beside this test and in readingChromeRules).
   const context = await browser.newContext({ ...devices['iPhone 13'] })
   const phone = await context.newPage()
   await phone.goto(`/?session=${E2E_LONG_ID}`)
   await expect(phone.locator('[class*="flowItem"]').first()).toBeVisible()
+  await waitForSettledChrome(phone)
   const header = phone.locator('header').first()
   await phone.locator('[data-conversation-scroll]').first().hover()
   await phone.mouse.wheel(0, -1500)
   await phone.waitForTimeout(500)
   await phone.mouse.wheel(0, 400)
 
-  // A running turn is not a reason to keep the chrome: stepping aside works while it
-  // streams, and the corner control is there to bring the composer back.
   await expect(header).toBeHidden()
   await expect(phone.getByRole('button', { name: '退出阅读模式' })).toBeVisible()
   await phone.getByRole('button', { name: '退出阅读模式' }).click()
   await expect(header).toBeVisible()
   await expect(phone.getByLabel('输入消息')).toBeVisible()
   await context.close()
+})
+
+test('keeps the chrome while a drafted image waits for the next message', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  const created = await page.request.post('/api/sessions', {
+    data: { name: 'reading-chrome-attachment', cwd: `/tmp/mink-web-e2e-att-chrome-${Date.now()}` },
+  })
+  expect(created.ok()).toBe(true)
+  const body = await created.json() as { data: { id: string; project_key: string } }
+  await page.goto(`/?session=${body.data.id}&project=${body.data.project_key}`)
+  const composer = page.getByLabel('输入消息')
+  await expect(composer).toBeVisible()
+  await expect(page.locator('input[aria-label="选择图片"]')).toBeEnabled()
+  // A transcript gives the reading gesture something to act on, and keeps the
+  // composer docked for the rest of the case.
+  await composer.fill('warm up the transcript')
+  await page.getByRole('button', { name: '发送' }).click()
+  await expect(page.getByText(/Completed:/).first()).toBeVisible()
+  await waitForSettledChrome(page)
+  const header = page.locator('header').first()
+
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64',
+  )
+  await page.setInputFiles('input[aria-label="选择图片"]', {
+    name: 'waiting.png',
+    mimeType: 'image/png',
+    buffer: png,
+  })
+  await expect(page.locator('[data-composer-attachments] img').first()).toHaveAttribute('src', /\/attachments\//)
+
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+  // The draft image belongs to the next message; a tap on content cannot step
+  // over it.
+  await page.locator('[class*="flowItem"]').first().click()
+  await expect(header).toBeVisible()
+  await page.screenshot({ path: 'test-results/live-mobile-attachment-pin.png' })
+
+  // Removing it unlocks the chrome: the next tap on content may hide it again.
+  await page.getByRole('button', { name: '移除附件：waiting.png' }).click()
+  await expect(page.locator('[data-composer-attachments]')).toHaveCount(0)
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+  await page.locator('[class*="flowItem"]').first().click()
+  await expect(header).toBeHidden()
 })
 
 test('keeps the composer on screen while a turn runs on a narrow viewport', async ({ page }) => {
@@ -482,15 +537,17 @@ test('keeps the composer on screen while a turn runs on a narrow viewport', asyn
   // what it asserts is the composer's own state.
   await expect(page.getByRole('button', { name: '提交引导' }).or(page.getByRole('button', { name: '发送' }))).toBeVisible()
   const scroller = page.locator('[class*="scrollBody"]').first()
+  // Focusing the composer is what pins the chrome for as long as the reader keeps
+  // typing: a running turn and a focused input both keep the header and card on
+  // screen, whatever the reader scrolls.
+  await page.getByLabel('输入消息').focus()
   await scroller.hover()
   await page.mouse.wheel(0, -800)
   await page.mouse.wheel(0, 600)
 
-  // The composer was just used, so it holds the chrome: typing must never happen
-  // off-screen. (A reader who steps aside before touching it can hide it — the other
-  // case covers that — and this one pins the lock: the composer stays reachable
-  // however far the reader scrolls.)
   await expect(page.getByLabel('输入消息')).toBeVisible()
+  await expect(page.locator('header').first()).toBeVisible()
+  await expect(page.getByRole('button', { name: '退出阅读模式' })).toHaveCount(0)
   const stop = page.getByRole('button', { name: '停止' })
   const guiding = page.getByRole('button', { name: '提交引导' })
   expect(await stop.isVisible() || await guiding.isVisible()).toBe(true)
@@ -566,6 +623,7 @@ test('never blanks the transcript while the chrome hides', async ({ browser }) =
   const phone = await context.newPage()
   await phone.goto(`/?session=${E2E_LONG_ID}`)
   await expect(phone.locator('[class*="flowItem"]').first()).toBeVisible()
+  await waitForSettledChrome(phone)
   const scroller = phone.locator('[data-conversation-scroll]').first()
   await scroller.hover()
 
@@ -627,6 +685,7 @@ test('keeps a reader inside the history where they were', async ({ browser }) =>
   const phone = await context.newPage()
   await phone.goto(`/?session=${E2E_LONG_ID}`)
   await expect(phone.locator('[class*="flowItem"]').first()).toBeVisible()
+  await waitForSettledChrome(phone)
   const older = phone.getByRole('button', { name: '加载更早的轮次' })
   if (await older.count() > 0) await older.click()
   await phone.locator('[data-conversation-scroll]').first().hover()

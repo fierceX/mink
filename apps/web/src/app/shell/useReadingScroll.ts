@@ -41,6 +41,10 @@ export function useReadingScroll(
       chrome.armUserScroll()
     }
     const onKeyDown = (event: KeyboardEvent): void => {
+      // Keys a menu or picker already handles are that control's, not a reading
+      // gesture for the transcript.
+      const active = document.activeElement
+      if (active instanceof Element && active.closest('[role="menu"], [role="listbox"]') !== null) return
       if (!['PageDown', 'PageUp', 'ArrowDown', 'ArrowUp', 'Home', 'End', ' '].includes(event.key)) return
       chrome.armUserScroll(event.key === 'PageDown' || event.key === 'ArrowDown' || event.key === 'End' || event.key === ' ' ? 1 : -1)
     }

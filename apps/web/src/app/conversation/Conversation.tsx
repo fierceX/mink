@@ -28,6 +28,7 @@ import { GoalBar } from './GoalBar.tsx'
 import type { GoalSnapshot } from '../../data/api.ts'
 import type { ReadingChrome } from '../shell/useReadingChrome.ts'
 import { useReadingScroll } from '../shell/useReadingScroll.ts'
+import { readingChromePinned } from '../shell/readingChromeRules.ts'
 import chatCss from './ChatView.module.css'
 import expandCss from '../details/ExpandButton.module.css'
 import rootCss from './ConversationRoot.module.css'
@@ -269,13 +270,41 @@ export function Conversation({
   const blank = items.length === 0
   const workState = state?.workState ?? 'idle'
   // Only inputs the session still owes an answer for are listed; applied and
-  // withdrawn receipts stay in the projection but leave the composer alone. A
-  // running turn is not a reason to keep the chrome: reading a streaming answer is
-  // the common case, and one tap (or the corner control) brings the stop button
-  // back. Queued guidance still pins it — that is an action the reader just took.
-  const chromeHidden = (chrome?.hidden ?? false) && (state?.inputs ?? []).every(
-    receipt => receipt.status === 'applied' || receipt.status === 'withdrawn',
+  // withdrawn receipts stay in the projection but leave the composer alone.
+  const awaitingReceipts = (state?.inputs ?? []).filter(
+    receipt => receipt.status !== 'applied' && receipt.status !== 'withdrawn',
   )
+  // The chrome may only step aside for a reader who is only reading. Focus is
+  // tracked by DOM containment so moving from the textarea into the composer's
+  // own menu or attachment controls never counts as leaving it.
+  const [composerFocused, setComposerFocused] = useState(false)
+  const withinComposer = (node: EventTarget | null): boolean =>
+    node instanceof Element && node.closest('[data-mink-composer]') !== null
+  // A focused control that unmounts (the hero composer turning into the docked
+  // one after the first message) never delivers its own focusout, so the DOM is
+  // re-read after every render: focus is DOM state, not a guess.
+  useEffect(() => {
+    if (composerFocused && !withinComposer(document.activeElement)) setComposerFocused(false)
+  })
+  const chromePinned = readingChromePinned({
+    composerFocused,
+    attachmentCount: attachments.entries.length,
+    running,
+    awaitingInputs: awaitingReceipts.length,
+    submissionPending: pendingDraft !== undefined,
+    hasError: error !== undefined,
+    // A first open is not a recovery: only an outage (or its brief recovered
+    // confirmation) keeps the chrome on screen.
+    connectionNotice: recovered
+      || (connection !== undefined && connection !== 'connected' && connection !== 'connecting')
+      || (connection === 'connecting' && wasDisconnected.current),
+  })
+  useEffect(() => {
+    chrome?.setInputLocked(chromePinned)
+  }, [chrome, chromePinned])
+  // Presentation follows the same predicate, so a state already hidden at the
+  // moment a pin appears never renders half-hidden chrome.
+  const chromeHidden = (chrome?.hidden ?? false) && !chromePinned
   // Hiding the chrome hands the input region's height to the transcript, and that
   // height change lands mid-gesture: this record keeps the reader's distance from
   // the live end across it, so the taller reading area shows the same lines instead
@@ -307,7 +336,7 @@ export function Conversation({
     ? null
     : (
       <PendingInputs
-        receipts={(state?.inputs ?? []).filter(receipt => receipt.status !== 'applied' && receipt.status !== 'withdrawn')}
+        receipts={awaitingReceipts}
         session={session}
         captureStamp={receiptStamp}
         onChanged={onReceiptChanged}
@@ -315,7 +344,15 @@ export function Conversation({
     )
 
   return (
-    <div className={rootCss.root} data-chrome={chromeHidden ? 'hidden' : 'shown'}>
+    // Focus is read from the whole column so either composer (hero or docked)
+    // pins the chrome; containment keeps a menu or picker inside the card from
+    // counting as leaving it.
+    <div
+      className={rootCss.root}
+      data-chrome={chromeHidden ? 'hidden' : 'shown'}
+      onFocusCapture={(event) => { if (withinComposer(event.target)) setComposerFocused(true) }}
+      onBlurCapture={(event) => { if (!withinComposer(event.relatedTarget)) setComposerFocused(false) }}
+    >
       <header className={rootCss.header} data-chrome-hidden={chromeHidden || undefined}>
         <div className={rootCss.titleRow}>
           {/* A drawer covers its own toggle, so the centre carries one too. */}

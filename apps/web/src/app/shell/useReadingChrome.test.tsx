@@ -33,4 +33,48 @@ describe('reading chrome', () => {
     rerender({ enabled: false })
     expect(result.current.hidden).toBe(false)
   })
+
+  it('refuses to hide while the input is locked', () => {
+    const { result } = renderHook(() => useReadingChrome(true))
+
+    act(() => { result.current.setInputLocked(true) })
+    act(() => { result.current.hide() })
+    expect(result.current.hidden).toBe(false)
+
+    act(() => {
+      result.current.armUserScroll(1)
+      result.current.consumed(200)
+    })
+    expect(result.current.hidden).toBe(false)
+  })
+
+  it('restores immediately when the lock turns on while hidden', () => {
+    const { result } = renderHook(() => useReadingChrome(true))
+
+    act(() => { result.current.hide() })
+    expect(result.current.hidden).toBe(true)
+
+    act(() => { result.current.setInputLocked(true) })
+    expect(result.current.hidden).toBe(false)
+  })
+
+  it('does not hide again just because the lock was released', () => {
+    const { result } = renderHook(() => useReadingChrome(true))
+
+    act(() => { result.current.setInputLocked(true) })
+    expect(result.current.hidden).toBe(false)
+    act(() => { result.current.setInputLocked(false) })
+    expect(result.current.hidden).toBe(false)
+  })
+
+  it('still allows a deliberate reveal while locked', () => {
+    const { result } = renderHook(() => useReadingChrome(true))
+
+    act(() => { result.current.hide() })
+    act(() => { result.current.setInputLocked(true) })
+    act(() => { result.current.hide() })
+    expect(result.current.hidden).toBe(false)
+    act(() => { result.current.reveal() })
+    expect(result.current.hidden).toBe(false)
+  })
 })

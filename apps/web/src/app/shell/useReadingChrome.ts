@@ -3,8 +3,10 @@
  * while the reader scrolls down through the transcript, and come back on the
  * gestures the legacy workbench defines — a deliberate upward scroll, a tap on
  * content, Escape, or focusing the composer. Layout shifts and streaming updates
- * never move the chrome, and hiding is presentation only: it never stops a turn
- * and never closes the session.
+ * never move the chrome. Hiding is presentation only: it never stops a turn and
+ * never closes the session; while the conversation is waiting on anything (focus,
+ * attachments, a running turn, queued receipts, a submission in flight, an error
+ * or a connection notice) the chrome stays visible.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -44,12 +46,17 @@ export function useReadingChrome(enabled: boolean): ReadingChrome {
   const userScrollDirection = useRef(0)
   const [hidden, setHidden] = useState(false)
   const [inputLocked, setInputLocked] = useState(false)
+  // The one predicate every hide path shares: the chrome steps aside only in
+  // the narrow layout, and only while the conversation does not need it on
+  // screen (focus, attachments, a running turn, an awaiting receipt, an error or
+  // a connection notice). Revealing is always allowed.
+  const canHide = enabled && !inputLocked
 
-  // Leaving the narrow viewport, or locking input, always restores the chrome —
-  // a hidden composer is only ever a reading state.
+  // Leaving the narrow viewport, or a condition that pins the chrome, always
+  // restores it — this is the one place a state already hidden is brought back.
   useEffect(() => {
-    if (!enabled || inputLocked) setHidden(false)
-  }, [enabled, inputLocked])
+    if (!canHide) setHidden(false)
+  }, [canHide])
 
   const reveal = useCallback(() => {
     gesture.current.reset()
@@ -59,13 +66,14 @@ export function useReadingChrome(enabled: boolean): ReadingChrome {
   const hide = useCallback(() => {
     // Reading chrome exists only in the narrow layout. The transcript's click
     // handler is mounted whenever the shell passes this object, so a desktop
-    // tap must not be able to hide the header and composer.
-    if (!enabled) return
+    // tap must not be able to hide the header and composer — and a locked
+    // conversation must never lose the controls it is waiting on.
+    if (!canHide) return
     // A tap is deliberate: the gesture detector is reset so a following scroll does
     // not read as the same movement.
     gesture.current.reset()
     setHidden(true)
-  }, [enabled])
+  }, [canHide])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -89,13 +97,13 @@ export function useReadingChrome(enabled: boolean): ReadingChrome {
   )
 
   const consumed = useCallback((delta: number) => {
-    if (!enabled || !isUserScroll()) return
+    if (!canHide || !isUserScroll()) return
     const direction = userScrollDirection.current
     if (direction !== 0 && Math.sign(delta) !== direction) return
     const reading = gesture.current.consume(delta)
     if (reading === undefined) return
-    setHidden(reading)
-  }, [enabled, isUserScroll])
+    setHidden(true)
+  }, [canHide, isUserScroll])
 
   // The transcript's effects depend on this object. Keeping it stable across
   // renders avoids unbinding and rebinding the scroll/click listeners on every
