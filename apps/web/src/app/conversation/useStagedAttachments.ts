@@ -75,30 +75,6 @@ export function useStagedAttachments(): StagedAttachmentsHandle {
     })
   }, [])
 
-  const consume = useCallback((keys: readonly string[]) => {
-    if (keys.length === 0) return
-    const submitted = new Set(keys)
-    setEntries((current) => {
-      const kept: DraftAttachment[] = []
-      for (const entry of current) {
-        if (!submitted.has(entry.key)) {
-          kept.push(entry)
-          continue
-        }
-        URL.revokeObjectURL(entry.preview)
-      }
-      return kept.length === current.length ? current : kept
-    })
-  }, [])
-
-  const clear = useCallback(() => {
-    setEntries((current) => {
-      for (const entry of current) URL.revokeObjectURL(entry.preview)
-      return []
-    })
-    setNotice(undefined)
-  }, [])
-
   const files = useMemo(
     () => entries.flatMap(entry => (entry.file === undefined ? [] : [entry.file])),
     [entries],
@@ -108,8 +84,6 @@ export function useStagedAttachments(): StagedAttachmentsHandle {
     entries,
     add,
     remove,
-    consume,
-    clear,
     ids: [],
     blocked: false,
     notice,

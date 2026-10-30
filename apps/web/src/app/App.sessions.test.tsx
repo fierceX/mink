@@ -224,7 +224,7 @@ describe('session switching and creation', () => {
     await waitFor(() => { expect(screen.getByText('会话已创建，但附件上传失败：第二张图片上传失败')).toBeDefined() })
     expect(submit).not.toHaveBeenCalled()
     expect(JSON.parse(localStorage.getItem('mink.attachments:p:fresh') ?? '[]')).toEqual([
-      { id: 'attachment-1', name: 'first.png' },
+      { key: 'stored-attachment-1-1', id: 'attachment-1', name: 'first.png' },
     ])
   })
 

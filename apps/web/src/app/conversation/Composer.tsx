@@ -56,9 +56,6 @@ export interface ComposerProps {
     entries: readonly DraftAttachment[]
     add: (files: readonly File[]) => void
     remove: (key: string) => void
-    /** Consume exactly the entries captured by an accepted submission. */
-    consume: (keys: readonly string[]) => void
-    clear: () => void
     /** Ids ready to reference from the submitted input. */
     ids: string[]
     /** Uploads in flight or a refused file block submission. */
@@ -82,9 +79,18 @@ export interface ComposerProps {
   /** Report every draft write so the owner can keep it with the session. */
   onDraftChange?: ((text: string) => void) | undefined
   /** Submit a fresh turn; resolves to an error message, or undefined on success. */
-  onSend: (text: string, attachmentIds: readonly string[]) => Promise<string | undefined>
+  onSend: (
+    text: string,
+    attachmentIds: readonly string[],
+    attachmentKeys: readonly string[],
+  ) => Promise<string | undefined>
   /** Submit guidance for the running turn. */
-  onGuide: (text: string, turnId: string, attachmentIds: readonly string[]) => Promise<string | undefined>
+  onGuide: (
+    text: string,
+    turnId: string,
+    attachmentIds: readonly string[],
+    attachmentKeys: readonly string[],
+  ) => Promise<string | undefined>
   /** Run one slash command; resolves to its message and whether it succeeded. */
   onCommand: (text: string) => Promise<{ message: string; ok: boolean }>
   /** Slash commands need a session; the new-conversation composer hides them. */
@@ -169,9 +175,9 @@ export function Composer({
     }
     const payload = text.trim()
     const ids = attachments.ids
-    // Freeze the attachment set this submission carries: an acceptance may
-    // only consume these entries, never files chosen while it was in flight.
-    const submittedEntries = attachments.entries.map(entry => entry.key)
+    // Freeze the attachment set this submission carries: an acceptance consumes
+    // exactly these draft identities, never files chosen while it was in flight.
+    const submittedKeys = attachments.entries.map(entry => entry.key)
     if ((payload === '' && attachments.entries.length === 0) || disabled || busy || attachments.blocked) return
     if (running && targetTurnId === null) {
       setError('当前会话尚未取得引导能力，请等待同步')
@@ -182,13 +188,10 @@ export function Composer({
     setBusy(true)
     write('')
     const call = running && targetTurnId !== null
-      ? onGuide(payload, targetTurnId, ids)
-      : onSend(payload, ids)
+      ? onGuide(payload, targetTurnId, ids, submittedKeys)
+      : onSend(payload, ids, submittedKeys)
     void call.then((failure) => {
-      if (failure === undefined) {
-        attachments.consume(submittedEntries)
-        return
-      }
+      if (failure === undefined) return
       // Restore only a draft nobody has replaced since the submission.
       setError(failure)
       if (revision.current === submittedAt + 1) write(payload)

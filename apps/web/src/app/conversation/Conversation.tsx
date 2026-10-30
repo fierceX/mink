@@ -53,9 +53,18 @@ export interface ConversationProps {
   /** How much of each turn's process the transcript shows. */
   processDisplay: ProcessDisplay
   /** Queue a fresh turn; resolves to an error message, or undefined. */
-  onSend: (text: string, attachmentIds: readonly string[]) => Promise<string | undefined>
+  onSend: (
+    text: string,
+    attachmentIds: readonly string[],
+    attachmentKeys?: readonly string[],
+  ) => Promise<string | undefined>
   /** Queue guidance for the running turn. */
-  onGuide: (text: string, turnId: string, attachmentIds: readonly string[]) => Promise<string | undefined>
+  onGuide: (
+    text: string,
+    turnId: string,
+    attachmentIds: readonly string[],
+    attachmentKeys?: readonly string[],
+  ) => Promise<string | undefined>
   /** Fold a receipt the pending strip changed back into the projection. */
   onReceiptChanged: (receipt: InputReceipt, started?: ReceiptStamp) => void
   /** Capture the view epoch/runtime generation before a receipt mutation. */

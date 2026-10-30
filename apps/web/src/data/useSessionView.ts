@@ -24,6 +24,7 @@ import {
   sessionIdentity,
   sessionPendingKey,
   writePendingSubmission,
+  type PendingSubmission,
 } from './sessionDraft.ts'
 import { setVerifierAvailable } from './commands.ts'
 import { useLatest } from './useLatest.ts'
@@ -54,9 +55,18 @@ export interface SessionView {
   /** An unresolved submission's body; restores the composer after a return. */
   pendingDraft: string | undefined
   /** Queue a fresh turn; resolves to an error message, or undefined on success. */
-  send: (text: string, attachmentIds?: readonly string[]) => Promise<string | undefined>
+  send: (
+    text: string,
+    attachmentIds?: readonly string[],
+    attachmentKeys?: readonly string[],
+  ) => Promise<string | undefined>
   /** Queue guidance bound to the running turn. */
-  guide: (text: string, turnId: string, attachmentIds?: readonly string[]) => Promise<string | undefined>
+  guide: (
+    text: string,
+    turnId: string,
+    attachmentIds?: readonly string[],
+    attachmentKeys?: readonly string[],
+  ) => Promise<string | undefined>
   /** Fold a receipt the panel changed back into the projection. */
   mergeReceipt: (receipt: InputReceipt, started?: ReceiptStamp) => void
   /** Capture the view epoch/runtime generation before a receipt mutation. */
@@ -117,17 +127,33 @@ function seed(summary: SessionSummary, rows: readonly Record<string, unknown>[])
   return reduced
 }
 
+/** The wire form of a submission record; local bookkeeping never leaves here. */
+function wireInput(input: PendingSubmission): HumanInput {
+  return {
+    request_id: input.request_id,
+    text: input.text,
+    target_turn_id: input.target_turn_id,
+    attachment_ids: input.attachment_ids,
+  }
+}
+
 /** Whether a stored submission is exactly what the reader is sending again. */
 function sameSubmission(
-  stored: HumanInput,
+  stored: PendingSubmission,
   text: string,
   targetTurnId: string | null,
   attachmentIds: readonly string[],
+  attachmentKeys: readonly string[],
 ): boolean {
-  return stored.target_turn_id === targetTurnId
-    && stored.text === text
-    && stored.attachment_ids.length === attachmentIds.length
-    && stored.attachment_ids.every((id, index) => id === attachmentIds[index])
+  if (stored.target_turn_id !== targetTurnId || stored.text !== text) return false
+  if (stored.attachment_ids.length !== attachmentIds.length) return false
+  if (!stored.attachment_ids.every((id, index) => id === attachmentIds[index])) return false
+  // Entry identity matters: the same content id can belong to a different draft
+  // entry (a re-chosen identical image), and that is a different input.
+  const storedKeys = stored.attachment_keys
+  if (storedKeys === undefined) return true
+  return storedKeys.length === attachmentKeys.length
+    && storedKeys.every((key, index) => key === attachmentKeys[index])
 }
 
 /** Ask the admission boundary whether it already holds this request. */
@@ -244,7 +270,7 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
   }, [])
 
   /** The submission this session left unresolved, from memory or storage. */
-  const storedSubmission = (target: SessionSummary): HumanInput | undefined => {
+  const storedSubmission = (target: SessionSummary): PendingSubmission | undefined => {
     const key = sessionPendingKey(target)
     const remembered = uncertain.current.get(key)
     if (remembered !== undefined) return remembered
@@ -254,7 +280,7 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
   }
 
   /** Keep a submission until its ending is known; the record is per identity. */
-  const rememberSubmission = (target: SessionSummary, input: HumanInput): void => {
+  const rememberSubmission = (target: SessionSummary, input: PendingSubmission): void => {
     const key = sessionPendingKey(target)
     uncertain.current.set(key, input)
     writePendingSubmission(key, input)
@@ -268,10 +294,14 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
     writePendingSubmission(key, undefined)
   }
 
-  /** Remove only attachments from an accepted input, preserving newer drafts. */
-  const forgetAcceptedAttachments = (target: SessionSummary, input: HumanInput): void => {
-    if (input.attachment_ids.length === 0) return
-    forgetStoredAttachments(sessionAttachmentsKey(target), input.attachment_ids)
+  /** Remove only the draft entries an accepted input consumed, preserving newer
+   * ones and any later copy of the same content-addressed image. */
+  const forgetAcceptedAttachments = (target: SessionSummary, input: PendingSubmission): void => {
+    forgetStoredAttachments(
+      sessionAttachmentsKey(target),
+      input.attachment_keys ?? [],
+      input.attachment_ids,
+    )
   }
 
   useEffect(() => {
@@ -386,14 +416,14 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
   // A fresh turn goes through the same input queue as guidance — the queue is
   // the session's only admission boundary, and it is the only path that carries
   // attachments. `target_turn_id: null` is what makes it a new turn.
-  const send = useCallback(async (text: string, attachmentIds: readonly string[] = []): Promise<string | undefined> => {
+  const send = useCallback(async (text: string, attachmentIds: readonly string[] = [], attachmentKeys: readonly string[] = []): Promise<string | undefined> => {
     const target = summary
     if (target === undefined) return '会话未打开'
     const view = sessionIdentity(target)
     const started = stampNow()
     const stored = storedSubmission(target)
-    let input: HumanInput
-    if (stored !== undefined && sameSubmission(stored, text, null, attachmentIds)) {
+    let input: PendingSubmission
+    if (stored !== undefined && sameSubmission(stored, text, null, attachmentIds, attachmentKeys)) {
       // An earlier attempt may already hold this input: resolve it before
       // minting a second request id for the same words.
       const reconciled = await receiptState(target, stored.request_id)
@@ -410,6 +440,7 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
         text,
         target_turn_id: null,
         attachment_ids: [...attachmentIds],
+        ...(attachmentKeys.length === 0 ? {} : { attachment_keys: [...attachmentKeys] }),
       }
     }
     // The record goes in before the request: a reload in the middle must not
@@ -422,7 +453,7 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
     }
     let outcome: SubmitOutcome
     try {
-      const response = await api.submitInput(target.id, input, target.project_key)
+      const response = await api.submitInput(target.id, wireInput(input), target.project_key)
       if (response.code !== 200) {
         forgetSubmission(target, input.request_id)
         outcome = { status: 'refused', message: response.message || `code ${response.code}` }
@@ -447,12 +478,12 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
 
   // Guidance rides the session's own input queue: the request id binds the
   // content, and the receipt comes back through the projection (`inputs_updated`).
-  const guide = useCallback(async (text: string, turnId: string, attachmentIds: readonly string[] = []): Promise<string | undefined> => {
+  const guide = useCallback(async (text: string, turnId: string, attachmentIds: readonly string[] = [], attachmentKeys: readonly string[] = []): Promise<string | undefined> => {
     const target = summary
     if (target === undefined) return '会话未打开'
     const stored = storedSubmission(target)
-    let input: HumanInput
-    if (stored !== undefined && sameSubmission(stored, text, turnId, attachmentIds)) {
+    let input: PendingSubmission
+    if (stored !== undefined && sameSubmission(stored, text, turnId, attachmentIds, attachmentKeys)) {
       const reconciled = await receiptState(target, stored.request_id)
       // A receipt the server already holds is not a failure: the guidance is in
       // the queue, and the strip above the composer shows it.
@@ -469,12 +500,13 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
         text,
         target_turn_id: turnId,
         attachment_ids: [...attachmentIds],
+        ...(attachmentKeys.length === 0 ? {} : { attachment_keys: [...attachmentKeys] }),
       }
     }
     rememberSubmission(target, input)
     let outcome: SubmitOutcome
     try {
-      const response = await api.submitInput(target.id, input, target.project_key)
+      const response = await api.submitInput(target.id, wireInput(input), target.project_key)
       if (response.code !== 200) {
         forgetSubmission(target, input.request_id)
         outcome = { status: 'refused', message: `提交失败：${response.message || `code ${response.code}`}` }

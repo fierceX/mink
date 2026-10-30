@@ -38,12 +38,6 @@ export interface AttachmentsHandle {
   blocked: boolean
   /** Ids ready to reference from an input. */
   ids: string[]
-  /**
-   * Consume exactly the entries captured when a submission was accepted.
-   * Later entries belong to the next message and stay in the rail.
-   */
-  consume: (keys: readonly string[]) => void
-  clear: () => void
   /** Message explaining why a file was refused, or undefined. */
   notice: string | undefined
 }
@@ -51,14 +45,27 @@ export interface AttachmentsHandle {
 /** Rebuild the rail from the ids this session stored. */
 function restore(session: SessionSummary | undefined, storageKey: string | undefined): DraftAttachment[] {
   if (session === undefined || storageKey === undefined) return []
-  return readAttachments(storageKey).map(stored => ({
-    key: `stored-${stored.id}`,
-    name: stored.name,
-    bytes: 0,
-    preview: sessionUrl(session.id, `/attachments/${stored.id}`, session.project_key),
-    status: 'ready' as const,
-    attachment: { id: stored.id, mime: '', width: 0, height: 0, bytes: 0 },
-  }))
+  const used = new Set<string>()
+  return readAttachments(storageKey).map(stored => {
+    // Draft entry identity survives a reload; legacy rows (id/name only) get a
+    // deterministic identity so a later write upgrades them.
+    const base = stored.key ?? `stored-${stored.id}`
+    let key = base
+    let suffix = 1
+    while (used.has(key)) {
+      suffix += 1
+      key = `${base}-${suffix}`
+    }
+    used.add(key)
+    return {
+      key,
+      name: stored.name,
+      bytes: 0,
+      preview: sessionUrl(session.id, `/attachments/${stored.id}`, session.project_key),
+      status: 'ready' as const,
+      attachment: { id: stored.id, mime: '', width: 0, height: 0, bytes: 0 },
+    }
+  })
 }
 
 /** Accepted format list from the session capability, normalized to mime names. */
@@ -79,21 +86,40 @@ export function useAttachments(session: SessionSummary | undefined, limits: Imag
   const [entries, setEntries] = useState<DraftAttachment[]>(() => restore(session, storageKey))
   const [notice, setNotice] = useState<string | undefined>(undefined)
   const counter = useRef(0)
+  // A per-hook prefix keeps generated identities unique across reloads, where
+  // the counter starts over while restored entries keep their old keys.
+  const draftPrefix = useRef(`draft-${Math.random().toString(36).slice(2, 8)}`)
 
   useEffect(() => {
     if (storageKey === undefined) return
     writeAttachments(storageKey, entries.flatMap(entry =>
-      entry.attachment === undefined ? [] : [{ id: entry.attachment.id, name: entry.name }]))
+      entry.attachment === undefined
+        ? []
+        : [{ key: entry.key, id: entry.attachment.id, name: entry.name }]))
   }, [entries, storageKey])
 
   useEffect(() => {
     if (storageKey === undefined) return
     const onConsumed = (event: Event): void => {
-      const detail = (event as CustomEvent<{ key: string; ids: string[] }>).detail
+      const detail = (event as CustomEvent<{
+        key: string
+        entryKeys?: string[]
+        ids?: string[]
+      }>).detail
       if (detail?.key !== storageKey) return
-      const consumed = new Set(detail.ids)
-      setEntries(current => current.filter(entry =>
-        entry.attachment === undefined || !consumed.has(entry.attachment.id)))
+      const consumedKeys = new Set(detail.entryKeys ?? [])
+      const consumedIds = new Set(detail.ids ?? [])
+      const seen = new Set<string>()
+      setEntries(current => current.filter(entry => {
+        if (entry.attachment === undefined) return true
+        if (consumedKeys.size > 0) return !consumedKeys.has(entry.key)
+        if (!consumedIds.has(entry.attachment.id)) return true
+        // Legacy receipts carry no entry identity: consume at most one entry
+        // per content id, so a later copy survives.
+        if (seen.has(entry.attachment.id)) return true
+        seen.add(entry.attachment.id)
+        return false
+      }))
     }
     window.addEventListener('mink:attachments-consumed', onConsumed)
     return () => window.removeEventListener('mink:attachments-consumed', onConsumed)
@@ -129,7 +155,7 @@ export function useAttachments(session: SessionSummary | undefined, limits: Imag
         }
         total += file.size
         counter.current += 1
-        const key = `draft-${counter.current}`
+        const key = `${draftPrefix.current}-${counter.current}`
         const preview = URL.createObjectURL(file)
         next.push({ key, name: file.name, bytes: file.size, preview, status: 'uploading' })
         // One async body owns both failure kinds: a refused upload (the server
@@ -174,37 +200,11 @@ export function useAttachments(session: SessionSummary | undefined, limits: Imag
     })
   }, [])
 
-  const consume = useCallback((keys: readonly string[]) => {
-    if (keys.length === 0) return
-    const submitted = new Set(keys)
-    setEntries((current) => {
-      const kept: DraftAttachment[] = []
-      for (const entry of current) {
-        if (!submitted.has(entry.key)) {
-          kept.push(entry)
-          continue
-        }
-        if (entry.preview.startsWith('blob:')) URL.revokeObjectURL(entry.preview)
-      }
-      return kept.length === current.length ? current : kept
-    })
-  }, [])
-
-  const clear = useCallback(() => {
-    setEntries((current) => {
-      for (const entry of current) {
-        if (entry.preview.startsWith('blob:')) URL.revokeObjectURL(entry.preview)
-      }
-      return []
-    })
-    setNotice(undefined)
-  }, [])
-
   const ids = useMemo(
     () => entries.flatMap(entry => (entry.attachment === undefined ? [] : [entry.attachment.id])),
     [entries],
   )
   const blocked = entries.some(entry => entry.status !== 'ready') || ids.length !== entries.length
 
-  return { entries, add, remove, blocked, ids, consume, clear, notice }
+  return { entries, add, remove, blocked, ids, notice }
 }

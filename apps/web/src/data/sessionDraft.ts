@@ -153,8 +153,11 @@ export function sessionAttachmentsKey(session: Pick<SessionSummary, 'project_key
   return `mink.attachments:${session.project_key}:${session.id}`
 }
 
-/** One stored draft attachment: the id is what the server knows, the name is copy. */
+/** One stored draft attachment: `key` is the draft entry identity (stable across
+ * reloads); `id` is the server's content-addressed attachment id used only for
+ * request references and resource reads. */
 export interface StoredAttachment {
+  key?: string
   id: string
   name: string
 }
@@ -170,7 +173,13 @@ export function readAttachments(key: string): StoredAttachment[] {
       if (typeof entry !== 'object' || entry === null) return []
       const id = (entry as { id?: unknown }).id
       const name = (entry as { name?: unknown }).name
-      return typeof id === 'string' && typeof name === 'string' ? [{ id, name }] : []
+      const entryKey = (entry as { key?: unknown }).key
+      if (typeof id !== 'string' || typeof name !== 'string') return []
+      return [{
+        ...(typeof entryKey === 'string' && entryKey !== '' ? { key: entryKey } : {}),
+        id,
+        name,
+      }]
     })
   } catch {
     return []
@@ -186,16 +195,43 @@ export function writeAttachments(key: string, entries: readonly StoredAttachment
   }
 }
 
-/** Remove attachments accepted by the server and notify mounted session rails. */
-export function forgetAcceptedAttachments(key: string, ids: readonly string[]): void {
-  if (ids.length === 0) return
-  const consumed = new Set(ids)
+/**
+ * Remove draft entries accepted by the server and notify mounted session rails.
+ *
+ * `entryKeys` is the submission's draft-entry snapshot. Content ids alone are
+ * not enough: attachments are content-addressed, so a re-chosen identical image
+ * shares its id with the submitted one. A legacy record without keys falls back
+ * to consuming at most one entry per id, which still preserves a later copy.
+ */
+export function forgetAcceptedAttachments(
+  key: string,
+  entryKeys: readonly string[],
+  ids: readonly string[],
+): void {
+  if (entryKeys.length === 0 && ids.length === 0) return
   const current = readAttachments(key)
-  const remaining = current.filter(attachment => !consumed.has(attachment.id))
+  let remaining: StoredAttachment[]
+  if (entryKeys.length > 0) {
+    const consumed = new Set(entryKeys)
+    remaining = current.filter(attachment =>
+      attachment.key === undefined || !consumed.has(attachment.key))
+  } else {
+    const consumed = new Set(ids)
+    const seen = new Set<string>()
+    remaining = current.filter(attachment => {
+      if (!consumed.has(attachment.id) || seen.has(attachment.id)) return true
+      seen.add(attachment.id)
+      return false
+    })
+  }
   if (remaining.length !== current.length) writeAttachments(key, remaining)
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('mink:attachments-consumed', {
-      detail: { key, ids: [...consumed] },
+      detail: {
+        key,
+        entryKeys: [...new Set(entryKeys)],
+        ids: [...new Set(ids)],
+      },
     }))
   }
 }
@@ -206,27 +242,44 @@ export function sessionPendingKey(session: Pick<SessionSummary, 'project_key' | 
 }
 
 /**
+ * A local submission record: the wire input plus the draft entries it consumes.
+ * `attachment_keys` never goes over the wire; it lets a receipt consume exactly
+ * the rail entries that were submitted, including a later copy of the same
+ * content-addressed image.
+ */
+export interface PendingSubmission extends HumanInput {
+  attachment_keys?: string[]
+}
+
+/**
  * Read the submission this session left unresolved, if any: the request id
  * binds the words to one input, so a retry after a switch or a reload is the
  * same submission to the server's admission boundary instead of a second one.
  */
-export function readPendingSubmission(key: string): HumanInput | undefined {
+export function readPendingSubmission(key: string): PendingSubmission | undefined {
   try {
     const raw = localStorage.getItem(key)
     if (raw === null) return undefined
     const parsed: unknown = JSON.parse(raw)
     if (typeof parsed !== 'object' || parsed === null) return undefined
-    const entry = parsed as Partial<HumanInput>
+    const entry = parsed as Partial<PendingSubmission>
     if (typeof entry.request_id !== 'string' || entry.request_id === '') return undefined
     if (typeof entry.text !== 'string') return undefined
     if (entry.target_turn_id !== null && typeof entry.target_turn_id !== 'string') return undefined
     if (!Array.isArray(entry.attachment_ids)) return undefined
     if (!entry.attachment_ids.every(id => typeof id === 'string')) return undefined
+    if (entry.attachment_keys !== undefined) {
+      if (!Array.isArray(entry.attachment_keys)) return undefined
+      if (!entry.attachment_keys.every(key => typeof key === 'string')) return undefined
+    }
     return {
       request_id: entry.request_id,
       text: entry.text,
       target_turn_id: entry.target_turn_id,
       attachment_ids: [...entry.attachment_ids],
+      ...(entry.attachment_keys === undefined
+        ? {}
+        : { attachment_keys: [...entry.attachment_keys] }),
     }
   } catch {
     return undefined
@@ -234,7 +287,7 @@ export function readPendingSubmission(key: string): HumanInput | undefined {
 }
 
 /** Persist one unresolved submission; `undefined` removes the record. */
-export function writePendingSubmission(key: string, input: HumanInput | undefined): void {
+export function writePendingSubmission(key: string, input: PendingSubmission | undefined): void {
   try {
     if (input === undefined) localStorage.removeItem(key)
     else localStorage.setItem(key, JSON.stringify(input))

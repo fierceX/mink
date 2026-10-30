@@ -334,6 +334,68 @@ test('keeps an image chosen while a text submission awaits its receipt', async (
   await expect(rail.locator('img').first()).toHaveAttribute('src', /\/attachments\//)
 })
 
+test('consumes only the submitted rail entry when the same image is chosen again', async ({ page }) => {
+  // The attachment store is content-addressed: the same bytes upload to the same
+  // id. A receipt must consume the draft entry it submitted, not every entry
+  // that happens to share that id.
+  const created = await page.request.post('/api/sessions', {
+    data: { name: 'attachment-same-content', cwd: `/tmp/mink-web-e2e-att-same-${Date.now()}` },
+  })
+  expect(created.ok()).toBe(true)
+  const body = await created.json() as { data: { id: string; project_key: string } }
+  await page.goto(`/?session=${body.data.id}&project=${body.data.project_key}`)
+  const composer = page.getByLabel('输入消息')
+  await expect(composer).toBeEnabled()
+  await composer.fill('warm up the transcript')
+  await page.getByRole('button', { name: '发送' }).click()
+  await expect(page.getByText(/Completed:/).first()).toBeVisible()
+
+  let releaseReceipt!: () => void
+  const held = new Promise<void>((resolve) => { releaseReceipt = resolve })
+  let receiptArrived!: () => void
+  const arrived = new Promise<void>((resolve) => { receiptArrived = resolve })
+  await page.route('**/api/sessions/*/inputs?*', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue()
+      return
+    }
+    const response = await route.fetch()
+    receiptArrived()
+    await held
+    await route.fulfill({ response })
+  })
+
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64',
+  )
+  const picker = 'input[aria-label="选择图片"]'
+  const rail = page.locator('[data-composer-attachments]')
+  await page.setInputFiles(picker, { name: 'same.png', mimeType: 'image/png', buffer: png })
+  await expect(rail.locator('img')).toHaveCount(1)
+
+  await composer.fill('same image follows')
+  await page.getByRole('button', { name: '发送' }).click()
+  await arrived
+
+  // The receipt is still held; choose the same bytes for the next message.
+  await page.setInputFiles(picker, { name: 'same.png', mimeType: 'image/png', buffer: png })
+  await expect(rail.locator('img')).toHaveCount(2)
+  await expect.poll(async () => rail.locator('img[src*="/attachments/"]').count()).toBe(2)
+
+  releaseReceipt()
+  await expect(composer).toHaveValue('')
+  await expect(page.getByText(/Completed:/)).toHaveCount(2)
+  // One rail entry was submitted; the later identical image stays drafted.
+  await expect(rail.locator('img')).toHaveCount(1)
+  await expect(rail.locator('img').first()).toHaveAttribute('src', /\/attachments\//)
+  const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? '[]'),
+    `mink.attachments:${body.data.project_key}:${body.data.id}`)
+  expect(stored).toHaveLength(1)
+  expect(stored[0]?.name).toBe('same.png')
+  expect(typeof stored[0]?.key).toBe('string')
+})
+
 test('opens a spilled output from an artifact reference in the transcript', async ({ page }) => {
   await openFixture(page)
   // The fixture history cites `artifact://fixture-output`; the reference opens

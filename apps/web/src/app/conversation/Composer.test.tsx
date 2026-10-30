@@ -32,8 +32,6 @@ function noAttachments(overrides: Partial<ComposerPropsAttachments> = {}) {
     entries,
     add: overrides.add ?? (() => {}),
     remove: overrides.remove ?? (() => {}),
-    consume: overrides.consume ?? (() => {}),
-    clear: overrides.clear ?? (() => {}),
     ids: overrides.ids ?? entries.flatMap(entry => (entry.attachment === undefined ? [] : [entry.attachment.id])),
     blocked: overrides.blocked ?? false,
     notice: overrides.notice,
@@ -44,8 +42,6 @@ type ComposerPropsAttachments = {
   entries?: DraftAttachment[]
   add?: (files: readonly File[]) => void
   remove?: (key: string) => void
-  consume?: (keys: readonly string[]) => void
-  clear?: () => void
   ids?: string[]
   blocked?: boolean
   notice?: string | undefined
@@ -85,7 +81,7 @@ describe('composer', () => {
     fireEvent.change(screen.getByLabelText('输入消息'), { target: { value: '重建会话区' } })
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
     await waitFor(() => {
-      expect(onSend).toHaveBeenCalledWith('重建会话区', [])
+      expect(onSend).toHaveBeenCalledWith('重建会话区', [], [])
     })
     expect(onGuide).not.toHaveBeenCalled()
   })
@@ -112,7 +108,7 @@ describe('composer', () => {
     fireEvent.change(screen.getByLabelText('输入消息'), { target: { value: '补充要求' } })
     fireEvent.click(screen.getByRole('button', { name: '提交引导' }))
     await waitFor(() => {
-      expect(onGuide).toHaveBeenCalledWith('补充要求', 'turn-7', [])
+      expect(onGuide).toHaveBeenCalledWith('补充要求', 'turn-7', [], [])
     })
     expect(onSend).not.toHaveBeenCalled()
   })
@@ -330,5 +326,7 @@ describe('a submission that fails', () => {
       expect(screen.getByRole('alert').textContent).toContain('无法连接服务')
     })
     expect(field.value).toBe('会被拒绝的输入')
-  })
+  
+})
+
 })

@@ -16,6 +16,8 @@ import {
   writeAttachments,
   writePendingSubmission,
   writeSessionDraft,
+  type PendingSubmission,
+  type StoredAttachment,
 } from '../data/sessionDraft.ts'
 import { useLatest } from '../data/useLatest.ts'
 import { useModelChoices } from '../data/useModelChoices.ts'
@@ -307,7 +309,8 @@ export function App() {
         return undefined
       }
       const attachmentIds: string[] = []
-      const storedAttachments: { id: string; name: string }[] = []
+      const storedAttachments: StoredAttachment[] = []
+      const attachmentKeys: string[] = []
       for (const file of files) {
         const upload = await api.upload(created.id, file, created.project_key)
         if (upload.code !== 200) {
@@ -315,19 +318,27 @@ export function App() {
           return undefined
         }
         attachmentIds.push(upload.data.id)
-        storedAttachments.push({ id: upload.data.id, name: file.name })
+        const key = `stored-${upload.data.id}-${storedAttachments.length + 1}`
+        attachmentKeys.push(key)
+        storedAttachments.push({ key, id: upload.data.id, name: file.name })
         // Keep each successful upload recoverable if a later image fails or
         // the browser reloads before the first input reaches the server.
         writeAttachments(sessionAttachmentsKey(created), storedAttachments)
       }
-      const input = {
+      const input: PendingSubmission = {
         request_id: firstRequestId,
         text,
         target_turn_id: null,
         attachment_ids: attachmentIds,
+        ...(attachmentKeys.length === 0 ? {} : { attachment_keys: attachmentKeys }),
       }
       writePendingSubmission(sessionPendingKey(created), input)
-      const submitted = await api.submitInput(created.id, input, created.project_key)
+      const submitted = await api.submitInput(created.id, {
+        request_id: input.request_id,
+        text: input.text,
+        target_turn_id: input.target_turn_id,
+        attachment_ids: input.attachment_ids,
+      }, created.project_key)
       writePendingSubmission(sessionPendingKey(created), undefined)
       if (submitted.code !== 200) {
         adopt(created, `会话已创建，但首条消息提交失败：${submitted.message || `code ${submitted.code}`}`)

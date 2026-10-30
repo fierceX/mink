@@ -8,6 +8,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionSummary } from '../../data/api.ts'
 import type { ImageLimits } from '../../data/types.ts'
+import {
+  forgetAcceptedAttachments,
+  readAttachments,
+  sessionAttachmentsKey,
+} from '../../data/sessionDraft.ts'
 import { Composer } from './Composer.tsx'
 import { useAttachments, type AttachmentsHandle } from './useAttachments.ts'
 import { useStagedAttachments } from './useStagedAttachments.ts'
@@ -170,12 +175,22 @@ describe('attachment consumption follows the submission snapshot', () => {
 
     await addImage(() => handle.current, 'first.png')
     expect(handle.current?.ids).toEqual(['att-first-png'])
+    const firstKey = handle.current!.entries[0]!.key
     submit('带图发送')
     await waitFor(() => { expect(handle.current?.entries).toHaveLength(1) })
 
     await addImage(() => handle.current, 'second.png')
     expect(handle.current?.ids).toEqual(['att-first-png', 'att-second-png'])
 
+    // The session view consumes the submission snapshot when the receipt is
+    // accepted; the Composer itself no longer clears the rail.
+    act(() => {
+      forgetAcceptedAttachments(
+        sessionAttachmentsKey(SESSION),
+        [firstKey],
+        ['att-first-png'],
+      )
+    })
     await act(async () => {
       call.resolve(undefined)
       await call.promise
@@ -215,7 +230,83 @@ describe('attachment consumption follows the submission snapshot', () => {
     expect(handle.current?.entries).toHaveLength(0)
   })
 
-  it('consumes the staged files captured by the composing first send', async () => {
+  it('does not consume an identical entry re-added after the submitted one was removed', async () => {
+    const call = deferred<string | undefined>()
+    const handle = { current: undefined as AttachmentsHandle | undefined }
+    render(<SessionComposer handle={handle} onSend={() => call.promise} />)
+
+    await addImage(() => handle.current, 'same.png')
+    const submittedKey = handle.current!.entries[0]!.key
+    submit('first image')
+    act(() => { handle.current?.remove(submittedKey) })
+    await addImage(() => handle.current, 'same.png')
+    const readdedKey = handle.current!.entries[0]!.key
+    expect(readdedKey).not.toBe(submittedKey)
+
+    act(() => {
+      forgetAcceptedAttachments(
+        sessionAttachmentsKey(SESSION),
+        [submittedKey],
+        ['att-same-png'],
+      )
+    })
+    expect(handle.current?.entries.map(entry => entry.key)).toEqual([readdedKey])
+    await act(async () => {
+      call.resolve(undefined)
+      await call.promise
+    })
+    expect(handle.current?.entries.map(entry => entry.key)).toEqual([readdedKey])
+  })
+
+  it('keeps a later draft entry that shares the submitted content id', async () => {
+    // The server stores attachments by content hash: re-choosing the same bytes
+    // yields the same id, even under another filename. Draft entry identity,
+    // not that content id, decides which rail item a receipt consumes.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      code: 200,
+      message: '',
+      data: { id: 'att-same', mime: 'image/png', width: 10, height: 10, bytes: 16 },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
+    const call = deferred<string | undefined>()
+    const handle = { current: undefined as AttachmentsHandle | undefined }
+    render(<SessionComposer handle={handle} onSend={() => call.promise} />)
+
+    await addImage(() => handle.current, 'same.png')
+    const submittedKey = handle.current!.entries[0]!.key
+    expect(handle.current?.ids).toEqual(['att-same'])
+    submit('first image')
+    act(() => { handle.current?.add([image('copy.png')]) })
+    await waitFor(() => {
+      expect(handle.current?.entries).toHaveLength(2)
+      expect(handle.current?.entries.every(entry => entry.status === 'ready')).toBe(true)
+    })
+    expect(handle.current?.ids).toEqual(['att-same', 'att-same'])
+    const laterKey = handle.current!.entries[1]!.key
+
+    act(() => {
+      forgetAcceptedAttachments(
+        sessionAttachmentsKey(SESSION),
+        [submittedKey],
+        ['att-same'],
+      )
+    })
+    expect(handle.current?.entries.map(entry => entry.key)).toEqual([laterKey])
+    expect(readAttachments(sessionAttachmentsKey(SESSION))).toEqual([
+      { key: laterKey, id: 'att-same', name: 'copy.png' },
+    ])
+
+    await act(async () => {
+      call.resolve(undefined)
+      await call.promise
+    })
+    // The Composer's own success path must not consume the later entry either.
+    expect(handle.current?.entries.map(entry => entry.key)).toEqual([laterKey])
+  })
+
+  it('leaves staged attachments to the composing view on success', async () => {
+    // The composing view owns its in-memory files: a successful first send
+    // switches to the created session and unmounts that view, so the Composer
+    // itself must not clear the rail.
     const call = deferred<string | undefined>()
     const handle = { current: undefined as ReturnType<typeof useStagedAttachments> | undefined }
     render(<ComposingComposer handle={handle} onSend={() => call.promise} />)
@@ -225,14 +316,11 @@ describe('attachment consumption follows the submission snapshot', () => {
     submit('首条消息')
     await waitFor(() => { expect(handle.current?.entries).toHaveLength(1) })
     act(() => { handle.current?.add([image('later.png')]) })
-    expect(handle.current?.entries).toHaveLength(2)
 
     await act(async () => {
       call.resolve(undefined)
       await call.promise
     })
-    await waitFor(() => {
-      expect(handle.current?.entries.map(entry => entry.name)).toEqual(['later.png'])
-    })
+    expect(handle.current?.entries.map(entry => entry.name)).toEqual(['staged.png', 'later.png'])
   })
 })

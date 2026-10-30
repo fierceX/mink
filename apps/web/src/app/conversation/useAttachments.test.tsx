@@ -145,6 +145,57 @@ describe('draft attachments', () => {
   })
 })
 
+describe('attachment consumption by draft entry identity', () => {
+  const key = 'mink.attachments:demo:session-1'
+
+  it('removes only the submitted entry when ids are shared by content hash', () => {
+    localStorage.setItem(key, JSON.stringify([
+      { key: 'draft-a', id: 'att-same', name: 'a.png' },
+      { key: 'draft-b', id: 'att-same', name: 'b.png' },
+    ]))
+    const handle = renderAttachments(LIMITS)
+    act(() => {
+      window.dispatchEvent(new CustomEvent('mink:attachments-consumed', {
+        detail: { key, entryKeys: ['draft-a'], ids: ['att-same'] },
+      }))
+    })
+    expect(handle().entries.map(entry => entry.key)).toEqual(['draft-b'])
+    expect(JSON.parse(localStorage.getItem(key) ?? '[]')).toEqual([
+      { key: 'draft-b', id: 'att-same', name: 'b.png' },
+    ])
+  })
+
+  it('legacy receipts without entry keys consume one entry per content id', () => {
+    localStorage.setItem(key, JSON.stringify([
+      { id: 'att-same', name: 'a.png' },
+      { id: 'att-same', name: 'b.png' },
+    ]))
+    const handle = renderAttachments(LIMITS)
+    act(() => {
+      window.dispatchEvent(new CustomEvent('mink:attachments-consumed', {
+        detail: { key, ids: ['att-same'] },
+      }))
+    })
+    expect(handle().entries).toHaveLength(1)
+    expect(handle().entries[0]?.name).toBe('b.png')
+    expect(handle().entries[0]?.key).toBe('stored-att-same-2')
+  })
+
+  it('keeps an upload that is still in flight when an earlier receipt arrives', () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})))
+    const handle = renderAttachments(LIMITS)
+    act(() => { handle().add([image('pending.png')]) })
+    expect(handle().entries[0]?.status).toBe('uploading')
+    act(() => {
+      window.dispatchEvent(new CustomEvent('mink:attachments-consumed', {
+        detail: { key, entryKeys: ['draft-a'], ids: ['att-same'] },
+      }))
+    })
+    expect(handle().entries).toHaveLength(1)
+    expect(handle().entries[0]?.status).toBe('uploading')
+  })
+})
+
 /** Second probe for the capability-less case, kept separate for a clean render. */
 function renderAttachmentsProbe() {
   const handle = { current: undefined as ReturnType<typeof useAttachments> | undefined }

@@ -5,6 +5,7 @@ import { isVerifierAvailable, setVerifierAvailable } from './commands.ts'
 import type { Attachment, HumanInput, ImageLimits, InputReceipt } from './types.ts'
 import { receiptStampHolds, useSessionView } from './useSessionView.ts'
 import { useAttachments } from '../app/conversation/useAttachments.ts'
+import { forgetAcceptedAttachments } from './sessionDraft.ts'
 
 /**
  * Regressions from the workbench audit (W2, W3, W4): the view keeps one
@@ -320,18 +321,177 @@ describe('session view identity and history', () => {
     expect(JSON.parse(localStorage.getItem(attachmentsKey) ?? '[]')).toHaveLength(2)
     await act(async () => { await result.current.view.send('带图', ['attachment-1']) })
 
+    // A legacy record carries no entry keys: the fallback consumes at most one
+    // entry per content id, and the restored rows now persist their identity.
     expect(JSON.parse(localStorage.getItem(attachmentsKey) ?? '[]')).toEqual([
-      { id: 'attachment-2', name: 'later.png' },
+      { key: 'stored-attachment-2', id: 'attachment-2', name: 'later.png' },
     ])
     await act(async () => {
       result.current.attachments.add([new File(['x'], 'new.png', { type: 'image/png' })])
     })
     await waitFor(() => { expect(result.current.attachments.ids).toEqual(['attachment-2', 'attachment-3']) })
-    expect(JSON.parse(localStorage.getItem(attachmentsKey) ?? '[]')).toEqual([
-      { id: 'attachment-2', name: 'later.png' },
-      { id: 'attachment-3', name: 'new.png' },
-    ])
+    const stored = JSON.parse(localStorage.getItem(attachmentsKey) ?? '[]') as { key: string; id: string; name: string }[]
+    expect(stored.map(entry => entry.id)).toEqual(['attachment-2', 'attachment-3'])
+    expect(stored[0]).toMatchObject({ key: 'stored-attachment-2', name: 'later.png' })
+    expect(typeof stored[1]?.key).toBe('string')
     expect(result.current.attachments.ids).not.toContain('attachment-1')
+  })
+
+  it('consumes the submitted draft entries, not every entry with the same content id', async () => {
+    vi.spyOn(api, 'openSession').mockResolvedValue(ok(live('A')))
+    const submit = deferred<ApiResponse<InputReceipt>>()
+    let requested = ''
+    let wire: Record<string, unknown> | undefined
+    vi.spyOn(api, 'submitInput').mockImplementationOnce(async (_id, input) => {
+      requested = input.request_id
+      wire = input as unknown as Record<string, unknown>
+      return submit.promise
+    })
+    vi.spyOn(api, 'upload').mockResolvedValue(ok<Attachment>({
+      id: 'attachment-1', mime: 'image/png', width: 1, height: 1, bytes: 1,
+    }))
+    Object.defineProperty(URL, 'createObjectURL', { value: () => 'blob:same', configurable: true })
+    Object.defineProperty(URL, 'revokeObjectURL', { value: () => {}, configurable: true })
+    const attachmentsKey = 'mink.attachments:p:A'
+    localStorage.setItem(attachmentsKey, JSON.stringify([
+      { key: 'draft-a', id: 'attachment-1', name: 'a.png' },
+    ]))
+    const { result } = renderHook(() => ({
+      view: useSessionView(SESSIONS.A),
+      attachments: useAttachments(SESSIONS.A, IMAGE_LIMITS),
+    }))
+    await waitFor(() => { expect(streams.length).toBe(1) })
+    act(() => { streams[0](snapshot('A')) })
+    expect(result.current.attachments.entries.map(entry => entry.key)).toEqual(['draft-a'])
+
+    let pending!: Promise<string | undefined>
+    act(() => { pending = result.current.view.send('same image', ['attachment-1'], ['draft-a']) })
+    await waitFor(() => { expect(requested).not.toBe('') })
+    // Local identity never reaches the admission boundary.
+    expect(wire?.attachment_keys).toBeUndefined()
+    const pendingRecord = JSON.parse(localStorage.getItem('mink.pending:p:A') ?? '{}') as {
+      attachment_keys?: string[]
+    }
+    expect(pendingRecord.attachment_keys).toEqual(['draft-a'])
+
+    // The server stores by content hash: re-choosing the same bytes yields the
+    // same id, but this is a different draft entry for the next message.
+    await act(async () => {
+      result.current.attachments.add([new File(['y'], 'b.png', { type: 'image/png' })])
+    })
+    await waitFor(() => { expect(result.current.attachments.entries).toHaveLength(2) })
+    const keys = result.current.attachments.entries.map(entry => entry.key)
+    expect(keys[0]).toBe('draft-a')
+    expect(keys[1]).toBeDefined()
+    expect(keys[1]).not.toBe('draft-a')
+
+    await act(async () => {
+      submit.resolve(ok(receiptFor({
+        request_id: requested,
+        text: 'same image',
+        target_turn_id: null,
+        attachment_ids: ['attachment-1'],
+      })))
+      await pending
+    })
+
+    expect(result.current.attachments.entries.map(entry => entry.key)).toEqual([keys[1]])
+    expect(JSON.parse(localStorage.getItem(attachmentsKey) ?? '[]')).toEqual([
+      { key: keys[1], id: 'attachment-1', name: 'b.png' },
+    ])
+    // A duplicate receipt is idempotent and must not touch the later entry.
+    act(() => {
+      forgetAcceptedAttachments(attachmentsKey, ['draft-a'], ['attachment-1'])
+    })
+    expect(result.current.attachments.entries.map(entry => entry.key)).toEqual([keys[1]])
+  })
+
+  it('reuses a persisted submission snapshot after a reload and consumes its entry', async () => {
+    vi.spyOn(api, 'openSession').mockResolvedValue(ok(live('A')))
+    let requested = ''
+    vi.spyOn(api, 'submitInput').mockImplementationOnce(async (_id, input) => {
+      requested = input.request_id
+      throw new Error('回复丢失')
+    })
+    vi.spyOn(api, 'inputs').mockImplementation(async (_id, _project, requestId) => ok(
+      requestId === requested
+        ? [receiptFor({
+            request_id: requested,
+            text: '带图',
+            target_turn_id: null,
+            attachment_ids: ['attachment-1'],
+          })]
+        : [],
+    ))
+    Object.defineProperty(URL, 'createObjectURL', { value: () => 'blob:a', configurable: true })
+    Object.defineProperty(URL, 'revokeObjectURL', { value: () => {}, configurable: true })
+    const attachmentsKey = 'mink.attachments:p:A'
+    localStorage.setItem(attachmentsKey, JSON.stringify([
+      { key: 'draft-a', id: 'attachment-1', name: 'a.png' },
+    ]))
+    const first = renderHook(() => ({
+      view: useSessionView(SESSIONS.A),
+      attachments: useAttachments(SESSIONS.A, IMAGE_LIMITS),
+    }))
+    await waitFor(() => { expect(streams.length).toBe(1) })
+    act(() => { streams[0](snapshot('A')) })
+    await act(async () => {
+      await first.result.current.view.send('带图', ['attachment-1'], ['draft-a'])
+    })
+    // The lost reply leaves the submission and its attachment identity stored.
+    expect(JSON.parse(localStorage.getItem('mink.pending:p:A') ?? '{}').attachment_keys).toEqual(['draft-a'])
+    expect(first.result.current.attachments.entries.map(entry => entry.key)).toEqual(['draft-a'])
+    first.unmount()
+
+    // A reload rebuilds the rail from storage; the retry is the same input.
+    const second = renderHook(() => ({
+      view: useSessionView(SESSIONS.A),
+      attachments: useAttachments(SESSIONS.A, IMAGE_LIMITS),
+    }))
+    await waitFor(() => { expect(streams.length).toBe(2) })
+    act(() => { streams[1](snapshot('A')) })
+    expect(second.result.current.attachments.entries.map(entry => entry.key)).toEqual(['draft-a'])
+    await act(async () => {
+      await second.result.current.view.send('带图', ['attachment-1'], ['draft-a'])
+    })
+    expect(second.result.current.attachments.entries).toHaveLength(0)
+    expect(JSON.parse(localStorage.getItem(attachmentsKey) ?? '[]')).toEqual([])
+    expect(localStorage.getItem('mink.pending:p:A')).toBeNull()
+  })
+
+  it('consumes guidance attachments by entry identity too', async () => {
+    vi.spyOn(api, 'openSession').mockResolvedValue(ok(live('A')))
+    let wire: Record<string, unknown> | undefined
+    vi.spyOn(api, 'submitInput').mockImplementationOnce(async (_id, input) => {
+      wire = input as unknown as Record<string, unknown>
+      return ok(receiptFor({
+        request_id: input.request_id,
+        text: '补充',
+        target_turn_id: 'turn-1',
+        attachment_ids: ['attachment-1'],
+      }))
+    })
+    Object.defineProperty(URL, 'createObjectURL', { value: () => 'blob:a', configurable: true })
+    Object.defineProperty(URL, 'revokeObjectURL', { value: () => {}, configurable: true })
+    const attachmentsKey = 'mink.attachments:p:A'
+    localStorage.setItem(attachmentsKey, JSON.stringify([
+      { key: 'draft-a', id: 'attachment-1', name: 'a.png' },
+      { key: 'draft-b', id: 'attachment-1', name: 'b.png' },
+    ]))
+    const { result } = renderHook(() => ({
+      view: useSessionView(SESSIONS.A),
+      attachments: useAttachments(SESSIONS.A, IMAGE_LIMITS),
+    }))
+    await waitFor(() => { expect(streams.length).toBe(1) })
+    act(() => { streams[0](snapshot('A')) })
+    await act(async () => {
+      await result.current.view.guide('补充', 'turn-1', ['attachment-1'], ['draft-a'])
+    })
+    expect(wire?.attachment_keys).toBeUndefined()
+    expect(result.current.attachments.entries.map(entry => entry.key)).toEqual(['draft-b'])
+    expect(JSON.parse(localStorage.getItem(attachmentsKey) ?? '[]')).toEqual([
+      { key: 'draft-b', id: 'attachment-1', name: 'b.png' },
+    ])
   })
 
   it('drops a history page that answers after the view was reopened', async () => {

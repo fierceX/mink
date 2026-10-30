@@ -78,8 +78,6 @@ const ATTACHMENTS = {
   ],
   add: () => {},
   remove: () => {},
-  consume: () => {},
-  clear: () => {},
   ids: ['att-1'],
   blocked: false,
   notice: undefined as string | undefined,
