@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- **Web 附件消费归属**：草稿条目现在持久化独立于内容 id 的 `key`；提交记录携带本次提交的条目身份（`attachment_keys` 仅本地，不过 wire），受理后只消费这些条目。服务端按内容去重，重复选择同一图片会得到相同 id，不再因此被旧回执误删；旧记录回退到“每个 id 最多消耗一个条目”。Composer 不再自行清空附件，确认消费只由会话视图或首次发送流程执行。
+- **Web 附件消费归属**：草稿条目持久化独立于内容 id 的 `key`；提交记录携带冻结的条目快照（`attachment_snapshot`，仅本地，不过 wire），受理后只消费快照命名的条目。服务端按内容去重，重复选择同一图片会得到相同 id，不再因此被旧回执误删；Composer 不再自行清空附件，确认消费只由会话视图或首次发送流程执行。
+- **Web 旧版提交迁移**：没有条目快照的旧未决提交在恢复边界一次性迁移为显式 `known:false`（持久化），受理后不再按内容 id 猜测并删除草稿；删除旧图后重新选择同图不会被旧回执误删，仍用原 request_id 对账。`无快照` / `known:false` / `known:true,keys:[]` 三态区分，存储与 rail 共用同一纯消费判据；`uncertain` 的类型改为真实的 `PendingSubmission`。
 - **Web 阅读栏操作状态**：Composer 将命令/提交的在途与失败状态上报给 Conversation，统一谓词据此保持操作栏可见；成功提示与失败文本分开表达，失败在编辑草稿或下一次操作时解除，成功提示不锁定阅读模式。
 - **workflow 解析**：提示词 workflow 选择改为一次 eligibility 筛选 + 每个互斥组择优的声明顺序输出，移除不再需要新增事实的固定点循环；选择、facts、顺序与 fingerprint 由测试期旧实现 oracle 在全部已编译 surface 组合上对比验证。
 - **Web 闲置代码清理**：删除无消费者的 `ConfigField`、`settings-form` 组件族，store 中未使用的 `defineStore`/`shallowEqual`/slot 契约类型（保留命令面板仍用的 `createSnapshotStore` 与 `SnapshotStore`），以及前端闲置的 `api.sendTurn`/`api.closeSession` 包装。命令面板、模型座位与后端路由不变；同配置构建的 JS 产物共减少 168 字节（4464859 → 4464691）。

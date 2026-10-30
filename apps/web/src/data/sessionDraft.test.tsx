@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  consumableAttachmentKeys,
+  forgetAcceptedAttachments,
   readAttachments,
   readPendingSubmission,
   sessionAttachmentsKey,
@@ -42,6 +44,54 @@ describe('session drafts', () => {
 
     writePendingSubmission(key, undefined)
     expect(readPendingSubmission(key)).toBeUndefined()
+  })
+
+  it('keeps no-snapshot, unknown and known-empty attachment sets distinct', () => {
+    const key = sessionPendingKey(SESSION)
+    const base = { request_id: 'req-1', text: 'x', target_turn_id: null, attachment_ids: [] }
+    // Absent snapshot: a record from before entry identities existed.
+    writePendingSubmission(key, base)
+    expect(readPendingSubmission(key)?.attachment_snapshot).toBeUndefined()
+    // Explicit migration result: present but proven unknown.
+    writePendingSubmission(key, { ...base, attachment_snapshot: { known: false } })
+    expect(readPendingSubmission(key)?.attachment_snapshot).toEqual({ known: false })
+    // Known empty is not legacy: an empty key list must not be guessed by id.
+    writePendingSubmission(key, { ...base, attachment_snapshot: { known: true, keys: [] } })
+    expect(readPendingSubmission(key)?.attachment_snapshot).toEqual({ known: true, keys: [] })
+    writePendingSubmission(key, {
+      ...base,
+      attachment_ids: ['att-1'],
+      attachment_snapshot: { known: true, keys: ['draft-a'] },
+    })
+    expect(readPendingSubmission(key)?.attachment_snapshot).toEqual({ known: true, keys: ['draft-a'] })
+
+    // The older bare key list is normalised into a known snapshot.
+    localStorage.setItem(key, JSON.stringify({ ...base, attachment_keys: ['draft-b'] }))
+    expect(readPendingSubmission(key)?.attachment_snapshot).toEqual({ known: true, keys: ['draft-b'] })
+  })
+
+  it('shares one consumption rule between storage and the rail', () => {
+    expect(consumableAttachmentKeys(undefined).size).toBe(0)
+    expect(consumableAttachmentKeys({ known: false }).size).toBe(0)
+    expect(consumableAttachmentKeys({ known: true, keys: [] }).size).toBe(0)
+    expect([...consumableAttachmentKeys({ known: true, keys: ['a', 'b'] })].sort()).toEqual(['a', 'b'])
+  })
+
+  it('removes only snapshot keys from storage and never guesses by id', () => {
+    const key = sessionAttachmentsKey(SESSION)
+    const seeded = [
+      { key: 'draft-a', id: 'same-id', name: 'a.png' },
+      { key: 'draft-b', id: 'same-id', name: 'b.png' },
+    ]
+    writeAttachments(key, seeded)
+    forgetAcceptedAttachments(key, { known: false })
+    expect(readAttachments(key)).toEqual(seeded)
+    forgetAcceptedAttachments(key, { known: true, keys: [] })
+    expect(readAttachments(key)).toEqual(seeded)
+    forgetAcceptedAttachments(key, { known: true, keys: ['draft-a'] })
+    expect(readAttachments(key)).toEqual([
+      { key: 'draft-b', id: 'same-id', name: 'b.png' },
+    ])
   })
 
   it('stores what the reader types and reads it back', () => {

@@ -187,8 +187,7 @@ describe('attachment consumption follows the submission snapshot', () => {
     act(() => {
       forgetAcceptedAttachments(
         sessionAttachmentsKey(SESSION),
-        [firstKey],
-        ['att-first-png'],
+        { known: true, keys: [firstKey] },
       )
     })
     await act(async () => {
@@ -246,8 +245,7 @@ describe('attachment consumption follows the submission snapshot', () => {
     act(() => {
       forgetAcceptedAttachments(
         sessionAttachmentsKey(SESSION),
-        [submittedKey],
-        ['att-same-png'],
+        { known: true, keys: [submittedKey] },
       )
     })
     expect(handle.current?.entries.map(entry => entry.key)).toEqual([readdedKey])
@@ -286,8 +284,7 @@ describe('attachment consumption follows the submission snapshot', () => {
     act(() => {
       forgetAcceptedAttachments(
         sessionAttachmentsKey(SESSION),
-        [submittedKey],
-        ['att-same'],
+        { known: true, keys: [submittedKey] },
       )
     })
     expect(handle.current?.entries.map(entry => entry.key)).toEqual([laterKey])

@@ -198,40 +198,24 @@ export function writeAttachments(key: string, entries: readonly StoredAttachment
 /**
  * Remove draft entries accepted by the server and notify mounted session rails.
  *
- * `entryKeys` is the submission's draft-entry snapshot. Content ids alone are
- * not enough: attachments are content-addressed, so a re-chosen identical image
- * shares its id with the submitted one. A legacy record without keys falls back
- * to consuming at most one entry per id, which still preserves a later copy.
+ * The snapshot is the submission's frozen draft-entry set. A receipt may only
+ * remove entries it can name: an unknown (legacy) snapshot removes nothing, and
+ * a known but empty one removes nothing either. Storage and the mounted rail
+ * share [`consumableAttachmentKeys`] so there is one consumption rule.
  */
 export function forgetAcceptedAttachments(
   key: string,
-  entryKeys: readonly string[],
-  ids: readonly string[],
+  snapshot: AttachmentSnapshot | undefined,
 ): void {
-  if (entryKeys.length === 0 && ids.length === 0) return
+  const consumed = consumableAttachmentKeys(snapshot)
+  if (consumed.size === 0) return
   const current = readAttachments(key)
-  let remaining: StoredAttachment[]
-  if (entryKeys.length > 0) {
-    const consumed = new Set(entryKeys)
-    remaining = current.filter(attachment =>
-      attachment.key === undefined || !consumed.has(attachment.key))
-  } else {
-    const consumed = new Set(ids)
-    const seen = new Set<string>()
-    remaining = current.filter(attachment => {
-      if (!consumed.has(attachment.id) || seen.has(attachment.id)) return true
-      seen.add(attachment.id)
-      return false
-    })
-  }
+  const remaining = current.filter(attachment =>
+    attachment.key === undefined || !consumed.has(attachment.key))
   if (remaining.length !== current.length) writeAttachments(key, remaining)
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('mink:attachments-consumed', {
-      detail: {
-        key,
-        entryKeys: [...new Set(entryKeys)],
-        ids: [...new Set(ids)],
-      },
+      detail: { key, snapshot },
     }))
   }
 }
@@ -242,13 +226,43 @@ export function sessionPendingKey(session: Pick<SessionSummary, 'project_key' | 
 }
 
 /**
+ * What a submission is allowed to consume from the draft.
+ *
+ * `undefined` means the record predates entry identities and was never
+ * migrated; `{known:false}` is an explicit migration result that could not
+ * prove the set (also consumes nothing); `{known:true,keys:[]}` is a known
+ * empty submission. The three states stay distinct — an empty key list is not
+ * a licence to guess by content id.
+ */
+export type AttachmentSnapshot =
+  | { known: true; keys: string[] }
+  | { known: false }
+
+/** Draft entry keys a receipt may remove; anything unknown removes nothing. */
+export function consumableAttachmentKeys(
+  snapshot: AttachmentSnapshot | undefined,
+): Set<string> {
+  return snapshot?.known === true ? new Set(snapshot.keys) : new Set()
+}
+
+/**
  * A local submission record: the wire input plus the draft entries it consumes.
- * `attachment_keys` never goes over the wire; it lets a receipt consume exactly
- * the rail entries that were submitted, including a later copy of the same
- * content-addressed image.
+ * `attachment_snapshot` never goes over the wire; it lets a receipt consume
+ * exactly the rail entries that were submitted, including a later copy of the
+ * same content-addressed image.
  */
 export interface PendingSubmission extends HumanInput {
-  attachment_keys?: string[]
+  attachment_snapshot?: AttachmentSnapshot
+}
+
+function parseSnapshot(value: unknown): AttachmentSnapshot | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const known = (value as { known?: unknown }).known
+  if (known === false) return { known: false }
+  if (known !== true) return undefined
+  const keys = (value as { keys?: unknown }).keys
+  if (!Array.isArray(keys) || !keys.every(key => typeof key === 'string')) return undefined
+  return { known: true, keys: [...keys] }
 }
 
 /**
@@ -262,24 +276,26 @@ export function readPendingSubmission(key: string): PendingSubmission | undefine
     if (raw === null) return undefined
     const parsed: unknown = JSON.parse(raw)
     if (typeof parsed !== 'object' || parsed === null) return undefined
-    const entry = parsed as Partial<PendingSubmission>
+    const entry = parsed as Partial<PendingSubmission> & { attachment_keys?: unknown }
     if (typeof entry.request_id !== 'string' || entry.request_id === '') return undefined
     if (typeof entry.text !== 'string') return undefined
     if (entry.target_turn_id !== null && typeof entry.target_turn_id !== 'string') return undefined
     if (!Array.isArray(entry.attachment_ids)) return undefined
     if (!entry.attachment_ids.every(id => typeof id === 'string')) return undefined
-    if (entry.attachment_keys !== undefined) {
-      if (!Array.isArray(entry.attachment_keys)) return undefined
-      if (!entry.attachment_keys.every(key => typeof key === 'string')) return undefined
+    // Older records carried a bare key list; normalise it to a known snapshot.
+    const legacyKeys = entry.attachment_keys
+    if (legacyKeys !== undefined) {
+      if (!Array.isArray(legacyKeys)) return undefined
+      if (!legacyKeys.every(key => typeof key === 'string')) return undefined
     }
+    const snapshot = parseSnapshot(entry.attachment_snapshot)
+      ?? (legacyKeys === undefined ? undefined : { known: true as const, keys: [...legacyKeys] })
     return {
       request_id: entry.request_id,
       text: entry.text,
       target_turn_id: entry.target_turn_id,
       attachment_ids: [...entry.attachment_ids],
-      ...(entry.attachment_keys === undefined
-        ? {}
-        : { attachment_keys: [...entry.attachment_keys] }),
+      ...(snapshot === undefined ? {} : { attachment_snapshot: snapshot }),
     }
   } catch {
     return undefined

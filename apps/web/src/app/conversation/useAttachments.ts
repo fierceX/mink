@@ -10,6 +10,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, sessionUrl, type SessionSummary } from '../../data/api.ts'
 import { readAttachments, sessionAttachmentsKey, writeAttachments } from '../../data/sessionDraft.ts'
+import {
+  consumableAttachmentKeys,
+  type AttachmentSnapshot,
+} from '../../data/sessionDraft.ts'
 import type { Attachment, ImageLimits } from '../../data/types.ts'
 
 /** Hard ceiling the workbench applies on top of the session's own limits. */
@@ -103,23 +107,15 @@ export function useAttachments(session: SessionSummary | undefined, limits: Imag
     const onConsumed = (event: Event): void => {
       const detail = (event as CustomEvent<{
         key: string
-        entryKeys?: string[]
-        ids?: string[]
+        snapshot?: AttachmentSnapshot
       }>).detail
       if (detail?.key !== storageKey) return
-      const consumedKeys = new Set(detail.entryKeys ?? [])
-      const consumedIds = new Set(detail.ids ?? [])
-      const seen = new Set<string>()
-      setEntries(current => current.filter(entry => {
-        if (entry.attachment === undefined) return true
-        if (consumedKeys.size > 0) return !consumedKeys.has(entry.key)
-        if (!consumedIds.has(entry.attachment.id)) return true
-        // Legacy receipts carry no entry identity: consume at most one entry
-        // per content id, so a later copy survives.
-        if (seen.has(entry.attachment.id)) return true
-        seen.add(entry.attachment.id)
-        return false
-      }))
+      // One consumption rule with the storage layer: only entries the frozen
+      // snapshot names may leave; an unknown/empty snapshot removes nothing.
+      const consumed = consumableAttachmentKeys(detail.snapshot)
+      if (consumed.size === 0) return
+      setEntries(current => current.filter(entry =>
+        entry.attachment === undefined || !consumed.has(entry.key)))
     }
     window.addEventListener('mink:attachments-consumed', onConsumed)
     return () => window.removeEventListener('mink:attachments-consumed', onConsumed)

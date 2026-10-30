@@ -330,7 +330,7 @@ export function App() {
         text,
         target_turn_id: null,
         attachment_ids: attachmentIds,
-        ...(attachmentKeys.length === 0 ? {} : { attachment_keys: attachmentKeys }),
+        attachment_snapshot: { known: true, keys: attachmentKeys },
       }
       writePendingSubmission(sessionPendingKey(created), input)
       const submitted = await api.submitInput(created.id, {

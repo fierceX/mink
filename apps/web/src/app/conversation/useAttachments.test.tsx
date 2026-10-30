@@ -148,7 +148,7 @@ describe('draft attachments', () => {
 describe('attachment consumption by draft entry identity', () => {
   const key = 'mink.attachments:demo:session-1'
 
-  it('removes only the submitted entry when ids are shared by content hash', () => {
+  it('removes only the entries the frozen snapshot names', () => {
     localStorage.setItem(key, JSON.stringify([
       { key: 'draft-a', id: 'att-same', name: 'a.png' },
       { key: 'draft-b', id: 'att-same', name: 'b.png' },
@@ -156,29 +156,35 @@ describe('attachment consumption by draft entry identity', () => {
     const handle = renderAttachments(LIMITS)
     act(() => {
       window.dispatchEvent(new CustomEvent('mink:attachments-consumed', {
-        detail: { key, entryKeys: ['draft-a'], ids: ['att-same'] },
+        detail: { key, snapshot: { known: true, keys: ['draft-a'] } },
       }))
     })
     expect(handle().entries.map(entry => entry.key)).toEqual(['draft-b'])
-    expect(JSON.parse(localStorage.getItem(key) ?? '[]')).toEqual([
-      { key: 'draft-b', id: 'att-same', name: 'b.png' },
-    ])
   })
 
-  it('legacy receipts without entry keys consume one entry per content id', () => {
+  it('an unknown snapshot consumes nothing, even for a shared content id', () => {
     localStorage.setItem(key, JSON.stringify([
-      { id: 'att-same', name: 'a.png' },
-      { id: 'att-same', name: 'b.png' },
+      { key: 'draft-a', id: 'att-same', name: 'a.png' },
+      { key: 'draft-b', id: 'att-same', name: 'b.png' },
     ]))
     const handle = renderAttachments(LIMITS)
     act(() => {
       window.dispatchEvent(new CustomEvent('mink:attachments-consumed', {
-        detail: { key, ids: ['att-same'] },
+        detail: { key, snapshot: { known: false } },
       }))
     })
-    expect(handle().entries).toHaveLength(1)
-    expect(handle().entries[0]?.name).toBe('b.png')
-    expect(handle().entries[0]?.key).toBe('stored-att-same-2')
+    expect(handle().entries.map(entry => entry.key)).toEqual(['draft-a', 'draft-b'])
+  })
+
+  it('a known empty snapshot consumes nothing', () => {
+    localStorage.setItem(key, JSON.stringify([{ key: 'draft-a', id: 'att-1', name: 'a.png' }]))
+    const handle = renderAttachments(LIMITS)
+    act(() => {
+      window.dispatchEvent(new CustomEvent('mink:attachments-consumed', {
+        detail: { key, snapshot: { known: true, keys: [] } },
+      }))
+    })
+    expect(handle().entries.map(entry => entry.key)).toEqual(['draft-a'])
   })
 
   it('keeps an upload that is still in flight when an earlier receipt arrives', () => {
@@ -188,7 +194,7 @@ describe('attachment consumption by draft entry identity', () => {
     expect(handle().entries[0]?.status).toBe('uploading')
     act(() => {
       window.dispatchEvent(new CustomEvent('mink:attachments-consumed', {
-        detail: { key, entryKeys: ['draft-a'], ids: ['att-same'] },
+        detail: { key, snapshot: { known: true, keys: ['draft-a'] } },
       }))
     })
     expect(handle().entries).toHaveLength(1)

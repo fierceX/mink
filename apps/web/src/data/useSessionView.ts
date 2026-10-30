@@ -24,6 +24,7 @@ import {
   sessionIdentity,
   sessionPendingKey,
   writePendingSubmission,
+  type AttachmentSnapshot,
   type PendingSubmission,
 } from './sessionDraft.ts'
 import { setVerifierAvailable } from './commands.ts'
@@ -137,6 +138,17 @@ function wireInput(input: PendingSubmission): HumanInput {
   }
 }
 
+/** The frozen attachment set a submission may consume. */
+function attachmentSnapshot(
+  attachmentIds: readonly string[],
+  attachmentKeys: readonly string[],
+): AttachmentSnapshot {
+  // Callers that cannot name one key per id leave the set unproven; guessing
+  // from content ids would delete a later copy of the same image.
+  if (attachmentIds.length !== attachmentKeys.length) return { known: false }
+  return { known: true, keys: [...attachmentKeys] }
+}
+
 /** Whether a stored submission is exactly what the reader is sending again. */
 function sameSubmission(
   stored: PendingSubmission,
@@ -148,12 +160,13 @@ function sameSubmission(
   if (stored.target_turn_id !== targetTurnId || stored.text !== text) return false
   if (stored.attachment_ids.length !== attachmentIds.length) return false
   if (!stored.attachment_ids.every((id, index) => id === attachmentIds[index])) return false
-  // Entry identity matters: the same content id can belong to a different draft
-  // entry (a re-chosen identical image), and that is a different input.
-  const storedKeys = stored.attachment_keys
-  if (storedKeys === undefined) return true
-  return storedKeys.length === attachmentKeys.length
-    && storedKeys.every((key, index) => key === attachmentKeys[index])
+  const snapshot = stored.attachment_snapshot
+  if (snapshot === undefined || !snapshot.known) return true
+  // An unproven current key list cannot identify a different input; the stored
+  // snapshot still names exactly what the accepted request consumed.
+  if (attachmentKeys.length !== attachmentIds.length) return true
+  return snapshot.keys.length === attachmentKeys.length
+    && snapshot.keys.every((key, index) => key === attachmentKeys[index])
 }
 
 /** Ask the admission boundary whether it already holds this request. */
@@ -246,7 +259,7 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
   // The unresolved submission of each session, keyed by identity: leaving a
   // session must not take its request identity away, and the storage copy keeps
   // it across a reload the way the draft is kept.
-  const uncertain = useRef<Map<string, HumanInput>>(new Map())
+  const uncertain = useRef<Map<string, PendingSubmission>>(new Map())
   const loadedIdentity = useRef<string | undefined>(undefined)
 
   /** The stamp a request starts under; every part must still hold when it ends. */
@@ -275,8 +288,18 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
     const remembered = uncertain.current.get(key)
     if (remembered !== undefined) return remembered
     const stored = readPendingSubmission(key)
-    if (stored !== undefined) uncertain.current.set(key, stored)
-    return stored
+    if (stored !== undefined) {
+      // Freeze the legacy decision at the recovery boundary: a record without
+      // an explicit snapshot is migrated once to "unknown" and persisted, so a
+      // receipt can never guess at the current draft later.
+      const migrated = stored.attachment_snapshot === undefined
+        ? { ...stored, attachment_snapshot: { known: false } as const }
+        : stored
+      if (migrated !== stored) writePendingSubmission(key, migrated)
+      uncertain.current.set(key, migrated)
+      return migrated
+    }
+    return undefined
   }
 
   /** Keep a submission until its ending is known; the record is per identity. */
@@ -299,8 +322,7 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
   const forgetAcceptedAttachments = (target: SessionSummary, input: PendingSubmission): void => {
     forgetStoredAttachments(
       sessionAttachmentsKey(target),
-      input.attachment_keys ?? [],
-      input.attachment_ids,
+      input.attachment_snapshot,
     )
   }
 
@@ -440,7 +462,7 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
         text,
         target_turn_id: null,
         attachment_ids: [...attachmentIds],
-        ...(attachmentKeys.length === 0 ? {} : { attachment_keys: [...attachmentKeys] }),
+        attachment_snapshot: attachmentSnapshot(attachmentIds, attachmentKeys),
       }
     }
     // The record goes in before the request: a reload in the middle must not
@@ -500,7 +522,7 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
         text,
         target_turn_id: turnId,
         attachment_ids: [...attachmentIds],
-        ...(attachmentKeys.length === 0 ? {} : { attachment_keys: [...attachmentKeys] }),
+        attachment_snapshot: attachmentSnapshot(attachmentIds, attachmentKeys),
       }
     }
     rememberSubmission(target, input)
