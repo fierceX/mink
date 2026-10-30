@@ -81,6 +81,6 @@ Rust：draft_goal、request_goal_draft、goal_draft_snapshot、generate_goal_dra
 
 Web：GET `/api/sessions/{id}/goal` 优先读活运行时快照，关闭时回退落盘 current；hidden 归一为 null。POST 同路径要求 `protocol_version:2`，objective、acceptance（agent_reviewed/human/verifier）、max_turns、max_minutes、acceptance_criteria、constraints；默认形成模型草案，宿主准备结构化 `draft_spec` 时可设 `generate:false`。成功返回 draft，尚未启动执行。
 
-POST `.../goal/{action}` 必须携带 goal_id/revision；新增 confirm、refine（feedback），保留 pause/resume/cancel/clear/budget/approve/reconcile。确认预约容量并由 core 激活；refine 的模型讨论也占同一宿主容量。SSE goal_updated 与镜像水位保持同一发布边界；事件、快照与动作响应只携带状态/额度/最新审核摘要，完整契约用 `GET .../goal?full=true` 按需读取。已清除（hidden）的目标在事件、镜像与快照中同样归一为 null，草案和审核详情只呈现 core 快照。
+POST `.../goal/{action}` 必须携带 goal_id/revision；新增 confirm、refine（feedback），保留 pause/resume/cancel/clear/budget/approve/reconcile。确认预约容量并由 core 激活；refine 的模型讨论也占同一宿主容量。`budget` 的 `soft_token_limit` 为三态：省略保留、数字设置、显式 `null` 清除；`0` 与非法值由 core 校验拒绝，拒绝不改变快照。SSE goal_updated 与镜像水位保持同一发布边界；事件、快照与动作响应只携带状态/额度/最新审核摘要，完整契约用 `GET .../goal?full=true` 按需读取。已清除（hidden）的目标在事件、镜像与快照中同样归一为 null，草案和审核详情只呈现 core 快照。
 
 CLI/TUI：`/goal <请求>`、`/goal refine <意见>`、`/goal confirm <ID> <REVISION>`；/goals 与可点击状态标记显示只读详情；`/goal` help 与解析分支列出同一组子命令（含 reconcile），`/goal confrim`、`/goal refne` 等误拼在三个解析器一致拒绝并给出建议。草案讨论通过类型化内部消息持久化，携带原始请求与修改意见，不注册为人类 Inbox 请求。Web 显示待确认草案卡片，控制指令只进入模型上下文。界面区分执行轮 Final 与 GoalFinished，呈现待确认、执行中、审核中、待人工验收及逐项审核证据；子目标进度仅由同一契约版本的最新审核派生；当前候选存在时必须匹配该候选。Python SDK 没有 Goal 产品入口。
