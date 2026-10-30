@@ -32,6 +32,7 @@ function noAttachments(overrides: Partial<ComposerPropsAttachments> = {}) {
     entries,
     add: overrides.add ?? (() => {}),
     remove: overrides.remove ?? (() => {}),
+    consume: overrides.consume ?? (() => {}),
     clear: overrides.clear ?? (() => {}),
     ids: overrides.ids ?? entries.flatMap(entry => (entry.attachment === undefined ? [] : [entry.attachment.id])),
     blocked: overrides.blocked ?? false,
@@ -43,6 +44,7 @@ type ComposerPropsAttachments = {
   entries?: DraftAttachment[]
   add?: (files: readonly File[]) => void
   remove?: (key: string) => void
+  consume?: (keys: readonly string[]) => void
   clear?: () => void
   ids?: string[]
   blocked?: boolean

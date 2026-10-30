@@ -56,6 +56,8 @@ export interface ComposerProps {
     entries: readonly DraftAttachment[]
     add: (files: readonly File[]) => void
     remove: (key: string) => void
+    /** Consume exactly the entries captured by an accepted submission. */
+    consume: (keys: readonly string[]) => void
     clear: () => void
     /** Ids ready to reference from the submitted input. */
     ids: string[]
@@ -167,6 +169,9 @@ export function Composer({
     }
     const payload = text.trim()
     const ids = attachments.ids
+    // Freeze the attachment set this submission carries: an acceptance may
+    // only consume these entries, never files chosen while it was in flight.
+    const submittedEntries = attachments.entries.map(entry => entry.key)
     if ((payload === '' && attachments.entries.length === 0) || disabled || busy || attachments.blocked) return
     if (running && targetTurnId === null) {
       setError('当前会话尚未取得引导能力，请等待同步')
@@ -181,7 +186,7 @@ export function Composer({
       : onSend(payload, ids)
     void call.then((failure) => {
       if (failure === undefined) {
-        attachments.clear()
+        attachments.consume(submittedEntries)
         return
       }
       // Restore only a draft nobody has replaced since the submission.

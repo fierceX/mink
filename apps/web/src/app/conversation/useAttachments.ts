@@ -38,6 +38,11 @@ export interface AttachmentsHandle {
   blocked: boolean
   /** Ids ready to reference from an input. */
   ids: string[]
+  /**
+   * Consume exactly the entries captured when a submission was accepted.
+   * Later entries belong to the next message and stay in the rail.
+   */
+  consume: (keys: readonly string[]) => void
   clear: () => void
   /** Message explaining why a file was refused, or undefined. */
   notice: string | undefined
@@ -169,6 +174,22 @@ export function useAttachments(session: SessionSummary | undefined, limits: Imag
     })
   }, [])
 
+  const consume = useCallback((keys: readonly string[]) => {
+    if (keys.length === 0) return
+    const submitted = new Set(keys)
+    setEntries((current) => {
+      const kept: DraftAttachment[] = []
+      for (const entry of current) {
+        if (!submitted.has(entry.key)) {
+          kept.push(entry)
+          continue
+        }
+        if (entry.preview.startsWith('blob:')) URL.revokeObjectURL(entry.preview)
+      }
+      return kept.length === current.length ? current : kept
+    })
+  }, [])
+
   const clear = useCallback(() => {
     setEntries((current) => {
       for (const entry of current) {
@@ -185,5 +206,5 @@ export function useAttachments(session: SessionSummary | undefined, limits: Imag
   )
   const blocked = entries.some(entry => entry.status !== 'ready') || ids.length !== entries.length
 
-  return { entries, add, remove, blocked, ids, clear, notice }
+  return { entries, add, remove, blocked, ids, consume, clear, notice }
 }

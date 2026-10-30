@@ -267,6 +267,63 @@ test('uploads an image for a session that accepts them and sends it', async ({ p
   await expect(page.locator('[data-composer-attachments] img').first()).toHaveAttribute('src', /\/attachments\//)
 })
 
+test('keeps an image chosen while a text submission awaits its receipt', async ({ page }) => {
+  // The accepted submission owns only the attachment set it was created with:
+  // a file chosen while it is in flight belongs to the next message.
+  const created = await page.request.post('/api/sessions', {
+    data: { name: 'attachment-pending-fixture', cwd: `/tmp/mink-web-e2e-att-pending-${Date.now()}` },
+  })
+  expect(created.ok()).toBe(true)
+  const body = await created.json() as { data: { id: string; project_key: string } }
+  await page.goto(`/?session=${body.data.id}&project=${body.data.project_key}`)
+  const composer = page.getByLabel('输入消息')
+  await expect(composer).toBeEnabled()
+  // A session with a transcript keeps the docked composer; the hero → docked
+  // switch of a first message is a separate mount and not this case.
+  await composer.fill('warm up the transcript')
+  await page.getByRole('button', { name: '发送' }).click()
+  await expect(page.getByText(/Completed:/).first()).toBeVisible()
+
+  let releaseReceipt!: () => void
+  const held = new Promise<void>((resolve) => { releaseReceipt = resolve })
+  let receiptArrived!: () => void
+  const arrived = new Promise<void>((resolve) => { receiptArrived = resolve })
+  await page.route('**/api/sessions/*/inputs?*', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue()
+      return
+    }
+    const response = await route.fetch()
+    receiptArrived()
+    await held
+    await route.fulfill({ response })
+  })
+
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64',
+  )
+  await composer.fill('先发一条普通文本')
+  await page.getByRole('button', { name: '发送' }).click()
+  await arrived
+
+  // The text submission is still awaiting its receipt; choose the next image.
+  await page.setInputFiles('input[aria-label="选择图片"]', {
+    name: 'next.png',
+    mimeType: 'image/png',
+    buffer: png,
+  })
+  const rail = page.locator('[data-composer-attachments]')
+  await expect(rail.locator('img')).toHaveCount(1)
+  await expect(rail.locator('img').first()).toHaveAttribute('src', /\/attachments\//)
+
+  releaseReceipt()
+  await expect(composer).toHaveValue('')
+  await expect(page.getByText(/Completed:/)).toHaveCount(2)
+  await expect(rail.locator('img')).toHaveCount(1)
+  await expect(rail.locator('img').first()).toHaveAttribute('src', /\/attachments\//)
+})
+
 test('opens a spilled output from an artifact reference in the transcript', async ({ page }) => {
   await openFixture(page)
   // The fixture history cites `artifact://fixture-output`; the reference opens

@@ -13,7 +13,7 @@ function renderComposer(overrides: Partial<Parameters<typeof Composer>[0]> = {})
       running={false}
       targetTurnId={null}
       disabled={false}
-      attachments={{ entries: [], add: () => {}, remove: () => {}, clear: () => {}, ids: [], blocked: false, notice: undefined }}
+      attachments={{ entries: [], add: () => {}, remove: () => {}, consume: () => {}, clear: () => {}, ids: [], blocked: false, notice: undefined }}
       canAttach
       model="flash"
       modelChoices={[{ alias: 'flash', model: 'deepseek-flash' }, { alias: 'pro', model: 'deepseek-v4-pro' }]}
