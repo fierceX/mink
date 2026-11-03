@@ -112,6 +112,28 @@ StormDecision::Suppress(reason) => {
 - 重试当前请求：502/429/连接重置/首事件与 idle 超时（不占格式窗口）与 SSE 损坏/异常 EOF（占一个格式错）；固定投影重试、恰发一次 Retry、可取消退避、`Retry-After` 为最早重试时间。
 - 结束：永久拒绝、恢复耗尽、取消、本地不可恢复故障；稳定错误前缀 `format_recovery_exhausted` / `request_retry_exhausted` / `request_timeout`，绝不空成功。
 
+### 终态失败原因
+
+`TurnOutcome.failure`（及 `TurnFinal`/`TurnError`/`SdkFinal`）是宿主重试/告警的唯一稳定分类；它来自 typed tag 与 downcast，不由 error 文本推断。
+
+| reason | 来源 |
+|---|---|
+| `request_timeout` | 整次逻辑请求的绝对期限（含压缩摘要共享期限） |
+| `request_retry_exhausted` | 可重试失败耗尽重试预算；首事件/idle 超时最终归入此类的恢复失败 |
+| `provider_rejected` | 永久拒绝、鉴权、schema/参数拒绝 |
+| `provider_stopped` | provider 返回 `error`/拒绝等终态 stop |
+| `context_overflow` | 无可见输出的 context overflow，且收缩后仍失败 |
+| `context_unavailable` | 摘要与应急 checkpoint 都无法让请求装进输入预算 |
+| `format_recovery_exhausted` | 格式窗口耗尽（含损坏流/不可配对调用） |
+| `max_turns_exceeded` | 达到 `max_turns`；同时设置 `TurnStatus::MaxTurnsExceeded` |
+| `signal_aborted` | 可靠性策略中止且未 handover |
+| `signal_handover` | 可靠性策略交给用户/宿主 |
+| `goal_budget_exhausted` | Goal 审核预算耗尽 |
+| `persistence` | 会话状态发布/目录同步失败或闩锁 |
+| `internal` | 无 typed 来源；error 文本仅作诊断 |
+
+取消（`Interrupted`）不是失败，`failure=None`；成功轮同样省略该字段。
+
 ### 关键取舍
 
 - 所有可继续的 round 共用同一个尾部：先结算窗口一次，再执行分支决策（todo 提醒、`[trajectory]` 证据注入），最后重载已提交历史——刷新必须在本轮所有追加之后；反馈诊断、工具结果与注入状态必须出现在下一次请求中。

@@ -1,4 +1,5 @@
 use crate::agent::belief::BeliefTracker;
+use crate::agent::failure::{TurnFailureReason, classify_turn_error};
 use crate::agent::turn::{TurnDecision, TurnEffect, TurnExecutor};
 use crate::context::AgentSharedContext;
 use crate::errors;
@@ -42,6 +43,7 @@ pub enum OrchCmd {
 pub struct TurnRunResult {
     pub billing_turn_id: String,
     pub status: TurnStatus,
+    pub failure: Option<TurnFailureReason>,
     pub tool_call_count: u32,
     pub tool_error_count: u32,
     pub error: Option<String>,
@@ -73,9 +75,14 @@ impl TurnStatus {
 
 impl TurnRunResult {
     pub fn failed(error: impl Into<String>) -> Self {
+        Self::failed_with(TurnFailureReason::Internal, error)
+    }
+
+    pub fn failed_with(reason: TurnFailureReason, error: impl Into<String>) -> Self {
         Self {
             billing_turn_id: String::new(),
             status: TurnStatus::Failed,
+            failure: Some(reason),
             tool_call_count: 0,
             tool_error_count: 0,
             error: Some(error.into()),
@@ -87,23 +94,26 @@ impl TurnRunResult {
     }
 
     fn from_decision(decision: &TurnDecision, executor: &TurnExecutor) -> Self {
-        let status = match decision {
-            TurnDecision::Stop => TurnStatus::Ok,
-            TurnDecision::Interrupted => TurnStatus::Interrupted,
-            TurnDecision::MaxTurnsExceeded => TurnStatus::MaxTurnsExceeded,
-            TurnDecision::Failed(_) => TurnStatus::Failed,
-        };
-        let error = match decision {
-            TurnDecision::Failed(msg) => Some(msg.clone()),
-            TurnDecision::Interrupted => Some("interrupted".to_string()),
-            TurnDecision::MaxTurnsExceeded => {
-                Some("max_turns exhausted before end_turn".to_string())
+        let (status, failure, error) = match decision {
+            TurnDecision::Stop => (TurnStatus::Ok, None, None),
+            TurnDecision::Interrupted => (
+                TurnStatus::Interrupted,
+                None,
+                Some("interrupted".to_string()),
+            ),
+            TurnDecision::MaxTurnsExceeded => (
+                TurnStatus::MaxTurnsExceeded,
+                Some(TurnFailureReason::MaxTurnsExceeded),
+                Some("max_turns exhausted before end_turn".to_string()),
+            ),
+            TurnDecision::Failed { reason, detail } => {
+                (TurnStatus::Failed, Some(*reason), Some(detail.clone()))
             }
-            _ => None,
         };
         Self {
             billing_turn_id: String::new(),
             status,
+            failure,
             tool_call_count: executor.tool_call_count(),
             tool_error_count: executor.tool_error_count(),
             error,
@@ -226,6 +236,7 @@ impl OrchActor {
                         self.ctx.log_event(crate::events::EventLog::RuntimeTurnStarted {
                             turn_id: turn_id.to_string(),
                         });
+                        let started_at = Instant::now();
                         let prepared = match goal_source {
                             Some(source) => self.publish_goal_boundary(input.as_str(), &source).await,
                             None => match goal_draft {
@@ -237,37 +248,20 @@ impl OrchActor {
                             Ok(()) => self.handle_user_input(input).await,
                             Err(error) => {
                                 let finish_error = self.ctx.input_inbox.finish().err();
-                                TurnRunResult::failed(match finish_error {
-                                    Some(finish) => format!("{error:#}; inbox settlement failed: {finish:#}"),
-                                    None => format!("{error:#}"),
-                                })
+                                TurnRunResult::failed_with(
+                                    TurnFailureReason::Persistence,
+                                    match finish_error {
+                                        Some(finish) => format!("{error:#}; inbox settlement failed: {finish:#}"),
+                                        None => format!("{error:#}"),
+                                    },
+                                )
                             }
                         };
-                        let mut result = result;
-                        if let Some(key) = &goal_iteration {
-                            // Settlement is identity-bound and idempotent: the
-                            // admitted iteration is the only row it may touch.
-                            let facts = crate::session::goal::SettlementFacts {
-                                interrupted_pause: result.status == TurnStatus::Interrupted
-                                    && !self.ctx.cancel.is_cancelled(),
-                            };
-                            let committed = async {
-                                self.ctx.store.sync().await?;
-                                self.ctx
-                                    .goal_store
-                                    .settle_iteration(key, &result, &facts)
-                                    .map(|_| ())
-                            }
+                        let result = self
+                            .settle_goal_iteration(goal_iteration.as_ref(), result)
                             .await;
-                            if let Err(error) = committed {
-                                let error = self.ctx.persistence_fault.raise(
-                                    self.ctx.store.path(),
-                                    format!("goal iteration publication failed: {error:#}"),
-                                );
-                                result.status = TurnStatus::Failed;
-                                result.error = Some(format!("{error:#}"));
-                            }
-                        }
+                        self.log_turn_final(&result, started_at.elapsed().as_millis() as u64)
+                            .await;
                         let _ = done.send(result);
                     }
                     Some(OrchCmd::SetModel { model, done }) => {
@@ -458,7 +452,6 @@ impl OrchActor {
         }
     }
     async fn handle_user_input(&mut self, input: String) -> TurnRunResult {
-        let started_at = Instant::now();
         let billing_turn_id = self.ctx.usage.begin_turn();
         if self.ctx.goal_store.snapshot().is_some_and(|g| {
             g.phase == crate::session::goal::GoalPhase::Executing
@@ -479,11 +472,9 @@ impl OrchActor {
             self.ctx.display.render_error(&format!("{error:#}"));
             self.refresh_title().await;
             let result = self.finish_usage(
-                TurnRunResult::failed(format!("{error:#}")),
+                TurnRunResult::failed_with(TurnFailureReason::Persistence, format!("{error:#}")),
                 &billing_turn_id,
             );
-            self.log_turn_final(&result, started_at.elapsed().as_millis() as u64)
-                .await;
             return result;
         }
         // 跨轮重复失败可累积升级，单次偶然失败自然消退。
@@ -502,12 +493,49 @@ impl OrchActor {
         let mut result = result;
         if let Err(error) = self.ctx.input_inbox.finish() {
             result.status = TurnStatus::Failed;
+            result.failure = Some(TurnFailureReason::Persistence);
             result.error = Some(format!("{error:#}"));
         }
         let result = self.finish_usage(result, &billing_turn_id);
         self.refresh_title().await;
-        self.log_turn_final(&result, started_at.elapsed().as_millis() as u64)
-            .await;
+        result
+    }
+
+    /// Publish the goal iteration settlement before the terminal event.
+    ///
+    /// Settlement is identity-bound and idempotent: the admitted iteration is
+    /// the only row it may touch. A settlement failure must change the
+    /// published outcome, so this runs before `log_turn_final` and the Final
+    /// stream event.
+    async fn settle_goal_iteration(
+        &self,
+        key: Option<&crate::session::goal::IterationKey>,
+        mut result: TurnRunResult,
+    ) -> TurnRunResult {
+        let Some(key) = key else {
+            return result;
+        };
+        let facts = crate::session::goal::SettlementFacts {
+            interrupted_pause: result.status == TurnStatus::Interrupted
+                && !self.ctx.cancel.is_cancelled(),
+        };
+        let committed = async {
+            self.ctx.store.sync().await?;
+            self.ctx
+                .goal_store
+                .settle_iteration(key, &result, &facts)
+                .map(|_| ())
+        }
+        .await;
+        if let Err(error) = committed {
+            let error = self.ctx.persistence_fault.raise(
+                self.ctx.store.path(),
+                format!("goal iteration publication failed: {error:#}"),
+            );
+            result.status = TurnStatus::Failed;
+            result.failure = Some(TurnFailureReason::Persistence);
+            result.error = Some(format!("{error:#}"));
+        }
         result
     }
 
@@ -561,10 +589,10 @@ impl OrchActor {
 
         self.log_turn_tracking(executor, &decision, model);
 
-        if let TurnDecision::Failed(ref msg) = decision
-            && msg != "interrupted"
+        if let TurnDecision::Failed { ref detail, .. } = decision
+            && detail != "interrupted"
         {
-            self.ctx.display.render_error(msg);
+            self.ctx.display.render_error(detail);
         }
         if decision == TurnDecision::MaxTurnsExceeded {
             self.ctx
@@ -579,7 +607,7 @@ impl OrchActor {
             TurnDecision::Stop => "Stop",
             TurnDecision::Interrupted => "Interrupted",
             TurnDecision::MaxTurnsExceeded => "MaxTurnsExceeded",
-            TurnDecision::Failed(_) => "Failed",
+            TurnDecision::Failed { .. } => "Failed",
         };
         self.ctx.log_event(crate::events::EventLog::TurnTracking {
             version: None,
@@ -595,6 +623,7 @@ impl OrchActor {
         self.ctx.log_event(crate::events::EventLog::TurnFinal {
             billing_turn_id: result.billing_turn_id.clone(),
             status: result.status.as_str().into(),
+            failure: result.failure,
             tool_call_count: result.tool_call_count,
             tool_error_count: result.tool_error_count,
             elapsed_ms,
@@ -615,6 +644,7 @@ impl OrchActor {
         model: &str,
     ) -> TurnRunResult {
         let info = errors::classify_anyhow(&e);
+        let failure = classify_turn_error(&e);
         let error = format!("{e}");
         self.ctx.log_event(crate::events::EventLog::TurnError {
             error: error.clone(),
@@ -624,6 +654,7 @@ impl OrchActor {
             model: Some(model.into()),
             elapsed_ms: None,
             idle_ms: None,
+            failure: Some(failure),
         });
         if info.severity == errors::ErrorSeverity::Fatal {
             self.ctx.display.render_error(&format!("Fatal error: {e}"));
@@ -635,6 +666,7 @@ impl OrchActor {
         TurnRunResult {
             billing_turn_id: String::new(),
             status: TurnStatus::Failed,
+            failure: Some(failure),
             tool_call_count: executor.tool_call_count(),
             tool_error_count: executor.tool_error_count(),
             error: Some(error),

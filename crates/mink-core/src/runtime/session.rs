@@ -8,6 +8,8 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::events::{EventLog as SessionEvent, SessionEventBatch};
+
 pub use crate::session::artifacts::{ArtifactManager, ArtifactRecord};
 pub use crate::session::goal::{GoalBudget, GoalSnapshot};
 pub use crate::session::goal::{
@@ -141,6 +143,28 @@ impl SessionReader {
             summary: UsageSummary::from_records(&records),
             last_context_tokens,
         })
+    }
+
+    /// Read the whole durable event log (`events.jsonl`) as typed records.
+    ///
+    /// Unknown event types and malformed complete lines are skipped; use
+    /// [`Self::events_since`] when the skipped count or incremental reads
+    /// matter.
+    pub fn events(&self) -> Result<Vec<SessionEvent>> {
+        Ok(self.events_since(0, usize::MAX)?.events)
+    }
+
+    /// Read at most `max_events` typed records starting at a byte offset.
+    ///
+    /// Only complete lines are consumed. A trailing partial line stays at
+    /// `next_offset` until the writer finishes it. An offset past the current
+    /// end returns an empty batch with `truncated = true` and `next_offset = 0`.
+    pub fn events_since(&self, offset: u64, max_events: usize) -> Result<SessionEventBatch> {
+        crate::session::event_reader::events_since(
+            &self.directory.join("events.jsonl"),
+            offset,
+            max_events,
+        )
     }
 
     pub fn conversation(&self) -> Result<Vec<serde_json::Value>> {
@@ -552,3 +576,7 @@ mod reader_tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "session_events_tests.rs"]
+mod session_events_tests;

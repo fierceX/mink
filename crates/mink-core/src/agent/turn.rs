@@ -1,3 +1,4 @@
+use crate::agent::failure::{TurnFailureReason, tag_failure};
 use crate::agent::text::truncate_str;
 use crate::context::AgentSharedContext;
 use crate::llm::client::LlmModelTarget;
@@ -46,8 +47,16 @@ impl StreamOutput {
 }
 
 #[derive(Debug)]
-struct ContextOverflowError {
+pub(crate) struct ContextOverflowError {
     message: String,
+}
+
+impl ContextOverflowError {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
 }
 
 impl std::fmt::Display for ContextOverflowError {
@@ -130,7 +139,10 @@ pub enum TurnDecision {
     Stop,
     Interrupted,
     MaxTurnsExceeded,
-    Failed(String),
+    Failed {
+        reason: TurnFailureReason,
+        detail: String,
+    },
 }
 
 impl TurnExecutor {
@@ -406,29 +418,32 @@ impl TurnExecutor {
             }
         }
         if projection.estimated_tokens > input_limit {
-            anyhow::bail!(
-                "context remains over the request input budget: estimated {} tokens, \
-                 limit {input_limit}; {} summary compaction(s) and {} emergency checkpoint(s) committed \
-                 and {forced_attempts} forced attempt(s) in this input; emergency checkpoint {} (last: {}){}",
-                projection.estimated_tokens,
-                self.compactor.compactions_this_turn(),
-                self.compactor.emergency_commits_this_turn(),
-                if emergency {
-                    "committed but still over budget"
-                } else {
-                    "unavailable"
-                },
-                summary_failure
-                    .or(last_detail)
-                    .unwrap_or_else(|| "none".to_string()),
-                if emergency_refused {
-                    " (minimal working space unavailable: even the smallest checkpoint does not fit)"
-                } else if emergency {
-                    " (emergency checkpoint committed but the request is still over budget)"
-                } else {
-                    ""
-                }
-            );
+            return Err(tag_failure(
+                TurnFailureReason::ContextUnavailable,
+                anyhow::anyhow!(
+                    "context remains over the request input budget: estimated {} tokens, \
+                     limit {input_limit}; {} summary compaction(s) and {} emergency checkpoint(s) committed \
+                     and {forced_attempts} forced attempt(s) in this input; emergency checkpoint {} (last: {}){}",
+                    projection.estimated_tokens,
+                    self.compactor.compactions_this_turn(),
+                    self.compactor.emergency_commits_this_turn(),
+                    if emergency {
+                        "committed but still over budget"
+                    } else {
+                        "unavailable"
+                    },
+                    summary_failure
+                        .or(last_detail)
+                        .unwrap_or_else(|| "none".to_string()),
+                    if emergency_refused {
+                        " (minimal working space unavailable: even the smallest checkpoint does not fit)"
+                    } else if emergency {
+                        " (emergency checkpoint committed but the request is still over budget)"
+                    } else {
+                        ""
+                    }
+                ),
+            ));
         }
         Ok(projection)
     }
@@ -691,7 +706,13 @@ impl TurnExecutor {
                 // stable reason prefix.
                 let _ = format_window.commit(true);
                 self.ctx.display.render_error(&detail);
-                return Ok((TurnDecision::Failed(detail), effects));
+                return Ok((
+                    TurnDecision::Failed {
+                        reason: TurnFailureReason::FormatRecoveryExhausted,
+                        detail,
+                    },
+                    effects,
+                ));
             }
 
             if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
@@ -746,7 +767,13 @@ impl TurnExecutor {
                     self.local.final_text.push_str(&text);
                     self.local.final_thinking.push_str(&thinking);
                     self.ctx.display.render_stop(&stop);
-                    return Ok((TurnDecision::Failed(format!("stop: {stop}")), effects));
+                    return Ok((
+                        TurnDecision::Failed {
+                            reason: TurnFailureReason::ProviderStopped,
+                            detail: format!("stop: {stop}"),
+                        },
+                        effects,
+                    ));
                 }
                 RoundKind::Truncated => {
                     // Truncated candidate: discarded as a whole
@@ -829,7 +856,10 @@ impl TurnExecutor {
             // request sees diagnostics, tool results and injected state alike.
             if format_window.commit(window_error) {
                 return Ok((
-                    TurnDecision::Failed(self.format_exhausted_reason()),
+                    TurnDecision::Failed {
+                        reason: TurnFailureReason::FormatRecoveryExhausted,
+                        detail: self.format_exhausted_reason(),
+                    },
                     effects,
                 ));
             }

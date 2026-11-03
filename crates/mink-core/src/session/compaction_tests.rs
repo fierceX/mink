@@ -1,6 +1,6 @@
 use super::*;
 use crate::llm::mock::MockLlmBackend;
-use crate::protocol::StopEvent;
+use crate::protocol::{StopEvent, UsageEvent};
 use serde_json::json;
 use std::sync::Mutex;
 
@@ -1858,6 +1858,7 @@ async fn startup_rebuilds_missing_or_stale_summary_projection() -> anyhow::Resul
         ctx.interrupt.clone(),
         summary_backend(),
         None,
+        None,
     )?;
 
     assert_eq!(
@@ -1867,6 +1868,144 @@ async fn startup_rebuilds_missing_or_stale_summary_projection() -> anyhow::Resul
     assert_eq!(
         std::fs::read_to_string(ctx.store.path().with_file_name("summary.txt"))?,
         "authoritative summary\n"
+    );
+    Ok(())
+}
+
+#[derive(Default)]
+struct RecordingSessionEventSink {
+    events: Mutex<Vec<crate::events::EventLog>>,
+}
+
+impl crate::runtime::SessionEventSink for RecordingSessionEventSink {
+    fn on_session_event(&self, _session_id: &str, event: &crate::events::EventLog) {
+        self.events.lock().unwrap().push(event.clone());
+    }
+}
+
+#[tokio::test]
+async fn compaction_events_reach_the_sink_without_disk_logging() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "compaction-sink",
+        |config| {
+            config.log_events = false;
+        },
+        summary_backend(),
+    )
+    .await?;
+    let sink = Arc::new(RecordingSessionEventSink::default());
+    let engine = CompactionEngine::new(
+        ctx.store.clone(),
+        ctx.store.path().with_file_name("summary.txt"),
+        ctx.config.base_url.clone(),
+        &ctx.config,
+        ctx.stats.clone(),
+        ctx.usage.clone(),
+        ctx.config.session_id.clone(),
+        ctx.display.clone(),
+        ctx.cancel.clone(),
+        ctx.interrupt.clone(),
+        summary_backend(),
+        None,
+        Some(sink.clone()),
+    )?;
+
+    engine.write_event(crate::events::EventLog::Compact {
+        version: Some(2),
+        trigger: "manual".into(),
+        result: "summary".into(),
+    });
+    engine.log_compact_event(&UsageEvent {
+        input_tokens: 10,
+        output_tokens: 2,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    });
+    engine.log_compaction_check(
+        "auto",
+        &PressureDecision {
+            source: "provider_calibrated",
+            effective_tokens: 90,
+            provider_baseline_tokens: Some(80),
+        },
+        120,
+        64,
+    );
+
+    let events = sink.events.lock().unwrap();
+    assert_eq!(events.len(), 3);
+    assert!(matches!(
+        &events[0],
+        crate::events::EventLog::Compact { trigger, .. } if trigger == "manual"
+    ));
+    assert!(matches!(
+        &events[1],
+        crate::events::EventLog::Usage { kind, .. } if kind == "compact"
+    ));
+    assert!(matches!(
+        &events[2],
+        crate::events::EventLog::CompactionCheck {
+            trigger,
+            pressure_source,
+            local_tokens,
+            provider_baseline_tokens,
+            calibrated_tokens,
+            threshold_tokens,
+            ..
+        } if trigger == "auto"
+            && pressure_source == "provider_calibrated"
+            && *local_tokens == 120
+            && *provider_baseline_tokens == Some(80)
+            && *calibrated_tokens == Some(90)
+            && *threshold_tokens == 64
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn real_compaction_check_emits_through_the_sink_without_disk_logging() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "compaction-check-sink",
+        |config| {
+            config.log_events = false;
+            config.max_context_tokens = 1_000_000;
+        },
+        summary_backend(),
+    )
+    .await?;
+    let sink = Arc::new(RecordingSessionEventSink::default());
+    let engine = CompactionEngine::new(
+        ctx.store.clone(),
+        ctx.store.path().with_file_name("summary.txt"),
+        ctx.config.base_url.clone(),
+        &ctx.config,
+        ctx.stats.clone(),
+        ctx.usage.clone(),
+        ctx.config.session_id.clone(),
+        ctx.display.clone(),
+        ctx.cancel.clone(),
+        ctx.interrupt.clone(),
+        summary_backend(),
+        None,
+        Some(sink.clone()),
+    )?;
+
+    let (compacted, reason) = engine
+        .evaluate_and_compact(
+            "auto",
+            0,
+            crate::llm::client::LlmModelTarget::new("flash", None),
+        )
+        .await?;
+    assert!(!compacted);
+    assert_eq!(reason, "below threshold");
+    let events = sink.events.lock().unwrap();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            crate::events::EventLog::CompactionCheck { trigger, .. } if trigger == "auto"
+        )),
+        "expected an auto CompactionCheck through the sink: {events:?}"
     );
     Ok(())
 }
@@ -1953,6 +2092,7 @@ async fn startup_repairs_legacy_cut_on_internal_user_message() -> anyhow::Result
         ctx.interrupt.clone(),
         summary_backend(),
         Some(writer.clone()),
+        None,
     )?;
     engine.validate_startup().await?;
     assert_eq!(engine.current_state()?.active_start, 3);
@@ -2655,6 +2795,7 @@ async fn startup_repair_loss_cleared_only_after_successful_commit() -> anyhow::R
         ctx.cancel.clone(),
         ctx.interrupt.clone(),
         summary_backend(),
+        None,
         None,
     )?;
     engine.validate_startup().await?;

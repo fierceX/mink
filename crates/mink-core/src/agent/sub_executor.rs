@@ -379,6 +379,7 @@ impl SubAgentExecutor {
             resolved_paths: None,
             api_url: parent_ctx.api_url.clone(),
             display: capture.clone(),
+            session_event_sink: parent_ctx.session_event_sink.clone(),
             sub_stream_tx: None,
             cancel,
             interrupt: parent_ctx.interrupt.clone(),
@@ -517,9 +518,9 @@ impl SubAgentExecutor {
                         "sub_agent_max_turns: child exhausted max_turns before end_turn"
                             .to_string(),
                     ),
-                    TurnDecision::Failed(message) => (
+                    TurnDecision::Failed { detail, .. } => (
                         SubAgentStopReason::Error,
-                        format!("sub_agent_error: {message}"),
+                        format!("sub_agent_error: {detail}"),
                     ),
                     TurnDecision::Stop | TurnDecision::Interrupted => unreachable!(),
                 };

@@ -36,6 +36,7 @@ pub struct AgentContextBuild {
     pub resolved_paths: Option<paths::Paths>,
     pub api_url: String,
     pub display: Arc<dyn Display>,
+    pub session_event_sink: Option<Arc<dyn crate::runtime::SessionEventSink>>,
     pub sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
     pub cancel: CancellationToken,
     pub interrupt: Arc<AtomicBool>,
@@ -187,6 +188,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
             params.interrupt.clone(),
             params.llm_backend.clone(),
             event_log_writer.clone(),
+            params.session_event_sink.clone(),
         )?
         .with_fault(persistence_fault.clone())
         .with_goal_store(if params.is_sub_agent {
@@ -238,6 +240,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         compaction,
         cancel: params.cancel,
         display: params.display,
+        session_event_sink: params.session_event_sink,
         sub_stream_tx: params.sub_stream_tx,
         read_only_fs: params.read_only_fs,
         vfs_scope,

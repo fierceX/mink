@@ -75,7 +75,7 @@ elif mode == "final_ok_exit3":
     sys.stdout.flush()
     sys.exit(3)
 elif mode == "final_failed":
-    emit({"type": "final", "version": 3, "status": "failed", "error": "model rejected"})
+    emit({"type": "final", "version": 3, "status": "failed", "error": "model rejected", "failure": "request_timeout"})
 elif mode == "final_interrupted":
     emit({"type": "final", "version": 3, "status": "interrupted"})
 elif mode == "final_max_turns":
@@ -227,6 +227,11 @@ class ProtocolVersusProcessExit(SDKProtocolHarness):
         _, final = self.collect("final_failed")
         self.assertEqual(final["status"], "failed")
         self.assertEqual(final["error"], "model rejected")
+        self.assertEqual(final["failure"], "request_timeout")
+
+    def test_ok_final_has_no_failure_reason(self):
+        result = self.run_result("final_ok")
+        self.assertIsNone(result["failure"])
 
     def test_legal_interruption_is_preserved(self):
         result = self.run_result("final_interrupted")

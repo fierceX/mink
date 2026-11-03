@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **嵌入事件契约**：公开 `mink::runtime::SessionEvent`（`events.jsonl` 词汇表）与 `SessionReader::events` / `events_since(offset, max_events)`。读取只消费完整行，末尾半截行留待下次；未知事件类型与坏 JSON 计入 `skipped` 而不失败；偏移超出文件返回 `truncated` 并重置为 0。新增 `SessionEventSink` / `AgentOptions::with_session_event_sink`，宿主可在不开启磁盘日志时实时收到 typed 事件，并用 `wants` 过滤 Text/Thinking/PrefixSnapshot；子代理继承父 sink 并携带自身 session id。
+- **终态失败分类（破坏性变更，下一 minor）**：`TurnOutcome` 新增可选 `failure: TurnFailureReason`，`TurnDecision::Failed` 改为携带 `{ reason, detail }`。`failure` 同时写入 `TurnFinal` / `TurnError` 事件、`SdkFinal` 与 Python `result["failure"]`；成功轮次省略该字段，旧事件日志仍可解码。失败原因来自 typed tag/downcast（provider、请求期限/重试耗尽、上下文溢出/不可用、格式窗口耗尽、max_turns、signal abort/handover、持久化、Goal 预算），不再用 error 文本决定宿主重试策略。外部直接构造 `TurnOutcome` 的代码需补 `failure: None`；`AgentEventKind` 不变。
+- **嵌入事件一致性修复**：压缩引擎的 `compaction_check`、`compact` 与摘要 usage 改经共享 `SessionEventSink` 出口，`log_events=false` 时仍可观察（此前直接写 writer 或提前返回而漏投）；Goal 结算在 `TurnFinal` 之前完成，结算失败时 `TurnOutcome`、sink 与 `events.jsonl` 的唯一终态均为 `failed/persistence`，不再出现先成功后失败的双终态。`SessionReader` 同时从 `mink::runtime` 根重新导出。
 - **Web 附件消费归属**：草稿条目持久化独立于内容 id 的 `key`；提交记录携带冻结的条目快照（`attachment_snapshot`，仅本地，不过 wire），受理后只消费快照命名的条目。服务端按内容去重，重复选择同一图片会得到相同 id，不再因此被旧回执误删；Composer 不再自行清空附件，确认消费只由会话视图或首次发送流程执行。
 - **Web 旧版提交迁移**：没有条目快照的旧未决提交在恢复边界一次性迁移为显式 `known:false`（持久化），受理后不再按内容 id 猜测并删除草稿；删除旧图后重新选择同图不会被旧回执误删，仍用原 request_id 对账。`无快照` / `known:false` / `known:true,keys:[]` 三态区分，存储与 rail 共用同一纯消费判据；`uncertain` 的类型改为真实的 `PendingSubmission`。
 - **Web 阅读栏操作状态**：Composer 将命令/提交的在途与失败状态上报给 Conversation，统一谓词据此保持操作栏可见；成功提示与失败文本分开表达，失败在编辑草稿或下一次操作时解除，成功提示不锁定阅读模式。

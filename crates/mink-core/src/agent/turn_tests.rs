@@ -163,7 +163,7 @@ async fn draft_signal_recovery_cannot_spawn_an_execution_replan() {
         .decide_signal_recovery(true, Some(&mut belief))
         .await
         .unwrap();
-    assert!(matches!(decision, Some(TurnDecision::Failed(_))));
+    assert!(matches!(decision, Some(TurnDecision::Failed { .. })));
     assert!(
         !child_directory.exists(),
         "a draft cannot launch an execution-capable recovery child"
@@ -790,6 +790,10 @@ async fn expired_round_deadline_prevents_any_new_stream() -> anyhow::Result<()> 
     assert!(
         format!("{error:#}").contains("request_timeout"),
         "{error:#}"
+    );
+    assert_eq!(
+        crate::agent::failure::classify_turn_error(&error),
+        crate::agent::failure::TurnFailureReason::RequestTimeout
     );
     Ok(())
 }
@@ -1916,11 +1920,15 @@ async fn retry_budget_yields_retries_plus_one_requests() -> anyhow::Result<()> {
         let error = executor
             .execute("exhaust the budget", None)
             .await
-            .expect_err("persistent 502 must fail the turn")
-            .to_string();
+            .expect_err("persistent 502 must fail the turn");
+        let message = format!("{error}");
         assert!(
-            error.contains("request_retry_exhausted"),
-            "retries={retries}: {error}"
+            message.contains("request_retry_exhausted"),
+            "retries={retries}: {message}"
+        );
+        assert_eq!(
+            crate::agent::failure::classify_turn_error(&error),
+            crate::agent::failure::TurnFailureReason::RequestRetryExhausted
         );
         assert_eq!(backend.calls(), expected, "retries={retries}");
     }
@@ -2022,7 +2030,7 @@ async fn damaged_attempt_with_exhausted_window_ends_turn() -> anyhow::Result<()>
     let mut executor = TurnExecutor::new(ctx);
     let (decision, _) = executor.execute("exhaust format budget", None).await?;
     match decision {
-        TurnDecision::Failed(reason) => {
+        TurnDecision::Failed { detail: reason, .. } => {
             assert!(reason.contains("format_recovery_exhausted"), "{reason}");
         }
         other => panic!("expected Failed(format_recovery_exhausted), got {other:?}"),
@@ -2356,7 +2364,7 @@ async fn write_argument_error_consumes_the_format_budget() -> anyhow::Result<()>
     let (decision, _) = executor.execute("bad write", None).await?;
 
     match decision {
-        TurnDecision::Failed(reason) => {
+        TurnDecision::Failed { detail: reason, .. } => {
             assert!(reason.contains("format_recovery_exhausted"), "{reason}");
         }
         other => panic!("expected format_recovery_exhausted, got {other:?}"),
@@ -2542,7 +2550,7 @@ async fn unparsable_nested_function_arguments_are_format_feedback() -> anyhow::R
     let (decision, _) = executor.execute("run it", None).await?;
 
     match decision {
-        TurnDecision::Failed(reason) => {
+        TurnDecision::Failed { detail: reason, .. } => {
             assert!(reason.contains("format_recovery_exhausted"), "{reason}");
         }
         other => panic!("the damaged candidate must consume the budget, got {other:?}"),
@@ -2622,7 +2630,7 @@ async fn non_string_nested_arguments_are_format_feedback() -> anyhow::Result<()>
     let (decision, _) = executor.execute("run it", None).await?;
 
     match decision {
-        TurnDecision::Failed(reason) => {
+        TurnDecision::Failed { detail: reason, .. } => {
             assert!(reason.contains("format_recovery_exhausted"), "{reason}");
         }
         other => panic!("the type error must consume the budget, got {other:?}"),
@@ -2800,7 +2808,7 @@ async fn dsml_invalid_json_parameter_is_format_feedback() -> anyhow::Result<()> 
     let (decision, _) = executor.execute("run it", None).await?;
 
     match decision {
-        TurnDecision::Failed(reason) => {
+        TurnDecision::Failed { detail: reason, .. } => {
             assert!(reason.contains("format_recovery_exhausted"), "{reason}");
         }
         other => panic!("the invalid JSON parameter must consume the budget, got {other:?}"),
@@ -3093,7 +3101,7 @@ async fn exhausted_window_keeps_legal_side_effects_from_the_same_batch() -> anyh
     let (decision, _) = executor.execute("one bad call", None).await?;
 
     match decision {
-        TurnDecision::Failed(reason) => {
+        TurnDecision::Failed { detail: reason, .. } => {
             assert!(reason.contains("format_recovery_exhausted"), "{reason}");
         }
         other => panic!("expected format_recovery_exhausted, got {other:?}"),

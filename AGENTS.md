@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-10-29
+> 更新日期：2026-11-03
 
 ## 项目概览
 
@@ -173,6 +173,12 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - 回滚只作用于循环窗口内被编辑路径，目标为最后一次 Read/Write 完整内容基线（编辑后内容不得作为回滚目标，Replace 的 Read 同样记录基线）；写回经 `publish_state_with_permissions`（权限先设置到临时文件再发布；权限读取/设置失败不得发布、也不得记成功回滚）且仅当磁盘与基线不一致；写回后 bump memo mutation，以 `signal_rollback` 落事件。
 - 恢复守卫拦截必须生成真实信号喂回信念；连续拦截达 `guard_max_blocks` 必须绕过守卫并强制注入，禁止无限拦截；信念跌破 abort 时，非交互且策略允许 restart 则先尝试 replan，成功重置信念并继续；未成功时 full 策略记录 `signal_handover` 后 Failed，较低策略直接 Failed。禁止静默丢弃证据；策略重启子代理初始化失败必须降级（`signal_replan_error` 后返回 None），不得升级为整轮 Err。
 - Recovery 首步资格来自 resolved semantic capabilities；Bash 的 `FocusedVerificationExec` classifier 与普通 Bash 安全/误用提示相互独立。
+
+### 嵌入事件与失败契约
+
+- 公开 `mink::runtime::SessionEvent`（`EventLog` 别名）是 `events.jsonl` 的唯一稳定词汇。reader 只消费完整行：未知类型/坏 JSON 计入 `skipped`，末尾半截行不消费，偏移超出文件返回 `truncated` 且 `next_offset=0`；新增字段必须可选，变体只增不改（`#[non_exhaustive]`）。宿主不得另建字符串字段解析层。
+- `SessionEventSink` 同步运行在调用线程：必须非阻塞、不得回调 runtime、不得 panic；`wants` 用于过滤 Text/Thinking/PrefixSnapshot 等高体积/敏感事件。`log_events=false` 仍投递，子代理继承父 sink 并携带自身 session id。压缩引擎的 `compact`/`compaction_check`/摘要 usage 必须走同一 sink 出口，不得直接写 writer。
+- `TurnOutcome.failure` / `TurnFinal.failure` / `TurnError.failure` / `SdkFinal.failure` 是稳定 snake_case code，只能来自 typed tag/downcast，禁止用 error 文本决定宿主重试或告警。成功轮省略该字段；`Interrupted` 为 `None`；`MaxTurnsExceeded` 同时写 status 与 failure；外部直接构造 `TurnOutcome` 时需补 `failure: None`。Goal 结算必须先于唯一 `TurnFinal` 发布；结算失败改写结果后不得保留先前的成功终态。
 
 ### 工具面与执行
 

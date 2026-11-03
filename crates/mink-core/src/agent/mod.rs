@@ -1,6 +1,7 @@
 pub mod belief;
 pub mod compactor;
 pub mod decision;
+pub(crate) mod failure;
 pub mod orchestrator;
 pub mod prefix;
 pub mod recovery_policy;

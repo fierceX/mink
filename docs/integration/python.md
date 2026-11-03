@@ -107,6 +107,7 @@ Rust core 会在 `conversation.jsonl` 中完整保留历史，并通过 `context
 | `tool_error_count` | `int` | 本次调用检测到的工具错误数量 |
 | `exit_code` | `int` | 进程退出码（0 表示成功） |
 | `error` | `str or None` | 错误信息（如有） |
+| `failure` | `str or None` | `final.failure` 的稳定 snake_case code，如 `request_timeout`、`context_unavailable`；成功轮为 `None` |
 | `stderr` | `str` | 进程原始错误输出（调试用） |
 
 **终态判定**：`status` 只来自合法的 `final` 事件，`final.status` 必须是

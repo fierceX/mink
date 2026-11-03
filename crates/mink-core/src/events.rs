@@ -1,3 +1,4 @@
+use crate::agent::failure::TurnFailureReason;
 use crate::protocol::UsageEvent;
 use crate::session::usage::UsageSummary;
 use crate::tools::metadata::{ToolResultKind, ToolStatus};
@@ -33,6 +34,7 @@ impl EventLog {
 /// shape by using `None`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum EventLog {
     SessionStart {
         session_id: String,
@@ -137,6 +139,8 @@ pub enum EventLog {
     TurnFinal {
         billing_turn_id: String,
         status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure: Option<TurnFailureReason>,
         tool_call_count: u32,
         tool_error_count: u32,
         elapsed_ms: u64,
@@ -146,6 +150,8 @@ pub enum EventLog {
     TurnError {
         error: String,
         category: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure: Option<TurnFailureReason>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         severity: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -268,6 +274,22 @@ pub enum EventLog {
         version: Option<u8>,
         message: String,
     },
+}
+
+/// One incremental read of `events.jsonl`.
+///
+/// `skipped` counts complete lines that were not valid [`EventLog`] values
+/// (unknown `type`, invalid UTF-8 or malformed JSON). A partial trailing line
+/// is never consumed and is not counted: it stays at `next_offset` until the
+/// writer finishes it.
+#[derive(Debug, Clone, Default)]
+pub struct SessionEventBatch {
+    pub events: Vec<EventLog>,
+    pub next_offset: u64,
+    pub skipped: usize,
+    /// The requested offset was past the current end of the file.
+    /// `next_offset` is reset to 0 so the caller can decide to reread.
+    pub truncated: bool,
 }
 
 fn default_tool_status() -> ToolStatus {

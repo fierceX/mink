@@ -373,6 +373,10 @@ pub struct CompactionEngine {
     prompt_usage: Mutex<PromptUsageState>,
     projection_dirty: AtomicBool,
     event_log_writer: Option<EventLogWriter>,
+    /// Optional live observer for the durable event vocabulary. Kept beside the
+    /// writer so compaction events use the same outlet as the rest of the
+    /// session instead of bypassing the sink.
+    session_event_sink: Option<Arc<dyn crate::runtime::SessionEventSink>>,
     /// Shared session publish-fault latch for context-state and projection
     /// writes.
     fault: crate::session::persistence::PersistenceFault,
@@ -398,6 +402,7 @@ impl CompactionEngine {
         interrupt: Arc<AtomicBool>,
         llm_backend: Arc<dyn LlmBackend>,
         event_log_writer: Option<EventLogWriter>,
+        session_event_sink: Option<Arc<dyn crate::runtime::SessionEventSink>>,
     ) -> Result<Self> {
         let state_path = summary_path.with_file_name("context-state.json");
         let state = load_state(&state_path)?;
@@ -435,6 +440,7 @@ impl CompactionEngine {
             prompt_usage: Mutex::new(PromptUsageState::default()),
             projection_dirty: AtomicBool::new(false),
             event_log_writer,
+            session_event_sink,
             fault: Default::default(),
             startup_repair_loss: Mutex::new(Vec::new()),
         })
@@ -757,13 +763,11 @@ impl CompactionEngine {
                     self.config.context_compact_input_reduction,
                     sanitize_field(reason, 96),
                 );
-                if self.config.log_events {
-                    self.write_event(crate::events::EventLog::Compact {
-                        version: Some(2),
-                        trigger: "emergency".into(),
-                        result,
-                    });
-                }
+                self.write_event(crate::events::EventLog::Compact {
+                    version: Some(2),
+                    trigger: "emergency".into(),
+                    result,
+                });
                 self.display.render_info(
                     "Context emergency checkpoint committed (lossy excerpt; details may be omitted).",
                 );
@@ -1002,13 +1006,11 @@ impl CompactionEngine {
             if degraded_cut { "_cut=degraded" } else { "" },
         );
         let result = format!("{result}_mode=summary");
-        if self.config.log_events {
-            self.write_event(crate::events::EventLog::Compact {
-                version: Some(2),
-                trigger: trigger.to_string(),
-                result: result.clone(),
-            });
-        }
+        self.write_event(crate::events::EventLog::Compact {
+            version: Some(2),
+            trigger: trigger.to_string(),
+            result: result.clone(),
+        });
         Ok((true, result))
     }
 
@@ -1813,9 +1815,6 @@ impl CompactionEngine {
         local_tokens: usize,
         threshold_tokens: usize,
     ) {
-        if !self.config.log_events {
-            return;
-        }
         self.write_event(crate::events::EventLog::CompactionCheck {
             trigger: trigger.to_string(),
             pressure_source: pressure.source.to_string(),
@@ -1829,18 +1828,28 @@ impl CompactionEngine {
     }
 
     fn write_event(&self, event: crate::events::EventLog) {
-        let Ok(line) = serde_json::to_string(&event) else {
-            return;
-        };
-        if let Some(writer) = &self.event_log_writer {
-            writer.send(line);
+        // Observability is independent of disk logging: a host that runs with
+        // `log_events=false` still receives compaction diagnostics through the
+        // sink. The writer remains the optional durable outlet.
+        if let Some(sink) = &self.session_event_sink {
+            let session_id = self.session_id.as_str();
+            if sink.wants(session_id, &event) {
+                sink.on_session_event(session_id, &event);
+            }
         }
-    }
-
-    fn log_compact_event(&self, usage: &UsageEvent) {
         if !self.config.log_events {
             return;
         }
+        let Some(writer) = &self.event_log_writer else {
+            return;
+        };
+        let Ok(line) = serde_json::to_string(&event) else {
+            return;
+        };
+        writer.send(line);
+    }
+
+    fn log_compact_event(&self, usage: &UsageEvent) {
         self.write_event(crate::events::EventLog::usage(usage, "compact"));
     }
 }

@@ -154,12 +154,30 @@ echo '{"version":3,"prompt":"scan this repo"}' | mink-core --agent-jsonl
 > 兼容性：`usage` 不再包含 `cost` 字段（费用统计已移除）；`usage_records[].cost_nano_cny`
 > 为兼容字段，已上报记录为 `0`、未上报记录为 `null`。
 
+失败时 `final` 追加可选 `failure`（snake_case code，失败且已分类时出现；成功与旧版本省略）：
+`request_timeout` / `request_retry_exhausted` / `provider_rejected` / `provider_stopped` /
+`context_overflow` / `context_unavailable` / `format_recovery_exhausted` / `max_turns_exceeded` /
+`signal_aborted` / `signal_handover` / `goal_budget_exhausted` / `persistence` / `internal`。
+
 `status` 取值：`ok` / `failed` / `interrupted` / `max_turns_exceeded`。
 `request.options.stream_events=false` 时只输出此 `final`；SDK 侧从
 `conversation.jsonl` 回读最后一条 assistant 消息补齐 `text` / `thinking`。
 
 `--agent-jsonl` 模式不会读取用户级/项目级 `.minkrc`，但仍应用同一命令行传入的
 `--config <toml>`，避免 SDK 调用产生额外文件 I/O。
+
+### Session events（`events.jsonl`）
+
+`events.jsonl` 的词汇表以 `mink::runtime::SessionEvent`（内部 `EventLog`）公开，每行一个
+`type` 标签的 JSON 对象。宿主用 `SessionReader::events` / `events_since(offset, max_events)`
+读取：只消费完整行，末尾半截行留在 `next_offset`；未知类型与坏 JSON 计入 `skipped`；
+偏移超出文件时 `truncated=true`、`next_offset=0`。`SessionEventSink` 提供同一词汇表的
+实时同步回调（`wants` 可过滤），不依赖磁盘日志；压缩产生的 `compaction_check`、`compact`
+与摘要 usage 也经该出口。
+
+`turn_final` 与 `turn_error` 均可带可选 `failure`（同上 code 集）；旧记录没有该字段仍可解码。
+其余事件字段（`llm_recovery` 的 `category`/`terminal`、`turn_error` 的 `category`、
+`compaction_check`、`signal` 等）保持既有稳定字符串语义。
 
 ## Web 输入与展示元数据
 
@@ -322,8 +340,11 @@ SubAgent 的执行记录仍在父会话工具结果中展示；其独立 session
 | `tool_call_count` | `u32` |
 | `tool_error_count` | `u32` |
 | `error` | `Option<String>` |
+| `failure` | `Option<TurnFailureReason>` |
 | `usage_records` | `Vec<crate::session::usage::UsageRecord>` |
 | `usage` | `crate::session::usage::UsageSummary` |
+
+`failure` 省略表示无失败分类（成功或未分类）。
 
 ## Goal 事件兼容
 

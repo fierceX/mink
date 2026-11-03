@@ -429,6 +429,7 @@ async fn harness_inner(
             resolved_paths: None,
             api_url,
             display: display.clone(),
+            session_event_sink: None,
             sub_stream_tx: None,
             cancel: crate::cancel::CancellationToken::new(),
             interrupt: Arc::new(AtomicBool::new(false)),

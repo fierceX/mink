@@ -301,7 +301,10 @@ async fn stop_error_reasons_return_failed_and_unknown_reasons_stop() -> anyhow::
     let (decision, effects) = executor.execute("filtered", None).await?;
     assert_eq!(
         decision,
-        TurnDecision::Failed("stop: content_filter".into())
+        TurnDecision::Failed {
+            reason: crate::agent::failure::TurnFailureReason::ProviderStopped,
+            detail: "stop: content_filter".into(),
+        }
     );
     assert!(effects.is_empty());
     Ok(())
@@ -532,9 +535,10 @@ async fn turn_aborts_when_tool_failures_push_belief_too_low() -> anyhow::Result<
 
     assert_eq!(
         decision,
-        TurnDecision::Failed(
-            "signal handover: reliability belief fell below the abort threshold".into()
-        )
+        TurnDecision::Failed {
+            reason: crate::agent::failure::TurnFailureReason::SignalHandover,
+            detail: "signal handover: reliability belief fell below the abort threshold".into(),
+        }
     );
     assert!(effects.is_empty());
     assert!(belief.belief() < 0.30, "belief={}", belief.belief());
@@ -1118,9 +1122,10 @@ async fn replan_setup_failure_degrades_to_handover() -> anyhow::Result<()> {
     let (decision, _) = outcome.expect("replan setup failure must not fail the whole turn");
     assert_eq!(
         decision,
-        TurnDecision::Failed(
-            "signal handover: reliability belief fell below the abort threshold".into()
-        )
+        TurnDecision::Failed {
+            reason: crate::agent::failure::TurnFailureReason::SignalHandover,
+            detail: "signal handover: reliability belief fell below the abort threshold".into(),
+        }
     );
     Ok(())
 }
@@ -1332,7 +1337,7 @@ async fn interrupted_replan_does_not_inject_success_evidence() -> anyhow::Result
     // Replan refused the interrupted child, so the turn ends without the
     // replan injection (handover/failed path), not with a fresh plan.
     assert!(
-        matches!(decision, TurnDecision::Failed(_)),
+        matches!(decision, TurnDecision::Failed { .. }),
         "unexpected decision: {decision:?}"
     );
     assert!(effects.is_empty());

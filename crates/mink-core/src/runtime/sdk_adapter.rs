@@ -89,6 +89,7 @@ pub fn final_from_outcome(outcome: &TurnOutcome) -> SdkFinal {
         tool_call_count: outcome.tool_call_count,
         tool_error_count: outcome.tool_error_count,
         error: outcome.error.clone(),
+        failure: outcome.failure,
         usage_records: outcome.usage_records.clone(),
         usage: outcome.usage.clone(),
     }

@@ -2038,6 +2038,10 @@ async fn first_event_deadline_survives_stream_establishment() {
         outcome.status,
         crate::agent::orchestrator::TurnStatus::Failed
     );
+    assert_eq!(
+        outcome.failure,
+        Some(crate::runtime::TurnFailureReason::RequestRetryExhausted)
+    );
     assert!(
         elapsed < std::time::Duration::from_millis(1_500),
         "establishment must consume the same first-event budget instead of \
@@ -3728,6 +3732,10 @@ async fn retry_does_not_bypass_first_event_deadline() {
         outcome.status,
         crate::agent::orchestrator::TurnStatus::Failed
     );
+    assert_eq!(
+        outcome.failure,
+        Some(crate::runtime::TurnFailureReason::RequestRetryExhausted)
+    );
     assert!(
         elapsed < std::time::Duration::from_millis(1_500),
         "Retry must not extend the first-event budget: {elapsed:?}"
@@ -3844,6 +3852,10 @@ async fn latched_fault_fails_next_turn_without_model_call() {
         outcome.status,
         crate::agent::orchestrator::TurnStatus::Failed
     );
+    assert_eq!(
+        outcome.failure,
+        Some(crate::runtime::TurnFailureReason::Persistence)
+    );
     assert!(
         outcome
             .error
@@ -3932,6 +3944,10 @@ async fn high_frequency_retry_events_do_not_starve_deadline_checks() {
         outcome.status,
         crate::agent::orchestrator::TurnStatus::Failed
     );
+    assert_eq!(
+        outcome.failure,
+        Some(crate::runtime::TurnFailureReason::RequestRetryExhausted)
+    );
     assert!(
         elapsed < std::time::Duration::from_millis(1_500),
         "the deadline must fire on the consumption path, not only when idle: {elapsed:?}"
@@ -4018,6 +4034,10 @@ async fn partial_tool_results_survive_join_failure() {
         outcome.status,
         crate::agent::orchestrator::TurnStatus::Failed,
         "a panicking custom tool must fail the turn: {outcome:?}"
+    );
+    assert_eq!(
+        outcome.failure,
+        Some(crate::runtime::TurnFailureReason::Internal)
     );
     assert!(
         outcome
@@ -6420,6 +6440,7 @@ async fn goal_settlement_is_idempotent_and_rejects_conflicting_facts() {
     let result = crate::agent::orchestrator::TurnRunResult {
         billing_turn_id: iteration.billing_turn_id.clone().expect("billing id"),
         status: TurnStatus::Ok,
+        failure: None,
         tool_call_count: 0,
         tool_error_count: 0,
         error: None,
@@ -6498,6 +6519,7 @@ async fn stale_settlement_fills_history_without_touching_the_replacement() {
     let result = crate::agent::orchestrator::TurnRunResult {
         billing_turn_id: iteration.billing_turn_id.clone().expect("billing id"),
         status: TurnStatus::Ok,
+        failure: None,
         tool_call_count: 0,
         tool_error_count: 0,
         error: None,

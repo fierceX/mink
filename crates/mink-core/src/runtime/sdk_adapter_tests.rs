@@ -41,6 +41,7 @@ fn final_from_outcome_contains_all_required_fields() {
         turn_id: crate::runtime::TurnId::new("sid-1:1"),
         billing_turn_id: "turn-1".into(),
         status: TurnStatus::Ok,
+        failure: None,
         session: session.clone(),
         text: "hello".into(),
         thinking: "hmm".into(),
@@ -61,6 +62,10 @@ fn final_from_outcome_contains_all_required_fields() {
     assert_eq!(final_json["tool_call_count"], 3);
     assert_eq!(final_json["tool_error_count"], 1);
     assert!(final_json["error"].is_null());
+    assert!(
+        final_json.get("failure").is_none(),
+        "a successful final must omit failure: {final_json}"
+    );
 }
 
 #[test]
@@ -86,6 +91,7 @@ fn final_fields_match_python_sdk_contract() {
         "tool_call_count",
         "tool_error_count",
         "error",
+        "failure",
     ];
     let session = SessionInfo {
         session_id: "sid".into(),
@@ -106,6 +112,7 @@ fn final_fields_match_python_sdk_contract() {
         turn_id: crate::runtime::TurnId::new("sid:1"),
         billing_turn_id: "turn-2".into(),
         status: TurnStatus::Failed,
+        failure: Some(crate::runtime::TurnFailureReason::Internal),
         session,
         text: String::new(),
         thinking: String::new(),
@@ -122,4 +129,5 @@ fn final_fields_match_python_sdk_contract() {
             "final JSON missing key: {key}"
         );
     }
+    assert_eq!(final_json["failure"], "internal");
 }

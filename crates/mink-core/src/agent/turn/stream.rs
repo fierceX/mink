@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent::failure::{TurnFailureReason, tag_failure};
 use crate::llm::recovery::{
     self, LlmUpstreamError, RequestRetryState, RequestTerminal, UpstreamFailureKind,
     find_upstream_failure, terminal_error,
@@ -183,7 +184,10 @@ impl super::TurnExecutor {
                     window,
                     Some("request_timeout"),
                 );
-                return Err(terminal_error(RequestTerminal::Timeout, last_failure));
+                return Err(tag_failure(
+                    TurnFailureReason::RequestTimeout,
+                    terminal_error(RequestTerminal::Timeout, last_failure),
+                ));
             }
 
             let attempt_cancel = self.ctx.cancel.linked_child_token();
@@ -224,7 +228,10 @@ impl super::TurnExecutor {
                         window,
                         Some("request_timeout"),
                     );
-                    return Err(terminal_error(RequestTerminal::Timeout, detail));
+                    return Err(tag_failure(
+                        TurnFailureReason::RequestTimeout,
+                        terminal_error(RequestTerminal::Timeout, detail),
+                    ));
                 }
                 Err(AttemptFailure::Retry(failure)) => {
                     last_failure = failure.message;
@@ -251,9 +258,9 @@ impl super::TurnExecutor {
                             window,
                             Some("request_retry_exhausted"),
                         );
-                        return Err(terminal_error(
-                            RequestTerminal::RetryExhausted,
-                            last_failure,
+                        return Err(tag_failure(
+                            TurnFailureReason::RequestRetryExhausted,
+                            terminal_error(RequestTerminal::RetryExhausted, last_failure),
                         ));
                     }
                     let wait = match retry.retry_wait(
@@ -270,7 +277,10 @@ impl super::TurnExecutor {
                                 window,
                                 Some("request_timeout"),
                             );
-                            return Err(terminal_error(RequestTerminal::Timeout, last_failure));
+                            return Err(tag_failure(
+                                TurnFailureReason::RequestTimeout,
+                                terminal_error(RequestTerminal::Timeout, last_failure),
+                            ));
                         }
                     };
                     // Exactly one Retry control notification per runtime-managed
@@ -482,7 +492,7 @@ impl super::TurnExecutor {
                     });
                     if !saw_visible_output && is_context_overflow_message(&e.message) {
                         return Err(AttemptFailure::Fatal(anyhow::Error::new(
-                            ContextOverflowError { message: e.message },
+                            ContextOverflowError::new(e.message),
                         )));
                     }
                     // A provider error envelope inside a `200` stream is
@@ -562,6 +572,7 @@ impl super::TurnExecutor {
                 self.ctx.log_event(crate::events::EventLog::TurnError {
                     error: message.clone(),
                     category: "llm_first_event_timeout".into(),
+                    failure: None,
                     severity: None,
                     belief: None,
                     model: None,
@@ -583,6 +594,7 @@ impl super::TurnExecutor {
             self.ctx.log_event(crate::events::EventLog::TurnError {
                 error: message.clone(),
                 category: "llm_idle_timeout".into(),
+                failure: None,
                 severity: None,
                 belief: None,
                 model: None,
@@ -664,9 +676,9 @@ fn establish_failure(error: anyhow::Error) -> AttemptFailure {
         return AttemptFailure::Interrupted;
     }
     if is_context_overflow_message(&format!("{error:#}")) {
-        return AttemptFailure::Fatal(anyhow::Error::new(ContextOverflowError {
-            message: format!("{error:#}"),
-        }));
+        return AttemptFailure::Fatal(anyhow::Error::new(ContextOverflowError::new(format!(
+            "{error:#}"
+        ))));
     }
     attempt_error_failure(error)
 }

@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::io::Write;
 use std::path::Path;
 
+use crate::agent::failure::TurnFailureReason;
 use crate::session::paths::SessionLayout;
 
 pub const PROTOCOL_VERSION: u32 = 3;
@@ -185,6 +186,8 @@ pub struct SdkFinal {
     pub tool_call_count: u32,
     pub tool_error_count: u32,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<TurnFailureReason>,
     pub usage_records: Vec<crate::session::usage::UsageRecord>,
     pub usage: crate::session::usage::UsageSummary,
 }
@@ -215,6 +218,7 @@ pub fn emit_failed_parse(error: &str) {
         "tool_call_count": 0,
         "tool_error_count": 0,
         "error": error,
+        "failure": null,
         "usage_records": [],
         "usage": crate::session::usage::UsageSummary::default(),
     }));

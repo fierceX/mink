@@ -1,6 +1,7 @@
 const MAX_REPLAN_ATTEMPTS_PER_INPUT: usize = 1;
 
 use super::*;
+use crate::agent::failure::TurnFailureReason;
 
 impl super::TurnExecutor {
     pub(super) fn apply_signal_recovery_guard(
@@ -330,7 +331,10 @@ impl super::TurnExecutor {
             }
             "error" | "max_tokens" | "length" => {
                 self.ctx.display.render_stop(stop);
-                Ok(Some(TurnDecision::Failed(format!("stop: {stop}"))))
+                Ok(Some(TurnDecision::Failed {
+                    reason: TurnFailureReason::ProviderStopped,
+                    detail: format!("stop: {stop}"),
+                }))
             }
             _ => {
                 self.ctx.display.render_stop(stop);
@@ -432,9 +436,10 @@ impl super::TurnExecutor {
                         self.ctx
                             .display
                             .render_error(&format!("DecisionEngine: aborting (belief {b:.2})."));
-                        return Ok(Some(TurnDecision::Failed(
-                            "aborted by DecisionEngine".into(),
-                        )));
+                        return Ok(Some(TurnDecision::Failed {
+                            reason: TurnFailureReason::SignalAborted,
+                            detail: "aborted by DecisionEngine".into(),
+                        }));
                     }
                     let budget = self.ctx.config.signal.evidence_max_chars;
                     let batch = self.signal_processor.evidence().render(budget, b);
@@ -455,9 +460,12 @@ impl super::TurnExecutor {
                         "DecisionEngine: handing over (belief {b:.2}).\n{}",
                         batch.text
                     ));
-                    return Ok(Some(TurnDecision::Failed(
-                        "signal handover: reliability belief fell below the abort threshold".into(),
-                    )));
+                    return Ok(Some(TurnDecision::Failed {
+                        reason: TurnFailureReason::SignalHandover,
+                        detail:
+                            "signal handover: reliability belief fell below the abort threshold"
+                                .into(),
+                    }));
                 }
                 _ => {}
             }

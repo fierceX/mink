@@ -1,3 +1,4 @@
+use crate::agent::failure::TurnFailureReason;
 use crate::agent::orchestrator::{OrchCmd, TurnRunResult, TurnStatus};
 use crate::context::AgentSharedContext;
 use crate::runtime::config::SessionInfo;
@@ -83,6 +84,8 @@ pub struct TurnOutcome {
     pub turn_id: TurnId,
     pub billing_turn_id: String,
     pub status: TurnStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<TurnFailureReason>,
     pub session: SessionInfo,
     pub text: String,
     pub thinking: String,
@@ -103,6 +106,7 @@ impl TurnOutcome {
             turn_id,
             billing_turn_id: result.billing_turn_id,
             status: result.status,
+            failure: result.failure,
             session,
             text: result.text,
             thinking: result.thinking,

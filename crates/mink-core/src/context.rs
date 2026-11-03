@@ -398,6 +398,8 @@ pub struct AgentSharedContext {
     pub compaction: Arc<CompactionEngine>,
     pub cancel: CancellationToken,
     pub display: Arc<dyn Display>,
+    /// Optional live observer for the durable event vocabulary (`events.jsonl`).
+    pub(crate) session_event_sink: Option<Arc<dyn crate::runtime::SessionEventSink>>,
     /// Optional sink for live sub-agent streaming. TUI sets this to a channel-backed sink.
     pub sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
     pub read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
@@ -532,6 +534,7 @@ impl AgentSharedContext {
             event.is_critical(),
             "log_critical_event requires a critical event"
         );
+        self.notify_session_event(&event);
         let value = serde_json::to_value(&event)?;
         let line = serde_json::to_string(&value)?;
         let persisted = if self.config.log_events {
@@ -579,11 +582,24 @@ impl AgentSharedContext {
         }
     }
 
+    /// Forward one typed event to the optional live observer. Delivery is
+    /// independent of `log_events` and must not affect turn state.
+    fn notify_session_event(&self, event: &crate::events::EventLog) {
+        let Some(sink) = &self.session_event_sink else {
+            return;
+        };
+        let session_id = self.config.session_id.as_str();
+        if sink.wants(session_id, event) {
+            sink.on_session_event(session_id, event);
+        }
+    }
+
     /// Append a typed event to events.jsonl. In stream-json mode, also emit
     /// to stdout. Persistence requires a configured `EventLogWriter`; callers
     /// that build a context by hand (tests, embedded builders) inject one.
     pub fn log_event(&self, event: crate::events::EventLog) {
         let critical = event.is_critical();
+        self.notify_session_event(&event);
         let value = match serde_json::to_value(event) {
             Ok(value) => value,
             Err(e) => {

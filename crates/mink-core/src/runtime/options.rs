@@ -153,6 +153,7 @@ pub struct AgentOptions {
     first_prompt: Option<String>,
     first_prompt_overridden: bool,
     event_sink: Option<Arc<dyn EventSink>>,
+    session_event_sink: Option<Arc<dyn crate::runtime::SessionEventSink>>,
     sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
     read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
     resource_handlers: Vec<Arc<dyn ResourceHandler>>,
@@ -194,6 +195,7 @@ impl AgentOptions {
             first_prompt,
             first_prompt_overridden: false,
             event_sink: None,
+            session_event_sink: None,
             sub_stream_tx: None,
             read_only_fs: None,
             resource_handlers: Vec::new(),
@@ -332,6 +334,19 @@ impl AgentOptions {
 
     pub fn with_event_sink(mut self, event_sink: Arc<dyn EventSink>) -> Self {
         self.event_sink = Some(event_sink);
+        self
+    }
+
+    /// Observe the typed durable event stream (`events.jsonl` vocabulary).
+    ///
+    /// The sink runs synchronously on the logging thread and must not block.
+    /// Use [`crate::runtime::SessionEventSink::wants`] to filter high-volume
+    /// or sensitive events. Delivery is independent of `log_events`.
+    pub fn with_session_event_sink(
+        mut self,
+        sink: Arc<dyn crate::runtime::SessionEventSink>,
+    ) -> Self {
+        self.session_event_sink = Some(sink);
         self
     }
 
@@ -718,6 +733,7 @@ impl AgentOptions {
             session_layout: self.session_layout,
             first_prompt: self.first_prompt,
             event_sink: self.event_sink,
+            session_event_sink: self.session_event_sink,
             sub_stream_tx: self.sub_stream_tx,
             read_only_fs: self.read_only_fs,
             resource_handlers: self.resource_handlers,

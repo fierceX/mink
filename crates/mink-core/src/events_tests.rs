@@ -153,6 +153,7 @@ fn typed_events_round_trip_through_jsonl_values() {
         EventLog::TurnError {
             error: "e".into(),
             category: "Network".into(),
+            failure: None,
             severity: Some("Fatal".into()),
             belief: Some(0.5),
             model: Some("flash".into()),

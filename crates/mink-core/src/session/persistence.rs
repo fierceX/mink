@@ -66,11 +66,32 @@ impl PersistenceFault {
 }
 
 fn fault_error(path: &Path, detail: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "session state persistence fault at {}: {detail}; restart the session before continuing",
-        path.display()
-    )
+    anyhow::Error::new(PersistenceFaultError {
+        path: path.to_path_buf(),
+        detail: detail.to_string(),
+    })
 }
+
+/// Typed marker for a latched session. Callers classify it without parsing
+/// the display text.
+#[derive(Debug)]
+pub(crate) struct PersistenceFaultError {
+    pub(crate) path: PathBuf,
+    pub(crate) detail: String,
+}
+
+impl std::fmt::Display for PersistenceFaultError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "session state persistence fault at {}: {}; restart the session before continuing",
+            self.path.display(),
+            self.detail
+        )
+    }
+}
+
+impl std::error::Error for PersistenceFaultError {}
 
 /// Publish `content` at `path`, recovering from a published-but-unsynced
 /// failure or latching the session when recovery is impossible.

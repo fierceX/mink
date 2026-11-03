@@ -424,6 +424,7 @@ class AgentSession:
             "tool_error_count": final.get("tool_error_count", 0),
             "exit_code": exit_code,
             "error": error_message,
+            "failure": final.get("failure"),
             "stderr": stderr_text,
         }
 

@@ -10,6 +10,7 @@ pub mod session;
 mod tools;
 pub(crate) use tools::RegisteredCustomTool;
 
+pub use crate::agent::failure::TurnFailureReason;
 pub use crate::capabilities::CapabilitySnapshot;
 pub use crate::capabilities::model_capabilities::{
     ImageDetail, ImageInputCapability, ImageLimitsOverrides, OpenAiChatImageUrlLimits,
@@ -65,7 +66,12 @@ pub use crate::ui::{
 pub(crate) use builder::build_runtime;
 pub use config::{SessionInfo, SessionPolicy};
 pub(crate) use events::TurnEventEmitter;
-pub use events::{AgentEvent, AgentEventKind, EventSink};
+pub use events::{AgentEvent, AgentEventKind, EventSink, SessionEventSink};
+pub use session::SessionReader;
+
+/// Durable session event vocabulary (`events.jsonl`).
+pub use crate::events::EventLog as SessionEvent;
+pub use crate::events::SessionEventBatch;
 pub use handle::{
     AgentEventStream, AgentRuntime, AgentRuntimeHandle, CompactOutcome, ModelSwitchOutcome,
     RuntimeError, RuntimeResult, TurnId, TurnOutcome,
@@ -130,3 +136,11 @@ pub use goal::{
 };
 
 pub use crate::session::goal_protocol::*;
+
+#[cfg(test)]
+#[path = "session_event_sink_tests.rs"]
+mod session_event_sink_tests;
+
+#[cfg(test)]
+#[path = "turn_failure_tests.rs"]
+mod turn_failure_tests;

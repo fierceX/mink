@@ -1,6 +1,6 @@
 # Rust 集成
 
-> 更新日期：2026-10-29
+> 更新日期：2026-11-03
 
 进程内 runtime 生命周期与可靠事件。前置：Rust 1.99+。
 
@@ -113,6 +113,80 @@ observer 通过固定容量队列与核心 turn 隔离；溢出只丢弃最新�
 `AgentRuntime::shutdown()` 返回。Web SSE 会额外加入 `stream_sequence` 作为传输序号，
 同时保留核心的 `turn_id + sequence`。事件名使用 `turn_started`、`title_update.stats`、
 `sub_agent_status`、`sub_agent_output` 与 `turn_final.outcome`。
+
+### 会话事件与终态失败
+
+`AgentEvent` 是实时 turn 流；`SessionEvent` 是持久 `events.jsonl` 的类型化词汇表，两者不同。
+需要 LLM 重试、首事件/idle 超时、压缩、信号与工具诊断时，读取 `SessionEvent`，不要解析原始 JSON。
+
+实时观察（可关闭磁盘日志）：
+
+```rust
+use std::sync::Arc;
+use mink::prelude::{AgentOptions, AgentRuntime, SessionEvent, SessionEventSink};
+
+struct Observer;
+impl SessionEventSink for Observer {
+    // 默认接收全部事件；可在这里过滤 Text/Thinking/PrefixSnapshot 等高体积/敏感记录。
+    fn wants(&self, _session_id: &str, _event: &SessionEvent) -> bool { true }
+    fn on_session_event(&self, _session_id: &str, event: &SessionEvent) {
+        if let SessionEvent::LlmRecovery { terminal, .. } = event {
+            eprintln!("recovery terminal={terminal:?}");
+        }
+    }
+}
+
+let rt = AgentRuntime::start(
+    AgentOptions::new("/tmp/mink-session", ".")
+        .with_api_key("sk-...")
+        .with_model("flash")
+        .with_log_events(false)
+        .with_session_event_sink(Arc::new(Observer)),
+).await?;
+```
+
+sink 同步运行在调用线程：必须非阻塞、不得回调 runtime、不得 panic。子代理继承父 sink，
+回调携带各自 session id。压缩引擎的 `compaction_check`、`compact` 与摘要 usage 同样经该
+sink 投递，不依赖磁盘日志。事件可能含模型文本、工具输出与 `PrefixSnapshot.system_prompt`，
+属敏感数据，由宿主自行保护。
+
+事后读取（可增量 tail）：
+
+```rust
+let mut offset = 0u64;
+loop {
+    let batch = mink::runtime::SessionReader::new(session_dir.clone())
+        .events_since(offset, 1024)?;
+    for event in batch.events { /* typed */ }
+    offset = batch.next_offset;
+    if !batch.truncated { break; }
+    offset = 0; // 文件被截断/轮转，显式重读
+    break;
+}
+```
+
+读取契约：只消费完整行，末尾半截行留在 `next_offset`；未知类型/坏 JSON 计入 `skipped`；
+偏移超出文件返回 `truncated=true, next_offset=0`，不偷偷从头读；`max_events` 必须大于 0。
+
+终态失败原因在 `TurnOutcome.failure`（同时写入 `TurnFinal`/`TurnError`、`SdkFinal` 与 Python
+`result["failure"]`）：
+
+```rust
+let outcome = rt.run_turn("review this").await?;
+match outcome.failure {
+    Some(mink::runtime::TurnFailureReason::RequestTimeout) => { /* 可重试的超时 */ }
+    Some(mink::runtime::TurnFailureReason::ContextUnavailable) => { /* 需要更大窗口/新会话 */ }
+    Some(reason) => eprintln!("failed: {reason}"),
+    None if outcome.status == mink::runtime::TurnStatus::Interrupted => { /* 取消，不是失败 */ }
+    None => { /* 正常结束 */ }
+}
+```
+
+`TurnFailureReason` 是稳定 snake_case code，覆盖请求期限/重试耗尽、provider 拒绝/终止、
+上下文溢出/不可用、格式窗口耗尽、max_turns、signal abort/handover、持久化、Goal 预算与
+内部错误。分类只来自 typed tag/downcast，不使用 error 文本。兼容性：成功轮不序列化
+`failure`；旧 `events.jsonl` 与旧 `final` 可解析；外部直接构造 `TurnOutcome` 需补
+`failure: None`（`AgentEventKind` 不变）。
 
 ### AgentOptions 配置速查
 

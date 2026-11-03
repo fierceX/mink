@@ -29,13 +29,14 @@ pub mod prelude {
         LoadedSkill, ModelResolver, OpenAiCompatibleBackend, OpenAiCompatibleOptions, OutputFormat,
         PostInitContext, PostInitHook, PrefixSource, ProviderOptions, ReadOnlyFileSystem,
         ResolvedModel, ResourceHandler, RuntimeError, RuntimeSkill, SandboxConfig,
-        SandboxPythonConfig, SessionInfo, SessionLayout, SessionPolicy, SignalPolicy,
-        SkillCapability, SkillDiscoveryPolicy, SkillLoadContext, SkillProvider, SourceLevel,
-        SourceMeta, TokenParamKind, ToolActivation, ToolApprovalMode, ToolApprovalPolicy,
-        ToolCapabilityOffer, ToolDefinition, ToolError, ToolExecutionContext, ToolExecutionMode,
-        ToolOptions, ToolOutput, ToolSemanticCapability, TurnId, TurnOutcome, TurnStatus,
-        UpstreamFailureKind, VfsGlobRequest, VfsGlobResult, VfsGrepEntry, VfsGrepRequest,
-        VfsGrepResult, VfsReadRequest, VfsReadResult, VfsScope,
+        SandboxPythonConfig, SessionEvent, SessionEventBatch, SessionEventSink, SessionInfo,
+        SessionLayout, SessionPolicy, SignalPolicy, SkillCapability, SkillDiscoveryPolicy,
+        SkillLoadContext, SkillProvider, SourceLevel, SourceMeta, TokenParamKind, ToolActivation,
+        ToolApprovalMode, ToolApprovalPolicy, ToolCapabilityOffer, ToolDefinition, ToolError,
+        ToolExecutionContext, ToolExecutionMode, ToolOptions, ToolOutput, ToolSemanticCapability,
+        TurnFailureReason, TurnId, TurnOutcome, TurnStatus, UpstreamFailureKind, VfsGlobRequest,
+        VfsGlobResult, VfsGrepEntry, VfsGrepRequest, VfsGrepResult, VfsReadRequest, VfsReadResult,
+        VfsScope,
     };
 }
 

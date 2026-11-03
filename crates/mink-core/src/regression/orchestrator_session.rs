@@ -17,6 +17,14 @@ async fn send_user_input(
     tx: &tokio::sync::mpsc::UnboundedSender<OrchCmd>,
     input: &str,
 ) -> anyhow::Result<crate::agent::orchestrator::TurnRunResult> {
+    send_user_input_with_iteration(tx, input, None).await
+}
+
+async fn send_user_input_with_iteration(
+    tx: &tokio::sync::mpsc::UnboundedSender<OrchCmd>,
+    input: &str,
+    goal_iteration: Option<crate::session::goal::IterationKey>,
+) -> anyhow::Result<crate::agent::orchestrator::TurnRunResult> {
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let turn_id = crate::runtime::TurnId::new("test-turn");
     let emitter = std::sync::Arc::new(crate::runtime::TurnEventEmitter::new(
@@ -27,7 +35,7 @@ async fn send_user_input(
     tx.send(OrchCmd::UserInput {
         goal_draft: None,
         goal_source: None,
-        goal_iteration: None,
+        goal_iteration,
         input: input.into(),
         turn_id,
         emitter,
@@ -326,6 +334,71 @@ async fn orchestrator_cancel_signal_shuts_actor_down() -> anyhow::Result<()> {
             .any(|msg| msg == "Shutting down..."),
         "{:?}",
         h.display.info.lock().unwrap()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn goal_settlement_failure_is_the_published_terminal() -> anyhow::Result<()> {
+    let llm = Arc::new(MockLlmBackend::new(
+        "flash",
+        vec![vec![
+            Ok(Event::Text(TextEvent {
+                content: "done".into(),
+            })),
+            Ok(Event::Stop(StopEvent {
+                reason: "end_turn".into(),
+            })),
+        ]],
+    ));
+    let h = harness_with_backend("orch-settlement-failure", llm).await?;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let actor = OrchActor::new(h.ctx.clone(), rx);
+    let handle = tokio::spawn(actor.run());
+
+    // A key that names no goal forces the identity-bound settlement to fail
+    // after the turn has already completed normally.
+    let key = crate::session::goal::IterationKey {
+        goal_id: "missing-goal".into(),
+        iteration: 1,
+        turn_id: "test-turn".into(),
+    };
+    let result = send_user_input_with_iteration(&tx, "finish", Some(key)).await?;
+    assert_eq!(
+        result.status,
+        crate::runtime::TurnStatus::Failed,
+        "{result:?}"
+    );
+    assert_eq!(
+        result.failure,
+        Some(crate::runtime::TurnFailureReason::Persistence)
+    );
+
+    drop(tx);
+    handle.await??;
+    h.ctx.flush_event_log().await?;
+    let reader = crate::runtime::SessionReader::new(
+        h.ctx
+            .events_path
+            .parent()
+            .expect("session directory")
+            .to_path_buf(),
+    );
+    let finals: Vec<_> = reader
+        .events()?
+        .into_iter()
+        .filter_map(|event| match event {
+            crate::events::EventLog::TurnFinal {
+                status, failure, ..
+            } => Some((status, failure)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(finals.len(), 1, "exactly one terminal event: {finals:?}");
+    assert_eq!(finals[0].0, "failed");
+    assert_eq!(
+        finals[0].1,
+        Some(crate::runtime::TurnFailureReason::Persistence)
     );
     Ok(())
 }

@@ -1,3 +1,4 @@
+use crate::events::EventLog as SessionEvent;
 use crate::runtime::{TurnId, TurnOutcome};
 use crate::tools::metadata::{ToolResultKind, ToolStatus};
 use crate::ui::{
@@ -592,6 +593,22 @@ impl Display for EventDisplay {
     fn render_clear_line(&self) {
         self.emit(AgentEventKind::ClearLine);
     }
+}
+
+/// Live observer for the durable session event vocabulary.
+///
+/// Unlike [`EventSink`] (the turn stream), this sink receives the same typed
+/// records written to `events.jsonl`, including `Text`/`Thinking` deltas and
+/// `PrefixSnapshot` payloads. Implementations must be non-blocking, must not
+/// call back into the runtime and must not panic; they run on the caller's
+/// thread. Return `false` from [`Self::wants`] to drop events that are not
+/// needed (for example high-volume deltas or sensitive payloads).
+pub trait SessionEventSink: Send + Sync {
+    fn wants(&self, _session_id: &str, _event: &SessionEvent) -> bool {
+        true
+    }
+
+    fn on_session_event(&self, session_id: &str, event: &SessionEvent);
 }
 
 #[cfg(test)]
