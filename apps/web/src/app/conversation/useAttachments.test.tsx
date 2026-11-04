@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionSummary } from '../../data/api.ts'
 import type { ImageLimits } from '../../data/types.ts'
 import { useAttachments } from './useAttachments.ts'
+import { mergeAttachments, sessionAttachmentsKey } from '../../data/sessionDraft.ts'
 import { ComposerAttachments } from './ComposerAttachments.tsx'
 
 beforeEach(() => {
@@ -96,6 +97,27 @@ describe('draft attachments', () => {
 
     act(() => { handle().remove('stored-att-7') })
     expect(JSON.parse(localStorage.getItem('mink.attachments:demo:session-1') ?? '[]')).toEqual([])
+  })
+
+  it('merges an upload completed after the rail mounted', async () => {
+    stubUpload('att-new')
+    const key = sessionAttachmentsKey(SESSION)
+    const handle = renderAttachments(LIMITS)
+    act(() => {
+      mergeAttachments(key, [
+        { key: 'stored-att-first-1', id: 'att-first', name: 'first.png' },
+      ])
+    })
+    await waitFor(() => {
+      expect(handle().entries.map(entry => entry.name)).toEqual(['first.png'])
+    })
+
+    act(() => { handle().add([image('new.png')]) })
+    await waitFor(() => { expect(handle().entries).toHaveLength(2) })
+    await waitFor(() => {
+      const stored = JSON.parse(localStorage.getItem(key) ?? '[]') as Array<{ name: string }>
+      expect(stored.map(entry => entry.name).sort()).toEqual(['first.png', 'new.png'])
+    })
   })
 
   it('refuses an unsupported format and an oversized image', () => {

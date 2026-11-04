@@ -148,6 +148,27 @@ export function writeSessionDraft(session: Pick<SessionSummary, 'project_key' | 
   }
 }
 
+/**
+ * Restore a first-send draft only when the session has no newer draft.
+ *
+ * A delayed first-send failure must not replace text the reader typed after
+ * the session was created. Any existing key (including an explicitly emptied
+ * draft) is newer than the failed request.
+ */
+export function writeSessionDraftIfAbsent(
+  session: Pick<SessionSummary, 'project_key' | 'id'>,
+  text: string,
+): boolean {
+  try {
+    const key = sessionDraftKey(session)
+    if (localStorage.getItem(key) !== null) return false
+    localStorage.setItem(key, text)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** Storage key for one session's drafted attachment ids. */
 export function sessionAttachmentsKey(session: Pick<SessionSummary, 'project_key' | 'id'>): string {
   return `mink.attachments:${session.project_key}:${session.id}`
@@ -192,6 +213,31 @@ export function writeAttachments(key: string, entries: readonly StoredAttachment
     localStorage.setItem(key, JSON.stringify(entries))
   } catch {
     // Storage is optional.
+  }
+}
+
+export interface AttachmentsMergedDetail {
+  key: string
+  entries: StoredAttachment[]
+}
+
+/**
+ * Append uploaded entries without replacing drafts added concurrently.
+ * Entries are identified by their draft key; a repeat upload is a no-op.
+ * Mounted rails receive the same additions so their in-memory list cannot
+ * later write an older state back over them.
+ */
+export function mergeAttachments(key: string, entries: readonly StoredAttachment[]): void {
+  if (entries.length === 0) return
+  const current = readAttachments(key)
+  const existing = new Set(current.flatMap(entry => (entry.key === undefined ? [] : [entry.key])))
+  const additions = entries.filter(entry => entry.key === undefined || !existing.has(entry.key))
+  if (additions.length === 0) return
+  writeAttachments(key, [...current, ...additions])
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent<AttachmentsMergedDetail>('mink:attachments-merged', {
+      detail: { key, entries: additions },
+    }))
   }
 }
 

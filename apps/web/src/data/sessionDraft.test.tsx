@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   consumableAttachmentKeys,
   forgetAcceptedAttachments,
+  mergeAttachments,
   readAttachments,
   readPendingSubmission,
   sessionAttachmentsKey,
@@ -10,6 +11,7 @@ import {
   useSessionDraft,
   writeAttachments,
   writePendingSubmission,
+  writeSessionDraftIfAbsent,
 } from './sessionDraft.ts'
 import { act, cleanup, render } from '@testing-library/react'
 import { useState } from 'react'
@@ -77,6 +79,26 @@ describe('session drafts', () => {
     expect([...consumableAttachmentKeys({ known: true, keys: ['a', 'b'] })].sort()).toEqual(['a', 'b'])
   })
 
+  it('merges first-send uploads without dropping concurrently added drafts', () => {
+    const key = sessionAttachmentsKey(SESSION)
+    writeAttachments(key, [
+      { key: 'later-draft', id: 'later-id', name: 'later.png' },
+    ])
+    mergeAttachments(key, [
+      { key: 'stored-1-1', id: 'first-id', name: 'first.png' },
+    ])
+    expect(readAttachments(key)).toEqual([
+      { key: 'later-draft', id: 'later-id', name: 'later.png' },
+      { key: 'stored-1-1', id: 'first-id', name: 'first.png' },
+    ])
+
+    // Re-running the same upload must not duplicate its draft entry.
+    mergeAttachments(key, [
+      { key: 'stored-1-1', id: 'first-id', name: 'first.png' },
+    ])
+    expect(readAttachments(key)).toHaveLength(2)
+  })
+
   it('removes only snapshot keys from storage and never guesses by id', () => {
     const key = sessionAttachmentsKey(SESSION)
     const seeded = [
@@ -92,6 +114,24 @@ describe('session drafts', () => {
     expect(readAttachments(key)).toEqual([
       { key: 'draft-b', id: 'same-id', name: 'b.png' },
     ])
+  })
+
+  it('restores a first-send draft only when the session has no newer one', () => {
+    const key = sessionDraftKey(SESSION)
+    expect(writeSessionDraftIfAbsent(SESSION, '旧正文')).toBe(true)
+    expect(localStorage.getItem(key)).toBe('旧正文')
+
+    localStorage.setItem(key, '后来输入')
+    expect(writeSessionDraftIfAbsent(SESSION, '旧正文')).toBe(false)
+    expect(localStorage.getItem(key)).toBe('后来输入')
+
+    // An explicitly emptied draft is still newer than the failed request.
+    localStorage.setItem(key, '')
+    expect(writeSessionDraftIfAbsent(SESSION, '旧正文')).toBe(false)
+    expect(localStorage.getItem(key)).toBe('')
+
+    localStorage.removeItem(key)
+    expect(writeSessionDraftIfAbsent(SESSION, '旧正文')).toBe(true)
   })
 
   it('stores what the reader types and reads it back', () => {

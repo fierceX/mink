@@ -187,6 +187,85 @@ describe('session switching and creation', () => {
     expect(localStorage.getItem('mink.attachments:p:fresh')).toBe('[]')
   })
 
+  it('keeps attachments added while the first-send receipt is pending', async () => {
+    stubShell()
+    vi.spyOn(api, 'listSessions').mockResolvedValue(ok([]))
+    vi.spyOn(api, 'workspace').mockResolvedValue(ok({ cwd: '/tmp/fresh', project_key: 'p', name: 'fresh' }))
+    vi.spyOn(api, 'createSession').mockResolvedValue(ok(session('fresh', { cwd: '/tmp/fresh', project_key: 'p' })))
+    vi.spyOn(api, 'upload').mockResolvedValue(ok({ id: 'attachment-1', name: 'tiny.png' } as never))
+    let resolveSubmit!: (value: ApiResponse<never>) => void
+    const submit = vi.spyOn(api, 'submitInput').mockImplementation(() => new Promise((resolve) => {
+      resolveSubmit = resolve
+    }))
+    render(<App />)
+
+    const empty = await waitFor(() => {
+      const node = document.querySelector('[data-empty-state]')
+      expect(node).not.toBeNull()
+      return node as HTMLElement
+    })
+    fireEvent.click(within(empty).getByRole('button', { name: '新建项目' }))
+    fireEvent.change(screen.getByLabelText('工作目录'), { target: { value: '/tmp/fresh' } })
+    fireEvent.click(screen.getByRole('button', { name: '打开目录' }))
+    await waitFor(() => { expect(document.querySelector('[data-new-conversation]')).not.toBeNull() })
+    fireEvent.change(screen.getByLabelText('选择图片'), {
+      target: { files: [new File(['image'], 'tiny.png', { type: 'image/png' })] },
+    })
+    fireEvent.change(screen.getByLabelText('输入消息'), { target: { value: '带图的首条消息' } })
+    fireEvent.keyDown(screen.getByLabelText('输入消息'), { key: 'Enter' })
+    await waitFor(() => { expect(submit).toHaveBeenCalledTimes(1) })
+
+    const key = 'mink.attachments:p:fresh'
+    const first = JSON.parse(localStorage.getItem(key) ?? '[]') as Array<Record<string, string>>
+    expect(first).toHaveLength(1)
+    const later = { key: 'later-1', id: 'attachment-2', name: 'later.png' }
+    localStorage.setItem(key, JSON.stringify([...first, later]))
+
+    await act(async () => {
+      resolveSubmit(ok({} as never))
+    })
+    await waitFor(() => {
+      expect(JSON.parse(localStorage.getItem(key) ?? '[]')).toEqual([later])
+    })
+  })
+
+  it('does not overwrite a draft typed after the first send started', async () => {
+    stubShell()
+    vi.spyOn(api, 'listSessions').mockResolvedValue(ok([]))
+    vi.spyOn(api, 'workspace').mockResolvedValue(ok({ cwd: '/tmp/fresh', project_key: 'p', name: 'fresh' }))
+    vi.spyOn(api, 'createSession').mockResolvedValue(ok(session('fresh', {
+      cwd: '/tmp/fresh', title: '新目录里的任务', project_key: 'p',
+    })))
+    let resolveSubmit!: (value: ApiResponse<never>) => void
+    const submit = vi.spyOn(api, 'submitInput').mockImplementation(() => new Promise((resolve) => {
+      resolveSubmit = resolve
+    }))
+    render(<App />)
+
+    const empty = await waitFor(() => {
+      const node = document.querySelector('[data-empty-state]')
+      expect(node).not.toBeNull()
+      return node as HTMLElement
+    })
+    fireEvent.click(within(empty).getByRole('button', { name: '新建项目' }))
+    fireEvent.change(screen.getByLabelText('工作目录'), { target: { value: '/tmp/fresh' } })
+    fireEvent.click(screen.getByRole('button', { name: '打开目录' }))
+    await waitFor(() => { expect(document.querySelector('[data-new-conversation]')).not.toBeNull() })
+    fireEvent.change(screen.getByLabelText('输入消息'), { target: { value: '旧正文' } })
+    fireEvent.keyDown(screen.getByLabelText('输入消息'), { key: 'Enter' })
+    await waitFor(() => { expect(submit).toHaveBeenCalledTimes(1) })
+
+    localStorage.setItem('mink.draft:p:fresh', '后来输入')
+    await act(async () => {
+      resolveSubmit({ code: 500, message: '首轮入口拒绝', data: undefined as never })
+    })
+    await waitFor(() => {
+      expect(screen.getByText('会话已创建，但首条消息提交失败：首轮入口拒绝')).toBeDefined()
+    })
+    expect(localStorage.getItem('mink.draft:p:fresh')).toBe('后来输入')
+    expect((screen.getByLabelText('输入消息') as HTMLTextAreaElement).value).toBe('后来输入')
+  })
+
   it('keeps completed first-send uploads as session drafts when a later upload fails', async () => {
     stubShell()
     vi.spyOn(api, 'listSessions').mockResolvedValue(ok([]))

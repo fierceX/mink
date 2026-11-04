@@ -13,6 +13,8 @@ import { readAttachments, sessionAttachmentsKey, writeAttachments } from '../../
 import {
   consumableAttachmentKeys,
   type AttachmentSnapshot,
+  type AttachmentsMergedDetail,
+  type StoredAttachment,
 } from '../../data/sessionDraft.ts'
 import type { Attachment, ImageLimits } from '../../data/types.ts'
 
@@ -46,14 +48,38 @@ export interface AttachmentsHandle {
   notice: string | undefined
 }
 
-/** Rebuild the rail from the ids this session stored. */
-function restore(session: SessionSummary | undefined, storageKey: string | undefined): DraftAttachment[] {
-  if (session === undefined || storageKey === undefined) return []
-  const used = new Set<string>()
-  return readAttachments(storageKey).map(stored => {
-    // Draft entry identity survives a reload; legacy rows (id/name only) get a
-    // deterministic identity so a later write upgrades them.
-    const base = stored.key ?? `stored-${stored.id}`
+/** Build one ready rail entry from a stored draft attachment. */
+function storedDraft(
+  session: SessionSummary,
+  stored: StoredAttachment,
+  key: string,
+): DraftAttachment {
+  return {
+    key,
+    name: stored.name,
+    bytes: 0,
+    preview: sessionUrl(session.id, `/attachments/${stored.id}`, session.project_key),
+    status: 'ready',
+    attachment: { id: stored.id, mime: '', width: 0, height: 0, bytes: 0 },
+  }
+}
+
+/** Append stored entries without disturbing identities already on the rail. */
+function mergeStored(
+  session: SessionSummary,
+  current: DraftAttachment[],
+  stored: readonly StoredAttachment[],
+): DraftAttachment[] {
+  const used = new Set(current.map(entry => entry.key))
+  const next = [...current]
+  for (const entry of stored) {
+    const base = entry.key ?? `stored-${entry.id}`
+    if (entry.key !== undefined) {
+      if (used.has(entry.key)) continue
+      used.add(entry.key)
+      next.push(storedDraft(session, entry, entry.key))
+      continue
+    }
     let key = base
     let suffix = 1
     while (used.has(key)) {
@@ -61,15 +87,15 @@ function restore(session: SessionSummary | undefined, storageKey: string | undef
       key = `${base}-${suffix}`
     }
     used.add(key)
-    return {
-      key,
-      name: stored.name,
-      bytes: 0,
-      preview: sessionUrl(session.id, `/attachments/${stored.id}`, session.project_key),
-      status: 'ready' as const,
-      attachment: { id: stored.id, mime: '', width: 0, height: 0, bytes: 0 },
-    }
-  })
+    next.push(storedDraft(session, entry, key))
+  }
+  return next.length === current.length ? current : next
+}
+
+/** Rebuild the rail from the ids this session stored. */
+function restore(session: SessionSummary | undefined, storageKey: string | undefined): DraftAttachment[] {
+  if (session === undefined || storageKey === undefined) return []
+  return mergeStored(session, [], readAttachments(storageKey))
 }
 
 /** Accepted format list from the session capability, normalized to mime names. */
@@ -101,6 +127,30 @@ export function useAttachments(session: SessionSummary | undefined, limits: Imag
         ? []
         : [{ key: entry.key, id: entry.attachment.id, name: entry.name }]))
   }, [entries, storageKey])
+
+  useEffect(() => {
+    if (storageKey === undefined || session === undefined) return
+    const sync = (stored: readonly StoredAttachment[]): void => {
+      setEntries(current => mergeStored(session, current, stored))
+    }
+    const onMerged = (event: Event): void => {
+      const detail = (event as CustomEvent<AttachmentsMergedDetail>).detail
+      if (detail?.key !== storageKey || !Array.isArray(detail.entries)) return
+      sync(detail.entries)
+    }
+    // Another tab's upload merge arrives as a storage event; syncing also
+    // closes the mount/merge race before this listener exists.
+    const onStorage = (event: StorageEvent): void => {
+      if (event.key === storageKey) sync(readAttachments(storageKey))
+    }
+    window.addEventListener('mink:attachments-merged', onMerged)
+    window.addEventListener('storage', onStorage)
+    sync(readAttachments(storageKey))
+    return () => {
+      window.removeEventListener('mink:attachments-merged', onMerged)
+      window.removeEventListener('storage', onStorage)
+    }
+  }, [storageKey, session])
 
   useEffect(() => {
     if (storageKey === undefined) return

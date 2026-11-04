@@ -9,13 +9,14 @@ import { api, type GoalSnapshot, type SessionSummary } from '../data/api.ts'
 import { useNow, useSessionCatalog } from '../data/useSessionCatalog.ts'
 import {
   clearComposeDraft,
+  forgetAcceptedAttachments,
+  mergeAttachments,
   sessionAttachmentsKey,
   sessionDraftKey,
   sessionPendingKey,
   useSessionDraft,
-  writeAttachments,
   writePendingSubmission,
-  writeSessionDraft,
+  writeSessionDraftIfAbsent,
   type PendingSubmission,
   type StoredAttachment,
 } from '../data/sessionDraft.ts'
@@ -284,7 +285,7 @@ export function App() {
     const project = composing
     let created: SessionSummary | undefined
     const adopt = (session: SessionSummary, message: string): void => {
-      writeSessionDraft(session, text)
+      writeSessionDraftIfAbsent(session, text)
       if (mayAdopt()) {
         clearComposeDraft(project.cwd, { draftId, requestId: firstRequestId, text })
         openSession(session)
@@ -323,7 +324,9 @@ export function App() {
         storedAttachments.push({ key, id: upload.data.id, name: file.name })
         // Keep each successful upload recoverable if a later image fails or
         // the browser reloads before the first input reaches the server.
-        writeAttachments(sessionAttachmentsKey(created), storedAttachments)
+        mergeAttachments(sessionAttachmentsKey(created), [
+          { key, id: upload.data.id, name: file.name },
+        ])
       }
       const input: PendingSubmission = {
         request_id: firstRequestId,
@@ -344,7 +347,7 @@ export function App() {
         adopt(created, `会话已创建，但首条消息提交失败：${submitted.message || `code ${submitted.code}`}`)
         return undefined
       }
-      writeAttachments(sessionAttachmentsKey(created), [])
+      forgetAcceptedAttachments(sessionAttachmentsKey(created), input.attachment_snapshot)
       clearComposeDraft(project.cwd, { draftId, requestId: firstRequestId, text })
       if (mayAdopt()) openSession(created)
       void catalog.refresh()
