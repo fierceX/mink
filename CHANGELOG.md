@@ -1,9 +1,17 @@
 # Changelog
 
-## Unreleased
+## v0.9.0 (2026-11-04)
+
+本版新增可嵌入的类型化会话事件与终态失败原因，修复首次发送的草稿/附件竞态、压缩事件出口与应急摘录标记，并继续收敛 Web 工作台、Goal 预算与内嵌前端构建。
+
+### 破坏性变更
+
+- **终态失败分类**：`TurnOutcome` 新增可选 `failure: TurnFailureReason`，`TurnDecision::Failed` 改为携带 `{ reason, detail }`。`failure` 同时写入 `TurnFinal` / `TurnError` 事件、`SdkFinal` 与 Python `result["failure"]`；成功轮次省略该字段，旧事件日志仍可解码。失败原因来自 typed tag/downcast（provider、请求期限/重试耗尽、上下文溢出/不可用、格式窗口耗尽、max_turns、signal abort/handover、持久化、Goal 预算），不再用 error 文本决定宿主重试策略。外部直接构造 `TurnOutcome` 的代码需补 `failure: None`；`AgentEventKind` 不变。
+- **Rust 嵌入 API**：增加可选 `mink::config_file` 入口，用于解析共享 `.minkrc` schema；`RuntimeError` 增加 `GoalActive` 变体，穷举匹配的下游代码需要处理该变体。
+
+### 新增与修复
 
 - **嵌入事件契约**：公开 `mink::runtime::SessionEvent`（`events.jsonl` 词汇表）与 `SessionReader::events` / `events_since(offset, max_events)`。读取只消费完整行，末尾半截行留待下次；未知事件类型与坏 JSON 计入 `skipped` 而不失败；偏移超出文件返回 `truncated` 并重置为 0。新增 `SessionEventSink` / `AgentOptions::with_session_event_sink`，宿主可在不开启磁盘日志时实时收到 typed 事件，并用 `wants` 过滤 Text/Thinking/PrefixSnapshot；子代理继承父 sink 并携带自身 session id。
-- **终态失败分类（破坏性变更，下一 minor）**：`TurnOutcome` 新增可选 `failure: TurnFailureReason`，`TurnDecision::Failed` 改为携带 `{ reason, detail }`。`failure` 同时写入 `TurnFinal` / `TurnError` 事件、`SdkFinal` 与 Python `result["failure"]`；成功轮次省略该字段，旧事件日志仍可解码。失败原因来自 typed tag/downcast（provider、请求期限/重试耗尽、上下文溢出/不可用、格式窗口耗尽、max_turns、signal abort/handover、持久化、Goal 预算），不再用 error 文本决定宿主重试策略。外部直接构造 `TurnOutcome` 的代码需补 `failure: None`；`AgentEventKind` 不变。
 - **嵌入事件一致性修复**：压缩引擎的 `compaction_check`、`compact` 与摘要 usage 改经共享 `SessionEventSink` 出口，`log_events=false` 时仍可观察（此前直接写 writer 或提前返回而漏投）；Goal 结算在 `TurnFinal` 之前完成，结算失败时 `TurnOutcome`、sink 与 `events.jsonl` 的唯一终态均为 `failed/persistence`，不再出现先成功后失败的双终态。`SessionReader` 同时从 `mink::runtime` 根重新导出。
 - **Web 首次发送的草稿消费**：首条消息成功只按提交时冻结的附件快照移除对应条目，不再把会话附件清空，因此回执延迟期间新加的图片会保留；上传过程中按草稿条目 key 合并并同步通知已挂载附件栏，避免其内存旧状态回写覆盖并发新增项。首条消息失败恢复旧正文时仅在会话尚无草稿时写入，不再覆盖读者后来输入的内容。两处均有 App 级回归测试。
 - **应急摘录标记**：修复初始请求截断标记缺少 `]` 的问题（`[… N bytes omitted…]`）；超过 3600 字节的请求进入应急摘录时标记不再与尾文粘连。新增截断标记闭合断言。
@@ -21,7 +29,6 @@
 - **配置与 server 边界**：CLI/server 共用 core `.minkrc` schema 和严格解析；已有配置读取/解析失败时 fail closed。server 默认监听地址为 `127.0.0.1`。
 - **新对话首发**：服务端会话先打开再上传图片；已成功上传的图片逐张保存为会话草稿，部分上传失败可恢复；迟到的首次发送回执不能切换当前导航或清除后来编辑的 compose 草稿，输入确认受理后只清掉该输入消耗的图片。
 - **Python WASI 沙箱**：多个 `package_dirs` 现在分别挂载并全部加入 `PYTHONPATH`，避免后续目录被首个挂载遮蔽；增加无需外部 CPython wasm 文件的 WASI 启动回归。
-- **Rust 嵌入 API**：增加可选 `mink::config_file` 入口，用于解析共享 `.minkrc` schema；`RuntimeError` 增加 `GoalActive` 变体，穷举匹配的下游代码需要处理该变体。
 - **Web 设计层维护方式**：设计层源码作为 mink 维护的 vendored 代码保留（MIT 署名保留），后续独立演进。
 
 ## v0.8.0 (2026-10-27)

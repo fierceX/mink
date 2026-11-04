@@ -21,7 +21,7 @@
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.8.0", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.9.0", default-features = false, features = ["runtime"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
 ```

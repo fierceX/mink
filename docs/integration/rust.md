@@ -17,7 +17,7 @@ Rust 发布包为 `mink-core`，库 crate 名为 `mink`。发布包提供可嵌�
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.8.0", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.9.0", default-features = false, features = ["runtime"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
 ```
@@ -228,7 +228,7 @@ Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。`mink-core` 发布�
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.8.0", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.9.0", default-features = false, features = ["runtime"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
 ```
