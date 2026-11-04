@@ -2927,6 +2927,10 @@ fn emergency_request_excerpt_keeps_both_ends_across_lengths() {
                 1,
                 "超预算时只能有一个省略标记：{rendered}"
             );
+            assert!(
+                rendered.contains("bytes omitted…]"),
+                "初始截断标记必须闭合：{rendered}"
+            );
         }
     }
 }

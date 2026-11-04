@@ -209,7 +209,7 @@ pub(super) fn emergency_blocks(
                 text,
                 EMERGENCY_REQUEST_BUDGET_BYTES,
                 "[…",
-                " bytes omitted…",
+                " bytes omitted…]",
             )
         }),
         request_source,
