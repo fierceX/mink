@@ -22,7 +22,7 @@ pub(super) fn blocker_evidence_versions(
 
 impl AgentRuntimeHandle {
     pub(crate) fn evidence_version(&self, reference: &str) -> Result<String> {
-        let cwd = self.goal_ctx.cwd.canonicalize()?;
+        let cwd = self.goal_ctx.paths.cwd.canonicalize()?;
         let path = if let Some(id) = reference.strip_prefix("artifact://") {
             ensure!(
                 !id.contains('/') && !id.contains(".."),
@@ -91,7 +91,7 @@ impl AgentRuntimeHandle {
                 .review_candidate
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("missing review candidate"))?;
-            let next = self.goal_ctx.goal_store.transition(
+            let next = self.goal_ctx.stores.goal_store.transition(
                 &current.id,
                 current.revision,
                 GoalTransition::RestartReview {
@@ -184,7 +184,7 @@ impl AgentRuntimeHandle {
         if !self.run_scheduled(run_id) {
             return Ok(());
         }
-        let seq = self.goal_ctx.store.committed_len().await?;
+        let seq = self.goal_ctx.stores.store.committed_len().await?;
         let reviewer_id = format!(
             "goal-review:{}:{}",
             self.goal_ctx
@@ -192,7 +192,7 @@ impl AgentRuntimeHandle {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .actual,
-            self.goal_ctx.tool_surface.fingerprint()
+            self.goal_ctx.tools.tool_surface.fingerprint()
         );
         if goal.review_candidate.as_ref().is_none_or(|c| {
             c.goal_id != goal.id
@@ -202,7 +202,7 @@ impl AgentRuntimeHandle {
                 || c.reviewer_id != reviewer_id
         }) {
             let prepare = |target: &GoalSnapshot| {
-                self.goal_ctx.goal_store.transition(
+                self.goal_ctx.stores.goal_store.transition(
                     &target.id,
                     target.revision,
                     GoalTransition::PrepareReview {
@@ -333,7 +333,7 @@ impl AgentRuntimeHandle {
             }
             let fingerprint = proposal.fingerprint()?;
             let report_artifact = report.artifact.clone();
-            let next = self.goal_ctx.goal_store.transition(
+            let next = self.goal_ctx.stores.goal_store.transition(
                 &current.id,
                 current.revision,
                 GoalTransition::CommitContinuation {
@@ -358,7 +358,7 @@ impl AgentRuntimeHandle {
                 && record.proposal.candidate == candidate
             {
                 ensure!(
-                    self.goal_ctx.store.committed_len().await? == record.conversation_seq,
+                    self.goal_ctx.stores.store.committed_len().await? == record.conversation_seq,
                     "continued decision history changed"
                 );
                 self.apply_if_run_scheduled(run_id, || {
@@ -370,7 +370,7 @@ impl AgentRuntimeHandle {
                             && current.review_candidate.as_ref() == Some(&candidate),
                         "continued candidate changed"
                     );
-                    let next = self.goal_ctx.goal_store.transition(
+                    let next = self.goal_ctx.stores.goal_store.transition(
                         &current.id,
                         current.revision,
                         GoalTransition::FinishContinuation {
@@ -424,13 +424,14 @@ impl AgentRuntimeHandle {
                 }
                 let session = Arc::new(super::review::GoalReviewSession::new(
                     goal.clone(),
-                    self.goal_ctx.goal_store.clone(),
-                    self.goal_ctx.usage.clone(),
+                    self.goal_ctx.stores.goal_store.clone(),
+                    self.goal_ctx.stores.usage.clone(),
                 ));
                 let outcome = self.run_goal_review(goal.clone(), session.clone()).await;
                 self.goal_ctx
+                    .stores
                     .goal_store
-                    .reconcile_usage(&self.goal_ctx.usage.all_records()?)?;
+                    .reconcile_usage(&self.goal_ctx.stores.usage.all_records()?)?;
                 if self.goal_ctx.cancel.is_cancelled() || self.goal_ctx.interrupt.is_set() {
                     return Ok(());
                 }
@@ -456,7 +457,7 @@ impl AgentRuntimeHandle {
                 let (review, reads) = session.export(self)?;
                 (review, reads, expected_conversation_seq)
             };
-            let conversation_seq = self.goal_ctx.store.committed_len().await?;
+            let conversation_seq = self.goal_ctx.stores.store.committed_len().await?;
             self.apply_if_run_scheduled(run_id, || {
                 let Some(current) = self.goal_snapshot() else {
                     return Ok(());
@@ -537,7 +538,7 @@ impl AgentRuntimeHandle {
                 } else {
                     None
                 };
-                goal = self.goal_ctx.goal_store.transition(
+                goal = self.goal_ctx.stores.goal_store.transition(
                     &current.id,
                     current.revision,
                     GoalTransition::CommitReview {
@@ -573,7 +574,7 @@ impl AgentRuntimeHandle {
                     .ok_or_else(|| anyhow::anyhow!("configured checker unavailable: {id}"))?
                     .clone();
                 let context = GoalVerificationContext {
-                    cwd: self.goal_ctx.cwd.clone(),
+                    cwd: self.goal_ctx.paths.cwd.clone(),
                     goal: goal.clone(),
                     cancelled: self.goal_ctx.interrupt.as_atomic(),
                     tools: Arc::new(crate::context::ToolContext::from(self.goal_ctx.as_ref())),
@@ -583,7 +584,7 @@ impl AgentRuntimeHandle {
                     candidate.iteration, candidate.generation, id
                 );
                 self.apply_if_run_scheduled(run_id, || {
-                    if let Some(g) = self.goal_ctx.goal_store.transition_if_current(
+                    if let Some(g) = self.goal_ctx.stores.goal_store.transition_if_current(
                         &goal.id,
                         GoalTransition::BeginChecker {
                             expected: candidate.clone(),
@@ -628,7 +629,7 @@ impl AgentRuntimeHandle {
                     reason: result.reason.clone(),
                     evidence: result.evidence.clone(),
                 };
-                if let Some(updated) = self.goal_ctx.goal_store.transition_if_current(
+                if let Some(updated) = self.goal_ctx.stores.goal_store.transition_if_current(
                     &goal.id,
                     GoalTransition::RecordCheckerResult {
                         effect_id: effect_id.clone(),
@@ -679,7 +680,7 @@ impl AgentRuntimeHandle {
                     continue;
                 }
             }
-            let conversation_seq = self.goal_ctx.store.committed_len().await?;
+            let conversation_seq = self.goal_ctx.stores.store.committed_len().await?;
             self.apply_if_run_scheduled(run_id, || {
                 let Some(current) = self.goal_snapshot() else {
                     return Ok(());
@@ -697,7 +698,7 @@ impl AgentRuntimeHandle {
                         && (checker.is_none() || self.checker_snapshot_matches(&current)?),
                     "candidate changed before completion"
                 );
-                let completed = self.goal_ctx.goal_store.transition(
+                let completed = self.goal_ctx.stores.goal_store.transition(
                     &current.id,
                     current.revision,
                     GoalTransition::CompleteReview {
@@ -722,7 +723,7 @@ impl AgentRuntimeHandle {
         reason: String,
         outcome: crate::session::goal::GoalReviewFailureStatus,
     ) -> Result<()> {
-        let Some(goal) = self.goal_ctx.goal_store.transition_if_current(
+        let Some(goal) = self.goal_ctx.stores.goal_store.transition_if_current(
             &candidate.goal_id,
             GoalTransition::ReviewFailure {
                 expected: candidate.clone(),
@@ -759,7 +760,7 @@ impl AgentRuntimeHandle {
             .filter_map(|r| self.evidence_version(r).ok().map(|v| (r, v)))
             .collect();
         let fingerprint = hash_bytes(&serde_json::to_vec(&(reason.as_str(), versions))?);
-        let Some(g) = self.goal_ctx.goal_store.transition_if_current(
+        let Some(g) = self.goal_ctx.stores.goal_store.transition_if_current(
             goal_id,
             GoalTransition::VerificationFailure {
                 reason,

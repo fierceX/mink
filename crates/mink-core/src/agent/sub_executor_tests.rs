@@ -9,9 +9,11 @@ async fn child_inherits_resource_session_but_has_own_agent_session() {
         .unwrap();
     Arc::get_mut(&mut parent)
         .expect("test context should be uniquely owned")
+        .tools
         .vfs_scope
         .resource_session_id = "tenant-knowledge".into();
     parent
+        .stores
         .todo_store
         .apply_structure(
             0,
@@ -24,32 +26,44 @@ async fn child_inherits_resource_session_but_has_own_agent_session() {
         )
         .unwrap();
 
-    let parent_snapshot = parent.capability_snapshot.clone();
+    let parent_snapshot = parent.tools.capability_snapshot.clone();
     let config = parent.config.clone();
     let child = SubAgentExecutor::new(parent, "sub-agent-session".into(), false, config)
         .await
         .unwrap();
     assert_eq!(
-        child.child_ctx.vfs_scope.resource_session_id,
+        child.child_ctx.tools.vfs_scope.resource_session_id,
         "tenant-knowledge"
     );
     assert_eq!(
-        child.child_ctx.vfs_scope.agent_session_id,
+        child.child_ctx.tools.vfs_scope.agent_session_id,
         "sub-agent-session"
     );
     assert!(Arc::ptr_eq(
-        &child.child_ctx.capability_snapshot,
+        &child.child_ctx.tools.capability_snapshot,
         &parent_snapshot
     ));
-    assert_eq!(child.child_ctx.session_layout, SessionLayout::Isolated);
+    assert_eq!(
+        child.child_ctx.paths.session_layout,
+        SessionLayout::Isolated
+    );
     assert!(
         child
             .child_ctx
+            .paths
             .home
             .ends_with("subagents/sub-agent-session")
     );
     assert!(child.child_store.lines().await.unwrap().is_empty());
-    assert!(child.child_ctx.todo_store.snapshot().items.is_empty());
+    assert!(
+        child
+            .child_ctx
+            .stores
+            .todo_store
+            .snapshot()
+            .items
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -128,18 +142,21 @@ async fn fork_inherits_full_history_and_compacted_projection() -> anyhow::Result
     .await?;
     for index in 0..3 {
         parent
+            .stores
             .store
             .add_user(&format!("request {index}: {}", "x".repeat(6_000)))
             .await?;
         parent
+            .stores
             .store
             .add_assistant(&format!("progress {index}: {}", "y".repeat(6_000)), "", &[])
             .await?;
     }
-    let full_history = parent.store.lines().await?;
+    let full_history = parent.stores.store.lines().await?;
     let resolved = crate::config::model_resolver(&parent.config).resolve(&parent.config.model);
     assert!(
         parent
+            .stores
             .compaction
             .evaluate_and_compact(
                 "manual",
@@ -152,10 +169,11 @@ async fn fork_inherits_full_history_and_compacted_projection() -> anyhow::Result
             .await?
             .0
     );
-    let projected = parent.compaction.active_messages().await?;
-    let parent_dir = parent.store.path().parent().unwrap().to_path_buf();
+    let projected = parent.stores.compaction.active_messages().await?;
+    let parent_dir = parent.stores.store.path().parent().unwrap().to_path_buf();
     let inherited_artifact =
         parent
+            .stores
             .artifacts
             .write_text("Bash", "parent output", "parent artifact content")?;
     tokio::fs::write(parent_dir.join("future-state.bin"), b"preserved").await?;
@@ -164,7 +182,7 @@ async fn fork_inherits_full_history_and_compacted_projection() -> anyhow::Result
         r#"{"total_input_tokens":999,"total_output_tokens":777}"#,
     )
     .await?;
-    parent.todo_store.apply_structure(
+    parent.stores.todo_store.apply_structure(
         0,
         crate::session::todo::TodoChanges {
             add: vec![crate::session::todo::TodoAdd {
@@ -174,6 +192,7 @@ async fn fork_inherits_full_history_and_compacted_projection() -> anyhow::Result
         },
     )?;
     let parent_todos = parent
+        .stores
         .todo_store
         .advance(
             1,
@@ -188,33 +207,35 @@ async fn fork_inherits_full_history_and_compacted_projection() -> anyhow::Result
     let child = SubAgentExecutor::new(parent, "sub-fork-state".into(), true, config).await?;
     assert_eq!(child.child_store.lines().await?, full_history);
     assert_eq!(
-        child.child_ctx.compaction.active_messages().await?,
+        child.child_ctx.stores.compaction.active_messages().await?,
         projected
     );
-    assert_eq!(child.child_ctx.todo_store.snapshot(), parent_todos);
+    assert_eq!(child.child_ctx.stores.todo_store.snapshot(), parent_todos);
     assert_eq!(
-        tokio::fs::read(child.child_ctx.home.join("future-state.bin")).await?,
+        tokio::fs::read(child.child_ctx.paths.home.join("future-state.bin")).await?,
         b"preserved"
     );
-    let usage = child.child_ctx.stats.snapshot().await;
+    let usage = child.child_ctx.stores.stats.snapshot().await;
     assert_eq!(usage.total_input_tokens, 0);
     assert_eq!(usage.total_output_tokens, 0);
     assert_eq!(
         child
             .child_ctx
+            .stores
             .artifacts
             .read_text(&inherited_artifact.id)?,
         "parent artifact content"
     );
-    let child_artifact =
-        child
-            .child_ctx
-            .artifacts
-            .write_text("Bash", "child output", "child artifact content")?;
+    let child_artifact = child.child_ctx.stores.artifacts.write_text(
+        "Bash",
+        "child output",
+        "child artifact content",
+    )?;
     assert_ne!(child_artifact.id, inherited_artifact.id);
     assert_eq!(
         child
             .child_ctx
+            .stores
             .artifacts
             .read_text(&inherited_artifact.id)?,
         "parent artifact content"
@@ -316,7 +337,7 @@ async fn child_environment_heading_matches_the_parent_for_prefix_reuse() -> anyh
         backend,
     )
     .await?;
-    parent.store.add_user("parent turn").await?;
+    parent.stores.store.add_user("parent turn").await?;
 
     let parent_prompt = parent.build_system_prompt()?;
     let child = SubAgentExecutor::new(
@@ -330,9 +351,13 @@ async fn child_environment_heading_matches_the_parent_for_prefix_reuse() -> anyh
 
     // The child really does run in its own isolated home...
     assert!(
-        child.child_ctx.home.ends_with("subagents/sub-env-head"),
+        child
+            .child_ctx
+            .paths
+            .home
+            .ends_with("subagents/sub-env-head"),
         "{}",
-        child.child_ctx.home.display()
+        child.child_ctx.paths.home.display()
     );
     // ...but the model-visible environment line must be the parent's.
     let parent_env = parent_prompt
@@ -479,6 +504,7 @@ fn blank_success_text_falls_back_to_streamed_text_then_no_output() {
 async fn setup_timeout_removes_the_partial_child_home() -> anyhow::Result<()> {
     let parent = crate::regression::test_context_for_agent("sub-setup-timeout").await?;
     let child_home = parent
+        .stores
         .store
         .path()
         .parent()
@@ -525,7 +551,7 @@ async fn child_without_label_uses_colon_id_title_fallback() -> anyhow::Result<()
         SubAgentOrigin::SubAgent,
     )
     .await?;
-    let raw = tokio::fs::read_to_string(child.child_ctx.home.join("session.json")).await?;
+    let raw = tokio::fs::read_to_string(child.child_ctx.paths.home.join("session.json")).await?;
     let metadata: serde_json::Value = serde_json::from_str(&raw)?;
     assert_eq!(metadata["title"], "Sub-agent: sub-title-fallback");
     Ok(())
@@ -548,7 +574,7 @@ async fn child_metadata_records_parent_origin_label_and_depth() -> anyhow::Resul
         SubAgentOrigin::SubAgent,
     )
     .await?;
-    let raw = tokio::fs::read_to_string(child.child_ctx.home.join("session.json")).await?;
+    let raw = tokio::fs::read_to_string(child.child_ctx.paths.home.join("session.json")).await?;
     let metadata: serde_json::Value = serde_json::from_str(&raw)?;
     assert_eq!(metadata["parent"], parent_id);
     assert_eq!(metadata["subagent"]["origin"], "sub_agent");
@@ -587,7 +613,7 @@ async fn internal_origins_are_distinct_and_do_not_require_delegation_depth() -> 
         SubAgentOrigin::Replan,
     )
     .await?;
-    let raw = tokio::fs::read_to_string(child.child_ctx.home.join("session.json")).await?;
+    let raw = tokio::fs::read_to_string(child.child_ctx.paths.home.join("session.json")).await?;
     let metadata: serde_json::Value = serde_json::from_str(&raw)?;
     assert_eq!(metadata["subagent"]["origin"], "replan");
 
@@ -602,7 +628,7 @@ async fn internal_origins_are_distinct_and_do_not_require_delegation_depth() -> 
         SubAgentOrigin::GoalReview,
     )
     .await?;
-    let raw = tokio::fs::read_to_string(review.child_ctx.home.join("session.json")).await?;
+    let raw = tokio::fs::read_to_string(review.child_ctx.paths.home.join("session.json")).await?;
     let metadata: serde_json::Value = serde_json::from_str(&raw)?;
     assert_eq!(metadata["subagent"]["origin"], "goal_review");
     assert_eq!(metadata["subagent"]["mode"], "fork");
@@ -613,6 +639,7 @@ async fn internal_origins_are_distinct_and_do_not_require_delegation_depth() -> 
 async fn fork_commit_window_drop_removes_destination_without_returning_ok() -> anyhow::Result<()> {
     let parent = crate::regression::test_context_for_agent("sub-commit-drop").await?;
     let child_home = parent
+        .stores
         .store
         .path()
         .parent()
@@ -662,6 +689,7 @@ async fn fork_commit_window_drop_removes_destination_without_returning_ok() -> a
 async fn fork_commit_success_keeps_the_directory() -> anyhow::Result<()> {
     let parent = crate::regression::test_context_for_agent("sub-commit-success").await?;
     let child_home = parent
+        .stores
         .store
         .path()
         .parent()
@@ -681,7 +709,7 @@ async fn fork_commit_success_keeps_the_directory() -> anyhow::Result<()> {
     )
     .await?;
     assert!(child_home.exists(), "successful commit must keep the home");
-    assert_eq!(child.context().sub_agent_depth, 1);
+    assert_eq!(child.context().delegation.sub_agent_depth, 1);
     Ok(())
 }
 

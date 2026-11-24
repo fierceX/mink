@@ -133,8 +133,8 @@ impl SubAgentCoordinator {
 
         for mut result in results {
             if let Some(request) = result.take_sub_agent_request() {
-                let depth = self.ctx.sub_agent_depth.saturating_add(1);
-                let max_depth = self.ctx.tool_config.sub_agent_max_depth;
+                let depth = self.ctx.delegation.sub_agent_depth.saturating_add(1);
+                let max_depth = self.ctx.tools.tool_config.sub_agent_max_depth;
                 if depth > max_depth {
                     fail_request(
                         &mut result,
@@ -171,7 +171,7 @@ impl SubAgentCoordinator {
                 );
                 let mode = if fork { "fork" } else { "fresh" }.to_string();
 
-                self.ctx.display.render_sub_agent_status_meta(
+                self.ctx.io.display.render_sub_agent_status_meta(
                     &session_id,
                     "launched",
                     Some(&label),
@@ -205,8 +205,8 @@ impl SubAgentCoordinator {
                 let launch_session_id = session_id.clone();
                 let phase = Arc::new(AtomicU8::new(PHASE_SETUP));
                 let child_stats = Arc::new(OnceLock::new());
-                let timeout_secs = self.ctx.tool_config.sub_agent_timeout_secs.max(1) as u64;
-                let display = self.ctx.display.clone();
+                let timeout_secs = self.ctx.tools.tool_config.sub_agent_timeout_secs.max(1) as u64;
+                let display = self.ctx.io.display.clone();
                 let spec = SubAgentRunSpec {
                     session_id: session_id.clone(),
                     prompt,
@@ -350,6 +350,7 @@ impl SubAgentCoordinator {
         while !batch.pending.is_empty() {
             if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
                 self.ctx
+                    .io
                     .display
                     .render_info("Sub-agent collection cancelled.");
                 end = Some(BatchEnd::Interrupted);
@@ -357,12 +358,12 @@ impl SubAgentCoordinator {
             }
             tokio::select! {
                 _ = self.ctx.cancel.cancelled() => {
-                    self.ctx.display.render_info("Sub-agent collection cancelled.");
+                    self.ctx.io.display.render_info("Sub-agent collection cancelled.");
                     end = Some(BatchEnd::Interrupted);
                     break;
                 }
                 _ = self.ctx.interrupt.notified() => {
-                    self.ctx.display.render_info("Sub-agent collection cancelled.");
+                    self.ctx.io.display.render_info("Sub-agent collection cancelled.");
                     end = Some(BatchEnd::Interrupted);
                     break;
                 }
@@ -372,7 +373,7 @@ impl SubAgentCoordinator {
                             let Some(launch) = batch.pending.remove(&idx) else {
                                 // Unknown or repeated index is an internal
                                 // protocol fault, never a silent skip.
-                                self.ctx.display.render_error(&format!(
+                                self.ctx.io.display.render_error(&format!(
                                     "Sub-agent collection protocol error: unknown result slot {idx}."
                                 ));
                                 end = Some(BatchEnd::ProtocolError);
@@ -380,7 +381,7 @@ impl SubAgentCoordinator {
                             };
                             launch.cancel.cancel();
                             let Some(pr) = processed_results.get_mut(idx) else {
-                                self.ctx.display.render_error(&format!(
+                                self.ctx.io.display.render_error(&format!(
                                     "Sub-agent collection protocol error: result slot {idx} out of range."
                                 ));
                                 end = Some(BatchEnd::ProtocolError);
@@ -425,12 +426,12 @@ impl SubAgentCoordinator {
                                 truncate_str(&sa.thinking, 60)
                             };
                             if !matches!(sa.status, SubAgentStatus::Succeeded) {
-                                self.ctx.display.render_error(&format!(
+                                self.ctx.io.display.render_error(&format!(
                                     "[sub-agent {}] failed: {}",
                                     session_id, preview
                                 ));
                             }
-                            self.ctx.display.render_sub_agent_status_meta(
+                            self.ctx.io.display.render_sub_agent_status_meta(
                                 &session_id,
                                 sa.status.as_str(),
                                 launch.label.as_deref(),
@@ -451,7 +452,7 @@ impl SubAgentCoordinator {
                                 Some(sa.usage.total_output_tokens),
                             );
                             self.ctx
-                                .stats
+                                .stores.stats
                                 .record_sub_agent(
                                     sa.usage.agent_request_count,
                                     sa.usage.total_input_tokens,
@@ -519,7 +520,7 @@ impl SubAgentCoordinator {
         let reason = end.as_str();
         for (idx, launch) in &batch.pending {
             launch.cancel.cancel();
-            self.ctx.display.render_sub_agent_status_meta(
+            self.ctx.io.display.render_sub_agent_status_meta(
                 &launch.session_id,
                 reason,
                 launch.label.as_deref(),
@@ -691,7 +692,9 @@ fn default_sub_agent_runner(config: Config) -> SubAgentRunner {
             .await
             {
                 Ok(executor) => {
-                    let _ = spec.child_stats.set(executor.context().stats.clone());
+                    let _ = spec
+                        .child_stats
+                        .set(executor.context().stores.stats.clone());
                     spec.phase.store(PHASE_RUN, Ordering::SeqCst);
                     executor.execute(spec.prompt).await
                 }

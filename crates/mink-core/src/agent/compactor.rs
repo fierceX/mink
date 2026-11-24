@@ -58,7 +58,7 @@ async fn existing_artifact_refs(
     if candidates.is_empty() {
         return Vec::new();
     }
-    let artifacts = ctx.artifacts.clone();
+    let artifacts = ctx.stores.artifacts.clone();
     tokio::task::spawn_blocking(move || {
         let indexed = artifacts.indexed_ids().unwrap_or_default();
         candidates
@@ -82,7 +82,7 @@ pub(crate) async fn commit_emergency_checkpoint(
     deadline: Option<std::time::Instant>,
     messages: &[serde_json::Value],
 ) -> Result<bool> {
-    let snapshot = ctx.todo_store.snapshot();
+    let snapshot = ctx.stores.todo_store.snapshot();
     let context = crate::session::compaction::EmergencyCheckpointContext {
         main_request,
         target_limit,
@@ -91,7 +91,8 @@ pub(crate) async fn commit_emergency_checkpoint(
         artifact_refs: existing_artifact_refs(ctx, messages).await,
         deadline,
     };
-    ctx.compaction
+    ctx.stores
+        .compaction
         .commit_emergency_checkpoint(reason, &context)
         .await
 }
@@ -146,7 +147,7 @@ impl TurnCompactor {
             purpose: LlmPurpose::Agent,
             model: target.model.to_string(),
             model_alias: target.alias.map(str::to_string),
-            api_url: self.ctx.api_url.clone(),
+            api_url: self.ctx.paths.api_url.clone(),
             api_key: self.ctx.api_key().to_string(),
             system_prompt: projection.system_prompt.clone(),
             messages: projection.runtime_projected.clone(),
@@ -154,7 +155,7 @@ impl TurnCompactor {
             max_tokens: crate::session::compaction::effective_max_tokens(&self.ctx.config),
             cancel: self.ctx.cancel.clone(),
             verbose: self.ctx.verbose(),
-            display: self.ctx.display.clone(),
+            display: self.ctx.io.display.clone(),
         };
         let current_projection = self
             .ctx
@@ -162,6 +163,7 @@ impl TurnCompactor {
             .cache_projection(&projection_request, projection_request.messages.len());
         let (did_compact, detail) = self
             .ctx
+            .stores
             .compaction
             .evaluate_and_compact_with_prefix_bounded(
                 trigger,
@@ -176,14 +178,14 @@ impl TurnCompactor {
                     tools: &projection.runtime_tools,
                     openai_tools: Some(&projection.openai_tools),
                 }),
-                todo_candidate_state(&self.ctx, &self.ctx.todo_store.snapshot()),
+                todo_candidate_state(&self.ctx, &self.ctx.stores.todo_store.snapshot()),
                 round_deadline,
             )
             .await?;
         if did_compact {
             self.compactions_this_turn += 1;
             (*system_prompt, *tools_json) = self.prefix.ensure().await?;
-            *messages = self.ctx.compaction.active_messages().await?;
+            *messages = self.ctx.stores.compaction.active_messages().await?;
             return Ok((true, detail));
         }
         Ok((false, detail))

@@ -144,7 +144,7 @@ async fn stream_parses_sse_text_usage_and_stop() -> anyhow::Result<()> {
             max_tokens: ctx.max_tokens(),
             cancel: ctx.cancel.clone(),
             verbose: ctx.verbose(),
-            display: ctx.display.clone(),
+            display: ctx.io.display.clone(),
         })
         .await?;
     let mut stream = response.events;
@@ -235,7 +235,7 @@ async fn backend_request_records_unreported_usage_when_request_fails() -> anyhow
         Err(error) => error.to_string(),
     };
     assert!(err.contains("backend unavailable"), "{err}");
-    let records = ctx.usage.all_records()?;
+    let records = ctx.stores.usage.all_records()?;
     assert_eq!(records.len(), 1);
     assert_eq!(
         records[0].status,
@@ -273,7 +273,7 @@ async fn backend_request_preserves_request_failure_attempt_count() -> anyhow::Re
         Err(error) => error.to_string(),
     };
     assert!(err.contains("transport unavailable"), "{err}");
-    let records = ctx.usage.all_records()?;
+    let records = ctx.stores.usage.all_records()?;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].attempt_count, 3);
     assert!(
@@ -569,7 +569,7 @@ async fn stream_eof_residual_frame_without_trailing_newline_is_parsed() -> anyho
             max_tokens: ctx.max_tokens(),
             cancel: ctx.cancel.clone(),
             verbose: ctx.verbose(),
-            display: ctx.display.clone(),
+            display: ctx.io.display.clone(),
         })
         .await?;
     let mut stream = response.events;
@@ -613,7 +613,7 @@ async fn dropped_establishment_future_records_unknown_usage_once() -> anyhow::Re
         "the establishment future must still be pending"
     );
 
-    let records = ctx.usage.all_records()?;
+    let records = ctx.stores.usage.all_records()?;
     assert_eq!(
         records.len(),
         1,
@@ -804,7 +804,7 @@ async fn extra_usage_event_does_not_open_a_second_ledger_entry() -> anyhow::Resu
 
     // One physical attempt settles exactly one record; the second Usage frame
     // is a duplicate for the same request, not a new attempt.
-    let records = ctx.usage.all_records()?;
+    let records = ctx.stores.usage.all_records()?;
     assert_eq!(records.len(), 1, "{records:?}");
     assert_eq!(
         records[0].status,
@@ -919,7 +919,7 @@ fn timeout_test_request(ctx: &Arc<AgentSharedContext>, api_url: String) -> LlmRe
         max_tokens: ctx.max_tokens(),
         cancel: ctx.cancel.clone(),
         verbose: ctx.verbose(),
-        display: ctx.display.clone(),
+        display: ctx.io.display.clone(),
     }
 }
 

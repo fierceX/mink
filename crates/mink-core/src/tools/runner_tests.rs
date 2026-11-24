@@ -497,10 +497,10 @@ async fn image_read_captures_and_reference_read_reinjects() {
         .await
         .unwrap();
     let bytes = png_fixture();
-    std::fs::write(shared.cwd.join("shot.png"), &bytes).unwrap();
+    std::fs::write(shared.paths.cwd.join("shot.png"), &bytes).unwrap();
     {
         let shared_ref = Arc::get_mut(&mut shared).expect("unique shared ctx");
-        shared_ref.model_capabilities = vision_capabilities(4);
+        shared_ref.tools.model_capabilities = vision_capabilities(4);
     }
     let ctx = crate::context::ToolContext::from(shared.as_ref());
     let runner = ToolRunner::new(Arc::new(ctx));
@@ -522,9 +522,10 @@ async fn image_read_captures_and_reference_read_reinjects() {
     );
     assert!(result.content.contains("shot.png"), "{}", result.content);
     // Object is durably cached and registered as a this-turn capture.
-    assert!(shared.image_cache.contains(&attachment.image_id));
+    assert!(shared.media.image_cache.contains(&attachment.image_id));
     assert!(
         shared
+            .media
             .this_turn_image_ids
             .lock()
             .unwrap()
@@ -568,15 +569,15 @@ async fn batch_admission_limits_each_batch_and_resets_between_batches() {
         .await
         .unwrap();
     let bytes = png_fixture();
-    std::fs::write(shared.cwd.join("shot.png"), &bytes).unwrap();
+    std::fs::write(shared.paths.cwd.join("shot.png"), &bytes).unwrap();
     // Distinct contents keep this-turn ids distinct (content-addressed).
     let bytes_b = png_fixture_with_dimensions(32, 24);
-    std::fs::write(shared.cwd.join("shot_b.png"), &bytes_b).unwrap();
+    std::fs::write(shared.paths.cwd.join("shot_b.png"), &bytes_b).unwrap();
     let bytes_c = png_fixture_with_dimensions(64, 24);
-    std::fs::write(shared.cwd.join("shot_c.png"), &bytes_c).unwrap();
+    std::fs::write(shared.paths.cwd.join("shot_c.png"), &bytes_c).unwrap();
     {
         let shared_ref = Arc::get_mut(&mut shared).expect("unique shared ctx");
-        shared_ref.model_capabilities = vision_capabilities(2);
+        shared_ref.tools.model_capabilities = vision_capabilities(2);
     }
     let tool_ctx = crate::context::ToolContext::from(shared.as_ref());
     let runner = ToolRunner::new(Arc::new(tool_ctx.clone()));
@@ -625,14 +626,14 @@ async fn batch_budget_survives_sequential_tool_flush() {
         .await
         .unwrap();
     let bytes = png_fixture();
-    std::fs::write(shared.cwd.join("shot.png"), &bytes).unwrap();
+    std::fs::write(shared.paths.cwd.join("shot.png"), &bytes).unwrap();
     let bytes_b = png_fixture_with_dimensions(32, 24);
-    std::fs::write(shared.cwd.join("shot_b.png"), &bytes_b).unwrap();
+    std::fs::write(shared.paths.cwd.join("shot_b.png"), &bytes_b).unwrap();
     let bytes_c = png_fixture_with_dimensions(64, 24);
-    std::fs::write(shared.cwd.join("shot_c.png"), &bytes_c).unwrap();
+    std::fs::write(shared.paths.cwd.join("shot_c.png"), &bytes_c).unwrap();
     {
         let shared_ref = Arc::get_mut(&mut shared).expect("unique shared ctx");
-        shared_ref.model_capabilities = vision_capabilities(2);
+        shared_ref.tools.model_capabilities = vision_capabilities(2);
     }
     let ctx = crate::context::ToolContext::from(shared.as_ref());
     let runner = ToolRunner::new(Arc::new(ctx));
@@ -729,7 +730,7 @@ async fn post_decode_model_input_errors_are_model_format() {
         })
         .await
         .unwrap();
-    std::fs::write(shared.cwd.join("a.txt"), "hello\n").unwrap();
+    std::fs::write(shared.paths.cwd.join("a.txt"), "hello\n").unwrap();
     let ctx = crate::context::ToolContext::from(shared.as_ref());
     let runner = ToolRunner::new(Arc::new(ctx));
     let call = ToolCallEvent {
@@ -782,7 +783,7 @@ async fn post_decode_model_input_errors_are_model_format() {
         })
         .await
         .unwrap();
-    std::fs::write(shared.cwd.join("a.txt"), "hello\n").unwrap();
+    std::fs::write(shared.paths.cwd.join("a.txt"), "hello\n").unwrap();
     let ctx = crate::context::ToolContext::from(shared.as_ref());
     let runner = ToolRunner::new(Arc::new(ctx));
     let call = ToolCallEvent {
@@ -812,7 +813,7 @@ async fn vfs_read_rejects_paths_that_escape_the_root() {
         .unwrap();
     {
         let shared_ref = Arc::get_mut(&mut shared).expect("unique shared ctx");
-        shared_ref.read_only_fs = Some(Arc::new(TestImageVfs {
+        shared_ref.tools.read_only_fs = Some(Arc::new(TestImageVfs {
             image: None,
             text: "backend body".to_string(),
         }));
@@ -842,8 +843,8 @@ async fn vfs_image_reads_one_at_a_time_and_text_falls_back() {
     let bytes = png_fixture();
     {
         let shared_ref = Arc::get_mut(&mut shared).expect("unique shared ctx");
-        shared_ref.model_capabilities = vision_capabilities(4);
-        shared_ref.read_only_fs = Some(Arc::new(TestImageVfs {
+        shared_ref.tools.model_capabilities = vision_capabilities(4);
+        shared_ref.tools.read_only_fs = Some(Arc::new(TestImageVfs {
             image: Some(bytes.clone()),
             text: "text body".to_string(),
         }));
@@ -858,6 +859,7 @@ async fn vfs_image_reads_one_at_a_time_and_text_falls_back() {
     assert!(results[0].image_attachment.is_some());
     assert!(
         shared
+            .media
             .image_cache
             .contains(&("sha256:".to_string() + &"00".repeat(32)))
             || !results[0].content.is_empty()
@@ -869,8 +871,8 @@ async fn vfs_image_reads_one_at_a_time_and_text_falls_back() {
         .unwrap();
     {
         let shared_ref = Arc::get_mut(&mut shared).expect("unique shared ctx");
-        shared_ref.model_capabilities = vision_capabilities(4);
-        shared_ref.read_only_fs = Some(Arc::new(TestImageVfs {
+        shared_ref.tools.model_capabilities = vision_capabilities(4);
+        shared_ref.tools.read_only_fs = Some(Arc::new(TestImageVfs {
             image: None,
             text: "plain text body".to_string(),
         }));
@@ -900,8 +902,8 @@ async fn vfs_text_selector_works_in_vision_session() {
         .unwrap();
     {
         let shared_ref = Arc::get_mut(&mut shared).expect("unique shared ctx");
-        shared_ref.model_capabilities = vision_capabilities(4);
-        shared_ref.read_only_fs = Some(Arc::new(TestImageVfs {
+        shared_ref.tools.model_capabilities = vision_capabilities(4);
+        shared_ref.tools.read_only_fs = Some(Arc::new(TestImageVfs {
             image: None,
             text: "line one\nline two\nline three".to_string(),
         }));
@@ -930,8 +932,8 @@ async fn vfs_image_selector_rejected_only_when_confirmed_image() {
     let bytes = png_fixture();
     {
         let shared_ref = Arc::get_mut(&mut shared).expect("unique shared ctx");
-        shared_ref.model_capabilities = vision_capabilities(4);
-        shared_ref.read_only_fs = Some(Arc::new(TestImageVfs {
+        shared_ref.tools.model_capabilities = vision_capabilities(4);
+        shared_ref.tools.read_only_fs = Some(Arc::new(TestImageVfs {
             image: Some(bytes.clone()),
             text: String::new(),
         }));
@@ -960,8 +962,8 @@ async fn registered_resources_never_become_vfs_image_reads() {
     let bytes = png_fixture();
     {
         let shared_ref = Arc::get_mut(&mut shared).expect("unique shared ctx");
-        shared_ref.model_capabilities = vision_capabilities(4);
-        shared_ref.read_only_fs = Some(Arc::new(TestImageVfs {
+        shared_ref.tools.model_capabilities = vision_capabilities(4);
+        shared_ref.tools.read_only_fs = Some(Arc::new(TestImageVfs {
             image: Some(bytes.clone()),
             text: "ignored".to_string(),
         }));
@@ -1017,10 +1019,10 @@ async fn selector_on_image_path_is_rejected_before_prepare() {
         .await
         .unwrap();
     let bytes = png_fixture();
-    std::fs::write(shared.cwd.join("shot.png"), &bytes).unwrap();
+    std::fs::write(shared.paths.cwd.join("shot.png"), &bytes).unwrap();
     {
         let shared_ref = Arc::get_mut(&mut shared).expect("unique shared ctx");
-        shared_ref.model_capabilities = vision_capabilities(4);
+        shared_ref.tools.model_capabilities = vision_capabilities(4);
     }
     let ctx = crate::context::ToolContext::from(shared.as_ref());
     let runner = ToolRunner::new(Arc::new(ctx));
@@ -1037,6 +1039,7 @@ async fn selector_on_image_path_is_rejected_before_prepare() {
     // Nothing was persisted.
     assert!(
         !shared
+            .media
             .image_cache
             .contains(&("sha256:".to_string() + &"00".repeat(32)))
     );
@@ -1048,7 +1051,7 @@ async fn unsupported_session_keeps_text_path_unchanged() {
         .await
         .unwrap();
     let bytes = png_fixture();
-    std::fs::write(shared.cwd.join("shot.png"), &bytes).unwrap();
+    std::fs::write(shared.paths.cwd.join("shot.png"), &bytes).unwrap();
     // model_capabilities stays Unsupported (default).
     let ctx = crate::context::ToolContext::from(shared.as_ref());
     let runner = ToolRunner::new(Arc::new(ctx));
@@ -1074,12 +1077,12 @@ async fn mixed_batch_preserves_dispatch_order() {
         .await
         .unwrap();
     let bytes = png_fixture();
-    std::fs::write(shared.cwd.join("a.png"), &bytes).unwrap();
-    std::fs::write(shared.cwd.join("b.png"), &bytes).unwrap();
-    std::fs::write(shared.cwd.join("note.txt"), "hello\n").unwrap();
+    std::fs::write(shared.paths.cwd.join("a.png"), &bytes).unwrap();
+    std::fs::write(shared.paths.cwd.join("b.png"), &bytes).unwrap();
+    std::fs::write(shared.paths.cwd.join("note.txt"), "hello\n").unwrap();
     {
         let shared_ref = Arc::get_mut(&mut shared).expect("unique");
-        shared_ref.model_capabilities = vision_capabilities(4);
+        shared_ref.tools.model_capabilities = vision_capabilities(4);
     }
     let ctx = crate::context::ToolContext::from(shared.as_ref());
     let runner = ToolRunner::new(Arc::new(ctx));
@@ -1112,8 +1115,9 @@ async fn latched_fault_halts_tool_batch_without_side_effects() {
     let shared = crate::regression::test_context_for_agent("runner-latched-batch")
         .await
         .unwrap();
-    let marker = shared.cwd.join("must-not-exist.txt");
+    let marker = shared.paths.cwd.join("must-not-exist.txt");
     let _ = shared
+        .stores
         .persistence_fault
         .raise(std::path::Path::new("todos.json"), "injected fault");
     let ctx = crate::context::ToolContext::from(shared.as_ref());
@@ -1158,7 +1162,7 @@ async fn latched_fault_halts_tool_batch_without_side_effects() {
         !marker.exists(),
         "a latched session must not dispatch tools with side effects"
     );
-    let _ = std::fs::remove_dir_all(shared.home.as_path());
+    let _ = std::fs::remove_dir_all(shared.paths.home.as_path());
 }
 
 fn bash_call(id: &str, input: serde_json::Value) -> ToolCallEvent {

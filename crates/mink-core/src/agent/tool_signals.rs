@@ -187,7 +187,7 @@ impl ToolSignalProcessor {
         }
 
         for signal in &result.signals {
-            ctx.display.render_signal(
+            ctx.io.display.render_signal(
                 &format!("{:?}", signal.kind),
                 signal.severity,
                 &signal.message,

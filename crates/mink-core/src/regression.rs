@@ -599,10 +599,12 @@ Progress: none\nTool evidence: none\nReflections: none";
     .await?;
     for index in 0..4 {
         h.ctx
+            .stores
             .store
             .add_user(&format!("request {index}: {}", "x".repeat(8_000)))
             .await?;
         h.ctx
+            .stores
             .store
             .add_assistant(&format!("progress {index}: {}", "y".repeat(8_000)), "", &[])
             .await?;
@@ -611,6 +613,7 @@ Progress: none\nTool evidence: none\nReflections: none";
     let resolved = crate::config::model_resolver(&h.ctx.config).resolve(&h.ctx.config.model);
     let (compacted, _) = h
         .ctx
+        .stores
         .compaction
         .evaluate_and_compact(
             "manual",

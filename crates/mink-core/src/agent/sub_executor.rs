@@ -276,7 +276,7 @@ impl SubAgentExecutor {
         config.model = active.alias.unwrap_or(active.actual);
         let allowed: Vec<String> = ["Read", "Glob", "Grep", "GoalRead"]
             .into_iter()
-            .filter(|name| parent_ctx.tool_surface.has(name))
+            .filter(|name| parent_ctx.tools.tool_surface.has(name))
             .map(str::to_string)
             .collect();
         config
@@ -313,8 +313,8 @@ impl SubAgentExecutor {
         if let Some(model) = model {
             config.model = model;
         }
-        let child_depth = parent_ctx.sub_agent_depth.saturating_add(1);
-        let max_depth = parent_ctx.tool_config.sub_agent_max_depth;
+        let child_depth = parent_ctx.delegation.sub_agent_depth.saturating_add(1);
+        let max_depth = parent_ctx.tools.tool_config.sub_agent_max_depth;
         if origin == SubAgentOrigin::SubAgent && child_depth > max_depth {
             bail!("sub-agent depth {child_depth} exceeds sub_agent_max_depth {max_depth}");
         }
@@ -323,11 +323,12 @@ impl SubAgentExecutor {
             bail!("invalid sub-agent session id: {session_id}");
         }
         let capture = Arc::new(CaptureDisplay::new(
-            parent_ctx.sub_stream_tx.clone(),
+            parent_ctx.delegation.sub_stream_tx.clone(),
             &session_id,
         ));
-        let parent_display = parent_ctx.display.clone();
+        let parent_display = parent_ctx.io.display.clone();
         let parent_session_dir = parent_ctx
+            .stores
             .store
             .path()
             .parent()
@@ -351,6 +352,7 @@ impl SubAgentExecutor {
         )
         .await?;
         let parent_lease = parent_ctx
+            .stores
             .session_lease
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -368,22 +370,22 @@ impl SubAgentExecutor {
             // Mirror the parent session's `<environment>` heading: the child's
             // own home would otherwise split the request head and stop a forked
             // child from reusing the parent's cached prefix.
-            environment_home: Some(parent_ctx.environment_home.clone()),
-            cwd: parent_ctx.cwd.clone(),
+            environment_home: Some(parent_ctx.paths.environment_home.clone()),
+            cwd: parent_ctx.paths.cwd.clone(),
             session_id: session_id.clone(),
             session_layout: SessionLayout::Isolated,
             resolved_paths: None,
-            api_url: parent_ctx.api_url.clone(),
+            api_url: parent_ctx.paths.api_url.clone(),
             display: capture.clone(),
-            session_event_sink: parent_ctx.session_event_sink.clone(),
+            session_event_sink: parent_ctx.io.session_event_sink.clone(),
             sub_stream_tx: None,
             cancel,
             interrupt: parent_ctx.interrupt.clone(),
             is_sub_agent: true,
             sub_agent_depth: child_depth,
-            usage_journal: Some(parent_ctx.usage.clone()),
-            read_only_fs: parent_ctx.read_only_fs.clone(),
-            resource_session_id: parent_ctx.vfs_scope.resource_session_id.clone(),
+            usage_journal: Some(parent_ctx.stores.usage.clone()),
+            read_only_fs: parent_ctx.tools.read_only_fs.clone(),
+            resource_session_id: parent_ctx.tools.vfs_scope.resource_session_id.clone(),
             resource_handlers: Vec::new(),
             skill_providers: Vec::new(),
             runtime_skills: Vec::new(),
@@ -392,18 +394,18 @@ impl SubAgentExecutor {
             resource_router: if review.is_some() {
                 None
             } else {
-                Some(parent_ctx.resource_router.clone())
+                Some(parent_ctx.tools.resource_router.clone())
             },
-            capability_snapshot: Some(parent_ctx.capability_snapshot.clone()),
+            capability_snapshot: Some(parent_ctx.tools.capability_snapshot.clone()),
             custom_tools: if review.is_some() {
                 Vec::new()
             } else {
-                parent_ctx.custom_tools.as_ref().clone()
+                parent_ctx.tools.custom_tools.as_ref().clone()
             },
             prefix_source: if review.is_some() {
                 None
             } else {
-                parent_ctx.prefix_source.clone()
+                parent_ctx.tools.prefix_source.clone()
             },
         })
         .await?;
@@ -416,7 +418,7 @@ impl SubAgentExecutor {
             .unwrap_or_else(|| format!("Sub-agent: {session_id}"));
         crate::session::metadata::ensure_metadata(
             &built.paths,
-            &parent_ctx.cwd,
+            &parent_ctx.paths.cwd,
             SessionSeed {
                 alias: None,
                 title: Some(title),
@@ -434,7 +436,7 @@ impl SubAgentExecutor {
         )
         .await?;
         home_guard.disarm();
-        let child_store = child_ctx.store.clone();
+        let child_store = child_ctx.stores.store.clone();
 
         Ok(Self {
             child_store,
@@ -466,7 +468,7 @@ impl SubAgentExecutor {
         let session_id = self.session_id.clone();
         let child_ctx = self.child_ctx.clone();
 
-        let timeout_secs = child_ctx.tool_config.sub_agent_timeout_secs.max(1) as u64;
+        let timeout_secs = child_ctx.tools.tool_config.sub_agent_timeout_secs.max(1) as u64;
         let cancel = child_ctx.cancel.clone();
         enum RunOutcome {
             Done(Result<(TurnDecision, String, String)>),
@@ -482,7 +484,7 @@ impl SubAgentExecutor {
 
         let captured_thinking = capture.take_thinking();
         let captured_text = capture.take_text();
-        let stats = child_ctx.stats.snapshot().await;
+        let stats = child_ctx.stores.stats.snapshot().await;
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         let (status, stop_reason, thinking, text, diagnostic) = match outcome {

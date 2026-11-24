@@ -131,7 +131,7 @@ async fn hashline_full_turn_persists_complete_edit_result_and_reuses_new_tag() -
         tokio::fs::read_to_string(h.cwd.join("turn.txt")).await?,
         "prefix\none\nTHREE\n"
     );
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     let first_result = lines[2]["content"][0]["content"]
         .as_str()
         .expect("first Edit result content");
@@ -565,6 +565,7 @@ async fn hashline_grep_does_not_mark_truncated_context_as_seen() -> anyhow::Resu
     let tag = crate::tools::snapshot::compute_file_tag(&content);
     let versions = h
         .ctx
+        .tools
         .snapshots
         .lock()
         .unwrap_or_else(|error| error.into_inner())

@@ -27,7 +27,7 @@ impl AgentRuntimeHandle {
                 // identity; if even that cannot be published the run still
                 // stops, with both causes reported.
                 let (publish_error, replaced) =
-                    match self.goal_ctx.goal_store.transition_if_current(
+                    match self.goal_ctx.stores.goal_store.transition_if_current(
                         &goal_id,
                         GoalTransition::FailRun {
                             reason: format!("{error:#}"),
@@ -50,6 +50,7 @@ impl AgentRuntimeHandle {
                     None => format!("goal run failed: {error:#}"),
                 };
                 self.goal_ctx
+                    .io
                     .display
                     .render_error(&format!("Goal runner: {fault}"));
                 if replaced {
@@ -71,11 +72,12 @@ impl AgentRuntimeHandle {
         // turned into a lifecycle change.
         if let Err(error) = self
             .goal_ctx
+            .stores
             .goal_store
-            .append_ended_row(&self.goal_ctx.store, self.goal_projection_chars())
+            .append_ended_row(&self.goal_ctx.stores.store, self.goal_projection_chars())
             .await
         {
-            self.goal_ctx.display.render_error(&format!(
+            self.goal_ctx.io.display.render_error(&format!(
                 "Goal runner: terminal facts not recorded: {error:#}"
             ));
         }
@@ -178,6 +180,7 @@ impl AgentRuntimeHandle {
             // finish). A clean finish chains into it; an error never restarts.
             if let Err(error) = self.schedule_goal() {
                 self.goal_ctx
+                    .io
                     .display
                     .render_error(&format!("Goal runner: {error:#}"));
             }
@@ -228,7 +231,7 @@ impl AgentRuntimeHandle {
             if let Some(id) = checker_id
                 && !self.goal_driver.verifiers.iter().any(|v| v.id() == id)
             {
-                let Some(updated) = self.goal_ctx.goal_store.transition_if_current(
+                let Some(updated) = self.goal_ctx.stores.goal_store.transition_if_current(
                     &goal.id,
                     GoalTransition::MarkVerifierUnavailable {
                         verifier_id: id.clone(),
@@ -250,7 +253,7 @@ impl AgentRuntimeHandle {
                 continue;
             }
             if let Some(reason) = goal.budget_reason() {
-                let Some(updated) = self.goal_ctx.goal_store.transition_if_current(
+                let Some(updated) = self.goal_ctx.stores.goal_store.transition_if_current(
                     &goal.id,
                     GoalTransition::ExhaustBudget {
                         reason: reason.into(),
@@ -262,25 +265,26 @@ impl AgentRuntimeHandle {
                 self.announce_goal(&updated);
                 break;
             }
-            let stream =
-                match self.stream_goal_iteration(self.goal_ctx.store.committed_len().await?) {
-                    Ok(stream) => stream,
-                    Err(RuntimeError::Closed) => break,
-                    Err(error) => {
-                        if self
-                            .goal_snapshot()
-                            .is_some_and(|g| g.status != GoalStatus::Active)
-                        {
-                            break;
-                        }
-                        // A stop latched while the iteration was being admitted:
-                        // no new work may start, only the stable fault may settle.
-                        if !self.run_scheduled(run_id) {
-                            break;
-                        }
-                        return Err(error.into());
+            let stream = match self
+                .stream_goal_iteration(self.goal_ctx.stores.store.committed_len().await?)
+            {
+                Ok(stream) => stream,
+                Err(RuntimeError::Closed) => break,
+                Err(error) => {
+                    if self
+                        .goal_snapshot()
+                        .is_some_and(|g| g.status != GoalStatus::Active)
+                    {
+                        break;
                     }
-                };
+                    // A stop latched while the iteration was being admitted:
+                    // no new work may start, only the stable fault may settle.
+                    if !self.run_scheduled(run_id) {
+                        break;
+                    }
+                    return Err(error.into());
+                }
+            };
 
             self.goal_driver.turn_active.send_replace(true);
             // Activity must be cleared on every exit path. A sink error or a
@@ -306,7 +310,7 @@ impl AgentRuntimeHandle {
             let _result = tokio::select! {
                 result = &mut outcome => result?,
                 _ = self.wait_goal_deadline() => {
-                    if let Some(budget) = self.goal_ctx.goal_store.transition_if_current(
+                    if let Some(budget) = self.goal_ctx.stores.goal_store.transition_if_current(
                         &goal.id,
                         GoalTransition::ExhaustBudget {
                             reason: "goal deadline reached during execution".into(),
@@ -321,7 +325,7 @@ impl AgentRuntimeHandle {
             // The orchestrator settled this iteration by identity at the
             // persistence boundary; the driver only reads the outcome and
             // applies the report-driven next action.
-            let Some(g) = self.goal_ctx.goal_store.snapshot() else {
+            let Some(g) = self.goal_ctx.stores.goal_store.snapshot() else {
                 return Ok(());
             };
             if g.id != settled_goal_id {

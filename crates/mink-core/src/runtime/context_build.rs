@@ -4,7 +4,10 @@ use crate::capabilities::{
     skill_providers_for_policy,
 };
 use crate::config::ResolvedConfig as Config;
-use crate::context::{AgentSharedContext, ToolConfig};
+use crate::context::{
+    AgentSharedContext, DelegationContext, EventIoContext, SessionPathsContext, SessionStores,
+    ToolConfig, ToolRuntimeContext, TurnMediaState,
+};
 use crate::llm::client::LlmBackend;
 use crate::resources::{ResourceHandler, ResourceRouter};
 use crate::session::compaction::CompactionEngine;
@@ -210,71 +213,89 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         .environment_home
         .clone()
         .unwrap_or_else(|| params.home.clone());
+    let memo_epoch = compaction.memo_epoch();
 
     let ctx = Arc::new(AgentSharedContext {
-        active_model: Mutex::new(crate::config::model_resolver(&config).resolve(&config.model)),
-        goal_review: params
-            .goal_review
-            .map(|review| review as Arc<dyn crate::goal_review::GoalReviewToolSession>),
-        session_lease: Arc::new(Mutex::new(params.session_lease)),
-        input_inbox,
-        goal_store,
         config: config.clone(),
-        cwd: params.cwd,
-        home: params.home,
-        environment_home,
-        session_layout: params.session_layout,
-        api_url: params.api_url,
+        active_model: Mutex::new(crate::config::model_resolver(&config).resolve(&config.model)),
         llm_backend: params.llm_backend,
-        store,
-        artifacts,
-        todo_store,
-        plan_store: plan_store.clone(),
-        persistence_fault,
-        read_memo: Arc::new(Mutex::new(crate::tools::read_memo::ReadMemo::new())),
-        memo_epoch: compaction.memo_epoch(),
-        memo_mutation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        snapshots: Arc::new(Mutex::new(FileSnapshotStore::default())),
-        stats,
-        usage,
-        compaction,
         cancel: params.cancel,
-        display: params.display,
-        session_event_sink: params.session_event_sink,
-        sub_stream_tx: params.sub_stream_tx,
-        read_only_fs: params.read_only_fs,
-        vfs_scope,
-        resource_router,
-        capability_snapshot,
-        tool_config,
-        tool_resolution_context,
-        tool_surface,
-        tool_capabilities,
-        custom_tools: Arc::new(params.custom_tools),
-        prefix_source: params.prefix_source,
-        model_capabilities,
-        image_cache,
-        this_turn_image_ids,
-        warned_image_ids,
-        events_path: paths.events.clone(),
-        immutable_prefix: Mutex::new(None),
-        is_sub_agent: params.is_sub_agent,
-        sub_agent_depth: params.sub_agent_depth,
         interrupt: params.interrupt,
-        event_log_warned: AtomicBool::new(false),
-        event_log_writer,
-        prefix_build_lock: tokio::sync::Mutex::new(()),
-        stream_flush_last: Mutex::new(None),
+        paths: SessionPathsContext {
+            cwd: params.cwd,
+            home: params.home,
+            environment_home,
+            session_layout: params.session_layout,
+            api_url: params.api_url,
+            events_path: paths.events.clone(),
+        },
+        stores: SessionStores {
+            store,
+            artifacts,
+            todo_store,
+            plan_store: plan_store.clone(),
+            goal_store,
+            input_inbox,
+            stats,
+            usage,
+            compaction,
+            persistence_fault,
+            session_lease: Arc::new(Mutex::new(params.session_lease)),
+            goal_review: params
+                .goal_review
+                .map(|review| review as Arc<dyn crate::goal_review::GoalReviewToolSession>),
+        },
+        tools: ToolRuntimeContext {
+            read_memo: Arc::new(Mutex::new(crate::tools::read_memo::ReadMemo::new())),
+            memo_epoch,
+            memo_mutation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            snapshots: Arc::new(Mutex::new(FileSnapshotStore::default())),
+            read_only_fs: params.read_only_fs,
+            vfs_scope,
+            resource_router,
+            capability_snapshot,
+            tool_config,
+            tool_resolution_context,
+            tool_surface,
+            tool_capabilities,
+            custom_tools: Arc::new(params.custom_tools),
+            prefix_source: params.prefix_source,
+            model_capabilities,
+        },
+        media: TurnMediaState {
+            image_cache,
+            this_turn_image_ids,
+            warned_image_ids,
+        },
+        delegation: DelegationContext {
+            is_sub_agent: params.is_sub_agent,
+            sub_agent_depth: params.sub_agent_depth,
+            sub_stream_tx: params.sub_stream_tx,
+        },
+        io: EventIoContext {
+            display: params.display,
+            session_event_sink: params.session_event_sink,
+            immutable_prefix: Mutex::new(None),
+            event_log_warned: AtomicBool::new(false),
+            event_log_writer,
+            prefix_build_lock: tokio::sync::Mutex::new(()),
+            stream_flush_last: Mutex::new(None),
+        },
     });
     ctx.log_event(crate::events::EventLog::ToolSurface {
-        role: format!("{:?}", ctx.tool_resolution_context.role()),
-        filesystem_backend: format!("{:?}", ctx.tool_resolution_context.filesystem_backend()),
+        role: format!("{:?}", ctx.tools.tool_resolution_context.role()),
+        filesystem_backend: format!(
+            "{:?}",
+            ctx.tools.tool_resolution_context.filesystem_backend()
+        ),
         active: ctx
+            .tools
             .tool_surface
             .names()
             .map(str::to_string)
             .collect::<Vec<_>>(),
         hidden: ctx
+            .tools
             .tool_surface
             .hidden()
             .iter()
@@ -282,10 +303,11 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
                 |(name, reason)| serde_json::json!({"name": name, "reason": format!("{reason:?}")}),
             )
             .collect::<Vec<_>>(),
-        surface_fingerprint: ctx.tool_surface.fingerprint().to_string(),
+        surface_fingerprint: ctx.tools.tool_surface.fingerprint().to_string(),
     });
     ctx.log_event(crate::events::EventLog::ToolCapabilityResolution {
         bindings: ctx
+            .tools
             .tool_capabilities
             .iter()
             .map(|(capability, binding)| {
@@ -298,14 +320,14 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
                 })
             })
             .collect::<Vec<_>>(),
-        capability_fingerprint: ctx.tool_capabilities.fingerprint().to_string(),
+        capability_fingerprint: ctx.tools.tool_capabilities.fingerprint().to_string(),
     });
 
     // One-time UI hint for text-only sessions (v7 §3.4): never part of the
     // system prompt or conversation. Sub-agents stay silent (the parent
     // already explained the session).
-    if !ctx.is_sub_agent && ctx.model_capabilities.image_input.limits().is_none() {
-        ctx.display.render_info(
+    if !ctx.delegation.is_sub_agent && ctx.tools.model_capabilities.image_input.limits().is_none() {
+        ctx.io.display.render_info(
             "This session's model does not declare image input: Read treats image files as text. Use a vision model (e.g. deepseek-v4-flash-vision-exp) or set [provider] image_input = \"on\" in .minkrc for a new session.",
         );
     }

@@ -305,11 +305,11 @@ async fn build_runtime_sets_vfs_resource_and_agent_sessions() {
 
     let runtime = build_runtime(runtime_config).await.unwrap();
     assert_eq!(
-        runtime.ctx.vfs_scope.resource_session_id,
+        runtime.ctx.tools.vfs_scope.resource_session_id,
         "tenant-knowledge-7"
     );
     assert_eq!(
-        runtime.ctx.vfs_scope.agent_session_id,
+        runtime.ctx.tools.vfs_scope.agent_session_id,
         runtime.session_info().session_id
     );
 
@@ -478,9 +478,14 @@ async fn runtime_skill_can_be_selected() {
 
     let runtime = build_runtime(runtime_config).await.unwrap();
 
-    assert_eq!(runtime.ctx.capability_snapshot.skills.selected.len(), 1);
     assert_eq!(
-        runtime.ctx.capability_snapshot.skills.selected[0].info.name,
+        runtime.ctx.tools.capability_snapshot.skills.selected.len(),
+        1
+    );
+    assert_eq!(
+        runtime.ctx.tools.capability_snapshot.skills.selected[0]
+            .info
+            .name,
         "runtime-guide"
     );
 
@@ -523,10 +528,14 @@ async fn sdk_inline_skill_can_be_selected_and_read() {
     let content = read_skill_resource("skill://company-policy", &tool_ctx).unwrap();
 
     assert!(content.contains("private policy"));
-    assert_eq!(runtime.ctx.capability_snapshot.skills.selected.len(), 1);
+    assert_eq!(
+        runtime.ctx.tools.capability_snapshot.skills.selected.len(),
+        1
+    );
     assert!(
         !runtime
             .ctx
+            .tools
             .capability_snapshot
             .skills
             .discoverable
@@ -536,6 +545,7 @@ async fn sdk_inline_skill_can_be_selected_and_read() {
     assert!(
         !runtime
             .ctx
+            .tools
             .capability_snapshot
             .skills
             .by_name
@@ -566,7 +576,7 @@ async fn runtime_only_policy_does_not_load_filesystem_or_builtin() {
         .into_runtime_config();
 
     let runtime = build_runtime(runtime_config).await.unwrap();
-    let snapshot = &runtime.ctx.capability_snapshot.skills;
+    let snapshot = &runtime.ctx.tools.capability_snapshot.skills;
 
     assert!(snapshot.by_name.contains_key("runtime-only"));
     assert!(!snapshot.by_name.contains_key("local-only"));
@@ -632,6 +642,7 @@ async fn explicit_skill_provider_can_be_read() {
     assert!(
         !runtime
             .ctx
+            .tools
             .capability_snapshot
             .skills
             .by_name
@@ -677,6 +688,7 @@ async fn custom_resource_handler_is_registered() {
         crate::resources::selector::split_read_path_selection("kb://tenant/doc").unwrap();
     let resource = runtime
         .ctx
+        .tools
         .resource_router
         .resolve(&selection, &tool_ctx)
         .unwrap();
@@ -700,6 +712,7 @@ async fn defaults_policy_keeps_existing_skill_behavior() {
     assert!(
         runtime
             .ctx
+            .tools
             .capability_snapshot
             .skills
             .by_name
@@ -737,6 +750,7 @@ async fn multiple_runtimes_do_not_share_skill_snapshot() {
     assert!(
         runtime_a
             .ctx
+            .tools
             .capability_snapshot
             .skills
             .by_name
@@ -745,6 +759,7 @@ async fn multiple_runtimes_do_not_share_skill_snapshot() {
     assert!(
         !runtime_a
             .ctx
+            .tools
             .capability_snapshot
             .skills
             .by_name
@@ -753,14 +768,15 @@ async fn multiple_runtimes_do_not_share_skill_snapshot() {
     assert!(
         runtime_b
             .ctx
+            .tools
             .capability_snapshot
             .skills
             .by_name
             .contains_key("runtime-b")
     );
     assert!(!Arc::ptr_eq(
-        &runtime_a.ctx.capability_snapshot,
-        &runtime_b.ctx.capability_snapshot
+        &runtime_a.ctx.tools.capability_snapshot,
+        &runtime_b.ctx.tools.capability_snapshot
     ));
 
     runtime_a.shutdown().await.unwrap();
@@ -2161,12 +2177,14 @@ async fn manual_compaction_falls_back_to_emergency_checkpoint() {
     for index in 0..4 {
         runtime
             .ctx
+            .stores
             .store
             .add_user(&format!("request {index}: {}", "x".repeat(60_000)))
             .await
             .unwrap();
         runtime
             .ctx
+            .stores
             .store
             .add_assistant(
                 &format!("progress {index}: {}", "y".repeat(60_000)),
@@ -2184,6 +2202,7 @@ async fn manual_compaction_falls_back_to_emergency_checkpoint() {
     );
     let summary = runtime
         .ctx
+        .stores
         .compaction
         .read_summary()
         .await
@@ -2219,12 +2238,14 @@ async fn interrupt_manual_compaction_releases_gate_for_next_turn() {
     for index in 0..3 {
         runtime
             .ctx
+            .stores
             .store
             .add_user(&format!("request {index}: {}", "x".repeat(2_000)))
             .await
             .unwrap();
         runtime
             .ctx
+            .stores
             .store
             .add_assistant(&format!("progress {index}: {}", "y".repeat(2_000)), "", &[])
             .await
@@ -2277,12 +2298,14 @@ async fn manual_error_is_delivered_without_dropping_actor() {
     .unwrap();
     runtime
         .ctx
+        .stores
         .store
         .add_user(&"x".repeat(150_000))
         .await
         .unwrap();
     runtime
         .ctx
+        .stores
         .store
         .append_runtime_message(serde_json::json!({
             "role": "assistant",
@@ -2353,12 +2376,14 @@ async fn manual_projection_read_failure_is_delivered_and_actor_survives() {
     for index in 0..3 {
         runtime
             .ctx
+            .stores
             .store
             .add_user(&format!("request {index}: {}", "x".repeat(2_000)))
             .await
             .unwrap();
         runtime
             .ctx
+            .stores
             .store
             .add_assistant(&format!("progress {index}: {}", "y".repeat(2_000)), "", &[])
             .await
@@ -2409,6 +2434,7 @@ async fn manual_compaction_delivers_latched_fault_without_model_call_or_write() 
     let before = std::fs::read(&state_path).ok();
     let _ = runtime
         .ctx
+        .stores
         .persistence_fault
         .raise(std::path::Path::new("todos.json"), "injected fault");
 
@@ -2455,12 +2481,14 @@ async fn seeded_compaction_runtime(
     for index in 0..3 {
         runtime
             .ctx
+            .stores
             .store
             .add_user(&format!("request {index}: {}", "x".repeat(2_000)))
             .await
             .unwrap();
         runtime
             .ctx
+            .stores
             .store
             .add_assistant(&format!("progress {index}: {}", "y".repeat(2_000)), "", &[])
             .await
@@ -2968,6 +2996,7 @@ async fn successful_mutating_custom_tool_invalidates_read_memos() {
     assert_eq!(
         runtime
             .ctx
+            .tools
             .memo_mutation
             .load(std::sync::atomic::Ordering::SeqCst),
         0
@@ -2976,6 +3005,7 @@ async fn successful_mutating_custom_tool_invalidates_read_memos() {
     assert_eq!(
         runtime
             .ctx
+            .tools
             .memo_mutation
             .load(std::sync::atomic::Ordering::SeqCst),
         1
@@ -3837,6 +3867,7 @@ async fn latched_fault_fails_next_turn_without_model_call() {
     .unwrap();
     let _ = runtime
         .ctx
+        .stores
         .persistence_fault
         .raise(std::path::Path::new("todos.json"), "injected fault");
 
@@ -3866,7 +3897,7 @@ async fn latched_fault_fails_next_turn_without_model_call() {
         outcome.error
     );
     assert!(
-        runtime.ctx.store.lines().await.unwrap().is_empty(),
+        runtime.ctx.stores.store.lines().await.unwrap().is_empty(),
         "history must stay untouched for a latched turn"
     );
 
@@ -4233,7 +4264,7 @@ async fn guidance_waits_for_accepted_response_and_continues_same_turn() {
         received.revision
     );
     assert_eq!(
-        runtime.ctx.store.lines().await.unwrap().len(),
+        runtime.ctx.stores.store.lines().await.unwrap().len(),
         1,
         "guidance must not mutate an in-flight request"
     );
@@ -4247,7 +4278,7 @@ async fn guidance_waits_for_accepted_response_and_continues_same_turn() {
             .iter()
             .any(|message| message["content"] == "keep the public API")
     );
-    let history = runtime.ctx.store.lines().await.unwrap();
+    let history = runtime.ctx.stores.store.lines().await.unwrap();
     assert_eq!(
         history
             .iter()
@@ -4433,6 +4464,7 @@ async fn guidance_during_tool_execution_preserves_exchange_and_round_limit() {
         assert!(
             !runtime
                 .ctx
+                .stores
                 .store
                 .lines()
                 .await
@@ -4443,7 +4475,7 @@ async fn guidance_during_tool_execution_preserves_exchange_and_round_limit() {
         release.notify_one();
         while stream.recv().await.is_some() {}
         let outcome = stream.outcome().await.unwrap();
-        let history = runtime.ctx.store.lines().await.unwrap();
+        let history = runtime.ctx.stores.store.lines().await.unwrap();
         let tool = history
             .iter()
             .position(|row| {
@@ -4534,6 +4566,7 @@ async fn goal_missing_review_blocks_without_a_report_repair_round() {
     assert_eq!(
         runtime
             .ctx
+            .stores
             .store
             .lines()
             .await
@@ -5544,6 +5577,7 @@ async fn goal_review_can_read_its_own_spilled_contract_artifact() {
         .map(|(r, _)| {
             runtime
                 .ctx
+                .stores
                 .artifacts
                 .read_text(r.strip_prefix("artifact://").unwrap())
         })
@@ -5633,6 +5667,7 @@ async fn goal_recovery_reaudits_known_checker_changes_without_replaying_checker(
     let sid = handle.session_info().session_id.clone();
     let executing = runtime
         .ctx
+        .stores
         .goal_store
         .begin_iteration("committed-execution", 0)
         .unwrap();
@@ -5648,7 +5683,7 @@ async fn goal_recovery_reaudits_known_checker_changes_without_replaying_checker(
         reviewer_id: format!(
             "goal-review:{}:{}",
             runtime.ctx.active_model.lock().unwrap().actual,
-            runtime.ctx.tool_surface.fingerprint()
+            runtime.ctx.tools.tool_surface.fingerprint()
         ),
     };
     let review: GoalReview = serde_json::from_value(serde_json::json!({
@@ -5659,6 +5694,7 @@ async fn goal_recovery_reaudits_known_checker_changes_without_replaying_checker(
     })).unwrap();
     runtime
         .ctx
+        .stores
         .goal_store
         .change(&executing.id, executing.revision, |g| {
             g.iterations[0].finished = true;
@@ -6063,7 +6099,7 @@ async fn refused_host_activation_destroys_its_lease() {
         let mut control = handle.goal_driver.lock_control();
         control.driver = crate::runtime::goal::DriverState::Idle;
     }
-    runtime.handle().goal_ctx.persistence_fault.raise(
+    runtime.handle().goal_ctx.stores.persistence_fault.raise(
         std::path::Path::new("goal.json"),
         "injected publish failure",
     );
@@ -6100,7 +6136,7 @@ async fn goal_persistence_fault_stops_scheduling_without_restart() {
         backend.calls.load(std::sync::atomic::Ordering::SeqCst) > 0,
         "goal turn never started"
     );
-    runtime.handle().goal_ctx.persistence_fault.raise(
+    runtime.handle().goal_ctx.stores.persistence_fault.raise(
         std::path::Path::new("goal.json"),
         "injected publish failure",
     );
@@ -6229,7 +6265,7 @@ fn goal_fault_stop_child() {
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        runtime.handle().goal_ctx.persistence_fault.raise(
+        runtime.handle().goal_ctx.stores.persistence_fault.raise(
             std::path::Path::new("goal.json"),
             "injected publish failure",
         );
@@ -6341,7 +6377,7 @@ async fn failed_stop_intent_stops_the_run_and_never_reads_as_saved() {
             goal_id: goal.id.clone(),
         };
     }
-    runtime.handle().goal_ctx.persistence_fault.raise(
+    runtime.handle().goal_ctx.stores.persistence_fault.raise(
         std::path::Path::new("goal.json"),
         "injected publish failure",
     );
@@ -6452,6 +6488,7 @@ async fn goal_settlement_is_idempotent_and_rejects_conflicting_facts() {
     let before = handle.goal_snapshot().unwrap();
     let applied = handle
         .goal_ctx
+        .stores
         .goal_store
         .settle_iteration(&key, &result, &SettlementFacts::default())
         .unwrap();
@@ -6473,6 +6510,7 @@ async fn goal_settlement_is_idempotent_and_rejects_conflicting_facts() {
     assert!(
         handle
             .goal_ctx
+            .stores
             .goal_store
             .settle_iteration(&key, &conflicting, &SettlementFacts::default())
             .is_err(),
@@ -6487,6 +6525,7 @@ async fn goal_settlement_is_idempotent_and_rejects_conflicting_facts() {
     assert!(
         handle
             .goal_ctx
+            .stores
             .goal_store
             .settle_iteration(&unknown, &result, &SettlementFacts::default())
             .is_err()
@@ -6539,6 +6578,7 @@ async fn stale_settlement_fills_history_without_touching_the_replacement() {
     // The archived goal's round settles in history; the replacement is untouched.
     handle
         .goal_ctx
+        .stores
         .goal_store
         .settle_iteration(&key, &result, &SettlementFacts::default())
         .expect("archive settlement");
@@ -6578,6 +6618,7 @@ async fn identity_bound_updates_never_touch_a_replacement() {
     // replacement, which is what every driver write now relies on.
     let applied = handle
         .goal_ctx
+        .stores
         .goal_store
         .transition_if_current(
             &first.id,
@@ -6911,7 +6952,7 @@ async fn audit8_prepublication_stop_failure_stops_the_run() {
     std::fs::set_permissions(&session_dir, original).unwrap();
     assert!(stopped.is_err(), "{stopped:?}");
     assert!(
-        handle.goal_ctx.persistence_fault.check().is_ok(),
+        handle.goal_ctx.stores.persistence_fault.check().is_ok(),
         "the failure is a plain publication failure, not a latched fault"
     );
     assert!(
@@ -7044,7 +7085,7 @@ async fn audit8_failed_stop_waits_for_gate_before_stable_fault() {
     .await
     .unwrap();
     let goal = handle.goal_snapshot().unwrap();
-    runtime.handle().goal_ctx.persistence_fault.raise(
+    runtime.handle().goal_ctx.stores.persistence_fault.raise(
         std::path::Path::new("goal.json"),
         "audit injected publish failure",
     );
@@ -7491,10 +7532,11 @@ async fn audit3_old_iteration_cannot_bill_replacement_goal() {
     // protocol refuses replacement until the previous run has exited.
     let new = handle
         .goal_ctx
+        .stores
         .goal_store
         .create(
             GoalSpec::new("new goal"),
-            crate::runtime::goal::goal_environment(&cwd, &handle.goal_ctx.tool_surface),
+            crate::runtime::goal::goal_environment(&cwd, &handle.goal_ctx.tools.tool_surface),
         )
         .unwrap();
     sink.release.notify_one();
@@ -7531,6 +7573,7 @@ async fn audit3_recover_normal_end_after_idle_publication() {
     // normal completion must recover into independent verification.
     runtime
         .ctx
+        .stores
         .goal_store
         .update_for_test(|s| {
             s.phase = GoalPhase::Idle;
@@ -7641,10 +7684,11 @@ async fn audit4_old_sink_error_cannot_fail_replacement() {
     // protocol refuses replacement until the previous run has exited.
     let new = handle
         .goal_ctx
+        .stores
         .goal_store
         .create(
             GoalSpec::new("new goal"),
-            crate::runtime::goal::goal_environment(&cwd, &handle.goal_ctx.tool_surface),
+            crate::runtime::goal::goal_environment(&cwd, &handle.goal_ctx.tools.tool_surface),
         )
         .unwrap();
     sink.release.notify_one();
@@ -8069,10 +8113,11 @@ async fn goal_review_rejects_unread_forged_or_changed_evidence() {
     let handle = runtime.handle();
     let goal = handle
         .goal_ctx
+        .stores
         .goal_store
         .create(
             GoalSpec::new("ship"),
-            crate::runtime::goal::goal_environment(&cwd, &handle.goal_ctx.tool_surface),
+            crate::runtime::goal::goal_environment(&cwd, &handle.goal_ctx.tools.tool_surface),
         )
         .unwrap();
     let candidate = GoalReviewCandidate {
@@ -8085,6 +8130,7 @@ async fn goal_review_rejects_unread_forged_or_changed_evidence() {
     };
     let goal = handle
         .goal_ctx
+        .stores
         .goal_store
         .change(&goal.id, goal.revision, |g| {
             g.review_candidate = Some(candidate.clone());
@@ -8094,8 +8140,8 @@ async fn goal_review_rejects_unread_forged_or_changed_evidence() {
         .unwrap();
     let session = Arc::new(crate::runtime::goal::review::GoalReviewSession::new(
         goal.clone(),
-        handle.goal_ctx.goal_store.clone(),
-        handle.goal_ctx.usage.clone(),
+        handle.goal_ctx.stores.goal_store.clone(),
+        handle.goal_ctx.stores.usage.clone(),
     ));
     let mut ctx = crate::context::ToolContext::from(handle.goal_ctx.as_ref());
     ctx.goal_adjudication = Some(session.clone());

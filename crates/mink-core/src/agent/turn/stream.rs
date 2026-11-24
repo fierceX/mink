@@ -63,7 +63,7 @@ impl super::TurnExecutor {
             return Ok(false);
         };
         let visible = crate::session::todo::visible_revision(messages)?;
-        let snapshot = self.ctx.todo_store.snapshot();
+        let snapshot = self.ctx.stores.todo_store.snapshot();
         if visible > snapshot.revision {
             anyhow::bail!(
                 "todo conversation revision {visible} is newer than persisted revision {}; refusing to continue",
@@ -81,6 +81,7 @@ impl super::TurnExecutor {
             crate::session::compaction::derived_display_tokens(&self.ctx.config),
         );
         self.ctx
+            .stores
             .store
             .append_runtime_message(message.clone())
             .await?;
@@ -150,7 +151,7 @@ impl super::TurnExecutor {
             return Ok(false);
         }
         self.compactor.note_emergency_commit();
-        *messages = self.ctx.compaction.active_messages().await?;
+        *messages = self.ctx.stores.compaction.active_messages().await?;
         self.reconcile_todo_state(messages).await?;
         Ok(true)
     }
@@ -191,8 +192,8 @@ impl super::TurnExecutor {
                 return Err(anyhow::Error::new(TurnInterrupted));
             }
             // A latched session must not open new requests.
-            self.ctx.persistence_fault.check()?;
-            if let Some(review) = self.ctx.goal_review.as_ref() {
+            self.ctx.stores.persistence_fault.check()?;
+            if let Some(review) = self.ctx.stores.goal_review.as_ref() {
                 review.check_budget()?;
             } else if let Some(review) = self.goal_adjudication.as_ref() {
                 review.check_budget()?;
@@ -309,7 +310,7 @@ impl super::TurnExecutor {
                     // follows.
                     self.log_recovery(attempt + 1, failure.category, &retry, window, None);
                     self.ctx.log_event(crate::events::EventLog::Retry);
-                    self.ctx.display.render_retry();
+                    self.ctx.io.display.render_retry();
                     retry.note_retry();
                     attempt += 1;
                     if !self.wait_retry_delay(wait).await {
@@ -510,7 +511,7 @@ impl super::TurnExecutor {
                         version: None,
                         content: t.content.clone(),
                     });
-                    self.ctx.display.render_thinking(&t.content);
+                    self.ctx.io.display.render_thinking(&t.content);
                     thinking.push_str(&t.content);
                 }
                 Event::Text(t) => {
@@ -519,7 +520,7 @@ impl super::TurnExecutor {
                         version: None,
                         content: t.content.clone(),
                     });
-                    self.ctx.display.render_text(&t.content);
+                    self.ctx.io.display.render_text(&t.content);
                     text.push_str(&t.content);
                 }
                 Event::ToolCall(call) => {
@@ -588,7 +589,7 @@ impl super::TurnExecutor {
                     stop.clear();
                     usage = None;
                     saw_stop = false;
-                    self.ctx.display.render_retry();
+                    self.ctx.io.display.render_retry();
                 }
             }
         }
@@ -694,6 +695,7 @@ impl super::TurnExecutor {
             idle_secs: idle,
         });
         self.ctx
+            .io
             .display
             .render_info(&crate::ui::llm_wait_heartbeat_message(elapsed, idle));
     }

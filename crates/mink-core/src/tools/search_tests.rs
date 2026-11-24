@@ -191,7 +191,8 @@ fn grep_zero_max_results_fails_closed_like_resource_grep() {
 #[tokio::test]
 async fn grep_searches_registered_resource_content() -> anyhow::Result<()> {
     let ctx = crate::regression::test_context_for_agent("grep-session-history").await?;
-    ctx.store
+    ctx.stores
+        .store
         .add_user("remember the cobalt migration decision")
         .await?;
     let tool_ctx = crate::context::ToolContext::from(ctx.as_ref());

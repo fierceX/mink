@@ -139,7 +139,7 @@ async fn host_agent_retries_rejected_conclusions_after_prose_only_independent_re
         .await
         .unwrap()
         .unwrap();
-    let history = handle.goal_ctx.store.lines().await.unwrap();
+    let history = handle.goal_ctx.stores.store.lines().await.unwrap();
     runtime.shutdown().await.unwrap();
     std::fs::remove_dir_all(root).unwrap();
     assert_eq!(completed.status, GoalStatus::Completed, "{completed:?}");
@@ -199,6 +199,7 @@ async fn blocked_review_fixture() -> (AgentRuntime, AgentRuntimeHandle, PathBuf,
     handle.confirm_goal(&draft.id, draft.revision).unwrap();
     let executing = handle
         .goal_ctx
+        .stores
         .goal_store
         .begin_iteration("one-execution", 0)
         .unwrap();
@@ -211,7 +212,7 @@ async fn blocked_review_fixture() -> (AgentRuntime, AgentRuntimeHandle, PathBuf,
         reviewer_id: format!(
             "goal-review:{}:{}",
             handle.goal_ctx.active_model.lock().unwrap().actual,
-            handle.goal_ctx.tool_surface.fingerprint()
+            handle.goal_ctx.tools.tool_surface.fingerprint()
         ),
     };
     let review: GoalReview = serde_json::from_value(serde_json::json!({
@@ -233,6 +234,7 @@ async fn blocked_review_fixture() -> (AgentRuntime, AgentRuntimeHandle, PathBuf,
     );
     let goal = handle
         .goal_ctx
+        .stores
         .goal_store
         .change(&executing.id, executing.revision, |g| {
             g.iterations[0].finished = true;
@@ -284,6 +286,7 @@ async fn settled_review_recovery_preserves_next_execution_phase() {
     let (runtime, handle, root, goal) = blocked_review_fixture().await;
     handle
         .goal_ctx
+        .stores
         .goal_store
         .recover(&goal.environment, &[], 0)
         .unwrap();
@@ -302,8 +305,8 @@ async fn external_blocker_requires_inspected_evidence() {
     let (runtime, handle, root, goal) = blocked_review_fixture().await;
     let session = super::review::GoalReviewSession::new(
         goal.clone(),
-        handle.goal_ctx.goal_store.clone(),
-        handle.goal_ctx.usage.clone(),
+        handle.goal_ctx.stores.goal_store.clone(),
+        handle.goal_ctx.stores.usage.clone(),
     );
     let ctx = crate::context::ToolContext::from(handle.goal_ctx.as_ref());
     let evidence_ctx = ctx.goal_review_tool_context().unwrap();
@@ -334,8 +337,8 @@ async fn host_conclusion_tool_is_scoped_and_rejections_preserve_goal_state() {
     let (runtime, handle, root, goal) = blocked_review_fixture().await;
     let session = Arc::new(super::review::GoalReviewSession::new(
         goal.clone(),
-        handle.goal_ctx.goal_store.clone(),
-        handle.goal_ctx.usage.clone(),
+        handle.goal_ctx.stores.goal_store.clone(),
+        handle.goal_ctx.stores.usage.clone(),
     ));
     let mut ctx = crate::context::ToolContext::from(handle.goal_ctx.as_ref());
     let call = |id: &str, name: &str, input_json| crate::protocol::ToolCallEvent {
@@ -372,7 +375,7 @@ async fn host_conclusion_tool_is_scoped_and_rejections_preserve_goal_state() {
         .await
         .unwrap();
     assert!(!forbidden[0].succeeded());
-    assert!(!handle.goal_ctx.cwd.join("forbidden.txt").exists());
+    assert!(!handle.goal_ctx.paths.cwd.join("forbidden.txt").exists());
     let mut invalid = conclusion;
     invalid["criteria"] = serde_json::json!([]);
     let rejected = runner
@@ -455,6 +458,7 @@ async fn review_token_limit_stops_new_provider_requests() {
     let (runtime, handle, root, goal) = blocked_review_fixture().await;
     let verifying = handle
         .goal_ctx
+        .stores
         .goal_store
         .change(&goal.id, goal.revision, |g| {
             g.reviews.clear();
@@ -466,7 +470,7 @@ async fn review_token_limit_stops_new_provider_requests() {
         .unwrap();
     handle.accept_goal(1, verifying).await.unwrap();
     let after = handle.goal_snapshot().unwrap();
-    let requests = handle.goal_ctx.usage.all_records().unwrap().len();
+    let requests = handle.goal_ctx.stores.usage.all_records().unwrap().len();
     close_fixture(runtime, &handle, root).await;
     assert_eq!(after.status, GoalStatus::BudgetExhausted);
     assert_eq!(requests, 0, "review requests share the goal token budget");
@@ -581,6 +585,7 @@ async fn cached_review_replay_does_not_count_another_execution_round() {
         let current = handle.goal_snapshot().unwrap();
         let verifying = handle
             .goal_ctx
+            .stores
             .goal_store
             .change(&current.id, current.revision, |g| {
                 g.phase = GoalPhase::Verifying;
@@ -703,6 +708,7 @@ async fn goal_state_control_matrix_preserves_terminal_and_retry_boundaries() {
         for action in ["resume", "budget", "pause", "cancel", "clear"] {
             let goal = handle
                 .goal_ctx
+                .stores
                 .goal_store
                 .update_for_test(|g| {
                     g.status = status.clone();
@@ -812,6 +818,7 @@ async fn failed_goal_retries_after_restart_and_explicit_budget_adjustment() {
     assert_eq!(failed.status, GoalStatus::Failed);
     handle
         .goal_ctx
+        .stores
         .goal_store
         .update_for_test(|g| {
             g.spec.limits.deadline_unix_secs = goal_now() - 1;
@@ -835,6 +842,7 @@ async fn failed_goal_retries_after_restart_and_explicit_budget_adjustment() {
     assert_eq!(backend.execution_calls.load(Ordering::SeqCst), 2);
     let pending = handle
         .goal_ctx
+        .stores
         .goal_store
         .change(&old.id, old.revision, |g| {
             g.pending_effects.push("unknown-effect".into());
@@ -930,6 +938,7 @@ async fn resume_phase_matrix_allows_last_round_review_without_an_extra_execution
         for phase in [GoalPhase::Idle, GoalPhase::Executing, GoalPhase::Verifying] {
             let goal = handle
                 .goal_ctx
+                .stores
                 .goal_store
                 .update_for_test(|g| {
                     g.status = status.clone();
@@ -1207,6 +1216,7 @@ async fn simple_conclusion_cannot_complete_without_independent_evidence() {
     let (runtime, handle, root, goal) = blocked_review_fixture().await;
     let artifact = handle
         .goal_ctx
+        .stores
         .artifacts
         .write_text(
             "IndependentGoalReview",
@@ -1216,6 +1226,7 @@ async fn simple_conclusion_cannot_complete_without_independent_evidence() {
         .unwrap();
     let current = handle
         .goal_ctx
+        .stores
         .goal_store
         .change(&goal.id, goal.revision, |g| {
             g.reviews.clear();
@@ -1233,8 +1244,8 @@ async fn simple_conclusion_cannot_complete_without_independent_evidence() {
         .unwrap();
     let session = Arc::new(super::review::GoalReviewSession::new(
         current.clone(),
-        handle.goal_ctx.goal_store.clone(),
-        handle.goal_ctx.usage.clone(),
+        handle.goal_ctx.stores.goal_store.clone(),
+        handle.goal_ctx.stores.usage.clone(),
     ));
     let mut ctx = crate::context::ToolContext::from(handle.goal_ctx.as_ref());
     ctx.goal_adjudication = Some(session.clone());
@@ -1588,6 +1599,7 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
     let (runtime, handle, root, goal) = blocked_review_fixture().await;
     let artifact = handle
         .goal_ctx
+        .stores
         .artifacts
         .write_text(
             "IndependentGoalReview",
@@ -1598,6 +1610,7 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
     let candidate = goal.review_candidate.clone().unwrap();
     let current = handle
         .goal_ctx
+        .stores
         .goal_store
         .change(&goal.id, goal.revision, |g| {
             g.reviews.clear();
@@ -1615,8 +1628,8 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
         .unwrap();
     let session = Arc::new(super::review::GoalReviewSession::new(
         current.clone(),
-        handle.goal_ctx.goal_store.clone(),
-        handle.goal_ctx.usage.clone(),
+        handle.goal_ctx.stores.goal_store.clone(),
+        handle.goal_ctx.stores.usage.clone(),
     ));
     let mut ctx = crate::context::ToolContext::from(handle.goal_ctx.as_ref());
     let proposal = GoalContinueProposal {
@@ -1671,6 +1684,7 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
     assert!(after.completion_basis.is_none());
     handle
         .goal_ctx
+        .stores
         .goal_store
         .recover(&after.environment, &[], 0)
         .unwrap();
@@ -1683,6 +1697,7 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
     ));
     let replay = handle
         .goal_ctx
+        .stores
         .goal_store
         .change(&restored.id, restored.revision, |g| {
             g.phase = GoalPhase::Verifying;
@@ -1695,7 +1710,13 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
     assert_eq!(replayed.continuation_rounds, 1);
     assert_eq!(replayed.continuations.len(), 1);
     assert!(
-        handle.goal_ctx.usage.all_records().unwrap().is_empty(),
+        handle
+            .goal_ctx
+            .stores
+            .usage
+            .all_records()
+            .unwrap()
+            .is_empty(),
         "replay sends no provider requests"
     );
     close_fixture(runtime, &handle, root).await;
@@ -1827,13 +1848,21 @@ async fn unknown_goal_format_version_fails_closed() {
     let handle = runtime.handle();
     handle
         .goal_ctx
+        .stores
         .goal_store
         .create(
             GoalSpec::new("reject unknown formats"),
-            goal_environment(&cwd, &handle.goal_ctx.tool_surface),
+            goal_environment(&cwd, &handle.goal_ctx.tools.tool_surface),
         )
         .unwrap();
-    let directory = handle.goal_ctx.store.path().parent().unwrap().to_path_buf();
+    let directory = handle
+        .goal_ctx
+        .stores
+        .store
+        .path()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let sid = handle.session_info().session_id.clone();
     runtime.shutdown().await.unwrap();
     drop(handle);
@@ -2161,6 +2190,7 @@ async fn confirm_goal_with_disabled_driver_outside_tokio_does_not_fault_driver()
     let handle = runtime.handle();
     let draft = handle
         .goal_ctx
+        .stores
         .goal_store
         .draft(GoalSpec::new("sync confirm check"), "env".into(), 60)
         .unwrap();

@@ -137,8 +137,9 @@ fn summary_backend() -> Arc<dyn LlmBackend> {
 }
 
 async fn add_tool_history(ctx: &crate::context::AgentSharedContext) -> anyhow::Result<()> {
-    ctx.store.add_user("fix the test suite").await?;
-    ctx.store
+    ctx.stores.store.add_user("fix the test suite").await?;
+    ctx.stores
+        .store
         .add_assistant(
             "I will run the tests.",
             "private reasoning",
@@ -152,21 +153,23 @@ async fn add_tool_history(ctx: &crate::context::AgentSharedContext) -> anyhow::R
             }],
         )
         .await?;
-    ctx.store
+    ctx.stores
+        .store
         .add_tool_results(&[crate::tools::runner::ToolExecution::test_result(
             "bash-1",
             "Bash",
             "Process completed with exit code 1.",
         )])
         .await?;
-    ctx.store.add_user("keep the API stable").await?;
+    ctx.stores.store.add_user("keep the API stable").await?;
     Ok(())
 }
 
 /// Extend a short history so the tail-user guard can be satisfied: a third
 /// real user turn gives the cut a boundary while keeping two users in tail.
 async fn add_follow_up_turn(ctx: &crate::context::AgentSharedContext) -> anyhow::Result<()> {
-    ctx.store
+    ctx.stores
+        .store
         .add_assistant(
             "Re-running after the fix.",
             "second private reasoning",
@@ -180,14 +183,18 @@ async fn add_follow_up_turn(ctx: &crate::context::AgentSharedContext) -> anyhow:
             }],
         )
         .await?;
-    ctx.store
+    ctx.stores
+        .store
         .add_tool_results(&[crate::tools::runner::ToolExecution::test_result(
             "bash-2",
             "Bash",
             "Process completed with exit code 0.",
         )])
         .await?;
-    ctx.store.add_user("and update the changelog").await?;
+    ctx.stores
+        .store
+        .add_user("and update the changelog")
+        .await?;
     Ok(())
 }
 
@@ -197,7 +204,8 @@ async fn compact(
     context_tokens: usize,
 ) -> anyhow::Result<(bool, String)> {
     let resolved = crate::config::model_resolver(&ctx.config).resolve(&ctx.config.model);
-    ctx.compaction
+    ctx.stores
+        .compaction
         .evaluate_and_compact(
             trigger,
             context_tokens,
@@ -243,7 +251,7 @@ async fn provider_usage_calibrates_auto_but_not_preflight() -> anyhow::Result<()
         summary_backend(),
     )
     .await?;
-    ctx.compaction.record_agent_request(
+    ctx.stores.compaction.record_agent_request(
         "flash",
         "prefix-a",
         798_000,
@@ -252,53 +260,64 @@ async fn provider_usage_calibrates_auto_but_not_preflight() -> anyhow::Result<()
         arc_values(vec![]),
         None,
     );
-    ctx.compaction.record_agent_usage(&UsageEvent {
+    ctx.stores.compaction.record_agent_usage(&UsageEvent {
         input_tokens: 400_000,
         output_tokens: 999_999,
         cache_read_input_tokens: 200_000,
         cache_creation_input_tokens: 80_000,
     });
 
-    let auto = ctx
-        .compaction
-        .pressure_decision("auto", 800_000, "flash", Some("prefix-a"), None);
+    let auto =
+        ctx.stores
+            .compaction
+            .pressure_decision("auto", 800_000, "flash", Some("prefix-a"), None);
     assert_eq!(auto.source, "provider_calibrated");
     assert_eq!(auto.provider_baseline_tokens, Some(680_000));
     assert_eq!(auto.effective_tokens, 682_000);
 
-    let preflight =
-        ctx.compaction
-            .pressure_decision("preflight", 800_000, "flash", Some("prefix-a"), None);
+    let preflight = ctx.stores.compaction.pressure_decision(
+        "preflight",
+        800_000,
+        "flash",
+        Some("prefix-a"),
+        None,
+    );
     assert_eq!(preflight.source, "local_preflight");
     assert_eq!(preflight.effective_tokens, 800_000);
 
     let smaller =
-        ctx.compaction
+        ctx.stores
+            .compaction
             .pressure_decision("auto", 700_000, "flash", Some("prefix-a"), None);
     assert_eq!(smaller.effective_tokens, 582_000);
-    let clamped = ctx
-        .compaction
-        .pressure_decision("auto", 0, "flash", Some("prefix-a"), None);
+    let clamped =
+        ctx.stores
+            .compaction
+            .pressure_decision("auto", 0, "flash", Some("prefix-a"), None);
     assert_eq!(clamped.effective_tokens, 0);
-    ctx.compaction.record_agent_usage(&UsageEvent {
+    ctx.stores.compaction.record_agent_usage(&UsageEvent {
         input_tokens: -1,
         output_tokens: 0,
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
     });
     let after_invalid_usage =
-        ctx.compaction
+        ctx.stores
+            .compaction
             .pressure_decision("auto", 800_000, "flash", Some("prefix-a"), None);
     assert_eq!(after_invalid_usage.effective_tokens, 682_000);
     let changed =
-        ctx.compaction
+        ctx.stores
+            .compaction
             .pressure_decision("auto", 800_000, "other", Some("prefix-a"), None);
     assert_eq!(changed.source, "local_fallback");
-    ctx.compaction
+    ctx.stores
+        .compaction
         .projection_generation
         .fetch_add(1, Ordering::SeqCst);
     let after_compaction =
-        ctx.compaction
+        ctx.stores
+            .compaction
             .pressure_decision("auto", 800_000, "flash", Some("prefix-a"), None);
     assert_eq!(after_compaction.source, "local_fallback");
     Ok(())
@@ -348,7 +367,7 @@ async fn provider_calibration_requires_actual_projection_compatibility() -> anyh
             json!({"role":"user","content":"original router guidance"}),
         ]),
     };
-    ctx.compaction.record_agent_request(
+    ctx.stores.compaction.record_agent_request(
         "flash",
         "source-prefix",
         700_000,
@@ -357,7 +376,7 @@ async fn provider_calibration_requires_actual_projection_compatibility() -> anyh
         arc_values(full.clone()),
         Some(previous.clone()),
     );
-    ctx.compaction.record_agent_usage(&UsageEvent {
+    ctx.stores.compaction.record_agent_usage(&UsageEvent {
         input_tokens: 500_000,
         output_tokens: 1,
         cache_read_input_tokens: 100_000,
@@ -372,7 +391,7 @@ async fn provider_calibration_requires_actual_projection_compatibility() -> anyh
         ]),
         ..previous.clone()
     };
-    let calibrated = ctx.compaction.pressure_decision(
+    let calibrated = ctx.stores.compaction.pressure_decision(
         "auto",
         710_000,
         "flash",
@@ -386,7 +405,7 @@ async fn provider_calibration_requires_actual_projection_compatibility() -> anyh
         tools: arc_values(full),
         ..compatible.clone()
     };
-    let changed_tools = ctx.compaction.pressure_decision(
+    let changed_tools = ctx.stores.compaction.pressure_decision(
         "auto",
         710_000,
         "flash",
@@ -402,7 +421,7 @@ async fn provider_calibration_requires_actual_projection_compatibility() -> anyh
         ]),
         ..previous
     };
-    let changed_messages = ctx.compaction.pressure_decision(
+    let changed_messages = ctx.stores.compaction.pressure_decision(
         "auto",
         710_000,
         "flash",
@@ -422,7 +441,7 @@ async fn stored_projection_hashes_messages_and_shares_usage_baseline() -> anyhow
     )
     .await?;
     let unique_pixels = "data:image/png;base64,UNIQUE_REQUEST_ONLY_PIXEL_PAYLOAD";
-    ctx.compaction.record_agent_request(
+    ctx.stores.compaction.record_agent_request(
         "flash",
         "prefix",
         100,
@@ -439,7 +458,7 @@ async fn stored_projection_hashes_messages_and_shares_usage_baseline() -> anyhow
             })]),
         }),
     );
-    ctx.compaction.record_agent_usage(&UsageEvent {
+    ctx.stores.compaction.record_agent_usage(&UsageEvent {
         input_tokens: 100,
         output_tokens: 1,
         cache_read_input_tokens: 0,
@@ -447,6 +466,7 @@ async fn stored_projection_hashes_messages_and_shares_usage_baseline() -> anyhow
     });
 
     let state = ctx
+        .stores
         .compaction
         .prompt_usage
         .lock()
@@ -488,13 +508,18 @@ async fn cache_aligned_summary_uses_dynamic_cap_when_configured_cap_exceeds_wind
     )
     .await?;
     for index in 0..3 {
-        ctx.store.add_user(&format!("request {index}")).await?;
-        ctx.store
+        ctx.stores
+            .store
+            .add_user(&format!("request {index}"))
+            .await?;
+        ctx.stores
+            .store
             .add_assistant(&format!("progress {index}"), "", &[])
             .await?;
     }
-    let messages =
-        crate::llm::image_projection::project_consumed_attachments(&ctx.store.lines().await?);
+    let messages = crate::llm::image_projection::project_consumed_attachments(
+        &ctx.stores.store.lines().await?,
+    );
     let system = "stable agent system".to_string();
     let tools = vec![json!({"name":"Read","description":"read"})];
     let resolved = crate::config::model_resolver(&ctx.config).resolve(&ctx.config.model);
@@ -504,7 +529,7 @@ async fn cache_aligned_summary_uses_dynamic_cap_when_configured_cap_exceeds_wind
         tools: arc_values(tools.clone()),
         messages: arc_values(messages.clone()),
     };
-    ctx.compaction.record_agent_request(
+    ctx.stores.compaction.record_agent_request(
         &resolved.actual,
         &prefix_fingerprint(&system, &tools),
         1_000,
@@ -538,10 +563,12 @@ async fn tail_target_is_tightened_to_available_space() -> anyhow::Result<()> {
     )
     .await?;
     for index in 0..40 {
-        ctx.store
+        ctx.stores
+            .store
             .add_user(&format!("request {index}: {}", "x".repeat(2_000)))
             .await?;
-        ctx.store
+        ctx.stores
+            .store
             .add_assistant(&format!("progress {index}"), "", &[])
             .await?;
     }
@@ -551,6 +578,7 @@ async fn tail_target_is_tightened_to_available_space() -> anyhow::Result<()> {
         openai_tools: None,
     };
     let (did_compact, reason) = ctx
+        .stores
         .compaction
         .evaluate_and_compact_with_prefix(
             "manual",
@@ -584,15 +612,18 @@ async fn cache_aligned_summary_reuses_agent_system_tools_and_prefix() -> anyhow:
     )
     .await?;
     for index in 0..4 {
-        ctx.store
+        ctx.stores
+            .store
             .add_user(&format!("request {index}: {}", "x".repeat(2_000)))
             .await?;
-        ctx.store
+        ctx.stores
+            .store
             .add_assistant(&format!("progress {index}"), "", &[])
             .await?;
     }
-    let messages =
-        crate::llm::image_projection::project_consumed_attachments(&ctx.store.lines().await?);
+    let messages = crate::llm::image_projection::project_consumed_attachments(
+        &ctx.stores.store.lines().await?,
+    );
     let system = "stable agent system".to_string();
     let tools = vec![json!({"name":"Read","description":"read"})];
     let resolved = crate::config::model_resolver(&ctx.config).resolve(&ctx.config.model);
@@ -602,7 +633,7 @@ async fn cache_aligned_summary_reuses_agent_system_tools_and_prefix() -> anyhow:
         tools: arc_values(tools.clone()),
         messages: arc_values(messages.clone()),
     };
-    ctx.compaction.record_agent_request(
+    ctx.stores.compaction.record_agent_request(
         &resolved.actual,
         &prefix_fingerprint(&system, &tools),
         10_000,
@@ -670,7 +701,7 @@ async fn raw_partial_aligned_summary_degrades_unconsumed_attachment() -> anyhow:
         "type":"image_url",
         "image_url":{"url":"data:image/png;base64,AA=="}
     });
-    ctx.compaction.record_agent_request(
+    ctx.stores.compaction.record_agent_request(
         &resolved.actual,
         &prefix_fingerprint(&system, &tools),
         1_000,
@@ -685,7 +716,7 @@ async fn raw_partial_aligned_summary_degrades_unconsumed_attachment() -> anyhow:
         }),
     );
 
-    let input = ctx.compaction.build_summary_input(
+    let input = ctx.stores.compaction.build_summary_input(
         &active,
         active.len(),
         None,
@@ -749,7 +780,7 @@ async fn partial_alignment_rolls_back_before_incomplete_tool_exchange() -> anyho
         "type":"image_url",
         "image_url":{"url":"data:image/png;base64,AA=="}
     });
-    ctx.compaction.record_agent_request(
+    ctx.stores.compaction.record_agent_request(
         &resolved.actual,
         &prefix_fingerprint(&system, &tools),
         1_000,
@@ -764,7 +795,7 @@ async fn partial_alignment_rolls_back_before_incomplete_tool_exchange() -> anyho
         }),
     );
 
-    let input = ctx.compaction.build_summary_input(
+    let input = ctx.stores.compaction.build_summary_input(
         &active,
         active.len(),
         None,
@@ -839,18 +870,18 @@ async fn transient_summary_failure_retries_and_commits_once() -> anyhow::Result<
     .await?;
     add_tool_history(&ctx).await?;
     add_follow_up_turn(&ctx).await?;
-    let before = ctx.compaction.active_messages().await?;
+    let before = ctx.stores.compaction.active_messages().await?;
 
     let (compacted, _reason) = compact(&ctx, "manual", 0).await?;
     assert!(compacted);
     assert_eq!(*backend.calls.lock().unwrap(), 2, "one retry after the 502");
-    let after = ctx.compaction.active_messages().await?;
+    let after = ctx.stores.compaction.active_messages().await?;
     assert!(
         after.len() < before.len(),
         "the accepted summary advances the projection"
     );
-    assert!(ctx.compaction.read_summary().await.is_some());
-    let records = ctx.usage.all_records()?;
+    assert!(ctx.stores.compaction.read_summary().await.is_some());
+    let records = ctx.stores.usage.all_records()?;
     assert_eq!(records.len(), 2, "{records:?}");
     assert!(
         records
@@ -911,7 +942,7 @@ async fn summary_deadline_bounds_an_in_flight_request() -> anyhow::Result<()> {
     .await?;
     add_tool_history(&ctx).await?;
     add_follow_up_turn(&ctx).await?;
-    let before = ctx.compaction.active_messages().await?;
+    let before = ctx.stores.compaction.active_messages().await?;
 
     let started = std::time::Instant::now();
     let error = compact(&ctx, "manual", 0)
@@ -925,13 +956,13 @@ async fn summary_deadline_bounds_an_in_flight_request() -> anyhow::Result<()> {
         elapsed < std::time::Duration::from_millis(1400),
         "the 1s deadline must cut the in-flight summary short: {elapsed:?}"
     );
-    let after = ctx.compaction.active_messages().await?;
+    let after = ctx.stores.compaction.active_messages().await?;
     assert_eq!(
         after.len(),
         before.len(),
         "nothing is committed on a deadline"
     );
-    assert!(ctx.compaction.read_summary().await.is_none());
+    assert!(ctx.stores.compaction.read_summary().await.is_none());
     Ok(())
 }
 
@@ -1029,7 +1060,7 @@ async fn summary_first_event_timeout_is_enforced() -> anyhow::Result<()> {
     .await?;
     add_tool_history(&ctx).await?;
     add_follow_up_turn(&ctx).await?;
-    let before = ctx.compaction.active_messages().await?;
+    let before = ctx.stores.compaction.active_messages().await?;
 
     let started = std::time::Instant::now();
     let error = compact(&ctx, "manual", 0)
@@ -1043,8 +1074,11 @@ async fn summary_first_event_timeout_is_enforced() -> anyhow::Result<()> {
         elapsed < std::time::Duration::from_millis(1400),
         "the 1s first-event budget must cut the establish wait short: {elapsed:?}"
     );
-    assert_eq!(ctx.compaction.active_messages().await?.len(), before.len());
-    assert!(ctx.compaction.read_summary().await.is_none());
+    assert_eq!(
+        ctx.stores.compaction.active_messages().await?.len(),
+        before.len()
+    );
+    assert!(ctx.stores.compaction.read_summary().await.is_none());
     Ok(())
 }
 
@@ -1070,7 +1104,7 @@ async fn summary_pending_stream_first_event_timeout_is_enforced() -> anyhow::Res
         .expect_err("a pending stream must hit the first-event timeout")
         .to_string();
     assert!(error.contains("first event"), "{error}");
-    assert!(ctx.compaction.read_summary().await.is_none());
+    assert!(ctx.stores.compaction.read_summary().await.is_none());
     Ok(())
 }
 
@@ -1103,7 +1137,7 @@ async fn summary_idle_timeout_is_enforced() -> anyhow::Result<()> {
         elapsed < std::time::Duration::from_millis(1800),
         "the 1s idle budget must end the stalled summary: {elapsed:?}"
     );
-    assert!(ctx.compaction.read_summary().await.is_none());
+    assert!(ctx.stores.compaction.read_summary().await.is_none());
     Ok(())
 }
 
@@ -1135,7 +1169,7 @@ async fn failed_compaction_attempt_is_cancelled_before_retry() -> anyhow::Result
         Some(true),
         "the failed attempt token must be cancelled before the retry starts"
     );
-    assert!(ctx.compaction.read_summary().await.is_some());
+    assert!(ctx.stores.compaction.read_summary().await.is_some());
     Ok(())
 }
 
@@ -1172,7 +1206,7 @@ async fn summary_tool_call_fails_explicitly_without_advancing_context() -> anyho
     .await?;
     add_tool_history(&ctx).await?;
     add_follow_up_turn(&ctx).await?;
-    let before = ctx.compaction.active_messages().await?;
+    let before = ctx.stores.compaction.active_messages().await?;
 
     let error = compact(&ctx, "manual", 0).await.unwrap_err();
 
@@ -1182,8 +1216,8 @@ async fn summary_tool_call_fails_explicitly_without_advancing_context() -> anyho
             .contains("compaction attempted invalid tool call Read (summary-read-1)"),
         "{error:#}"
     );
-    assert_eq!(ctx.compaction.active_messages().await?, before);
-    assert!(ctx.compaction.read_summary().await.is_none());
+    assert_eq!(ctx.stores.compaction.active_messages().await?, before);
+    assert!(ctx.stores.compaction.read_summary().await.is_none());
     Ok(())
 }
 
@@ -1211,16 +1245,18 @@ async fn forced_triggers_compact_below_the_savings_ratio() -> anyhow::Result<()>
     )
     .await?;
     // 可折叠段很小、热尾部很大：saved / total 远低于 10%。
-    ctx.store
+    ctx.stores
+        .store
         .add_user(&format!("turn0 {}", "p".repeat(2_000)))
         .await?;
-    ctx.store.add_assistant("ack", "", &[]).await?;
-    ctx.store
+    ctx.stores.store.add_assistant("ack", "", &[]).await?;
+    ctx.stores
+        .store
         .add_user(&format!("turn1 {}", "q".repeat(90_000)))
         .await?;
-    ctx.store.add_assistant("ack", "", &[]).await?;
-    ctx.store.add_user("turn2").await?;
-    ctx.store.add_assistant("ack", "", &[]).await?;
+    ctx.stores.store.add_assistant("ack", "", &[]).await?;
+    ctx.stores.store.add_user("turn2").await?;
+    ctx.stores.store.add_assistant("ack", "", &[]).await?;
 
     let (auto, reason) = compact(&ctx, "auto", 900_000).await?;
     assert!(!auto, "auto 必须保留 10% 收益门控：{reason}");
@@ -1248,10 +1284,10 @@ async fn window_with_only_two_user_turns_cannot_compact() -> anyhow::Result<()> 
         summary_backend(),
     )
     .await?;
-    ctx.store.add_user("first request").await?;
-    ctx.store.add_assistant("ack", "", &[]).await?;
-    ctx.store.add_user("second request").await?;
-    ctx.store.add_assistant("ack", "", &[]).await?;
+    ctx.stores.store.add_user("first request").await?;
+    ctx.stores.store.add_assistant("ack", "", &[]).await?;
+    ctx.stores.store.add_user("second request").await?;
+    ctx.stores.store.add_assistant("ack", "", &[]).await?;
 
     let (compacted, reason) = compact(&ctx, "preflight", 900_000).await?;
     assert!(!compacted);
@@ -1562,10 +1598,12 @@ async fn oversized_net_summary_is_not_published() -> anyhow::Result<()> {
     )
     .await?;
     for index in 0..4 {
-        ctx.store
+        ctx.stores
+            .store
             .add_user(&format!("request {index}: {}", "x".repeat(200)))
             .await?;
-        ctx.store
+        ctx.stores
+            .store
             .add_assistant(&format!("progress {index}"), "", &[])
             .await?;
     }
@@ -1574,8 +1612,10 @@ async fn oversized_net_summary_is_not_published() -> anyhow::Result<()> {
         tools: &[],
         openai_tools: None,
     };
-    let before = estimate_candidate_tokens(shape, &ctx.compaction.active_messages().await?, None)?;
+    let before =
+        estimate_candidate_tokens(shape, &ctx.stores.compaction.active_messages().await?, None)?;
     let (compacted, reason) = ctx
+        .stores
         .compaction
         .evaluate_and_compact_with_prefix(
             "preflight",
@@ -1590,12 +1630,13 @@ async fn oversized_net_summary_is_not_published() -> anyhow::Result<()> {
         .await?;
     assert!(!compacted, "{reason}");
     assert!(reason.contains("no net benefit"), "{reason}");
-    let after = estimate_candidate_tokens(shape, &ctx.compaction.active_messages().await?, None)?;
+    let after =
+        estimate_candidate_tokens(shape, &ctx.stores.compaction.active_messages().await?, None)?;
     assert_eq!(
         after, before,
         "a rejected summary must not change the projection"
     );
-    assert!(ctx.compaction.read_summary().await.is_none());
+    assert!(ctx.stores.compaction.read_summary().await.is_none());
     Ok(())
 }
 
@@ -1617,28 +1658,37 @@ async fn over_budget_strict_candidate_falls_back_to_budget_feasible_cut() -> any
     .await?;
     // 一个小旧轮次 + 两个各 27,000 字符的 user 轮次：严格 cut 非零，但保留两条 user
     // 的候选超过输入预算；最新安全边界的短摘要可以装下。
-    ctx.store.add_user("old request").await?;
-    ctx.store.add_assistant("old progress", "", &[]).await?;
-    ctx.store
+    ctx.stores.store.add_user("old request").await?;
+    ctx.stores
+        .store
+        .add_assistant("old progress", "", &[])
+        .await?;
+    ctx.stores
+        .store
         .add_user(&format!("first {}", "x".repeat(27_000)))
         .await?;
-    ctx.store.add_assistant("progress", "", &[]).await?;
-    ctx.store
+    ctx.stores.store.add_assistant("progress", "", &[]).await?;
+    ctx.stores
+        .store
         .add_user(&format!("second {}", "y".repeat(27_000)))
         .await?;
-    ctx.store.add_assistant("progress two", "", &[]).await?;
+    ctx.stores
+        .store
+        .add_assistant("progress two", "", &[])
+        .await?;
     let shape = MainRequestShape {
         system_prompt: "",
         tools: &[],
         openai_tools: None,
     };
-    let active = ctx.compaction.active_messages().await?;
+    let active = ctx.stores.compaction.active_messages().await?;
     let context_tokens = estimate_candidate_tokens(shape, &active, None)?;
     assert!(
         context_tokens > request_input_limit(&ctx.config),
         "the fixture must be over budget: {context_tokens}"
     );
     let (compacted, detail) = ctx
+        .stores
         .compaction
         .evaluate_and_compact_with_prefix_bounded(
             "preflight",
@@ -1675,37 +1725,48 @@ async fn strict_feasibility_accounts_for_active_plan() -> anyhow::Result<()> {
     )
     .await?;
     // 长 Plan（6000 ASCII 字符）通过 PlanStore 建立，不直接写运行时文件。
-    ctx.plan_store
+    ctx.stores
+        .plan_store
         .set_draft(&format!("# Plan\n{}", "p".repeat(6_000)), 64_000)?;
-    ctx.plan_store.confirm()?;
-    let plan_before = std::fs::read_to_string(ctx.store.path().with_file_name("plan.md"))?;
+    ctx.stores.plan_store.confirm()?;
+    let plan_before = std::fs::read_to_string(ctx.stores.store.path().with_file_name("plan.md"))?;
     assert!(plan_before.contains(&"p".repeat(1_000)));
 
     // 旧轮次 + 两个 22,000 字符 user 轮次：裸尾部看似可行，加上 Plan 后超额。
-    ctx.store
+    ctx.stores
+        .store
         .add_user(&format!("old {}", "o".repeat(6_000)))
         .await?;
-    ctx.store.add_assistant("old progress", "", &[]).await?;
-    ctx.store
+    ctx.stores
+        .store
+        .add_assistant("old progress", "", &[])
+        .await?;
+    ctx.stores
+        .store
         .add_user(&format!("first {}", "x".repeat(22_000)))
         .await?;
-    ctx.store.add_assistant("progress", "", &[]).await?;
-    ctx.store
+    ctx.stores.store.add_assistant("progress", "", &[]).await?;
+    ctx.stores
+        .store
         .add_user(&format!("second {}", "y".repeat(22_000)))
         .await?;
-    ctx.store.add_assistant("progress two", "", &[]).await?;
+    ctx.stores
+        .store
+        .add_assistant("progress two", "", &[])
+        .await?;
     let shape = MainRequestShape {
         system_prompt: "",
         tools: &[],
         openai_tools: None,
     };
-    let active = ctx.compaction.active_messages().await?;
+    let active = ctx.stores.compaction.active_messages().await?;
     let context_tokens = estimate_candidate_tokens(shape, &active, None)?;
     assert!(
         context_tokens > request_input_limit(&ctx.config),
         "the fixture must be over budget: {context_tokens}"
     );
     let (compacted, detail) = ctx
+        .stores
         .compaction
         .evaluate_and_compact_with_prefix_bounded(
             "preflight",
@@ -1726,10 +1787,10 @@ async fn strict_feasibility_accounts_for_active_plan() -> anyhow::Result<()> {
 
     // 权威 Plan 与原始历史不得被改写。
     assert_eq!(
-        std::fs::read_to_string(ctx.store.path().with_file_name("plan.md"))?,
+        std::fs::read_to_string(ctx.stores.store.path().with_file_name("plan.md"))?,
         plan_before
     );
-    let history = serde_json::to_string(&ctx.store.lines().await?)?;
+    let history = serde_json::to_string(&ctx.stores.store.lines().await?)?;
     assert!(history.contains(&"y".repeat(1_000)));
     Ok(())
 }
@@ -1748,19 +1809,28 @@ async fn expired_round_deadline_blocks_emergency_publish() -> anyhow::Result<()>
         summary_backend(),
     )
     .await?;
-    ctx.store
+    ctx.stores
+        .store
         .add_user(&format!("seed {}", "x".repeat(2_000)))
         .await?;
-    ctx.store.add_assistant("progress", "", &[]).await?;
-    ctx.store
+    ctx.stores.store.add_assistant("progress", "", &[]).await?;
+    ctx.stores
+        .store
         .add_user(&format!("seed two {}", "y".repeat(2_000)))
         .await?;
-    ctx.store.add_assistant("progress two", "", &[]).await?;
-    ctx.store
+    ctx.stores
+        .store
+        .add_assistant("progress two", "", &[])
+        .await?;
+    ctx.stores
+        .store
         .add_user(&format!("seed three {}", "z".repeat(2_000)))
         .await?;
-    ctx.store.add_assistant("progress three", "", &[]).await?;
-    let messages = ctx.compaction.active_messages().await?;
+    ctx.stores
+        .store
+        .add_assistant("progress three", "", &[])
+        .await?;
+    let messages = ctx.stores.compaction.active_messages().await?;
     let shape = MainRequestShape {
         system_prompt: "",
         tools: &[],
@@ -1770,6 +1840,7 @@ async fn expired_round_deadline_blocks_emergency_publish() -> anyhow::Result<()>
 
     // 1) 摘要评估在共享期限已过时定型为 deadline，而不是可转应急的摘要失败。
     let error = ctx
+        .stores
         .compaction
         .evaluate_and_compact_with_prefix_bounded(
             "preflight",
@@ -1799,8 +1870,8 @@ async fn expired_round_deadline_blocks_emergency_publish() -> anyhow::Result<()>
     .await
     .expect_err("an expired round deadline must refuse the emergency checkpoint");
     assert!(is_compaction_deadline_expired(&error), "{error:#}");
-    assert!(ctx.compaction.read_summary().await.is_none());
-    let projection = serde_json::to_string(&ctx.compaction.active_messages().await?)?;
+    assert!(ctx.stores.compaction.read_summary().await.is_none());
+    let projection = serde_json::to_string(&ctx.stores.compaction.active_messages().await?)?;
     assert!(
         !projection.contains("emergency-context-excerpt"),
         "{projection}"
@@ -1832,26 +1903,26 @@ async fn startup_rebuilds_missing_or_stale_summary_projection() -> anyhow::Resul
         summary_backend(),
     )
     .await?;
-    let state_path = ctx.store.path().with_file_name("context-state.json");
+    let state_path = ctx.stores.store.path().with_file_name("context-state.json");
     let state = CompactionState {
         active_start: 0,
         summary: "authoritative summary".into(),
     };
     crate::session::atomic_file::atomic_replace(&state_path, &serde_json::to_vec_pretty(&state)?)?;
     std::fs::write(
-        ctx.store.path().with_file_name("summary.txt"),
+        ctx.stores.store.path().with_file_name("summary.txt"),
         "stale projection\n",
     )?;
 
     let engine = CompactionEngine::new(
-        ctx.store.clone(),
-        ctx.store.path().with_file_name("summary.txt"),
+        ctx.stores.store.clone(),
+        ctx.stores.store.path().with_file_name("summary.txt"),
         ctx.config.base_url.clone(),
         &ctx.config,
-        ctx.stats.clone(),
-        ctx.usage.clone(),
+        ctx.stores.stats.clone(),
+        ctx.stores.usage.clone(),
         ctx.config.session_id.clone(),
-        ctx.display.clone(),
+        ctx.io.display.clone(),
         ctx.cancel.clone(),
         ctx.interrupt.clone(),
         summary_backend(),
@@ -1864,7 +1935,7 @@ async fn startup_rebuilds_missing_or_stale_summary_projection() -> anyhow::Resul
         Some("authoritative summary")
     );
     assert_eq!(
-        std::fs::read_to_string(ctx.store.path().with_file_name("summary.txt"))?,
+        std::fs::read_to_string(ctx.stores.store.path().with_file_name("summary.txt"))?,
         "authoritative summary\n"
     );
     Ok(())
@@ -1893,14 +1964,14 @@ async fn compaction_events_reach_the_sink_without_disk_logging() -> anyhow::Resu
     .await?;
     let sink = Arc::new(RecordingSessionEventSink::default());
     let engine = CompactionEngine::new(
-        ctx.store.clone(),
-        ctx.store.path().with_file_name("summary.txt"),
+        ctx.stores.store.clone(),
+        ctx.stores.store.path().with_file_name("summary.txt"),
         ctx.config.base_url.clone(),
         &ctx.config,
-        ctx.stats.clone(),
-        ctx.usage.clone(),
+        ctx.stores.stats.clone(),
+        ctx.stores.usage.clone(),
         ctx.config.session_id.clone(),
-        ctx.display.clone(),
+        ctx.io.display.clone(),
         ctx.cancel.clone(),
         ctx.interrupt.clone(),
         summary_backend(),
@@ -1973,14 +2044,14 @@ async fn real_compaction_check_emits_through_the_sink_without_disk_logging() -> 
     .await?;
     let sink = Arc::new(RecordingSessionEventSink::default());
     let engine = CompactionEngine::new(
-        ctx.store.clone(),
-        ctx.store.path().with_file_name("summary.txt"),
+        ctx.stores.store.clone(),
+        ctx.stores.store.path().with_file_name("summary.txt"),
         ctx.config.base_url.clone(),
         &ctx.config,
-        ctx.stats.clone(),
-        ctx.usage.clone(),
+        ctx.stores.stats.clone(),
+        ctx.stores.usage.clone(),
         ctx.config.session_id.clone(),
-        ctx.display.clone(),
+        ctx.io.display.clone(),
         ctx.cancel.clone(),
         ctx.interrupt.clone(),
         summary_backend(),
@@ -2062,30 +2133,37 @@ async fn startup_repairs_legacy_cut_on_internal_user_message() -> anyhow::Result
         summary_backend(),
     )
     .await?;
-    ctx.store.add_user("head constraint").await?;
-    ctx.store.add_assistant("head response", "", &[]).await?;
-    ctx.store.add_runtime_user("plain injected text").await?;
-    ctx.store
+    ctx.stores.store.add_user("head constraint").await?;
+    ctx.stores
+        .store
+        .add_assistant("head response", "", &[])
+        .await?;
+    ctx.stores
+        .store
+        .add_runtime_user("plain injected text")
+        .await?;
+    ctx.stores
+        .store
         .add_assistant("next safe boundary", "", &[])
         .await?;
 
-    let state_path = ctx.store.path().with_file_name("context-state.json");
+    let state_path = ctx.stores.store.path().with_file_name("context-state.json");
     let state = CompactionState {
         active_start: 2,
         summary: "authoritative summary".into(),
     };
     crate::session::atomic_file::atomic_replace(&state_path, &serde_json::to_vec_pretty(&state)?)?;
 
-    let writer = crate::session::event_log::EventLogWriter::start(ctx.events_path.clone());
+    let writer = crate::session::event_log::EventLogWriter::start(ctx.paths.events_path.clone());
     let engine = CompactionEngine::new(
-        ctx.store.clone(),
-        ctx.store.path().with_file_name("summary.txt"),
+        ctx.stores.store.clone(),
+        ctx.stores.store.path().with_file_name("summary.txt"),
         ctx.config.base_url.clone(),
         &ctx.config,
-        ctx.stats.clone(),
-        ctx.usage.clone(),
+        ctx.stores.stats.clone(),
+        ctx.stores.usage.clone(),
         ctx.config.session_id.clone(),
-        ctx.display.clone(),
+        ctx.io.display.clone(),
         ctx.cancel.clone(),
         ctx.interrupt.clone(),
         summary_backend(),
@@ -2096,7 +2174,7 @@ async fn startup_repairs_legacy_cut_on_internal_user_message() -> anyhow::Result
     assert_eq!(engine.current_state()?.active_start, 3);
 
     // The skipped message is carried into the next summary input…
-    let active = ctx.store.lines_from(3).await?;
+    let active = ctx.stores.store.lines_from(3).await?;
     let input =
         engine.build_summary_input(&active, 1, None, false, LlmModelTarget::new("flash", None))?;
     let serialized = serde_json::to_string(&input.messages)?;
@@ -2116,7 +2194,7 @@ async fn startup_repairs_legacy_cut_on_internal_user_message() -> anyhow::Result
 
     // …and the repair itself is visible as an event.
     writer.flush().await?;
-    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&ctx.paths.events_path).await?;
     assert!(events.contains("startup_repair"), "{events}");
     assert!(events.contains("skipped 1 message(s)"), "{events}");
     Ok(())
@@ -2137,26 +2215,29 @@ async fn compaction_keeps_full_history_and_persists_state() -> anyhow::Result<()
     )
     .await?;
     for index in 0..4 {
-        ctx.store
+        ctx.stores
+            .store
             .add_user(&format!("request {index}: {}", "x".repeat(8_000)))
             .await?;
-        ctx.store
+        ctx.stores
+            .store
             .add_assistant(&format!("progress {index}: {}", "y".repeat(8_000)), "", &[])
             .await?;
     }
 
-    let full_history = ctx.store.lines().await?;
+    let full_history = ctx.stores.store.lines().await?;
     let (compacted, _) = compact(&ctx, "manual", 50_000).await?;
     assert!(compacted);
-    assert_eq!(ctx.store.lines().await?, full_history);
+    assert_eq!(ctx.stores.store.lines().await?, full_history);
 
-    let projected = ctx.compaction.active_messages().await?;
+    let projected = ctx.stores.compaction.active_messages().await?;
     assert!(projected.len() < full_history.len());
-    let persisted = load_state(&ctx.store.path().with_file_name("context-state.json"))?;
+    let persisted = load_state(&ctx.stores.store.path().with_file_name("context-state.json"))?;
     assert!(persisted.active_start > 0);
     assert!(!persisted.summary.is_empty());
     assert!(
-        !ctx.store
+        !ctx.stores
+            .store
             .path()
             .with_file_name("summary.txt")
             .with_file_name("context-state.json")
@@ -2179,14 +2260,16 @@ async fn compaction_interrupts_pending_summary_without_committing() -> anyhow::R
     )
     .await?;
     for index in 0..3 {
-        ctx.store
+        ctx.stores
+            .store
             .add_user(&format!("request {index}: {}", "x".repeat(2_000)))
             .await?;
-        ctx.store
+        ctx.stores
+            .store
             .add_assistant(&format!("progress {index}: {}", "y".repeat(2_000)), "", &[])
             .await?;
     }
-    let compaction = ctx.compaction.clone();
+    let compaction = ctx.stores.compaction.clone();
     let task = tokio::spawn(async move {
         compaction
             .evaluate_and_compact("manual", 0, LlmModelTarget::new("flash", None))
@@ -2200,7 +2283,7 @@ async fn compaction_interrupts_pending_summary_without_committing() -> anyhow::R
         .to_string();
     assert!(error.contains("compaction interrupted"), "{error}");
     assert_eq!(
-        load_state(&ctx.store.path().with_file_name("context-state.json"))?.active_start,
+        load_state(&ctx.stores.store.path().with_file_name("context-state.json"))?.active_start,
         0
     );
     Ok(())
@@ -2224,8 +2307,9 @@ async fn enabled_input_reduction_changes_only_the_summary_request() -> anyhow::R
     add_tool_history(&ctx).await?;
     add_follow_up_turn(&ctx).await?;
 
-    let full_history = ctx.store.lines().await?;
+    let full_history = ctx.stores.store.lines().await?;
     let (compacted, _) = ctx
+        .stores
         .compaction
         .evaluate_and_compact(
             "manual",
@@ -2234,7 +2318,7 @@ async fn enabled_input_reduction_changes_only_the_summary_request() -> anyhow::R
         )
         .await?;
     assert!(compacted);
-    assert_eq!(ctx.store.lines().await?, full_history);
+    assert_eq!(ctx.stores.store.lines().await?, full_history);
 
     let guard = backend.requests.lock().unwrap();
     let request = guard.first().expect("summary request captured");
@@ -2304,13 +2388,15 @@ async fn repeated_compaction_advances_boundary_and_merges_previous_summary() -> 
     )
     .await?;
     for index in 0..3 {
-        ctx.store
+        ctx.stores
+            .store
             .add_user(&format!(
                 "first batch request {index}: {}",
                 "x".repeat(2_000)
             ))
             .await?;
-        ctx.store
+        ctx.stores
+            .store
             .add_assistant(
                 &format!("first batch progress {index}: {}", "y".repeat(2_000)),
                 "",
@@ -2320,18 +2406,20 @@ async fn repeated_compaction_advances_boundary_and_merges_previous_summary() -> 
     }
 
     assert!(compact(&ctx, "manual", 0).await?.0);
-    let state_path = ctx.store.path().with_file_name("context-state.json");
+    let state_path = ctx.stores.store.path().with_file_name("context-state.json");
     let first_state = load_state(&state_path)?;
     assert!(first_state.active_start > 0);
 
     for index in 0..3 {
-        ctx.store
+        ctx.stores
+            .store
             .add_user(&format!(
                 "second batch request {index}: {}",
                 "a".repeat(2_000)
             ))
             .await?;
-        ctx.store
+        ctx.stores
+            .store
             .add_assistant(
                 &format!("second batch progress {index}: {}", "b".repeat(2_000)),
                 "",
@@ -2339,14 +2427,14 @@ async fn repeated_compaction_advances_boundary_and_merges_previous_summary() -> 
             )
             .await?;
     }
-    let full_history = ctx.store.lines().await?;
+    let full_history = ctx.stores.store.lines().await?;
 
     assert!(compact(&ctx, "manual", 0).await?.0);
 
     let second_state = load_state(&state_path)?;
     assert!(second_state.active_start > first_state.active_start);
-    assert_eq!(ctx.store.lines().await?, full_history);
-    let projected = ctx.compaction.active_messages().await?;
+    assert_eq!(ctx.stores.store.lines().await?, full_history);
+    let projected = ctx.stores.compaction.active_messages().await?;
     assert!(projected.len() < full_history.len());
     assert_eq!(projected[0]["role"], "user");
     assert_eq!(projected[0]["internal"], true);
@@ -2409,19 +2497,20 @@ async fn compacted_history_projects_active_plan_after_summary_and_removes_it_on_
     )
     .await?;
     for index in 0..3 {
-        ctx.store
+        ctx.stores
+            .store
             .add_user(&format!("request {index}: {}", "x".repeat(2_000)))
             .await?;
-        ctx.store.add_assistant("progress", "", &[]).await?;
+        ctx.stores.store.add_assistant("progress", "", &[]).await?;
     }
     tokio::fs::write(
-        &ctx.store.path().with_file_name("plan.md"),
+        &ctx.stores.store.path().with_file_name("plan.md"),
         "# Active plan\n1. implement\n2. verify\n",
     )
     .await?;
     assert!(compact(&ctx, "manual", 0).await?.0);
 
-    let projected = ctx.compaction.active_messages().await?;
+    let projected = ctx.stores.compaction.active_messages().await?;
     assert!(
         projected[0]["content"]
             .as_str()
@@ -2437,8 +2526,8 @@ async fn compacted_history_projects_active_plan_after_summary_and_removes_it_on_
     assert_eq!(projected[0]["internal"], true);
     assert_eq!(projected[1]["internal"], true);
 
-    tokio::fs::remove_file(&ctx.store.path().with_file_name("plan.md")).await?;
-    let cleared = ctx.compaction.active_messages().await?;
+    tokio::fs::remove_file(&ctx.stores.store.path().with_file_name("plan.md")).await?;
+    let cleared = ctx.stores.compaction.active_messages().await?;
     assert!(cleared.iter().all(|message| {
         !message["content"]
             .as_str()
@@ -2469,13 +2558,13 @@ async fn summary_preserves_tool_commands_and_paths() -> anyhow::Result<()> {
         backend,
     )
     .await?;
-    ctx.store.add_user("fix the build").await?;
-    ctx.store.add_assistant("checking", "", &[]).await?;
+    ctx.stores.store.add_user("fix the build").await?;
+    ctx.stores.store.add_assistant("checking", "", &[]).await?;
 
     let (compacted, _) = compact(&ctx, "manual", 0).await?;
 
     assert!(compacted);
-    let summary = ctx.compaction.current_summary()?.unwrap();
+    let summary = ctx.stores.compaction.current_summary()?.unwrap();
     assert!(summary.contains("Read(src/lib.rs)"));
     assert!(summary.contains("Bash(cargo test)"));
     Ok(())
@@ -2493,10 +2582,12 @@ async fn zero_context_window_disables_auto_but_allows_manual_compaction() -> any
     )
     .await?;
     for index in 0..3 {
-        ctx.store
+        ctx.stores
+            .store
             .add_user(&format!("request {index}: {}", "x".repeat(4_000)))
             .await?;
-        ctx.store
+        ctx.stores
+            .store
             .add_assistant(&format!("progress {index}: {}", "y".repeat(4_000)), "", &[])
             .await?;
     }
@@ -2519,15 +2610,18 @@ async fn manual_compact_refuses_latched_session() -> anyhow::Result<()> {
     )
     .await?;
     for index in 0..3 {
-        ctx.store
+        ctx.stores
+            .store
             .add_user(&format!("request {index}: {}", "x".repeat(6_000)))
             .await?;
-        ctx.store
+        ctx.stores
+            .store
             .add_assistant(&format!("progress {index}: {}", "y".repeat(6_000)), "", &[])
             .await?;
     }
-    let state_path = ctx.store.path().with_file_name("context-state.json");
+    let state_path = ctx.stores.store.path().with_file_name("context-state.json");
     let _ = ctx
+        .stores
         .persistence_fault
         .raise(&state_path, "injected publish fault");
 
@@ -2555,10 +2649,12 @@ async fn summary_projection_failure_fails_compaction() -> anyhow::Result<()> {
     )
     .await?;
     for index in 0..4 {
-        ctx.store
+        ctx.stores
+            .store
             .add_user(&format!("request {index}: {}", "x".repeat(8_000)))
             .await?;
-        ctx.store
+        ctx.stores
+            .store
             .add_assistant(&format!("progress {index}: {}", "y".repeat(8_000)), "", &[])
             .await?;
     }
@@ -2566,8 +2662,8 @@ async fn summary_projection_failure_fails_compaction() -> anyhow::Result<()> {
     // context-state write succeeds, but the projection write cannot, and the
     // compaction must report an error instead of returning success with only
     // a dirty marker.
-    let _ = std::fs::remove_file(ctx.store.path().with_file_name("summary.txt"));
-    std::fs::create_dir(ctx.store.path().with_file_name("summary.txt"))?;
+    let _ = std::fs::remove_file(ctx.stores.store.path().with_file_name("summary.txt"));
+    std::fs::create_dir(ctx.stores.store.path().with_file_name("summary.txt"))?;
 
     let error = compact(&ctx, "manual", 50_000).await.unwrap_err();
 
@@ -2576,7 +2672,7 @@ async fn summary_projection_failure_fails_compaction() -> anyhow::Result<()> {
         message.contains("directory") || message.contains("projection"),
         "{message}"
     );
-    let state = load_state(&ctx.store.path().with_file_name("context-state.json"))?;
+    let state = load_state(&ctx.stores.store.path().with_file_name("context-state.json"))?;
     assert!(
         state.active_start > 0,
         "authoritative state is committed before the derived projection fails"
@@ -2598,16 +2694,18 @@ async fn cancelled_compaction_records_unknown_usage() -> anyhow::Result<()> {
     )
     .await?;
     for index in 0..4 {
-        ctx.store
+        ctx.stores
+            .store
             .add_user(&format!("request {index}: {}", "x".repeat(8_000)))
             .await?;
-        ctx.store
+        ctx.stores
+            .store
             .add_assistant(&format!("progress {index}: {}", "y".repeat(8_000)), "", &[])
             .await?;
     }
     let interrupt = ctx.interrupt.clone();
-    let engine = ctx.compaction.clone();
-    let usage = ctx.usage.clone();
+    let engine = ctx.stores.compaction.clone();
+    let usage = ctx.stores.usage.clone();
     let model = ctx.config.model.clone();
     let resolver = crate::config::model_resolver(&ctx.config);
     let task = tokio::spawn(async move {
@@ -2661,24 +2759,26 @@ async fn memo_epoch_is_shared_and_bumped_by_compaction() -> anyhow::Result<()> {
     )
     .await?;
     assert!(
-        Arc::ptr_eq(&ctx.memo_epoch, &ctx.compaction.memo_epoch()),
+        Arc::ptr_eq(&ctx.tools.memo_epoch, &ctx.stores.compaction.memo_epoch()),
         "context and compaction engine must share one memo epoch"
     );
     for index in 0..4 {
-        ctx.store
+        ctx.stores
+            .store
             .add_user(&format!("request {index}: {}", "x".repeat(8_000)))
             .await?;
-        ctx.store
+        ctx.stores
+            .store
             .add_assistant(&format!("progress {index}: {}", "y".repeat(8_000)), "", &[])
             .await?;
     }
-    let before = ctx.memo_epoch.load(Ordering::SeqCst);
+    let before = ctx.tools.memo_epoch.load(Ordering::SeqCst);
 
     let (compacted, _) = compact(&ctx, "manual", 50_000).await?;
 
     assert!(compacted);
     assert!(
-        ctx.memo_epoch.load(Ordering::SeqCst) > before,
+        ctx.tools.memo_epoch.load(Ordering::SeqCst) > before,
         "compaction commit must bump the shared memo epoch"
     );
     Ok(())
@@ -2746,7 +2846,7 @@ async fn summary_retry_discards_partial_output() -> anyhow::Result<()> {
     add_follow_up_turn(&ctx).await?;
 
     assert!(compact(&ctx, "manual", 0).await?.0);
-    let summary = ctx.compaction.read_summary().await.expect("summary");
+    let summary = ctx.stores.compaction.read_summary().await.expect("summary");
     assert!(summary.contains("fresh summary answer"), "{summary}");
     assert!(
         !summary.contains("stale partial summary"),
@@ -2765,16 +2865,19 @@ async fn startup_repair_loss_cleared_only_after_successful_commit() -> anyhow::R
         summary_backend(),
     )
     .await?;
-    ctx.store.add_user("head constraint").await?;
-    ctx.store.add_assistant("ack", "", &[]).await?;
-    ctx.store.add_runtime_user("plain injected text").await?;
-    ctx.store.add_user("second constraint").await?;
-    ctx.store.add_assistant("mid", "", &[]).await?;
-    ctx.store.add_user("third constraint").await?;
-    ctx.store.add_assistant("mid2", "", &[]).await?;
-    ctx.store.add_user("fourth constraint").await?;
+    ctx.stores.store.add_user("head constraint").await?;
+    ctx.stores.store.add_assistant("ack", "", &[]).await?;
+    ctx.stores
+        .store
+        .add_runtime_user("plain injected text")
+        .await?;
+    ctx.stores.store.add_user("second constraint").await?;
+    ctx.stores.store.add_assistant("mid", "", &[]).await?;
+    ctx.stores.store.add_user("third constraint").await?;
+    ctx.stores.store.add_assistant("mid2", "", &[]).await?;
+    ctx.stores.store.add_user("fourth constraint").await?;
 
-    let state_path = ctx.store.path().with_file_name("context-state.json");
+    let state_path = ctx.stores.store.path().with_file_name("context-state.json");
     let state = CompactionState {
         active_start: 2,
         summary: "authoritative summary".into(),
@@ -2782,14 +2885,14 @@ async fn startup_repair_loss_cleared_only_after_successful_commit() -> anyhow::R
     crate::session::atomic_file::atomic_replace(&state_path, &serde_json::to_vec_pretty(&state)?)?;
 
     let engine = CompactionEngine::new(
-        ctx.store.clone(),
-        ctx.store.path().with_file_name("summary.txt"),
+        ctx.stores.store.clone(),
+        ctx.stores.store.path().with_file_name("summary.txt"),
         ctx.config.base_url.clone(),
         &ctx.config,
-        ctx.stats.clone(),
-        ctx.usage.clone(),
+        ctx.stores.stats.clone(),
+        ctx.stores.usage.clone(),
         ctx.config.session_id.clone(),
-        ctx.display.clone(),
+        ctx.io.display.clone(),
         ctx.cancel.clone(),
         ctx.interrupt.clone(),
         summary_backend(),
@@ -2798,7 +2901,7 @@ async fn startup_repair_loss_cleared_only_after_successful_commit() -> anyhow::R
     )?;
     engine.validate_startup().await?;
 
-    let active = ctx.store.lines_from(3).await?;
+    let active = ctx.stores.store.lines_from(3).await?;
     let before =
         engine.build_summary_input(&active, 5, None, true, LlmModelTarget::new("flash", None))?;
     assert!(
@@ -2811,7 +2914,7 @@ async fn startup_repair_loss_cleared_only_after_successful_commit() -> anyhow::R
         .await?;
     assert!(compacted, "history must be compactable after the repair");
 
-    let new_active = ctx.store.lines_from(8).await?;
+    let new_active = ctx.stores.store.lines_from(8).await?;
     let after = engine.build_summary_input(
         &new_active,
         0,
@@ -2947,13 +3050,14 @@ async fn emergency_checkpoint_keeps_long_request_ends_in_projection() -> anyhow:
     )
     .await?;
     let request = format!("HEAD-MARKER{}TAIL-DO-NOT-DELETE", "x".repeat(20_000));
-    ctx.store.add_user(&request).await?;
+    ctx.stores.store.add_user(&request).await?;
     let shape = MainRequestShape {
         system_prompt: "",
         tools: &[],
         openai_tools: None,
     };
     let committed = ctx
+        .stores
         .compaction
         .commit_emergency_checkpoint(
             "audit_request_ends",
@@ -2969,7 +3073,7 @@ async fn emergency_checkpoint_keeps_long_request_ends_in_projection() -> anyhow:
         .await?;
     assert!(committed, "应急 checkpoint 必须提交");
 
-    let projection = serde_json::to_string(&ctx.compaction.active_messages().await?)?;
+    let projection = serde_json::to_string(&ctx.stores.compaction.active_messages().await?)?;
     assert!(projection.contains("HEAD-MARKER"), "{projection}");
     assert!(projection.contains("TAIL-DO-NOT-DELETE"), "{projection}");
     assert!(projection.contains("lossy excerpt"), "{projection}");
@@ -2977,7 +3081,7 @@ async fn emergency_checkpoint_keeps_long_request_ends_in_projection() -> anyhow:
         !projection.contains(&"x".repeat(3_000)),
         "投影里的摘录不能是全文"
     );
-    let history = serde_json::to_string(&ctx.store.lines().await?)?;
+    let history = serde_json::to_string(&ctx.stores.store.lines().await?)?;
     assert!(
         history.contains("TAIL-DO-NOT-DELETE") && history.contains(&"x".repeat(1_000)),
         "完整原文必须留在历史里"
@@ -2999,15 +3103,15 @@ async fn goal_state_is_not_mounted_before_a_compaction() -> anyhow::Result<()> {
         summary_backend(),
     )
     .await?;
-    ctx.goal_store.create(
+    ctx.stores.goal_store.create(
         crate::runtime::GoalSpec::new("GOAL-CONTRACT-MARKER"),
         "env".into(),
     )?;
     add_tool_history(&ctx).await?;
 
-    let rows = ctx.store.lines().await?;
+    let rows = ctx.stores.store.lines().await?;
     assert_eq!(
-        ctx.compaction.active_messages().await?,
+        ctx.stores.compaction.active_messages().await?,
         rows,
         "an uncompacted request is the durable history, with nothing mounted in front"
     );
@@ -3027,7 +3131,7 @@ async fn goal_contract_checkpoint_is_byte_stable_across_rounds() -> anyhow::Resu
         summary_backend(),
     )
     .await?;
-    let goal = ctx.goal_store.create(
+    let goal = ctx.stores.goal_store.create(
         crate::runtime::GoalSpec::new("GOAL-CONTRACT-MARKER"),
         "env".into(),
     )?;
@@ -3043,7 +3147,7 @@ async fn goal_contract_checkpoint_is_byte_stable_across_rounds() -> anyhow::Resu
             .cloned()
             .expect("the compacted window carries the goal contract")
     };
-    let before = checkpoint(&ctx.compaction.active_messages().await?);
+    let before = checkpoint(&ctx.stores.compaction.active_messages().await?);
     let text = before["content"].as_str().unwrap_or_default();
     assert!(text.contains("GOAL-CONTRACT-MARKER"), "{text}");
     for per_round in ["Round:", "Remaining turns", "Phase:", "Decision:"] {
@@ -3054,23 +3158,25 @@ async fn goal_contract_checkpoint_is_byte_stable_across_rounds() -> anyhow::Resu
     }
 
     // Only per-round state moves between rounds.
-    ctx.goal_store.change(&goal.id, goal.revision, |goal| {
-        goal.iterations.push(crate::session::goal::GoalIteration {
-            iteration: 1,
-            turn_id: "turn-1".into(),
-            billing_turn_id: None,
-            finished: true,
-            conversation_start: 0,
-            outcome_status: None,
-            outcome_error: None,
-        });
-        goal.phase = crate::session::goal::GoalPhase::Executing;
-        goal.reason = Some("round one finished".into());
-        goal.blocked_rounds = 2;
-        Ok(())
-    })?;
+    ctx.stores
+        .goal_store
+        .change(&goal.id, goal.revision, |goal| {
+            goal.iterations.push(crate::session::goal::GoalIteration {
+                iteration: 1,
+                turn_id: "turn-1".into(),
+                billing_turn_id: None,
+                finished: true,
+                conversation_start: 0,
+                outcome_status: None,
+                outcome_error: None,
+            });
+            goal.phase = crate::session::goal::GoalPhase::Executing;
+            goal.reason = Some("round one finished".into());
+            goal.blocked_rounds = 2;
+            Ok(())
+        })?;
 
-    let after = checkpoint(&ctx.compaction.active_messages().await?);
+    let after = checkpoint(&ctx.stores.compaction.active_messages().await?);
     // `_mink` is engine metadata that never reaches the provider, so the wire
     // bytes are the content (see `llm::transport::convert_messages_to_openai`).
     assert_eq!(
@@ -3093,7 +3199,7 @@ async fn second_compaction_summary_input_includes_goal_contract_checkpoint() -> 
         backend.clone(),
     )
     .await?;
-    ctx.goal_store.create(
+    ctx.stores.goal_store.create(
         crate::runtime::GoalSpec::new("GOAL-CACHE-ALIGN-MARKER"),
         "env".into(),
     )?;
@@ -3108,9 +3214,9 @@ async fn second_compaction_summary_input_includes_goal_contract_checkpoint() -> 
     // prefix including the goal contract checkpoint instead of diverging at index 1.
     add_tool_history(&ctx).await?;
     add_follow_up_turn(&ctx).await?;
-    let active = ctx.compaction.active_messages().await?;
+    let active = ctx.stores.compaction.active_messages().await?;
     let resolved = crate::config::model_resolver(&ctx.config).resolve(&ctx.config.model);
-    ctx.compaction.record_agent_request(
+    ctx.stores.compaction.record_agent_request(
         &resolved.actual,
         "prefix",
         10_000,

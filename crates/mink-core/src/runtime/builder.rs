@@ -107,18 +107,18 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
 
     if let Some(hook) = &post_init_hook {
         let system_prompt = ctx.build_system_prompt()?;
-        let tools_json = ctx.tool_surface.schemas();
+        let tools_json = ctx.tools.tool_surface.schemas();
         let workflows = crate::prompt::workflows::PromptWorkflowResolver::builtin()
-            .resolve(&ctx.tool_capabilities)?;
+            .resolve(&ctx.tools.tool_capabilities)?;
         let workflow_ids: Vec<String> = workflows
             .ordered()
             .iter()
             .map(|spec| spec.id.to_string())
             .collect();
         let workflow_fingerprint = workflows.fingerprint().to_string();
-        let dependency_fingerprint = ctx.capability_snapshot.dependency_fingerprint.clone();
-        let tool_surface_fingerprint = ctx.tool_surface.fingerprint().to_string();
-        let tool_capabilities_fingerprint = ctx.tool_capabilities.fingerprint().to_string();
+        let dependency_fingerprint = ctx.tools.capability_snapshot.dependency_fingerprint.clone();
+        let tool_surface_fingerprint = ctx.tools.tool_surface.fingerprint().to_string();
+        let tool_capabilities_fingerprint = ctx.tools.tool_capabilities.fingerprint().to_string();
         let log_ctx = ctx.clone();
         let log_event = |value: serde_json::Value| -> anyhow::Result<()> {
             log_ctx.log_raw_event(value);
@@ -129,7 +129,7 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
             cwd: &cwd,
             system_prompt: &system_prompt,
             tools: &tools_json,
-            capabilities: &ctx.capability_snapshot,
+            capabilities: &ctx.tools.capability_snapshot,
             workflow_ids: &workflow_ids,
             workflow_fingerprint: &workflow_fingerprint,
             tool_surface_fingerprint: &tool_surface_fingerprint,
@@ -141,7 +141,7 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         ctx.flush_event_log().await?;
     }
 
-    ctx.compaction.validate_startup().await?;
+    ctx.stores.compaction.validate_startup().await?;
 
     crate::session::metadata::ensure_metadata(
         &spaths,
@@ -158,7 +158,8 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
     .await?;
 
     let commit_display = event_display.clone();
-    ctx.store
+    ctx.stores
+        .store
         .observe_commits(Arc::new(move |conversation_seq, message| {
             commit_display.emit(crate::runtime::AgentEventKind::ConversationCommitted {
                 conversation_seq,
@@ -182,19 +183,20 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         });
     }
     if let Err(error) = ctx.flush_event_log().await {
-        ctx.display
+        ctx.io
+            .display
             .render_error(&format!("Event log flush failed: {error}"));
     }
 
     let session_info = SessionInfo::new(sid, session_ref, new_session, home, cwd, &spaths);
     let handle = crate::runtime::AgentRuntimeHandle {
-        input_inbox: ctx.input_inbox.clone(),
+        input_inbox: ctx.stores.input_inbox.clone(),
         goal_ctx: ctx.clone(),
         goal_driver: Arc::new(crate::runtime::goal::GoalDriver::new(
             goal_verifiers,
             goal_event_sink,
         )),
-        image_input: ctx.model_capabilities.image_input.clone(),
+        image_input: ctx.tools.model_capabilities.image_input.clone(),
         cmd_tx,
         session: session_info,
         event_display: event_display.clone(),

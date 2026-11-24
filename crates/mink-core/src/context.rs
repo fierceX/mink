@@ -176,42 +176,44 @@ impl From<&AgentSharedContext> for ToolContext {
     fn from(ctx: &AgentSharedContext) -> Self {
         Self {
             goal_drafting: ctx
+                .stores
                 .goal_store
                 .snapshot()
                 .is_some_and(|g| g.status == crate::session::goal::GoalStatus::Draft),
-            goal_review: ctx.goal_review.as_ref().cloned(),
+            goal_review: ctx.stores.goal_review.as_ref().cloned(),
             goal_adjudication: None,
             _session_lease: ctx
+                .stores
                 .session_lease
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
-            cwd: ctx.cwd.clone(),
-            home: ctx.home.clone(),
-            store: ctx.store.clone(),
-            artifacts: ctx.artifacts.clone(),
-            read_memo: ctx.read_memo.clone(),
-            memo_epoch: ctx.memo_epoch.clone(),
-            memo_mutation: ctx.memo_mutation.clone(),
-            snapshots: ctx.snapshots.clone(),
-            plan_store: ctx.plan_store.clone(),
-            todo_store: ctx.todo_store.clone(),
-            goal_store: ctx.goal_store.clone(),
-            persistence_fault: ctx.persistence_fault.clone(),
-            tool_config: ctx.tool_config.clone(),
+            cwd: ctx.paths.cwd.clone(),
+            home: ctx.paths.home.clone(),
+            store: ctx.stores.store.clone(),
+            artifacts: ctx.stores.artifacts.clone(),
+            read_memo: ctx.tools.read_memo.clone(),
+            memo_epoch: ctx.tools.memo_epoch.clone(),
+            memo_mutation: ctx.tools.memo_mutation.clone(),
+            snapshots: ctx.tools.snapshots.clone(),
+            plan_store: ctx.stores.plan_store.clone(),
+            todo_store: ctx.stores.todo_store.clone(),
+            goal_store: ctx.stores.goal_store.clone(),
+            persistence_fault: ctx.stores.persistence_fault.clone(),
+            tool_config: ctx.tools.tool_config.clone(),
             interrupt: ctx.interrupt.clone(),
             cancel: ctx.cancel.clone(),
-            read_only_fs: ctx.read_only_fs.clone(),
-            vfs_scope: ctx.vfs_scope.clone(),
-            resource_router: ctx.resource_router.clone(),
-            capability_snapshot: ctx.capability_snapshot.clone(),
-            tool_resolution_context: ctx.tool_resolution_context,
-            tool_surface: ctx.tool_surface.clone(),
-            tool_capabilities: ctx.tool_capabilities.clone(),
-            custom_tools: ctx.custom_tools.clone(),
-            model_capabilities: ctx.model_capabilities.clone(),
-            image_cache: ctx.image_cache.clone(),
-            this_turn_image_ids: ctx.this_turn_image_ids.clone(),
+            read_only_fs: ctx.tools.read_only_fs.clone(),
+            vfs_scope: ctx.tools.vfs_scope.clone(),
+            resource_router: ctx.tools.resource_router.clone(),
+            capability_snapshot: ctx.tools.capability_snapshot.clone(),
+            tool_resolution_context: ctx.tools.tool_resolution_context,
+            tool_surface: ctx.tools.tool_surface.clone(),
+            tool_capabilities: ctx.tools.tool_capabilities.clone(),
+            custom_tools: ctx.tools.custom_tools.clone(),
+            model_capabilities: ctx.tools.model_capabilities.clone(),
+            image_cache: ctx.media.image_cache.clone(),
+            this_turn_image_ids: ctx.media.this_turn_image_ids.clone(),
         }
     }
 }
@@ -367,13 +369,8 @@ fn display_tool_path(cwd: &Path, path: &Path) -> String {
         .replace(std::path::MAIN_SEPARATOR, "/")
 }
 
-/// AgentSharedContext holds all shared resources accessible by every component.
-pub struct AgentSharedContext {
-    pub(crate) active_model: Mutex<crate::config::ResolvedModel>,
-    pub(crate) goal_review: Option<Arc<dyn crate::goal_review::GoalReviewToolSession>>,
-    pub(crate) session_lease: Arc<Mutex<Option<Arc<crate::session::lease::SessionLease>>>>,
-    pub input_inbox: Arc<crate::session::input::InputInbox>,
-    pub config: Config,
+/// Session filesystem paths and API endpoint layout shared across runtime components.
+pub struct SessionPathsContext {
     pub cwd: PathBuf,
     pub home: PathBuf,
     /// Value rendered in the model-visible `<environment>` block. Differs from
@@ -382,28 +379,33 @@ pub struct AgentSharedContext {
     pub environment_home: PathBuf,
     pub session_layout: SessionLayout,
     pub api_url: String,
-    pub llm_backend: Arc<dyn LlmBackend>,
+    pub events_path: PathBuf,
+}
+
+/// Durable session stores, telemetry journals, compaction engine, and session leases.
+pub struct SessionStores {
     pub store: Arc<ConversationStore>,
     pub artifacts: Arc<ArtifactManager>,
     pub todo_store: Arc<TodoStore>,
-    pub(crate) goal_store: Arc<crate::session::goal::GoalStore>,
     /// Session-lifetime Plan store: one journal/transition lock per session.
     pub(crate) plan_store: Arc<PlanStore>,
+    pub(crate) goal_store: Arc<crate::session::goal::GoalStore>,
+    pub input_inbox: Arc<crate::session::input::InputInbox>,
+    pub stats: Arc<StatsTracker>,
+    pub usage: Arc<UsageJournal>,
+    pub compaction: Arc<CompactionEngine>,
     /// Session-wide publish-fault latch (see `session::persistence`).
     pub(crate) persistence_fault: crate::session::persistence::PersistenceFault,
+    pub(crate) session_lease: Arc<Mutex<Option<Arc<crate::session::lease::SessionLease>>>>,
+    pub(crate) goal_review: Option<Arc<dyn crate::goal_review::GoalReviewToolSession>>,
+}
+
+/// Resolved tool surface, capabilities, snapshots, and resource routing for the session.
+pub struct ToolRuntimeContext {
     pub read_memo: Arc<Mutex<crate::tools::read_memo::ReadMemo>>,
     pub memo_epoch: Arc<AtomicU64>,
     pub memo_mutation: Arc<AtomicU64>,
     pub snapshots: Arc<Mutex<FileSnapshotStore>>,
-    pub stats: Arc<StatsTracker>,
-    pub usage: Arc<UsageJournal>,
-    pub compaction: Arc<CompactionEngine>,
-    pub cancel: CancellationToken,
-    pub display: Arc<dyn Display>,
-    /// Optional live observer for the durable event vocabulary (`events.jsonl`).
-    pub(crate) session_event_sink: Option<Arc<dyn crate::runtime::SessionEventSink>>,
-    /// Optional sink for live sub-agent streaming. TUI sets this to a channel-backed sink.
-    pub sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
     pub read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
     pub vfs_scope: VfsScope,
     pub resource_router: Arc<ResourceRouter>,
@@ -416,21 +418,35 @@ pub struct AgentSharedContext {
     pub(crate) prefix_source: Option<Arc<dyn crate::runtime::PrefixSource>>,
     pub(crate) model_capabilities:
         Arc<crate::capabilities::model_capabilities::SessionModelCapabilities>,
+}
+
+/// Image capture and per-turn materialization deduplication state.
+pub struct TurnMediaState {
     pub(crate) image_cache: Arc<crate::session::image_cache::ImageCache>,
     /// Image ids captured during the current user input (v7 §9.5).
     pub(crate) this_turn_image_ids: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Image ids whose unavailability warning was already shown in a previous
     /// request (cross-request dedup, review fix).
     pub(crate) warned_image_ids: Arc<Mutex<std::collections::HashSet<String>>>,
-    pub events_path: PathBuf,
-    pub immutable_prefix: Mutex<Option<ImmutablePrefix>>,
+}
+
+/// Sub-agent hierarchy identity and live output sink.
+pub struct DelegationContext {
     /// 是否为子代理上下文。为 true 时禁止递归调用 SubAgent。
     pub is_sub_agent: bool,
     /// Delegation depth of this agent: 0 for a primary agent, parent + 1 for a
     /// delegated child. Persisted in child metadata and enforced by the surface.
     pub sub_agent_depth: u32,
-    /// 用于中断当前任务的事件信号。每轮开始时重置为 false。
-    pub interrupt: InterruptSignal,
+    /// Optional sink for live sub-agent streaming. TUI sets this to a channel-backed sink.
+    pub sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
+}
+
+/// Terminal display, event log writer, prefix lock, and stream-json flush state.
+pub struct EventIoContext {
+    pub display: Arc<dyn Display>,
+    /// Optional live observer for the durable event vocabulary (`events.jsonl`).
+    pub(crate) session_event_sink: Option<Arc<dyn crate::runtime::SessionEventSink>>,
+    pub immutable_prefix: Mutex<Option<ImmutablePrefix>>,
     /// Avoid repeated stderr warnings if event logging starts failing.
     pub event_log_warned: AtomicBool,
     /// Optional serialized writer for production runtimes. Hand-built test
@@ -445,17 +461,35 @@ pub struct AgentSharedContext {
     pub(crate) stream_flush_last: Mutex<Option<Instant>>,
 }
 
+/// AgentSharedContext holds all shared resources accessible by every component.
+pub struct AgentSharedContext {
+    pub config: Config,
+    pub(crate) active_model: Mutex<crate::config::ResolvedModel>,
+    pub llm_backend: Arc<dyn LlmBackend>,
+    pub cancel: CancellationToken,
+    /// 用于中断当前任务的事件信号。每轮开始时重置为 false。
+    pub interrupt: InterruptSignal,
+    pub paths: SessionPathsContext,
+    pub stores: SessionStores,
+    pub tools: ToolRuntimeContext,
+    pub media: TurnMediaState,
+    pub delegation: DelegationContext,
+    pub io: EventIoContext,
+}
+
 impl AgentSharedContext {
     pub(crate) fn todo_read_provider(&self) -> Option<&str> {
         use crate::tools::semantic_capabilities::ToolSemanticCapability::TodoInspect;
-        self.tool_capabilities
+        self.tools
+            .tool_capabilities
             .primary_provider(TodoInspect)
             .map(|provider| provider.tool.as_str())
     }
 
     pub(crate) fn todo_advance_provider(&self) -> Option<&str> {
         use crate::tools::semantic_capabilities::ToolSemanticCapability::TodoProgressTransition;
-        self.tool_capabilities
+        self.tools
+            .tool_capabilities
             .primary_provider(TodoProgressTransition)
             .map(|provider| provider.tool.as_str())
     }
@@ -473,23 +507,25 @@ impl AgentSharedContext {
     /// prefix through `PrefixSource` still use this as the compiled fallback.
     pub(crate) fn build_system_prompt(&self) -> anyhow::Result<String> {
         let system_prompt = crate::prompt::Builder {
-            cwd: self.cwd.clone(),
-            home: self.environment_home.clone(),
-            delegation: (self.sub_agent_depth > 0).then_some(crate::prompt::DelegationScope {
-                depth: self.sub_agent_depth,
-                max_depth: self.tool_config.sub_agent_max_depth,
-            }),
-            skill_snapshot: Arc::new(self.capability_snapshot.skills.clone()),
-            context_file_snapshot: Arc::new(self.capability_snapshot.context_files.clone()),
-            rule_snapshot: Arc::new(self.capability_snapshot.rules.clone()),
+            cwd: self.paths.cwd.clone(),
+            home: self.paths.environment_home.clone(),
+            delegation: (self.delegation.sub_agent_depth > 0).then_some(
+                crate::prompt::DelegationScope {
+                    depth: self.delegation.sub_agent_depth,
+                    max_depth: self.tools.tool_config.sub_agent_max_depth,
+                },
+            ),
+            skill_snapshot: Arc::new(self.tools.capability_snapshot.skills.clone()),
+            context_file_snapshot: Arc::new(self.tools.capability_snapshot.context_files.clone()),
+            rule_snapshot: Arc::new(self.tools.capability_snapshot.rules.clone()),
             mission_file: self.config.mission_file.clone(),
             mission_content: self.config.mission_content.clone(),
-            tool_surface: self.tool_surface.clone(),
-            tool_capabilities: self.tool_capabilities.clone(),
-            edit_mode: self.tool_config.edit_mode,
-            edit_fuzzy_match: self.tool_config.edit_fuzzy_match,
-            edit_fuzzy_threshold: self.tool_config.edit_fuzzy_threshold,
-            edit_enforce_seen_lines: self.tool_config.edit_enforce_seen_lines,
+            tool_surface: self.tools.tool_surface.clone(),
+            tool_capabilities: self.tools.tool_capabilities.clone(),
+            edit_mode: self.tools.tool_config.edit_mode,
+            edit_fuzzy_match: self.tools.tool_config.edit_fuzzy_match,
+            edit_fuzzy_threshold: self.tools.tool_config.edit_fuzzy_threshold,
+            edit_enforce_seen_lines: self.tools.tool_config.edit_enforce_seen_lines,
             signal_policy: self.config.signal_policy,
             skill_index_budget_chars: crate::prompt::skill_index_budget_chars(
                 self.config.max_context_tokens,
@@ -516,8 +552,11 @@ impl AgentSharedContext {
     }
 
     pub fn usage_scope(&self, kind: UsageKind) -> UsageScope {
-        let mut scope = self.usage.scope(kind, self.config.session_id.clone());
-        if let Some(review) = &self.goal_review {
+        let mut scope = self
+            .stores
+            .usage
+            .scope(kind, self.config.session_id.clone());
+        if let Some(review) = &self.stores.goal_review {
             scope.billing_turn_id = review.billing_turn_id();
         }
         scope
@@ -540,7 +579,7 @@ impl AgentSharedContext {
         let value = serde_json::to_value(&event)?;
         let line = serde_json::to_string(&value)?;
         let persisted = if self.config.log_events {
-            match &self.event_log_writer {
+            match &self.io.event_log_writer {
                 Some(writer) => writer
                     .send_critical_async(
                         line.clone(),
@@ -587,7 +626,7 @@ impl AgentSharedContext {
     /// Forward one typed event to the optional live observer. Delivery is
     /// independent of `log_events` and must not affect turn state.
     fn notify_session_event(&self, event: &crate::events::EventLog) {
-        let Some(sink) = &self.session_event_sink else {
+        let Some(sink) = &self.io.session_event_sink else {
             return;
         };
         let session_id = self.config.session_id.as_str();
@@ -628,12 +667,12 @@ impl AgentSharedContext {
                 "critical event logged through log_event; use log_critical_event for a reliable commit",
             );
             if self.config.log_events
-                && let Some(writer) = &self.event_log_writer
+                && let Some(writer) = &self.io.event_log_writer
             {
                 writer.send_best_effort(line.clone());
             }
         } else if self.config.log_events {
-            if let Some(writer) = &self.event_log_writer {
+            if let Some(writer) = &self.io.event_log_writer {
                 // Async turn paths must not block on writer backpressure: an
                 // overflow is counted and surfaces on the next flush.
                 writer.send_best_effort(line.clone());
@@ -656,7 +695,7 @@ impl AgentSharedContext {
             }
         };
         if self.config.log_events {
-            if let Some(writer) = &self.event_log_writer {
+            if let Some(writer) = &self.io.event_log_writer {
                 writer.send_best_effort(line.clone());
             } else {
                 self.warn_event_log_once("event log writer is not configured; event discarded");
@@ -666,14 +705,14 @@ impl AgentSharedContext {
     }
 
     pub(crate) async fn flush_event_log(&self) -> std::io::Result<()> {
-        if let Some(writer) = &self.event_log_writer {
+        if let Some(writer) = &self.io.event_log_writer {
             writer.flush().await?;
         }
         Ok(())
     }
 
     fn warn_event_log_once(&self, message: &str) {
-        if !self.event_log_warned.swap(true, Ordering::SeqCst) {
+        if !self.io.event_log_warned.swap(true, Ordering::SeqCst) {
             let _ = writeln!(std::io::stderr(), "[mink] Warning: {message}");
         }
     }
@@ -696,6 +735,7 @@ impl AgentSharedContext {
 
         let now = Instant::now();
         let mut last = self
+            .io
             .stream_flush_last
             .lock()
             .unwrap_or_else(|error| error.into_inner());

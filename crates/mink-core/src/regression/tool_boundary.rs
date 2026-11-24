@@ -117,7 +117,7 @@ async fn safety_blocked_bash_emits_typed_signal_event() -> anyhow::Result<()> {
     // turn 级错误指标），同时照常产生类型化 signal 事件。
     assert_eq!(executor.tool_error_count(), 1);
     h.ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&h.ctx.paths.events_path).await?;
     let signals = crate::regression::parsed_signal_events(&events);
     assert!(
         signals.iter().any(|signal| {
@@ -263,8 +263,8 @@ async fn virtual_search_tools_route_through_injected_backend() -> anyhow::Result
 
     let mut ctx = test_context_for_agent("virtual-search-routing").await?;
     let shared = Arc::get_mut(&mut ctx).expect("test context should be uniquely owned");
-    shared.read_only_fs = Some(Arc::new(SearchVfs));
-    shared.vfs_scope.resource_session_id = "knowledge-session".into();
+    shared.tools.read_only_fs = Some(Arc::new(SearchVfs));
+    shared.tools.vfs_scope.resource_session_id = "knowledge-session".into();
 
     let runner = ToolRunner::new(Arc::new(ToolContext::from(ctx.as_ref())));
     let results = runner

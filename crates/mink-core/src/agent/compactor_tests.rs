@@ -36,22 +36,25 @@ async fn maybe_compact_attempts_again_after_a_successful_compaction() -> anyhow:
         backend,
     )
     .await?;
-    ctx.store
+    ctx.stores
+        .store
         .add_user(&format!("first {}", "x".repeat(24_000)))
         .await?;
-    ctx.store
+    ctx.stores
+        .store
         .add_assistant(&"y".repeat(24_000), "", &[])
         .await?;
-    ctx.store
+    ctx.stores
+        .store
         .add_user(&format!("second {}", "z".repeat(6_000)))
         .await?;
-    ctx.store.add_assistant("ack", "", &[]).await?;
-    ctx.store.add_user("third").await?;
-    ctx.store.add_assistant("ack", "", &[]).await?;
+    ctx.stores.store.add_assistant("ack", "", &[]).await?;
+    ctx.stores.store.add_user("third").await?;
+    ctx.stores.store.add_assistant("ack", "", &[]).await?;
 
     let prefix = PrefixManager::new(ctx.clone());
     let mut compactor = TurnCompactor::new(ctx.clone(), prefix);
-    let mut messages = ctx.store.lines().await?;
+    let mut messages = ctx.stores.store.lines().await?;
     let mut system_prompt = String::new();
     let mut tools = Vec::new();
     let target = LlmModelTarget::new("test-model", None);
@@ -76,10 +79,11 @@ async fn maybe_compact_attempts_again_after_a_successful_compaction() -> anyhow:
     assert_eq!(compactor.compactions_this_turn(), 1);
 
     // 同一输入的下一个 round 继续追加内容：必须还能压。
-    ctx.store
+    ctx.stores
+        .store
         .add_assistant(&"w".repeat(24_000), "", &[])
         .await?;
-    messages = ctx.store.lines().await?;
+    messages = ctx.stores.store.lines().await?;
     let projection = crate::llm::request::RequestProjection::build(
         messages.as_slice(),
         system_prompt.as_str(),
@@ -101,10 +105,10 @@ async fn maybe_compact_attempts_again_after_a_successful_compaction() -> anyhow:
         "a later compaction in the same input must still run: {detail}"
     );
     assert_eq!(compactor.compactions_this_turn(), 2);
-    assert_eq!(messages, ctx.compaction.active_messages().await?);
+    assert_eq!(messages, ctx.stores.compaction.active_messages().await?);
 
     ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&ctx.paths.events_path).await?;
     assert_eq!(
         events.matches("\"type\":\"compact\"").count(),
         2,
@@ -128,17 +132,19 @@ async fn maybe_compact_success_refreshes_context_and_prefix() -> anyhow::Result<
     })
     .await?;
     for idx in 0..3 {
-        ctx.store
+        ctx.stores
+            .store
             .add_user(&format!("user {idx} {}", "context ".repeat(500)))
             .await?;
-        ctx.store
+        ctx.stores
+            .store
             .add_assistant(&format!("assistant {idx}"), "", &[])
             .await?;
     }
     let prefix = PrefixManager::new(ctx.clone());
     let (_old_prompt, _old_tools) = prefix.ensure().await?;
     let mut compactor = TurnCompactor::new(ctx.clone(), prefix);
-    let mut messages = ctx.store.lines().await?;
+    let mut messages = ctx.stores.store.lines().await?;
     let mut system_prompt = String::new();
     let mut tools = Vec::new();
 
@@ -161,7 +167,7 @@ async fn maybe_compact_success_refreshes_context_and_prefix() -> anyhow::Result<
 
     assert!(did_compact, "{detail}");
     assert_eq!(compactor.compactions_this_turn(), 1);
-    assert_eq!(messages, ctx.compaction.active_messages().await?);
+    assert_eq!(messages, ctx.stores.compaction.active_messages().await?);
     assert!(!system_prompt.is_empty());
     assert!(!tools.is_empty());
     Ok(())
@@ -214,7 +220,7 @@ async fn goal_checkpoint_survives_compaction_and_stays_out_of_immutable_prefix()
         backend,
     )
     .await?;
-    let goal = ctx.goal_store.create(
+    let goal = ctx.stores.goal_store.create(
         crate::runtime::GoalSpec::new("GOAL-CONTRACT-MARKER"),
         "env".into(),
     )?;
@@ -222,16 +228,17 @@ async fn goal_checkpoint_survives_compaction_and_stays_out_of_immutable_prefix()
     // projection row is written any more, so the head is the only goal state in
     // the compacted window.
     for n in 0..3 {
-        ctx.store
+        ctx.stores
+            .store
             .add_user(&format!("user {n} {}", "context ".repeat(700)))
             .await?;
-        ctx.store.add_assistant("ack", "", &[]).await?;
+        ctx.stores.store.add_assistant("ack", "", &[]).await?;
     }
     let prefix = PrefixManager::new(ctx.clone());
     let (prompt_before, tools_before) = prefix.ensure().await?;
     assert!(!prompt_before.contains("GOAL-CONTRACT-MARKER"));
     let mut compactor = TurnCompactor::new(ctx.clone(), prefix);
-    let mut messages = ctx.compaction.active_messages().await?;
+    let mut messages = ctx.stores.compaction.active_messages().await?;
     let mut prompt = String::new();
     let mut tools = vec![];
     let projection = crate::llm::request::RequestProjection::build(
@@ -268,7 +275,7 @@ async fn goal_checkpoint_survives_compaction_and_stays_out_of_immutable_prefix()
     // The fold lives in the projection, not in the durable history: the oldest
     // rows stay in `conversation.jsonl` while the active window starts after
     // them.
-    let rows = ctx.store.lines().await?;
+    let rows = ctx.stores.store.lines().await?;
     assert!(
         !messages.iter().any(|m| m == &rows[0]),
         "the compacted window must have folded the oldest durable row: {messages:#?}"

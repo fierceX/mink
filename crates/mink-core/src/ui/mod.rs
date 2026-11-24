@@ -346,7 +346,7 @@ pub async fn title_snapshot(
     ctx: &crate::context::AgentSharedContext,
     belief: f64,
 ) -> StatsSnapshot {
-    let stats = ctx.stats.snapshot().await;
+    let stats = ctx.stores.stats.snapshot().await;
     StatsSnapshot {
         current_turn_count: stats.current_turn_count,
         agent_request_count: stats.agent_request_count,
@@ -366,7 +366,7 @@ pub async fn render_title_snapshot(
     belief: f64,
 ) {
     let snapshot = title_snapshot(ctx, belief).await;
-    ctx.display.render_title_update(model_label, &snapshot);
+    ctx.io.display.render_title_update(model_label, &snapshot);
 }
 
 #[cfg(test)]

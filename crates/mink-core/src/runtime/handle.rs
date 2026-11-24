@@ -442,6 +442,7 @@ impl AgentRuntimeHandle {
         let (source, goal_iteration) = if goal_source.is_some() {
             let goal = self
                 .goal_ctx
+                .stores
                 .goal_store
                 .begin_iteration(turn_id.as_str(), goal_source.unwrap_or(0))
                 .map_err(|e| RuntimeError::Command(format!("{e:#}")))?;
@@ -718,6 +719,7 @@ impl AgentRuntimeHandle {
             return Err(RuntimeError::Closed);
         }
         self.goal_ctx
+            .stores
             .persistence_fault
             .check()
             .map_err(|e| RuntimeError::Command(format!("{e:#}")))
@@ -762,6 +764,7 @@ impl AgentRuntimeHandle {
         {
             match self
                 .goal_ctx
+                .stores
                 .goal_store
                 .pause_if_active("paused by user interrupt")
             {
@@ -772,7 +775,7 @@ impl AgentRuntimeHandle {
                     // the current run so it cannot keep scheduling, and report
                     // the failure instead of a silent pause.
                     self.stop_run_after_failed_stop_intent(&format!("{error:#}"));
-                    self.goal_ctx.display.render_error(&format!("{error:#}"));
+                    self.goal_ctx.io.display.render_error(&format!("{error:#}"));
                 }
             }
         }
@@ -945,7 +948,7 @@ impl AgentRuntime {
             &mut shutdown_timed_out,
         )
         .await;
-        let usage = self.ctx.usage.clone();
+        let usage = self.ctx.stores.usage.clone();
         flush_stage_blocking(
             SHUTDOWN_STAGE_BUDGET,
             "usage flush",
@@ -957,7 +960,7 @@ impl AgentRuntime {
         flush_stage(
             SHUTDOWN_STAGE_BUDGET,
             "stats flush",
-            self.ctx.stats.flush(),
+            self.ctx.stores.stats.flush(),
             &mut failures,
             &mut shutdown_timed_out,
         )
@@ -965,12 +968,13 @@ impl AgentRuntime {
         flush_stage(
             SHUTDOWN_STAGE_BUDGET,
             "compaction projection flush",
-            self.ctx.compaction.flush_projection(),
+            self.ctx.stores.compaction.flush_projection(),
             &mut failures,
             &mut shutdown_timed_out,
         )
         .await;
         self.ctx
+            .stores
             .session_lease
             .lock()
             .unwrap_or_else(|e| e.into_inner())

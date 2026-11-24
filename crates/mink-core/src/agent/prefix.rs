@@ -16,7 +16,7 @@ impl PrefixManager {
     /// Dependency fingerprint of the current session capabilities.
     fn current_dependency_fingerprint(&self) -> Result<String> {
         let workflows = crate::prompt::workflows::PromptWorkflowResolver::builtin()
-            .resolve(&self.ctx.tool_capabilities)?;
+            .resolve(&self.ctx.tools.tool_capabilities)?;
         Ok(self.dependency_fingerprint(&workflows))
     }
 
@@ -26,28 +26,29 @@ impl PrefixManager {
     ) -> String {
         format!(
             "mink-prefix-dependencies-v2\0{}\0{}\0{}\0{}\0{}",
-            self.ctx.capability_snapshot.dependency_fingerprint,
-            self.ctx.tool_surface.fingerprint(),
-            self.ctx.tool_capabilities.fingerprint(),
+            self.ctx.tools.capability_snapshot.dependency_fingerprint,
+            self.ctx.tools.tool_surface.fingerprint(),
+            self.ctx.tools.tool_capabilities.fingerprint(),
             workflows.fingerprint(),
-            self.ctx.model_capabilities.capability_fingerprint,
+            self.ctx.tools.model_capabilities.capability_fingerprint,
         )
     }
 
     pub async fn ensure(&self) -> Result<(String, Vec<serde_json::Value>)> {
-        if let Some(source) = &self.ctx.prefix_source
-            && let Some(prefix) = source.prefix(&self.ctx.events_path)
+        if let Some(source) = &self.ctx.tools.prefix_source
+            && let Some(prefix) = source.prefix(&self.ctx.paths.events_path)
         {
             return Ok(prefix);
         }
 
         // One async build gate: the std guard below is never held across the
         // critical-event await (the future must stay Send).
-        let _build = self.ctx.prefix_build_lock.lock().await;
+        let _build = self.ctx.io.prefix_build_lock.lock().await;
 
         {
             let mut guard = self
                 .ctx
+                .io
                 .immutable_prefix
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
@@ -73,11 +74,11 @@ impl PrefixManager {
         // here and cached inside ImmutablePrefix (v7 §3.4). Unsupported
         // sessions leave the schema byte-for-byte unchanged.
         let tools_json = crate::tools::surface::augment_read_schema_for_image(
-            self.ctx.tool_surface.schemas(),
-            &self.ctx.model_capabilities,
+            self.ctx.tools.tool_surface.schemas(),
+            &self.ctx.tools.model_capabilities,
         );
         let workflows = crate::prompt::workflows::PromptWorkflowResolver::builtin()
-            .resolve(&self.ctx.tool_capabilities)?;
+            .resolve(&self.ctx.tools.tool_capabilities)?;
         self.ctx
             .log_event(crate::events::EventLog::PromptWorkflowResolution {
                 active_workflows: workflows
@@ -119,6 +120,7 @@ impl PrefixManager {
         {
             let mut guard = self
                 .ctx
+                .io
                 .immutable_prefix
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
@@ -131,6 +133,7 @@ impl PrefixManager {
     pub fn invalidate(&self) {
         *self
             .ctx
+            .io
             .immutable_prefix
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;

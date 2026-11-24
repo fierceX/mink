@@ -65,7 +65,7 @@ async fn sub_agent_success_formats_result_and_records_usage() -> anyhow::Result<
     assert_eq!(metadata["sub_agent"]["depth"], 1);
     assert_eq!(metadata["sub_agent"]["input_tokens"], 10);
     assert_eq!(metadata["sub_agent"]["output_tokens"], 5);
-    let stats = h.ctx.stats.snapshot().await;
+    let stats = h.ctx.stores.stats.snapshot().await;
     assert_eq!(stats.sub_agent_request_count, 1);
     assert_eq!(stats.agent_request_count, 2);
     assert_eq!(stats.total_input_tokens, 10);
@@ -347,7 +347,7 @@ async fn sub_agent_executor_with_mock_llm_captures_child_output() -> anyhow::Res
         ]],
     ));
     let h = harness_with_backend("sub-executor-mock", llm.clone()).await?;
-    h.ctx.store.add_user("parent context").await?;
+    h.ctx.stores.store.add_user("parent context").await?;
     let parent = h.ctx.clone();
     let executor = SubAgentExecutor::new(
         parent.clone(),
@@ -364,8 +364,8 @@ async fn sub_agent_executor_with_mock_llm_captures_child_output() -> anyhow::Res
         "unexpected thinking: {}",
         result.thinking
     );
-    assert_eq!(h.ctx.store.lines().await?.len(), 1);
-    let records = h.ctx.usage.all_records()?;
+    assert_eq!(h.ctx.stores.store.lines().await?.len(), 1);
+    let records = h.ctx.stores.usage.all_records()?;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].kind, crate::session::usage::UsageKind::SubAgent);
     assert_eq!(records[0].origin_session_id, "sub_mock");
@@ -404,7 +404,7 @@ async fn real_deepseek_api_smoke_streams_response() -> anyhow::Result<()> {
             max_tokens: h.ctx.max_tokens(),
             cancel: h.ctx.cancel.clone(),
             verbose: h.ctx.verbose(),
-            display: h.ctx.display.clone(),
+            display: h.ctx.io.display.clone(),
         })
         .await?;
     let mut stream = response.events;
@@ -695,7 +695,7 @@ async fn sub_agent_results_follow_input_order_and_count_usage_per_child() -> any
 
     // Each child is accounted exactly once (completion order differs):
     // request_count counts children, token totals sum both.
-    let stats = h.ctx.stats.snapshot().await;
+    let stats = h.ctx.stores.stats.snapshot().await;
     assert_eq!(stats.sub_agent_request_count, 2);
     assert_eq!(stats.total_input_tokens, 30);
     assert_eq!(stats.total_output_tokens, 2);
@@ -706,6 +706,7 @@ async fn sub_agent_results_follow_input_order_and_count_usage_per_child() -> any
 async fn timed_out_child_does_not_reuse_parent_usage() -> anyhow::Result<()> {
     let h = harness_with("sub-timeout-parent-stats", false, 1).await?;
     h.ctx
+        .stores
         .stats
         .record_usage(&crate::protocol::UsageEvent {
             input_tokens: 10,
@@ -714,7 +715,7 @@ async fn timed_out_child_does_not_reuse_parent_usage() -> anyhow::Result<()> {
             cache_creation_input_tokens: 1,
         })
         .await;
-    let before = h.ctx.stats.snapshot().await;
+    let before = h.ctx.stores.stats.snapshot().await;
     let coordinator = SubAgentCoordinator::new(h.ctx.clone());
     let mut result = internal_result("SubAgent");
     result.spawns_sub_agent = true;
@@ -755,7 +756,7 @@ async fn timed_out_child_does_not_reuse_parent_usage() -> anyhow::Result<()> {
     assert_eq!(metadata["sub_agent"]["output_tokens"], 0);
     assert_eq!(metadata["sub_agent"]["usage_known"], false);
     assert!(metadata["sub_agent"].get("elapsed_known").is_none());
-    let after = h.ctx.stats.snapshot().await;
+    let after = h.ctx.stores.stats.snapshot().await;
     assert_eq!(after.agent_request_count, before.agent_request_count);
     assert_eq!(after.total_input_tokens, before.total_input_tokens);
     assert_eq!(after.total_output_tokens, before.total_output_tokens);
@@ -881,9 +882,9 @@ async fn nested_delegation_is_allowed_when_depth_budget_remains() -> anyhow::Res
         h.ctx.config.clone(),
     )
     .await?;
-    assert_eq!(child.context().sub_agent_depth, 1);
+    assert_eq!(child.context().delegation.sub_agent_depth, 1);
     assert!(
-        child.context().tool_surface.has("SubAgent"),
+        child.context().tools.tool_surface.has("SubAgent"),
         "a child below the configured maximum must retain SubAgent"
     );
 

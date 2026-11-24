@@ -31,15 +31,15 @@ impl super::TurnExecutor {
         let call_context = crate::tools::semantic_capabilities::CapabilityCallContext {
             tool_name: &first.name,
             input: &first.input_json,
-            resource_router: &self.ctx.resource_router,
-            filesystem_backend: self.ctx.tool_resolution_context.filesystem_backend(),
+            resource_router: &self.ctx.tools.resource_router,
+            filesystem_backend: self.ctx.tools.tool_resolution_context.filesystem_backend(),
         };
         let decision = self.recovery_policy.classify_first_call(&call_context);
         if let crate::agent::recovery_policy::RecoveryFirstCallDecision::Blocked(guidance) =
             decision
         {
             guidance
-                .validate(&self.ctx.tool_surface)
+                .validate(&self.ctx.tools.tool_surface)
                 .expect("RecoveryPolicy emitted an inactive tool reference");
             let max_blocks = self.ctx.config.signal.guard_max_blocks;
             if self.local.guard_blocks < max_blocks {
@@ -104,11 +104,12 @@ impl super::TurnExecutor {
             let full = if path.is_absolute() {
                 path.clone()
             } else {
-                self.ctx.cwd.join(&path)
+                self.ctx.paths.cwd.join(&path)
             };
             let candidate = {
                 let snapshots = self
                     .ctx
+                    .tools
                     .snapshots
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -147,7 +148,7 @@ impl super::TurnExecutor {
             };
             let publish_path = full.clone();
             let publish_bytes = restored.into_bytes();
-            let publish_fault = self.ctx.persistence_fault.clone();
+            let publish_fault = self.ctx.stores.persistence_fault.clone();
             let publish_result = tokio::task::spawn_blocking(move || {
                 crate::session::persistence::publish_state_with_permissions(
                     &publish_path,
@@ -165,7 +166,7 @@ impl super::TurnExecutor {
                         error: error.to_string(),
                     })
                     .await?;
-                if self.ctx.persistence_fault.info().is_some() {
+                if self.ctx.stores.persistence_fault.info().is_some() {
                     // Published-but-unsynced without successful recovery:
                     // fail closed instead of continuing on unknown state.
                     return Err(error);
@@ -173,6 +174,7 @@ impl super::TurnExecutor {
                 continue;
             }
             self.ctx
+                .tools
                 .memo_mutation
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             rolled_back.push(serde_json::json!({
@@ -186,7 +188,7 @@ impl super::TurnExecutor {
                     files: rolled_back.clone(),
                 })
                 .await?;
-            self.ctx.display.render_info(&format!(
+            self.ctx.io.display.render_info(&format!(
                 "Signal rollback: restored {} file(s) to their last read snapshot",
                 rolled_back.len()
             ));
@@ -205,7 +207,7 @@ impl super::TurnExecutor {
         if self.local.replan_attempts >= MAX_REPLAN_ATTEMPTS_PER_INPUT {
             return Ok(None);
         }
-        if !self.ctx.tool_surface.has("SubAgent") {
+        if !self.ctx.tools.tool_surface.has("SubAgent") {
             return Ok(None);
         }
         self.local.replan_attempts += 1;
@@ -235,7 +237,7 @@ impl super::TurnExecutor {
                         error: error.to_string(),
                     })
                     .await?;
-                self.ctx.display.render_info(&format!(
+                self.ctx.io.display.render_info(&format!(
                     "Signal replan unavailable: {error}; falling back to evidence/guard",
                 ));
                 return Ok(None);
@@ -262,8 +264,9 @@ impl super::TurnExecutor {
              this revised plan. Treat it as new evidence, not a user request.\n{}",
             result.text
         );
-        self.ctx.store.add_runtime_user(&injection).await?;
+        self.ctx.stores.store.add_runtime_user(&injection).await?;
         self.ctx
+            .io
             .display
             .render_info("Signal replan: fresh sub-agent produced a revised plan");
         Ok(Some(result.text))
@@ -299,7 +302,7 @@ impl super::TurnExecutor {
         is_last_turn: bool,
     ) -> Result<Option<TurnDecision>> {
         // 更新标题栏信念度
-        let _ = self.ctx.stats.flush_if_dirty().await;
+        let _ = self.ctx.stores.stats.flush_if_dirty().await;
         let current_belief = belief.as_ref().map_or(0.0, |bt| bt.belief());
         crate::ui::render_title_snapshot(&self.ctx, self.model_label(), current_belief).await;
 
@@ -316,6 +319,7 @@ impl super::TurnExecutor {
                 if !self.local.todo_final_reminder_sent
                     && self
                         .ctx
+                        .stores
                         .todo_store
                         .snapshot()
                         .items
@@ -324,7 +328,7 @@ impl super::TurnExecutor {
                     && let Some(provider) = self.ctx.todo_advance_provider()
                 {
                     self.ctx
-                        .store
+                        .stores.store
                         .add_runtime_user(&format!(
                             "<todo-final-reminder>Todo items remain in_progress. Before finishing, call {provider} to complete verified work or pause work that is no longer active. If the work is blocked and should remain active, state that explicitly.</todo-final-reminder>"
                         ))
@@ -334,18 +338,18 @@ impl super::TurnExecutor {
                         return Ok(None);
                     }
                 }
-                self.ctx.display.render_stop(stop);
+                self.ctx.io.display.render_stop(stop);
                 Ok(Some(TurnDecision::Stop))
             }
             "error" | "max_tokens" | "length" => {
-                self.ctx.display.render_stop(stop);
+                self.ctx.io.display.render_stop(stop);
                 Ok(Some(TurnDecision::Failed {
                     reason: TurnFailureReason::ProviderStopped,
                     detail: format!("stop: {stop}"),
                 }))
             }
             _ => {
-                self.ctx.display.render_stop(stop);
+                self.ctx.io.display.render_stop(stop);
                 Ok(Some(TurnDecision::Stop))
             }
         }
@@ -394,9 +398,10 @@ impl super::TurnExecutor {
                         )
                     };
                     self.ctx
+                        .io
                         .display
                         .render_info(&format!("Injecting trajectory evidence (belief {b:.2})"));
-                    self.ctx.store.add_runtime_user(&text).await?;
+                    self.ctx.stores.store.add_runtime_user(&text).await?;
                     let policy = self.ctx.config.signal_policy;
                     // Warning 级在 state-ops 及以上策略先回滚窗口内编辑。
                     if directive.severity == crate::agent::decision::RecoverySeverity::Warning
@@ -434,7 +439,7 @@ impl super::TurnExecutor {
                         bt.reset();
                         self.local.signal_recovery_guard = false;
                         self.local.guard_bypassed = false;
-                        self.ctx.display.render_info(&format!(
+                        self.ctx.io.display.render_info(&format!(
                             "DecisionEngine: belief {b:.2} — retrying with a fresh replan instead of handing over",
                         ));
                         return Ok(None);
@@ -442,6 +447,7 @@ impl super::TurnExecutor {
                     // 用户接管仅在 full 策略启用；较低策略直接失败。
                     if !policy.allows_handover() {
                         self.ctx
+                            .io
                             .display
                             .render_error(&format!("DecisionEngine: aborting (belief {b:.2})."));
                         return Ok(Some(TurnDecision::Failed {
@@ -464,7 +470,7 @@ impl super::TurnExecutor {
                             ],
                         })
                         .await?;
-                    self.ctx.display.render_error(&format!(
+                    self.ctx.io.display.render_error(&format!(
                         "DecisionEngine: handing over (belief {b:.2}).\n{}",
                         batch.text
                     ));

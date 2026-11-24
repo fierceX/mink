@@ -59,12 +59,12 @@ async fn orchestrator_user_input_runs_turn_and_logs_tracking() -> anyhow::Result
     ));
     let h = harness_with_backend("orch-user-input", llm.clone()).await?;
     run_orchestrator_user_input(h.ctx.clone(), "say hi").await?;
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[0]["role"], "user");
     assert_eq!(lines[1]["role"], "assistant");
     h.ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&h.ctx.paths.events_path).await?;
     assert!(events.contains(r#""type":"turn_start""#), "{events}");
     assert!(events.contains(r#""type":"turn_tracking""#), "{events}");
     assert!(events.contains(r#""type":"turn_final""#), "{events}");
@@ -311,7 +311,7 @@ async fn orchestrator_logs_stream_error_from_turn() -> anyhow::Result<()> {
         h.display.info.lock().unwrap()
     );
     h.ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&h.ctx.paths.events_path).await?;
     assert!(events.contains(r#""type":"turn_error""#), "{events}");
     assert!(events.contains(r#""category":"Network""#), "{events}");
     Ok(())
@@ -379,6 +379,7 @@ async fn goal_settlement_failure_is_the_published_terminal() -> anyhow::Result<(
     h.ctx.flush_event_log().await?;
     let reader = crate::runtime::SessionReader::new(
         h.ctx
+            .paths
             .events_path
             .parent()
             .expect("session directory")
@@ -439,10 +440,12 @@ async fn orchestrator_manual_compact_uses_active_model_and_shared_backend() -> a
     .await?;
     for index in 0..3 {
         h.ctx
+            .stores
             .store
             .add_user(&format!("user history {index}: {}", "x".repeat(256)))
             .await?;
         h.ctx
+            .stores
             .store
             .add_assistant(&format!("assistant history {index}"), "", &[])
             .await?;
@@ -480,10 +483,12 @@ async fn orchestrator_manual_compact_summary_failure_is_skipped_and_logged() -> 
     .await?;
     for index in 0..3 {
         h.ctx
+            .stores
             .store
             .add_user(&format!("user history {index}: {}", "x".repeat(256)))
             .await?;
         h.ctx
+            .stores
             .store
             .add_assistant(&format!("assistant history {index}"), "", &[])
             .await?;
@@ -509,7 +514,7 @@ async fn orchestrator_manual_compact_summary_failure_is_skipped_and_logged() -> 
     drop(tx);
     handle.await??;
 
-    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&h.ctx.paths.events_path).await?;
     assert!(events.contains(r#""type":"compact""#), "{events}");
     assert!(events.contains(r#""version":2"#), "{events}");
     assert!(events.contains(r#""trigger":"manual""#), "{events}");
@@ -550,14 +555,16 @@ async fn manual_compaction_prefix_writer_failure_delivers_error_and_recovers() -
     )
     .await?;
     for index in 0..3 {
-        h.store
+        h.stores
+            .store
             .add_user(&format!("user history {index}: {}", "x".repeat(5_000)))
             .await?;
-        h.store
+        h.stores
+            .store
             .add_assistant(&format!("assistant history {index}"), "", &[])
             .await?;
     }
-    let state_path = crate::session::paths::paths_for(&h.home, &h.cwd, "regression")
+    let state_path = crate::session::paths::paths_for(&h.paths.home, &h.paths.cwd, "regression")
         .summary
         .with_file_name("context-state.json");
     let before = std::fs::read(&state_path).ok();
@@ -634,10 +641,12 @@ async fn manual_compaction_tightens_huge_tail_instead_of_degrading() -> anyhow::
     .await?;
     for index in 0..45 {
         h.ctx
+            .stores
             .store
             .add_user(&format!("USER-MARKER-{index}: {}", "x".repeat(2_000)))
             .await?;
         h.ctx
+            .stores
             .store
             .add_assistant(&format!("progress {index}"), "", &[])
             .await?;
@@ -658,7 +667,7 @@ async fn manual_compaction_tightens_huge_tail_instead_of_degrading() -> anyhow::
         "huge tail must be tightened, not degraded: {reason}"
     );
     assert_eq!(requests.lock().unwrap().len(), 1, "reason: {reason}");
-    let projection = serde_json::to_string(&h.ctx.compaction.active_messages().await?)?;
+    let projection = serde_json::to_string(&h.ctx.stores.compaction.active_messages().await?)?;
     assert!(projection.contains("USER-MARKER-43"), "{projection}");
     assert!(projection.contains("USER-MARKER-44"), "{projection}");
 
@@ -677,6 +686,7 @@ async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()
     let (stable_prompt, stable_tools) = prefix.ensure().await?;
     let stable_fingerprint = h
         .ctx
+        .io
         .immutable_prefix
         .lock()
         .unwrap()
@@ -693,21 +703,28 @@ async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()
     assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());
     assert_eq!(
-        tokio::fs::read_to_string(&h.ctx.store.path().with_file_name("plan.draft")).await?,
+        tokio::fs::read_to_string(&h.ctx.stores.store.path().with_file_name("plan.draft")).await?,
         "1. ship it\n"
     );
-    assert!(!h.ctx.store.path().with_file_name("plan.md").exists());
+    assert!(!h.ctx.stores.store.path().with_file_name("plan.md").exists());
 
     // Turn 2: PlanConfirm commits the file and appends the transition.
     let (decision, effects) = executor.execute("confirm the plan", None).await?;
     assert_eq!(decision, TurnDecision::Stop);
     assert_eq!(effects, vec!["Plan confirmed."]);
     assert_eq!(
-        tokio::fs::read_to_string(&h.ctx.store.path().with_file_name("plan.md")).await?,
+        tokio::fs::read_to_string(&h.ctx.stores.store.path().with_file_name("plan.md")).await?,
         "1. ship it\n"
     );
-    assert!(!h.ctx.store.path().with_file_name("plan.draft").exists());
-    let rows = h.ctx.store.lines().await?;
+    assert!(
+        !h.ctx
+            .stores
+            .store
+            .path()
+            .with_file_name("plan.draft")
+            .exists()
+    );
+    let rows = h.ctx.stores.store.lines().await?;
     let confirmed_index = rows
         .iter()
         .position(|message| {
@@ -733,8 +750,8 @@ async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()
     let (decision, effects) = executor.execute("clear the plan", None).await?;
     assert_eq!(decision, TurnDecision::Stop);
     assert_eq!(effects, vec!["Plan cleared."]);
-    assert!(!h.ctx.store.path().with_file_name("plan.md").exists());
-    let rows = h.ctx.store.lines().await?;
+    assert!(!h.ctx.stores.store.path().with_file_name("plan.md").exists());
+    let rows = h.ctx.stores.store.lines().await?;
     let cleared_index = rows
         .iter()
         .position(|message| {
@@ -763,6 +780,7 @@ async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()
     assert_eq!(after_tools, stable_tools);
     assert_eq!(
         h.ctx
+            .io
             .immutable_prefix
             .lock()
             .unwrap()
@@ -794,16 +812,18 @@ async fn plan_transition_survives_a_compaction_in_the_same_turn() -> anyhow::Res
     .await?;
     for index in 0..4 {
         h.ctx
+            .stores
             .store
             .add_user(&format!("history {index}: {}", "x".repeat(12_000)))
             .await?;
         h.ctx
+            .stores
             .store
             .add_assistant(&format!("history response {index}"), "", &[])
             .await?;
     }
     tokio::fs::write(
-        &h.ctx.store.path().with_file_name("plan.draft"),
+        &h.ctx.stores.store.path().with_file_name("plan.draft"),
         "1. execute\n",
     )
     .await?;
@@ -816,8 +836,15 @@ async fn plan_transition_survives_a_compaction_in_the_same_turn() -> anyhow::Res
     // 同一输入内的压缩不再被次数互锁限制：这里只要求确实压过，
     // 且 Plan 交接在压缩之后仍然完整。
     assert!(!requests.lock().unwrap().is_empty());
-    assert!(h.ctx.store.path().with_file_name("plan.md").exists());
-    assert!(!h.ctx.store.path().with_file_name("plan.draft").exists());
+    assert!(h.ctx.stores.store.path().with_file_name("plan.md").exists());
+    assert!(
+        !h.ctx
+            .stores
+            .store
+            .path()
+            .with_file_name("plan.draft")
+            .exists()
+    );
     Ok(())
 }
 
@@ -839,14 +866,19 @@ async fn plan_confirm_does_not_force_compaction() -> anyhow::Result<()> {
     )
     .await?;
     for index in 0..3 {
-        h.ctx.store.add_user(&format!("history {index}")).await?;
         h.ctx
+            .stores
+            .store
+            .add_user(&format!("history {index}"))
+            .await?;
+        h.ctx
+            .stores
             .store
             .add_assistant(&format!("history response {index}"), "", &[])
             .await?;
     }
     tokio::fs::write(
-        &h.ctx.store.path().with_file_name("plan.draft"),
+        &h.ctx.stores.store.path().with_file_name("plan.draft"),
         "1. execute\n",
     )
     .await?;
@@ -855,9 +887,16 @@ async fn plan_confirm_does_not_force_compaction() -> anyhow::Result<()> {
     let (decision, _) = executor.execute("confirm the plan", None).await?;
 
     assert_eq!(decision, TurnDecision::Stop);
-    assert!(h.ctx.store.path().with_file_name("plan.md").exists());
-    assert!(!h.ctx.store.path().with_file_name("plan.draft").exists());
-    let rows = h.ctx.store.lines().await?;
+    assert!(h.ctx.stores.store.path().with_file_name("plan.md").exists());
+    assert!(
+        !h.ctx
+            .stores
+            .store
+            .path()
+            .with_file_name("plan.draft")
+            .exists()
+    );
+    let rows = h.ctx.stores.store.lines().await?;
     let transition_index = rows
         .iter()
         .position(|message| {
@@ -907,7 +946,14 @@ async fn plan_draft_empty_content_cancels_and_reports_cancellation() -> anyhow::
         &serde_json::json!({"content": "1. inspect\n"}),
         &tool_ctx,
     )?;
-    assert!(h.ctx.store.path().with_file_name("plan.draft").exists());
+    assert!(
+        h.ctx
+            .stores
+            .store
+            .path()
+            .with_file_name("plan.draft")
+            .exists()
+    );
 
     let outcome = crate::tools::runner::ToolExec::execute(
         &crate::tools::plan::PlanDraftTool,
@@ -923,7 +969,14 @@ async fn plan_draft_empty_content_cancels_and_reports_cancellation() -> anyhow::
             content: None,
         }))
     ));
-    assert!(!h.ctx.store.path().with_file_name("plan.draft").exists());
+    assert!(
+        !h.ctx
+            .stores
+            .store
+            .path()
+            .with_file_name("plan.draft")
+            .exists()
+    );
     Ok(())
 }
 
@@ -998,7 +1051,7 @@ async fn todo_tools_persist_incremental_state_and_reject_stale_writes() -> anyho
         }),
         &tool_ctx,
     )?;
-    let before = h.ctx.todo_store.snapshot();
+    let before = h.ctx.stores.todo_store.snapshot();
     let error = crate::tools::runner::ToolExec::execute(
         &crate::tools::todo::TodoWriteTool,
         &json!({"base_revision": 3, "remove": ["T0002"]}),
@@ -1007,8 +1060,9 @@ async fn todo_tools_persist_incremental_state_and_reject_stale_writes() -> anyho
     .unwrap_err()
     .to_string();
     assert!(error.contains("stale todo revision"), "{error}");
-    assert_eq!(h.ctx.todo_store.snapshot(), before);
-    let todo_path = crate::session::paths::paths_for(&h.ctx.home, &h.ctx.cwd, "regression").todos;
+    assert_eq!(h.ctx.stores.todo_store.snapshot(), before);
+    let todo_path =
+        crate::session::paths::paths_for(&h.ctx.paths.home, &h.ctx.paths.cwd, "regression").todos;
     let reloaded = crate::session::todo::TodoStore::load(todo_path)?;
     assert_eq!(reloaded.snapshot(), before);
     assert_eq!(reloaded.snapshot().revision, 4);

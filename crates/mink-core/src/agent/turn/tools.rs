@@ -28,7 +28,7 @@ impl super::TurnExecutor {
             // samples and documentation examples must stay ordinary text.
             // Explicit wrappers keep their format-feedback path even when the
             // name is empty/damaged (the model made a deliberate attempt).
-            if sc.bare_json && !self.ctx.tool_surface.has(&sc.name) {
+            if sc.bare_json && !self.ctx.tools.tool_surface.has(&sc.name) {
                 continue;
             }
             let cid = format!("scavenged_{}_{}", self.local.scavenge_seq, calls.len());
@@ -109,6 +109,7 @@ impl super::TurnExecutor {
             });
             let summary = build_tool_call_summary(&call.name, &call.fields);
             self.ctx
+                .io
                 .display
                 .render_tool_call(&crate::ui::ToolCallDisplay {
                     tool_use_id: &call.id,
@@ -127,9 +128,13 @@ impl super::TurnExecutor {
         calls: &[ToolCallEvent],
         usage: &Option<UsageEvent>,
     ) -> Result<()> {
-        self.ctx.store.add_assistant(text, thinking, calls).await?;
+        self.ctx
+            .stores
+            .store
+            .add_assistant(text, thinking, calls)
+            .await?;
         if let Some(u) = usage {
-            self.ctx.stats.record_usage(u).await;
+            self.ctx.stores.stats.record_usage(u).await;
         }
         Ok(())
     }
@@ -211,6 +216,7 @@ impl super::TurnExecutor {
 
         if self
             .ctx
+            .stores
             .goal_store
             .snapshot()
             .is_some_and(|g| g.phase == crate::session::goal::GoalPhase::Executing)
@@ -218,17 +224,22 @@ impl super::TurnExecutor {
             let message =
                 crate::session::store::ConversationStore::tool_results_message(&processed_results);
             self.ctx
+                .stores
                 .store
                 .append_runtime_message_durable(message)
                 .await?;
-            self.ctx.goal_store.close_effects(
+            self.ctx.stores.goal_store.close_effects(
                 &processed_results
                     .iter()
                     .map(|r| r.tool_use_id.clone())
                     .collect::<Vec<_>>(),
             )?;
         } else {
-            self.ctx.store.add_tool_results(&processed_results).await?;
+            self.ctx
+                .stores
+                .store
+                .add_tool_results(&processed_results)
+                .await?;
         }
         for (tool_use_id, command) in plan_transitions {
             self.tools
@@ -238,7 +249,7 @@ impl super::TurnExecutor {
         // A state store may have hit an unrecoverable publish fault while
         // executing these tools: the session must stop instead of letting
         // the model continue from a possibly divergent in-memory view.
-        self.ctx.persistence_fault.check()?;
+        self.ctx.stores.persistence_fault.check()?;
         self.observe_todo_progress(&processed_results);
         self.maybe_append_todo_progress_reminder().await?;
 
@@ -262,6 +273,7 @@ impl super::TurnExecutor {
                 artifacts: r.artifacts.clone(),
             });
             self.ctx
+                .io
                 .display
                 .render_tool_result(&crate::ui::PresentedToolResultDisplay {
                     base: ToolResultDisplay {
@@ -327,6 +339,7 @@ impl super::TurnExecutor {
             || self.local.successful_work_calls_since_todo_advance < 8
             || !self
                 .ctx
+                .stores
                 .todo_store
                 .snapshot()
                 .items
@@ -339,7 +352,7 @@ impl super::TurnExecutor {
             return Ok(());
         };
         self.ctx
-            .store
+            .stores.store
             .add_runtime_user(&format!(
                 "<todo-progress-reminder>Active todo work has continued across several successful operations without a progress transition. Reassess the active batch and call {provider} if any item should be completed, paused, or otherwise advanced.</todo-progress-reminder>"
             ))

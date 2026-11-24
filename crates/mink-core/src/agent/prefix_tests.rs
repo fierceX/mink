@@ -12,10 +12,11 @@ async fn ensure_reuses_valid_cached_prefix() -> anyhow::Result<()> {
         .collect();
     assert_eq!(
         first_names,
-        ctx.tool_surface.names().collect::<Vec<_>>(),
+        ctx.tools.tool_surface.names().collect::<Vec<_>>(),
         "request schemas must come from the resolved surface"
     );
     let cached_fingerprint = ctx
+        .io
         .immutable_prefix
         .lock()
         .unwrap()
@@ -29,7 +30,8 @@ async fn ensure_reuses_valid_cached_prefix() -> anyhow::Result<()> {
     assert_eq!(first_prompt, second_prompt);
     assert_eq!(first_tools, second_tools);
     assert_eq!(
-        ctx.immutable_prefix
+        ctx.io
+            .immutable_prefix
             .lock()
             .unwrap()
             .as_ref()
@@ -57,7 +59,7 @@ async fn ensure_logs_prefix_snapshot_once_and_rebuild_replaces_it() -> anyhow::R
     };
 
     ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&ctx.paths.events_path).await?;
     let snapshots = snapshot(&events);
     assert_eq!(
         snapshots.len(),
@@ -68,7 +70,8 @@ async fn ensure_logs_prefix_snapshot_once_and_rebuild_replaces_it() -> anyhow::R
     assert_eq!(evt["version"], 1);
     assert_eq!(
         evt["fingerprint"].as_str().unwrap(),
-        ctx.immutable_prefix
+        ctx.io
+            .immutable_prefix
             .lock()
             .unwrap()
             .as_ref()
@@ -81,19 +84,20 @@ async fn ensure_logs_prefix_snapshot_once_and_rebuild_replaces_it() -> anyhow::R
     // Cache hit must not duplicate the snapshot.
     manager.ensure().await?;
     ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&ctx.paths.events_path).await?;
     assert_eq!(snapshot(&events).len(), 1);
 
     // Invalidation rebuild replaces the snapshot with the new fingerprint.
     manager.invalidate();
     manager.ensure().await?;
     ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&ctx.paths.events_path).await?;
     let snapshots = snapshot(&events);
     assert_eq!(snapshots.len(), 2, "rebuild appends one more snapshot");
     assert_eq!(
         snapshots[1]["fingerprint"].as_str().unwrap(),
-        ctx.immutable_prefix
+        ctx.io
+            .immutable_prefix
             .lock()
             .unwrap()
             .as_ref()
@@ -106,7 +110,7 @@ async fn ensure_logs_prefix_snapshot_once_and_rebuild_replaces_it() -> anyhow::R
 #[tokio::test]
 async fn ensure_drops_corrupt_cached_prefix_and_rebuilds() -> anyhow::Result<()> {
     let ctx = crate::regression::test_context_for_agent("prefix-cache-invalid").await?;
-    *ctx.immutable_prefix.lock().unwrap() = Some(ImmutablePrefix::new_with_fingerprint(
+    *ctx.io.immutable_prefix.lock().unwrap() = Some(ImmutablePrefix::new_with_fingerprint(
         "stale".into(),
         vec![serde_json::json!({"name":"Bash"})],
         String::new(),
@@ -119,7 +123,8 @@ async fn ensure_drops_corrupt_cached_prefix_and_rebuilds() -> anyhow::Result<()>
     assert_ne!(system_prompt, "stale");
     assert!(!tools.is_empty());
     assert!(
-        ctx.immutable_prefix
+        ctx.io
+            .immutable_prefix
             .lock()
             .unwrap()
             .as_ref()
@@ -156,7 +161,8 @@ async fn prefix_waits_for_real_writer_result_and_retries_after_recovery() -> any
         .expect_err("a real write failure must reach the prefix caller");
     assert!(error.to_string().contains("failed to open"), "{error:#}");
     assert!(
-        ctx.immutable_prefix
+        ctx.io
+            .immutable_prefix
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .is_none(),
@@ -194,7 +200,8 @@ async fn stale_dependency_fingerprint_forces_prefix_rebuild() -> anyhow::Result<
         &tools_json,
         Some(&stale_dependency),
     );
-    *ctx.immutable_prefix
+    *ctx.io
+        .immutable_prefix
         .lock()
         .unwrap_or_else(|error| error.into_inner()) = Some(
         crate::session::prefix::ImmutablePrefix::new_with_fingerprint(
@@ -207,6 +214,7 @@ async fn stale_dependency_fingerprint_forces_prefix_rebuild() -> anyhow::Result<
 
     let (rebuilt_prompt, _) = manager.ensure().await?;
     let guard = ctx
+        .io
         .immutable_prefix
         .lock()
         .unwrap_or_else(|error| error.into_inner());

@@ -822,7 +822,7 @@ pub(crate) async fn prepare_llm_request(
     model_alias: Option<&str>,
     projection: &crate::llm::request::RequestProjection,
 ) -> Result<PreparedLlmRequest> {
-    let purpose = if ctx.is_sub_agent {
+    let purpose = if ctx.delegation.is_sub_agent {
         LlmPurpose::SubAgent {
             session_id: ctx.config.session_id.clone(),
         }
@@ -838,14 +838,15 @@ pub(crate) async fn prepare_llm_request(
         // while the wire body needs resolved data URLs.
         let mut messages = (*projection.runtime_projected).clone();
         let this_turn_ids = ctx
+            .media
             .this_turn_image_ids
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
-        let cache = ctx.image_cache.clone();
-        let display = ctx.display.clone();
-        let limits = ctx.model_capabilities.image_input.limits().cloned();
-        let warned = ctx.warned_image_ids.clone();
+        let cache = ctx.media.image_cache.clone();
+        let display = ctx.io.display.clone();
+        let limits = ctx.tools.model_capabilities.image_input.limits().cloned();
+        let warned = ctx.media.warned_image_ids.clone();
         let messages = tokio::task::spawn_blocking(move || {
             let mut warned = warned.lock().unwrap_or_else(|error| error.into_inner());
             crate::llm::image_projection::materialize_images_with(
@@ -877,7 +878,7 @@ pub(crate) async fn prepare_llm_request(
         purpose,
         model: model_name.to_string(),
         model_alias: model_alias.map(str::to_string),
-        api_url: ctx.api_url.clone(),
+        api_url: ctx.paths.api_url.clone(),
         api_key: ctx.api_key().to_string(),
         system_prompt: projection.system_prompt.clone(),
         messages,
@@ -885,7 +886,7 @@ pub(crate) async fn prepare_llm_request(
         max_tokens: crate::session::compaction::effective_max_tokens(&ctx.config),
         cancel: ctx.cancel.clone(),
         verbose: ctx.verbose(),
-        display: ctx.display.clone(),
+        display: ctx.io.display.clone(),
     });
     let body = match (wants_prebuilt_body, openai_messages.as_ref()) {
         (true, Some(openai_messages)) => {
@@ -930,8 +931,8 @@ pub(crate) async fn open_llm_stream(
     cancel: LlmCancelToken,
 ) -> Result<LlmResponseStream> {
     let request = prepared.request_for(cancel);
-    let capture = ctx.usage.capture(
-        ctx.usage_scope(if ctx.is_sub_agent {
+    let capture = ctx.stores.usage.capture(
+        ctx.usage_scope(if ctx.delegation.is_sub_agent {
             UsageKind::SubAgent
         } else {
             UsageKind::Agent
@@ -943,7 +944,7 @@ pub(crate) async fn open_llm_stream(
         Err(error) => return Err(error),
     };
     if prepared.is_agent_request {
-        ctx.compaction.record_agent_request_with_hashes(
+        ctx.stores.compaction.record_agent_request_with_hashes(
             &prepared.model_name,
             &prepared.source_fingerprint,
             prepared.local_tokens,

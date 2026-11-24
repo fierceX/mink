@@ -33,7 +33,7 @@ async fn full_turn_tool_loop_preserves_conversation_order() -> anyhow::Result<()
     assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());
     assert_eq!(executor.tool_call_count(), 1);
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     assert_eq!(lines.len(), 4);
     assert_eq!(lines[0]["role"], "user");
     assert_eq!(lines[1]["role"], "assistant");
@@ -79,11 +79,11 @@ async fn turn_retry_thinking_usage_and_stop_are_persisted() -> anyhow::Result<()
 
     assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     assert_eq!(lines[1]["content"][0]["thinking"], "think");
     assert_eq!(lines[1]["content"][1]["text"], "final");
     assert!(!serde_json::to_string(&lines[1])?.contains("stale"));
-    let stats = h.ctx.stats.snapshot().await;
+    let stats = h.ctx.stores.stats.snapshot().await;
     assert_eq!(stats.total_input_tokens, 11);
     assert_eq!(stats.total_output_tokens, 7);
     assert_eq!(stats.total_cache_read_tokens, 3);
@@ -112,7 +112,7 @@ async fn turn_error_event_returns_error_and_logs_event() -> anyhow::Result<()> {
 
     assert_eq!(err, "model error");
     h.ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&h.ctx.paths.events_path).await?;
     assert!(events.contains(r#""type":"error""#), "{events}");
     assert!(events.contains(r#""message":"model error""#), "{events}");
     Ok(())
@@ -138,7 +138,7 @@ async fn turn_cancel_after_stream_returns_interrupted_without_assistant() -> any
 
     assert_eq!(decision, TurnDecision::Interrupted);
     assert!(effects.is_empty());
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["role"], "user");
     Ok(())
@@ -177,7 +177,7 @@ async fn turn_scavenges_text_tool_call_and_executes_it() -> anyhow::Result<()> {
     assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());
     assert_eq!(executor.tool_call_count(), 1);
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     assert!(
         lines[1]["content"]
             .as_array()
@@ -195,7 +195,7 @@ async fn turn_scavenges_text_tool_call_and_executes_it() -> anyhow::Result<()> {
             .contains("found")
     );
     h.ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&h.ctx.paths.events_path).await?;
     assert!(events.contains(r#""type":"scavenge""#), "{events}");
     Ok(())
 }
@@ -233,7 +233,7 @@ async fn turn_scavenged_tool_call_after_end_turn_continues_loop() -> anyhow::Res
     assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());
     assert_eq!(executor.tool_call_count(), 1);
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     assert_eq!(lines.len(), 4);
     assert_eq!(lines[2]["content"][0]["type"], "tool_result");
     assert_eq!(lines[3]["content"][1]["text"], "done");
@@ -271,7 +271,7 @@ async fn turn_stream_without_stop_event_fails_without_assistant_message() -> any
             && err.contains("ended without a terminal stop event"),
         "{err}"
     );
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["role"], "user");
     Ok(())
@@ -303,7 +303,7 @@ async fn turn_llm_first_event_timeout_fails_with_clear_error() -> anyhow::Result
 
     assert!(err.contains("first event timeout"), "{err}");
     h.ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&h.ctx.paths.events_path).await?;
     assert!(
         events.contains(r#""category":"llm_first_event_timeout""#),
         "{events}"
@@ -337,7 +337,7 @@ async fn turn_llm_idle_timeout_fails_after_partial_stream() -> anyhow::Result<()
 
     assert!(err.contains("idle timeout"), "{err}");
     h.ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&h.ctx.paths.events_path).await?;
     assert!(
         events.contains(r#""category":"llm_idle_timeout""#),
         "{events}"
@@ -421,7 +421,7 @@ async fn disabled_tool_call_persists_error_result_instead_of_being_dropped() -> 
 
     assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     assert!(
         lines[1]["content"]
             .as_array()
@@ -479,12 +479,12 @@ async fn invalid_scavenged_tool_call_is_surfaced_as_format_feedback() -> anyhow:
         "the degraded candidate is reported, not silently dropped"
     );
     h.ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&h.ctx.paths.events_path).await?;
     assert!(
         events.contains("recovered unparsable tool call Read"),
         "{events}"
     );
-    let conversation = tokio::fs::read_to_string(&h.ctx.store.path()).await?;
+    let conversation = tokio::fs::read_to_string(&h.ctx.stores.store.path()).await?;
     assert!(
         conversation.contains("invalid tool arguments"),
         "{conversation}"
@@ -545,12 +545,13 @@ async fn edit_tool_result_uses_full_edit_preview_branch() -> anyhow::Result<()> 
     });
     let h = harness_with_backend("edit-preview", llm).await?;
     tokio::fs::write(h.cwd.join("edit.txt"), "old\n").await?;
-    let snapshot = h
-        .ctx
-        .snapshots
-        .lock()
-        .unwrap()
-        .record(&h.cwd.join("edit.txt"), "old\n", [1]);
+    let snapshot =
+        h.ctx
+            .tools
+            .snapshots
+            .lock()
+            .unwrap()
+            .record(&h.cwd.join("edit.txt"), "old\n", [1]);
     *tag.lock().unwrap() = snapshot.tag;
 
     let mut executor = TurnExecutor::new(h.ctx.clone());
@@ -574,6 +575,7 @@ async fn latched_fault_blocks_turn_before_tools_and_history() -> anyhow::Result<
     // history append or any tool side effect.
     let _ = h
         .ctx
+        .stores
         .persistence_fault
         .raise(std::path::Path::new("todos.json"), "injected publish fault");
     let mut executor = TurnExecutor::new(h.ctx.clone());
@@ -590,7 +592,7 @@ async fn latched_fault_blocks_turn_before_tools_and_history() -> anyhow::Result<
         "the latched turn must not execute tools with side effects"
     );
     assert!(
-        h.ctx.store.lines().await?.is_empty(),
+        h.ctx.stores.store.lines().await?.is_empty(),
         "the latched turn must not modify history"
     );
     Ok(())
@@ -601,6 +603,7 @@ async fn session_fault_latch_is_shared_with_plan_and_todo_stores() -> anyhow::Re
     let h = harness("fault-latch-sharing").await?;
     let _ = h
         .ctx
+        .stores
         .persistence_fault
         .raise(std::path::Path::new("state.json"), "injected fault");
 
@@ -616,6 +619,7 @@ async fn session_fault_latch_is_shared_with_plan_and_todo_stores() -> anyhow::Re
 
     let todo_error = h
         .ctx
+        .stores
         .todo_store
         .apply_structure(0, crate::session::todo::TodoChanges::default())
         .expect_err("a latched session must reject Todo writes");
@@ -663,7 +667,7 @@ async fn critical_events_keep_stream_json_stdout_output() -> anyhow::Result<()> 
         });
         ctx.flush_event_log().await?;
 
-        let stored = tokio::fs::read_to_string(&ctx.events_path).await?;
+        let stored = tokio::fs::read_to_string(&ctx.paths.events_path).await?;
         let records: Vec<serde_json::Value> = stored
             .lines()
             .filter_map(|line| serde_json::from_str(line).ok())

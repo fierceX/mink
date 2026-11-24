@@ -56,14 +56,14 @@ async fn signal_recovery_guard_blocks_first_write() -> anyhow::Result<()> {
     assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());
     assert!(!h.cwd.join("blocked.txt").exists());
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     assert!(
         serde_json::to_string(&lines)?.contains("SIGNAL_RECOVERY guard"),
         "{}",
         serde_json::to_string_pretty(&lines)?
     );
     h.ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&h.ctx.paths.events_path).await?;
     assert!(events.contains(r#""name":"Write""#), "{events}");
     assert!(
         events.contains(r#""reason":"recovery_guard","state":"blocked""#),
@@ -139,7 +139,7 @@ async fn signal_recovery_guard_blocks_whole_batch() -> anyhow::Result<()> {
     assert!(effects.is_empty());
     assert!(!h.cwd.join("blocked.txt").exists());
     assert!(!h.cwd.join("blocked2.txt").exists());
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     let serialized = serde_json::to_string(&lines)?;
     assert_eq!(
         serialized.matches("SIGNAL_RECOVERY guard").count(),
@@ -158,7 +158,7 @@ async fn signal_recovery_guard_blocks_whole_batch() -> anyhow::Result<()> {
         serde_json::to_string_pretty(&lines)?
     );
     h.ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&h.ctx.paths.events_path).await?;
     let guard_signals = crate::regression::parsed_signal_events(&events)
         .into_iter()
         .filter(|signal| {
@@ -236,7 +236,7 @@ async fn signal_recovery_guard_allows_first_read() -> anyhow::Result<()> {
 
     assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     assert!(serde_json::to_string(&lines)?.contains("ok"));
     Ok(())
 }
@@ -267,7 +267,7 @@ async fn stop_error_reasons_return_failed_and_unknown_reasons_stop() -> anyhow::
     let (decision, effects) = executor.execute("too long", None).await?;
     assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     assert!(
         lines.iter().any(|line| {
             line["role"] == "user"
@@ -429,7 +429,7 @@ async fn soft_only_editloop_does_not_inject_above_warn_zone() -> anyhow::Result<
         "{:?}",
         h.display.info.lock().unwrap()
     );
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     assert!(
         !lines.iter().any(|line| {
             line["role"] == "user"
@@ -478,7 +478,7 @@ async fn turn_injects_hint_after_failed_tool_and_continues() -> anyhow::Result<(
     assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());
     assert!(belief.belief() < 0.70);
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     assert!(
         lines.iter().any(|line| {
             line["role"] == "user"
@@ -608,7 +608,7 @@ async fn abort_degrades_to_replan_then_continues() -> anyhow::Result<()> {
         "belief={}",
         belief.belief()
     );
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     assert!(
         lines.iter().any(|line| {
             line["role"] == "user"
@@ -683,7 +683,7 @@ async fn second_warning_triggers_replan() -> anyhow::Result<()> {
 
     assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     assert!(
         lines.iter().any(|line| {
             line["role"] == "user"
@@ -1004,7 +1004,7 @@ async fn repeated_soft_failures_trigger_evidence_injection() -> anyhow::Result<(
     let mut belief = BeliefTracker::new(16);
     let (decision, _) = executor.execute("soft failures", Some(&mut belief)).await?;
     assert_eq!(decision, TurnDecision::Stop);
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     assert!(
         lines.iter().any(|line| {
             line["role"] == "user"
@@ -1075,7 +1075,7 @@ async fn clean_calls_do_not_open_soft_failure_gate() -> anyhow::Result<()> {
     let mut belief = BeliefTracker::new(16);
     let (decision, _) = executor.execute("mostly clean", Some(&mut belief)).await?;
     assert_eq!(decision, TurnDecision::Stop);
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     assert!(
         !lines.iter().any(|line| {
             line["role"] == "user"
@@ -1107,6 +1107,7 @@ async fn replan_setup_failure_degrades_to_handover() -> anyhow::Result<()> {
     let h = harness_with_backend("replan-setup-failure", llm.clone()).await?;
     let parent_session_dir = h
         .ctx
+        .stores
         .store
         .path()
         .parent()
@@ -1168,7 +1169,7 @@ async fn signaled_bash_failure_is_a_hard_signal() -> anyhow::Result<()> {
         .await?;
 
     h.ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&h.ctx.paths.events_path).await?;
     let signals = crate::regression::parsed_signal_events(&events);
     let hard_failures = signals
         .iter()
@@ -1342,7 +1343,7 @@ async fn interrupted_replan_does_not_inject_success_evidence() -> anyhow::Result
     );
     assert!(effects.is_empty());
 
-    let lines = h.ctx.store.lines().await?;
+    let lines = h.ctx.stores.store.lines().await?;
     assert!(
         !lines.iter().any(|line| {
             line["role"] == "user"
@@ -1355,7 +1356,7 @@ async fn interrupted_replan_does_not_inject_success_evidence() -> anyhow::Result
     );
 
     h.ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&h.ctx.paths.events_path).await?;
     let replan_events: Vec<serde_json::Value> = events
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())

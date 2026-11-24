@@ -188,7 +188,7 @@ impl TurnExecutor {
                 &ctx.config.signal,
             ),
             recovery_policy: crate::agent::recovery_policy::RecoveryPolicy::from_resolved(
-                &ctx.tool_capabilities,
+                &ctx.tools.tool_capabilities,
                 crate::tools::catalog::ToolCatalog::builtin()
                     .expect("built-in tool catalog was validated during context construction"),
             ),
@@ -248,6 +248,7 @@ impl TurnExecutor {
         self.signal_processor.reset();
         self.decision_engine.reset();
         self.ctx
+            .media
             .this_turn_image_ids
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -313,7 +314,7 @@ impl TurnExecutor {
             Err(error) if crate::session::compaction::is_summary_unavailable(&error) => {
                 let reason = crate::session::compaction::summary_unavailable_reason(&error)
                     .unwrap_or("unavailable");
-                self.ctx.display.render_info(&format!(
+                self.ctx.io.display.render_info(&format!(
                     "Context summary unavailable ({reason}); continuing without compaction."
                 ));
                 false
@@ -454,7 +455,7 @@ impl TurnExecutor {
     ) -> Result<(TurnDecision, Vec<TurnEffect>)> {
         // A latched persistence fault means the session must not accept new
         // work: refuse before the model request, history append or tools.
-        self.ctx.persistence_fault.check()?;
+        self.ctx.stores.persistence_fault.check()?;
         // New user intent: compiler-enforced full local-state reset.
         self.reset_local_state(user_input);
 
@@ -463,25 +464,26 @@ impl TurnExecutor {
         // that journal before constructing any new model-visible history.
         self.tools.recover_plan_transactions().await?;
 
-        let mut messages = self.ctx.compaction.active_messages().await?;
+        let mut messages = self.ctx.stores.compaction.active_messages().await?;
         self.reconcile_todo_state(&mut messages).await?;
         if let Some(session) = &self.goal_adjudication {
-            self.ctx.store.append_runtime_message(serde_json::json!({
+            self.ctx.stores.store.append_runtime_message(serde_json::json!({
                 "role":"user", "content":user_input, "internal":true,
                 "_mink":{"internal":true,"source":"goal_adjudication","candidate":session.goal.review_candidate}
             })).await?;
-        } else if self.ctx.input_inbox.active_turn().is_some() {
+        } else if self.ctx.stores.input_inbox.active_turn().is_some() {
             self.ctx
+                .stores
                 .input_inbox
-                .apply_pending(&self.ctx.store, || {
+                .apply_pending(&self.ctx.stores.store, || {
                     self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set()
                 })
                 .await?;
         } else {
-            self.ctx.store.add_user(user_input).await?;
+            self.ctx.stores.store.add_user(user_input).await?;
         }
         if self.goal_adjudication.is_none() {
-            self.ctx.stats.record_turn().await;
+            self.ctx.stores.stats.record_turn().await;
             self.ctx.log_event(crate::events::EventLog::UserInput {
                 version: None,
                 content: user_input.to_string(),
@@ -495,12 +497,12 @@ impl TurnExecutor {
         let (mut system_prompt, mut tools_json) = match self.ensure_prefix().await {
             Ok(prefix) => prefix,
             Err(error) if error.downcast_ref::<TurnInterrupted>().is_some() => {
-                self.ctx.display.render_stop("interrupted");
+                self.ctx.io.display.render_stop("interrupted");
                 return Ok((TurnDecision::Interrupted, effects));
             }
             Err(error) => return Err(error),
         };
-        messages = self.ctx.compaction.active_messages().await?;
+        messages = self.ctx.stores.compaction.active_messages().await?;
 
         // Every user turn owns a fresh format window; compaction never clears
         // it and a sub-agent executor owns its own. State stays in memory.
@@ -512,23 +514,24 @@ impl TurnExecutor {
 
         while turn < max_turns {
             if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
-                self.ctx.display.render_stop("interrupted");
+                self.ctx.io.display.render_stop("interrupted");
                 return Ok((TurnDecision::Interrupted, effects));
             }
             if self.goal_adjudication.is_none()
                 && self
                     .ctx
+                    .stores
                     .input_inbox
-                    .apply_pending(&self.ctx.store, || {
+                    .apply_pending(&self.ctx.stores.store, || {
                         self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set()
                     })
                     .await?
                     > 0
             {
-                messages = self.ctx.compaction.active_messages().await?;
+                messages = self.ctx.stores.compaction.active_messages().await?;
             }
             if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
-                self.ctx.display.render_stop("interrupted");
+                self.ctx.io.display.render_stop("interrupted");
                 return Ok((TurnDecision::Interrupted, effects));
             }
             turn += 1;
@@ -557,7 +560,7 @@ impl TurnExecutor {
                     // Cancellation during request preparation (including a
                     // prefix snapshot commit waiting on the event log) keeps
                     // the "interrupted" classification.
-                    self.ctx.display.render_stop("interrupted");
+                    self.ctx.io.display.render_stop("interrupted");
                     return Ok((TurnDecision::Interrupted, effects));
                 }
                 Err(error) => return Err(error),
@@ -577,7 +580,7 @@ impl TurnExecutor {
                     Err(error) if error.downcast_ref::<TurnInterrupted>().is_some() => {
                         // 建立阶段的中断必须先于 context-overflow 等
                         // 字符串式识别处理：用户中断不能伪装成网络失败。
-                        self.ctx.display.render_stop("interrupted");
+                        self.ctx.io.display.render_stop("interrupted");
                         return Ok((TurnDecision::Interrupted, effects));
                     }
                     Err(error) if error.downcast_ref::<ContextOverflowError>().is_some() => {
@@ -605,7 +608,7 @@ impl TurnExecutor {
                                     &error,
                                 ) =>
                             {
-                                self.ctx.display.render_stop("interrupted");
+                                self.ctx.io.display.render_stop("interrupted");
                                 return Ok((TurnDecision::Interrupted, effects));
                             }
                             // 共享期限耗尽不可转应急：直接以主请求终态 timeout 结束。
@@ -622,7 +625,7 @@ impl TurnExecutor {
                                 let reason =
                                     crate::session::compaction::summary_unavailable_reason(&error)
                                         .unwrap_or("unavailable");
-                                self.ctx.display.render_info(&format!(
+                                self.ctx.io.display.render_info(&format!(
                                     "Context summary unavailable ({reason}); falling back to an emergency checkpoint."
                                 ));
                                 false
@@ -630,7 +633,7 @@ impl TurnExecutor {
                             Err(error) => return Err(error),
                         };
                         if compacted {
-                            self.ctx.display.render_info(
+                            self.ctx.io.display.render_info(
                                 "Context summary committed; verifying the request actually shrank.",
                             );
                             projection = Arc::new(crate::llm::request::RequestProjection::build(
@@ -661,7 +664,7 @@ impl TurnExecutor {
                                         &error,
                                     ) =>
                                 {
-                                    self.ctx.display.render_stop("interrupted");
+                                    self.ctx.io.display.render_stop("interrupted");
                                     return Ok((TurnDecision::Interrupted, effects));
                                 }
                                 Err(error) => return Err(error),
@@ -680,7 +683,7 @@ impl TurnExecutor {
                             // 没有变得更小：再发同样的请求只会再次被拒。
                             return Err(error);
                         }
-                        self.ctx.display.render_info(&format!(
+                        self.ctx.io.display.render_info(&format!(
                             "Context overflow detected; shrank the request ({} -> {} tokens) and retrying (round shrink #{overflow_shrink_attempts}).",
                             rejected_tokens, retried_tokens
                         ));
@@ -704,7 +707,7 @@ impl TurnExecutor {
                 // round-end commit happens here and the turn fails with the
                 // stable reason prefix.
                 let _ = format_window.commit(true);
-                self.ctx.display.render_error(&detail);
+                self.ctx.io.display.render_error(&detail);
                 return Ok((
                     TurnDecision::Failed {
                         reason: TurnFailureReason::FormatRecoveryExhausted,
@@ -715,7 +718,7 @@ impl TurnExecutor {
             }
 
             if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
-                self.ctx.display.render_stop("interrupted");
+                self.ctx.io.display.render_stop("interrupted");
                 return Ok((TurnDecision::Interrupted, effects));
             }
 
@@ -753,7 +756,7 @@ impl TurnExecutor {
             // refreshes the history.
             let window_error = match &kind {
                 RoundKind::Interrupted => {
-                    self.ctx.display.render_stop("interrupted");
+                    self.ctx.io.display.render_stop("interrupted");
                     return Ok((TurnDecision::Interrupted, effects));
                 }
                 RoundKind::Terminal => {
@@ -765,7 +768,7 @@ impl TurnExecutor {
                     self.record_agent_calibration(&usage);
                     self.local.final_text.push_str(&text);
                     self.local.final_thinking.push_str(&thinking);
-                    self.ctx.display.render_stop(&stop);
+                    self.ctx.io.display.render_stop(&stop);
                     return Ok((
                         TurnDecision::Failed {
                             reason: TurnFailureReason::ProviderStopped,
@@ -783,7 +786,7 @@ impl TurnExecutor {
                         "<output-truncated>The previous response hit the output limit (stop: {}) and was discarded without executing anything. Continue with one smaller, focused step.</output-truncated>",
                         truncate_str(&stop, 80)
                     );
-                    self.ctx.store.add_runtime_user(&diagnostic).await?;
+                    self.ctx.stores.store.add_runtime_user(&diagnostic).await?;
                     true
                 }
                 RoundKind::IdentityInvalid(reason) => {
@@ -798,7 +801,7 @@ impl TurnExecutor {
                     let diagnostic = format!(
                         "<tool-call-format-error>The previous response could not be executed: {reason}. No tool was run. Resend the intended tool call(s) with an explicit tool name and one unique id per call.</tool-call-format-error>"
                     );
-                    self.ctx.store.add_runtime_user(&diagnostic).await?;
+                    self.ctx.stores.store.add_runtime_user(&diagnostic).await?;
                     true
                 }
                 RoundKind::Unconfirmed => {
@@ -814,7 +817,7 @@ impl TurnExecutor {
                         "<incomplete-response>The previous assistant response could not be confirmed as complete (stop reason: {:?}, no tool calls). State the next step explicitly or resend the intended tool call(s).</incomplete-response>",
                         truncate_str(&stop, 80)
                     );
-                    self.ctx.store.add_runtime_user(&diagnostic).await?;
+                    self.ctx.stores.store.add_runtime_user(&diagnostic).await?;
                     true
                 }
                 RoundKind::Complete => {
@@ -842,7 +845,7 @@ impl TurnExecutor {
                         .execute_tools_inner(calls, belief.as_deref_mut(), &mut effects)
                         .await?;
                     if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
-                        self.ctx.display.render_stop("interrupted");
+                        self.ctx.io.display.render_stop("interrupted");
                         return Ok((TurnDecision::Interrupted, effects));
                     }
                     had_format_error
@@ -867,9 +870,9 @@ impl TurnExecutor {
                     return Ok((TurnDecision::Stop, effects));
                 }
                 if matches!(kind, RoundKind::Complete) {
-                    self.ctx.store.add_runtime_user("<goal-conclusion-required>The independent review is available, but no valid host conclusion has been recorded. Submit GoalReview for the bound candidate. If a previous call was rejected, correct its specific tool-result diagnostic and call again. Do not end this adjudication with a prose-only declaration.</goal-conclusion-required>").await?;
+                    self.ctx.stores.store.add_runtime_user("<goal-conclusion-required>The independent review is available, but no valid host conclusion has been recorded. Submit GoalReview for the bound candidate. If a previous call was rejected, correct its specific tool-result diagnostic and call again. Do not end this adjudication with a prose-only declaration.</goal-conclusion-required>").await?;
                 }
-                messages = self.ctx.compaction.active_messages().await?;
+                messages = self.ctx.stores.compaction.active_messages().await?;
                 continue;
             }
             match &kind {
@@ -886,14 +889,15 @@ impl TurnExecutor {
                     if let Some(decision) = self
                         .decide_next(&stop, belief.as_deref_mut(), turn >= max_turns)
                         .await?
-                        && (decision != TurnDecision::Stop || self.ctx.input_inbox.close_if_empty())
+                        && (decision != TurnDecision::Stop
+                            || self.ctx.stores.input_inbox.close_if_empty())
                     {
                         return Ok((decision, effects));
                     }
                 }
                 _ => {}
             }
-            messages = self.ctx.compaction.active_messages().await?;
+            messages = self.ctx.stores.compaction.active_messages().await?;
         }
 
         Ok((TurnDecision::MaxTurnsExceeded, effects))
@@ -913,7 +917,7 @@ impl TurnExecutor {
     /// calibration must not be fed by discarded candidates.
     fn record_agent_calibration(&self, usage: &Option<UsageEvent>) {
         if let Some(usage) = usage {
-            self.ctx.compaction.record_agent_usage(usage);
+            self.ctx.stores.compaction.record_agent_usage(usage);
         }
     }
 
@@ -921,7 +925,7 @@ impl TurnExecutor {
     /// not calibrate later requests or dilute the format window.
     async fn record_discarded_usage(&self, usage: &Option<UsageEvent>) {
         if let Some(usage) = usage {
-            self.ctx.stats.record_usage(usage).await;
+            self.ctx.stores.stats.record_usage(usage).await;
         }
     }
 }

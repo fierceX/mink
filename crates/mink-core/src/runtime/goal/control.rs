@@ -11,10 +11,10 @@ impl AgentRuntimeHandle {
             .collect()
     }
     pub fn goal_snapshot(&self) -> Option<GoalSnapshot> {
-        self.goal_ctx.goal_store.snapshot()
+        self.goal_ctx.stores.goal_store.snapshot()
     }
     pub fn subscribe_goal(&self) -> tokio::sync::watch::Receiver<Option<GoalSnapshot>> {
-        self.goal_ctx.goal_store.subscribe()
+        self.goal_ctx.stores.goal_store.subscribe()
     }
     /// Retired direct activation. Hosts must explicitly confirm a durable draft.
     pub fn create_goal(&self, _spec: GoalSpec) -> RuntimeResult<GoalSnapshot> {
@@ -63,7 +63,7 @@ impl AgentRuntimeHandle {
         if let Some(active_turn_id) = self.active_turn_id() {
             return Err(RuntimeError::Busy { active_turn_id });
         }
-        if !self.goal_ctx.tool_surface.has("GoalRead") {
+        if !self.goal_ctx.tools.tool_surface.has("GoalRead") {
             return Err(RuntimeError::Configuration(
                 "goal requires GoalRead in the resolved tool surface".into(),
             ));
@@ -79,13 +79,16 @@ impl AgentRuntimeHandle {
                 "select a checker_id when multiple goal checkers are registered".into(),
             ));
         }
-        let environment = goal_environment(&self.goal_ctx.cwd, &self.goal_ctx.tool_surface);
+        let environment =
+            goal_environment(&self.goal_ctx.paths.cwd, &self.goal_ctx.tools.tool_surface);
         let goal = if ready {
             self.goal_ctx
+                .stores
                 .goal_store
                 .draft(spec, environment, duration_secs)
         } else {
             self.goal_ctx
+                .stores
                 .goal_store
                 .draft_pending(spec, environment, duration_secs)
         }
@@ -135,17 +138,18 @@ impl AgentRuntimeHandle {
             if let Some(active_turn_id) = self.active_turn_id() {
                 return Err(RuntimeError::Busy { active_turn_id });
             }
-            if !self.goal_ctx.tool_surface.has("GoalRead") {
+            if !self.goal_ctx.tools.tool_surface.has("GoalRead") {
                 return Err(RuntimeError::Configuration(
                     "goal requires GoalRead in the resolved tool surface".into(),
                 ));
             }
             self.goal_ctx
+                .stores
                 .goal_store
                 .confirm(
                     id,
                     revision,
-                    goal_environment(&self.goal_ctx.cwd, &self.goal_ctx.tool_surface),
+                    goal_environment(&self.goal_ctx.paths.cwd, &self.goal_ctx.tools.tool_surface),
                 )
                 .map_err(command_error)?
         };
@@ -171,7 +175,7 @@ impl AgentRuntimeHandle {
         revision: u64,
         feedback: &str,
     ) -> RuntimeResult<GoalDraftSnapshot> {
-        if !self.goal_ctx.tool_surface.has("GoalDraft") {
+        if !self.goal_ctx.tools.tool_surface.has("GoalDraft") {
             return Err(RuntimeError::Configuration(
                 "draft generation requires GoalDraft in the resolved tool surface".into(),
             ));
@@ -195,6 +199,7 @@ impl AgentRuntimeHandle {
                 ));
             }
             self.goal_ctx
+                .stores
                 .goal_store
                 .transition(
                     &current.id,
@@ -274,7 +279,10 @@ impl AgentRuntimeHandle {
             id,
             revision,
             GoalTransition::Resume {
-                environment: goal_environment(&self.goal_ctx.cwd, &self.goal_ctx.tool_surface),
+                environment: goal_environment(
+                    &self.goal_ctx.paths.cwd,
+                    &self.goal_ctx.tools.tool_surface,
+                ),
             },
             false,
         )?;
@@ -286,7 +294,7 @@ impl AgentRuntimeHandle {
     }
 
     fn ensure_goal_submission_available(&self) -> RuntimeResult<()> {
-        if !self.goal_ctx.tool_surface.has("GoalReview") {
+        if !self.goal_ctx.tools.tool_surface.has("GoalReview") {
             return Err(RuntimeError::Configuration(
                 "goal requires GoalReview in the host's resolved tool surface".into(),
             ));
@@ -404,7 +412,7 @@ impl AgentRuntimeHandle {
         }
         let g = match self
             .goal_ctx
-            .goal_store
+            .stores.goal_store
             .transition_from_snapshot_classified(id, revision, |goal| {
                 if check_idle_turn {
                     ensure!(
@@ -532,10 +540,11 @@ impl AgentRuntimeHandle {
                 GoalReviewStage::Adjudicating => "宿主提交结论",
             };
             self.goal_ctx
+                .io
                 .display
                 .render_info(&format!("Goal {}: {label}", goal.id));
         }
-        self.goal_ctx.display.render_info(&format!(
+        self.goal_ctx.io.display.render_info(&format!(
             "Goal {:?}: {} ({} turns remaining; acceptance {:?}; basis {:?})",
             goal.status,
             goal.reason.as_deref().unwrap_or(&goal.spec.objective),

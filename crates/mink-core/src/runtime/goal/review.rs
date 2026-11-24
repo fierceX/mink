@@ -266,9 +266,9 @@ impl GoalReviewSession {
                 .strip_prefix("artifact://")
                 .ok_or_else(|| anyhow::anyhow!("invalid artifact reference: {reference}"))?;
             let parent_path = parent.session.artifacts_dir.join(format!("{id}.txt"));
-            match parent.goal_ctx.artifacts.find(id)? {
+            match parent.goal_ctx.stores.artifacts.find(id)? {
                 Some(_) => {
-                    let original = parent.goal_ctx.artifacts.read_text(id)?;
+                    let original = parent.goal_ctx.stores.artifacts.read_text(id)?;
                     ensure!(
                         hash_bytes(original.as_bytes()) == *hash,
                         "inherited artifact changed after inspection"
@@ -279,7 +279,7 @@ impl GoalReviewSession {
                         !parent_path.try_exists()?,
                         "unindexed parent artifact identity"
                     );
-                    let record = parent.goal_ctx.artifacts.write_text(
+                    let record = parent.goal_ctx.stores.artifacts.write_text(
                         "GoalReviewEvidence",
                         "read-only reviewer evidence",
                         &content,
@@ -658,6 +658,7 @@ impl AgentRuntimeHandle {
             .ok_or_else(|| anyhow::anyhow!("missing review candidate"))?;
         let session_dir = self
             .goal_ctx
+            .stores
             .store
             .path()
             .parent()
@@ -673,14 +674,14 @@ impl AgentRuntimeHandle {
         let conclusion = execution_conclusion(&history, start, candidate.conversation_seq);
         if conclusion.trim().is_empty() && !session.snapshot_for_read().review_requires_full {
             let current = session.snapshot_for_read();
-            let next = self.goal_ctx.goal_store.transition(
+            let next = self.goal_ctx.stores.goal_store.transition(
                 &current.id,
                 current.revision,
                 GoalTransition::MarkReviewAmbiguous,
             )?;
             self.announce_goal(&next);
         }
-        let conclusion_artifact = self.goal_ctx.artifacts.write_text(
+        let conclusion_artifact = self.goal_ctx.stores.artifacts.write_text(
             "GoalExecutionConclusion",
             "final committed execution response",
             &conclusion,
@@ -698,6 +699,7 @@ impl AgentRuntimeHandle {
                     && committed_sequence <= r.conversation_seq
                     && self
                         .goal_ctx
+                        .stores
                         .artifacts
                         .read_text(r.artifact.strip_prefix("artifact://").unwrap_or(""))
                         .is_ok_and(|text| hash_bytes(text.as_bytes()) == r.content_hash)
@@ -707,7 +709,7 @@ impl AgentRuntimeHandle {
                     })
             });
             if current.review_report.is_some() && cached.is_none() {
-                let next = self.goal_ctx.goal_store.transition(
+                let next = self.goal_ctx.stores.goal_store.transition(
                     &current.id,
                     current.revision,
                     GoalTransition::InvalidateReviewReport,
@@ -717,7 +719,7 @@ impl AgentRuntimeHandle {
             }
             let report = if let Some(report) = cached {
                 ensure!(
-                    self.goal_ctx.store.committed_len().await? == report.conversation_seq,
+                    self.goal_ctx.stores.store.committed_len().await? == report.conversation_seq,
                     "conversation changed before host adjudication"
                 );
                 for (reference, hash) in &report.evidence_versions {
@@ -761,7 +763,7 @@ impl AgentRuntimeHandle {
                     goal.iterations.last().map_or("", |i| i.turn_id.as_str()),
                     crate::tools::runner::format_tool_result(
                         &conclusion,
-                        self.goal_ctx.tool_config.tool_result_max_bytes
+                        self.goal_ctx.tools.tool_config.tool_result_max_bytes
                     ),
                     conclusion_artifact.id,
                     serde_json::to_string(&current.reviews.last())?,
@@ -792,12 +794,12 @@ impl AgentRuntimeHandle {
                     "independent reviewer returned an empty report"
                 );
                 let (reads, mapping) = session.import_evidence(self)?;
-                let seq = self.goal_ctx.store.committed_len().await?;
+                let seq = self.goal_ctx.stores.store.committed_len().await?;
                 ensure!(
                     seq == current.acceptance_conversation_seq,
                     "conversation changed before host adjudication"
                 );
-                let artifact = self.goal_ctx.artifacts.write_text(
+                let artifact = self.goal_ctx.stores.artifacts.write_text(
                     "IndependentGoalReview",
                     "independent descriptive audit report",
                     &result.text,
@@ -815,6 +817,7 @@ impl AgentRuntimeHandle {
             };
             let report_text = self
                 .goal_ctx
+                .stores
                 .artifacts
                 .read_text(report.artifact.strip_prefix("artifact://").unwrap_or(""))?;
             session.set_stage(GoalReviewStage::Adjudicating)?;
@@ -826,11 +829,11 @@ impl AgentRuntimeHandle {
                 serde_json::to_string(&current.requirement_ids())?,
                 crate::tools::runner::format_tool_result(
                     &conclusion,
-                    self.goal_ctx.tool_config.tool_result_max_bytes
+                    self.goal_ctx.tools.tool_config.tool_result_max_bytes
                 ),
                 crate::tools::runner::format_tool_result(
                     &report_text,
-                    self.goal_ctx.tool_config.tool_result_max_bytes
+                    self.goal_ctx.tools.tool_config.tool_result_max_bytes
                 ),
                 report.artifact,
                 serde_json::to_string(&report.evidence_versions)?,
@@ -843,14 +846,15 @@ impl AgentRuntimeHandle {
             );
             let outcome = self
                 .goal_ctx
+                .stores
                 .usage
                 .with_goal_adjudication(
                     format!("goal-review:{}:{}", goal.id, goal.iterations.len()),
                     host.execute(&prompt, None),
                 )
                 .await;
-            self.goal_ctx.store.sync().await?;
-            let seq = self.goal_ctx.store.committed_len().await?;
+            self.goal_ctx.stores.store.sync().await?;
+            let seq = self.goal_ctx.stores.store.committed_len().await?;
             // Bind a reusable report to the host history even when submission failed.
             let mut report = report;
             report.conversation_seq = seq;
@@ -883,7 +887,7 @@ impl AgentRuntimeHandle {
                     1
                 };
                 if rounds >= 3 {
-                    let next = self.goal_ctx.goal_store.transition(
+                    let next = self.goal_ctx.stores.goal_store.transition(
                         &current.id,
                         current.revision,
                         GoalTransition::EscalateRepeatedContinuation {
@@ -905,7 +909,7 @@ impl AgentRuntimeHandle {
         report: GoalReviewReport,
     ) -> Result<()> {
         let current = session.snapshot_for_read();
-        let next = self.goal_ctx.goal_store.transition(
+        let next = self.goal_ctx.stores.goal_store.transition(
             &current.id,
             current.revision,
             GoalTransition::PublishReviewReport { report },
@@ -929,7 +933,7 @@ impl AgentRuntimeHandle {
                 .strip_prefix("artifact://")
                 .ok_or_else(|| anyhow::anyhow!("invalid report reference"))?;
             ensure!(
-                hash_bytes(self.goal_ctx.artifacts.read_text(id)?.as_bytes())
+                hash_bytes(self.goal_ctx.stores.artifacts.read_text(id)?.as_bytes())
                     == report.content_hash,
                 "independent report changed"
             );
@@ -945,7 +949,7 @@ impl AgentRuntimeHandle {
                 let path = if path.is_absolute() {
                     path.to_path_buf()
                 } else {
-                    self.goal_ctx.cwd.join(path)
+                    self.goal_ctx.paths.cwd.join(path)
                 }
                 .canonicalize()?;
                 path.to_string_lossy().into_owned()

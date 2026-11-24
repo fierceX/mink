@@ -205,7 +205,7 @@ async fn hashline_partial_commit_bumps_mutation_for_committed_files() -> anyhow:
             .await
             .map_err(|error| anyhow::anyhow!("{error:#}"))?;
     let tool_ctx = crate::context::ToolContext::from(shared.as_ref());
-    let cwd = shared.cwd.clone();
+    let cwd = shared.paths.cwd.clone();
 
     let readonly = cwd.join("readonly");
     std::fs::create_dir_all(&readonly)?;
@@ -248,7 +248,7 @@ async fn replace_edit_rolls_back_all_edits_when_later_entry_fails() -> anyhow::R
             .await
             .map_err(|error| anyhow::anyhow!("{error:#}"))?;
     let tool_ctx = crate::context::ToolContext::from(shared.as_ref());
-    let file_path = shared.cwd.join("sample.txt");
+    let file_path = shared.paths.cwd.join("sample.txt");
     std::fs::write(&file_path, "alpha\nbeta\n")?;
 
     let edit_context = tool_ctx.file_edit_context();
@@ -281,7 +281,7 @@ async fn hashline_anchor_edit_enforces_seen_lines() -> anyhow::Result<()> {
     .await
     .map_err(|error| anyhow::anyhow!("{error:#}"))?;
     let tool_ctx = crate::context::ToolContext::from(shared.as_ref());
-    let file_path = shared.cwd.join("code.txt");
+    let file_path = shared.paths.cwd.join("code.txt");
     let content = "line1\nline2\nline3\nline4\n";
     std::fs::write(&file_path, content)?;
 

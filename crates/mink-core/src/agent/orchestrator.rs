@@ -137,7 +137,7 @@ impl OrchActor {
         source: &crate::runtime::GoalContinuation,
     ) -> anyhow::Result<()> {
         use crate::session::goal::GoalSnapshot;
-        let Some(goal) = self.ctx.goal_store.snapshot() else {
+        let Some(goal) = self.ctx.stores.goal_store.snapshot() else {
             return Ok(());
         };
         let kind = GoalSnapshot::boundary_kind(source.iteration);
@@ -151,7 +151,11 @@ impl OrchActor {
                 "goal_message": goal.message(kind, source.iteration),
             }
         });
-        self.ctx.store.append_runtime_message_durable(message).await
+        self.ctx
+            .stores
+            .store
+            .append_runtime_message_durable(message)
+            .await
     }
 
     async fn publish_goal_draft_discussion(
@@ -162,6 +166,7 @@ impl OrchActor {
         use crate::session::goal::{GoalMessageKind, GoalStatus};
         let goal = self
             .ctx
+            .stores
             .goal_store
             .snapshot()
             .ok_or_else(|| anyhow::anyhow!("goal draft missing"))?;
@@ -174,7 +179,7 @@ impl OrchActor {
         let mut message = goal.message(GoalMessageKind::Draft, 0);
         message.objective = goal.spec.original_request.clone();
         message.feedback = Some(source.feedback.clone());
-        self.ctx.store.append_runtime_message_durable(serde_json::json!({
+        self.ctx.stores.store.append_runtime_message_durable(serde_json::json!({
             "role":"user", "content":input,
             "_mink":{"internal":true,"source":"goal_draft","goal_draft":source,"goal_message":message}
         })).await
@@ -191,8 +196,8 @@ impl OrchActor {
         if limit == usize::MAX {
             return Ok(false);
         }
-        let projected = ctx.compaction.active_messages().await?;
-        let snapshot = ctx.todo_store.snapshot();
+        let projected = ctx.stores.compaction.active_messages().await?;
+        let snapshot = ctx.stores.todo_store.snapshot();
         let todo_candidate = crate::agent::compactor::todo_candidate_state(ctx, &snapshot);
         let tokens = crate::session::compaction::estimate_candidate_tokens(
             shape,
@@ -247,7 +252,7 @@ impl OrchActor {
                         let result = match prepared {
                             Ok(()) => self.handle_user_input(input).await,
                             Err(error) => {
-                                let finish_error = self.ctx.input_inbox.finish().err();
+                                let finish_error = self.ctx.stores.input_inbox.finish().err();
                                 TurnRunResult::failed_with(
                                     TurnFailureReason::Persistence,
                                     match finish_error {
@@ -279,14 +284,14 @@ impl OrchActor {
                                     trigger: "manual".into(),
                                     result: format!("failed: {error:#}"),
                                 });
-                                self.ctx.display.render_error(&format!("Compact failed: {error}"));
+                                self.ctx.io.display.render_error(&format!("Compact failed: {error}"));
                                 Err(error)
                             }
                         };
-                        self.ctx.display.render_stop("end_turn");
+                        self.ctx.io.display.render_stop("end_turn");
                         if let Err(error) = self.ctx.flush_event_log().await {
                             self.ctx
-                                .display
+                                .io.display
                                 .render_error(&format!("Event log flush failed: {error}"));
                         }
                         let _ = done.send(outcome);
@@ -294,7 +299,7 @@ impl OrchActor {
                     None => break,
                 },
                 _ = self.ctx.cancel.cancelled() => {
-                    self.ctx.display.render_info("Shutting down...");
+                    self.ctx.io.display.render_info("Shutting down...");
                     break;
                 }
             }
@@ -302,10 +307,11 @@ impl OrchActor {
 
         if let Err(error) = self.ctx.flush_event_log().await {
             self.ctx
+                .io
                 .display
                 .render_error(&format!("Event log flush failed: {error}"));
         }
-        let _ = self.ctx.stats.flush().await;
+        let _ = self.ctx.stores.stats.flush().await;
         Ok(())
     }
 
@@ -316,8 +322,8 @@ impl OrchActor {
     /// (before any prefix/history/LLM access) instead of dying with a
     /// channel-closed error.
     async fn handle_compact(&mut self) -> Result<crate::runtime::CompactOutcome> {
-        self.ctx.persistence_fault.check()?;
-        self.ctx.display.render_info("Compressing...");
+        self.ctx.stores.persistence_fault.check()?;
+        self.ctx.io.display.render_info("Compressing...");
         let active_model = self.resolve_active();
 
         // manual 与每次真实请求同源：无条件经唯一的 PrefixManager 获取前缀形状
@@ -346,12 +352,12 @@ impl OrchActor {
             &active_model.actual,
             active_model.alias.as_deref(),
         );
-        let todo_snapshot = self.ctx.todo_store.snapshot();
+        let todo_snapshot = self.ctx.stores.todo_store.snapshot();
         let todo_candidate =
             crate::agent::compactor::todo_candidate_state(&self.ctx, &todo_snapshot);
         // manual 不传伪 0：用与真实请求同源的投影估算本次输入（含预演 TodoSync），
         // 否则「已超预算」永远不会启用 degraded 切点，也不会收紧尾部。
-        let projected = self.ctx.compaction.active_messages().await?;
+        let projected = self.ctx.stores.compaction.active_messages().await?;
         let context_tokens = crate::session::compaction::estimate_candidate_tokens(
             shape,
             &projected,
@@ -359,6 +365,7 @@ impl OrchActor {
         )?;
         let mut result = self
             .ctx
+            .stores
             .compaction
             .evaluate_and_compact_with_prefix(
                 "manual",
@@ -407,11 +414,12 @@ impl OrchActor {
                     None,
                     // manual 不在某个 round 内：没有共享绝对期限。
                     None,
-                    &self.ctx.compaction.active_messages().await?,
+                    &self.ctx.stores.compaction.active_messages().await?,
                 )
                 .await?;
                 if emergency_committed {
                     self.ctx
+                        .io
                         .display
                         .render_info("Manual compaction fell back to an emergency checkpoint.");
                     result = Ok((true, "manual emergency checkpoint committed".to_string()));
@@ -424,12 +432,12 @@ impl OrchActor {
 
         match result {
             Ok((true, _reason)) => {
-                if let Some(summary) = self.ctx.compaction.read_summary().await {
+                if let Some(summary) = self.ctx.stores.compaction.read_summary().await {
                     let trimmed = summary.trim();
                     if !trimmed.is_empty() {
-                        self.ctx.display.render_text(trimmed);
+                        self.ctx.io.display.render_text(trimmed);
                         if !trimmed.ends_with('\n') {
-                            self.ctx.display.render_text("\n");
+                            self.ctx.io.display.render_text("\n");
                         }
                     }
                 }
@@ -438,6 +446,7 @@ impl OrchActor {
             }
             Ok((false, reason)) => {
                 self.ctx
+                    .io
                     .display
                     .render_info(&format!("Compact skipped: {reason}"));
                 // 跳过也要留痕：摘要不可用等失败不能只在终端出现。
@@ -452,16 +461,17 @@ impl OrchActor {
         }
     }
     async fn handle_user_input(&mut self, input: String) -> TurnRunResult {
-        let billing_turn_id = self.ctx.usage.begin_turn();
-        if self.ctx.goal_store.snapshot().is_some_and(|g| {
+        let billing_turn_id = self.ctx.stores.usage.begin_turn();
+        if self.ctx.stores.goal_store.snapshot().is_some_and(|g| {
             g.phase == crate::session::goal::GoalPhase::Executing
                 && g.iterations.last().is_some_and(|i| !i.finished)
         }) && let Err(error) = self
             .ctx
+            .stores
             .goal_store
             .associate_iteration_billing(&billing_turn_id)
         {
-            let _ = self.ctx.input_inbox.finish();
+            let _ = self.ctx.stores.input_inbox.finish();
             return self.finish_usage(
                 TurnRunResult::failed(format!("goal billing association failed: {error:#}")),
                 &billing_turn_id,
@@ -469,9 +479,9 @@ impl OrchActor {
         }
         // Session-level publish fault: refuse the operation up front instead
         // of requesting the model, touching history or executing tools.
-        if let Err(error) = self.ctx.persistence_fault.check() {
-            let _ = self.ctx.input_inbox.finish();
-            self.ctx.display.render_error(&format!("{error:#}"));
+        if let Err(error) = self.ctx.stores.persistence_fault.check() {
+            let _ = self.ctx.stores.input_inbox.finish();
+            self.ctx.io.display.render_error(&format!("{error:#}"));
             self.refresh_title().await;
             let result = self.finish_usage(
                 TurnRunResult::failed_with(TurnFailureReason::Persistence, format!("{error:#}")),
@@ -493,7 +503,7 @@ impl OrchActor {
         };
 
         let mut result = result;
-        if let Err(error) = self.ctx.input_inbox.finish() {
+        if let Err(error) = self.ctx.stores.input_inbox.finish() {
             result.status = TurnStatus::Failed;
             result.failure = Some(TurnFailureReason::Persistence);
             result.error = Some(format!("{error:#}"));
@@ -522,16 +532,17 @@ impl OrchActor {
                 && !self.ctx.cancel.is_cancelled(),
         };
         let committed = async {
-            self.ctx.store.sync().await?;
+            self.ctx.stores.store.sync().await?;
             self.ctx
+                .stores
                 .goal_store
                 .settle_iteration(key, &result, &facts)
                 .map(|_| ())
         }
         .await;
         if let Err(error) = committed {
-            let error = self.ctx.persistence_fault.raise(
-                self.ctx.store.path(),
+            let error = self.ctx.stores.persistence_fault.raise(
+                self.ctx.stores.store.path(),
                 format!("goal iteration publication failed: {error:#}"),
             );
             result.status = TurnStatus::Failed;
@@ -543,18 +554,18 @@ impl OrchActor {
 
     fn finish_usage(&self, mut result: TurnRunResult, billing_turn_id: &str) -> TurnRunResult {
         result.billing_turn_id = billing_turn_id.to_string();
-        match self.ctx.usage.records_for(billing_turn_id) {
+        match self.ctx.stores.usage.records_for(billing_turn_id) {
             Ok(records) => {
                 result.usage = UsageSummary::from_records(&records);
                 result.usage_records = records;
             }
             Err(error) => {
-                self.ctx.display.render_error(&format!(
+                self.ctx.io.display.render_error(&format!(
                     "Failed to read usage records for turn {billing_turn_id}: {error}"
                 ));
             }
         }
-        self.ctx.usage.end_turn(billing_turn_id);
+        self.ctx.stores.usage.end_turn(billing_turn_id);
         result
     }
 
@@ -586,7 +597,7 @@ impl OrchActor {
         model: &str,
     ) -> TurnRunResult {
         for effect in &effects {
-            self.ctx.display.render_info(effect);
+            self.ctx.io.display.render_info(effect);
         }
 
         self.log_turn_tracking(executor, &decision, model);
@@ -594,10 +605,11 @@ impl OrchActor {
         if let TurnDecision::Failed { ref detail, .. } = decision
             && detail != "interrupted"
         {
-            self.ctx.display.render_error(detail);
+            self.ctx.io.display.render_error(detail);
         }
         if decision == TurnDecision::MaxTurnsExceeded {
             self.ctx
+                .io
                 .display
                 .render_error("max_turns exhausted before end_turn");
         }
@@ -634,6 +646,7 @@ impl OrchActor {
         });
         if let Err(error) = self.ctx.flush_event_log().await {
             self.ctx
+                .io
                 .display
                 .render_error(&format!("Event log flush failed: {error}"));
         }
@@ -659,9 +672,13 @@ impl OrchActor {
             failure: Some(failure),
         });
         if info.severity == errors::ErrorSeverity::Fatal {
-            self.ctx.display.render_error(&format!("Fatal error: {e}"));
+            self.ctx
+                .io
+                .display
+                .render_error(&format!("Fatal error: {e}"));
         } else {
             self.ctx
+                .io
                 .display
                 .render_error(&format!("Turn execution error: {e}"));
         }
@@ -691,6 +708,7 @@ impl OrchActor {
         let model = model.trim();
         if model.is_empty() {
             self.ctx
+                .io
                 .display
                 .render_error("Model name must not be empty.");
             anyhow::bail!("Model name must not be empty.");
@@ -704,15 +722,20 @@ impl OrchActor {
             &self.ctx.config,
             self.ctx.llm_backend.as_ref(),
         );
-        if !self.ctx.model_capabilities.is_compatible_with(&candidate) {
-            self.ctx.display.render_error(&format!(
+        if !self
+            .ctx
+            .tools
+            .model_capabilities
+            .is_compatible_with(&candidate)
+        {
+            self.ctx.io.display.render_error(&format!(
                 "Model switch rejected: this session was initialized with image capability {}. The selected model has incompatible capabilities. Start a new session to use that model.",
-                self.ctx.model_capabilities.capability_fingerprint
+                self.ctx.tools.model_capabilities.capability_fingerprint
             ));
             anyhow::bail!(
                 "model switch rejected: capability fingerprint {} does not match the session's frozen {}",
                 candidate.capability_fingerprint,
-                self.ctx.model_capabilities.capability_fingerprint
+                self.ctx.tools.model_capabilities.capability_fingerprint
             );
         }
         if model == self.ctx.config.model {
@@ -720,16 +743,17 @@ impl OrchActor {
         } else {
             self.forced_model = Some(model.to_string());
         }
-        self.ctx.compaction.clear_prompt_usage();
+        self.ctx.stores.compaction.clear_prompt_usage();
         let resolved = self.resolve_active();
         let label = resolved.label;
         self.ctx
+            .io
             .display
             .render_info(&format!("Switched to {label} model."));
         // 控制操作没有 turn emitter，标题更新会落入空处；把快照随结果返回，
         // 由 CLI/TUI 适配层自行渲染（不在适配层重新解析模型别名）。
         let stats = crate::ui::title_snapshot(&self.ctx, self.belief.belief()).await;
-        self.ctx.display.render_title_update(&label, &stats);
+        self.ctx.io.display.render_title_update(&label, &stats);
         *self
             .ctx
             .active_model

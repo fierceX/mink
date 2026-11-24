@@ -135,14 +135,15 @@ async fn draft_signal_recovery_cannot_spawn_an_execution_replan() {
     )
     .await
     .unwrap();
-    ctx.goal_store
+    ctx.stores
+        .goal_store
         .draft(
             crate::session::goal::GoalSpec::new("discuss the contract"),
             "env".into(),
             3600,
         )
         .unwrap();
-    let child_directory = ctx.store.path().parent().unwrap().join("subagents");
+    let child_directory = ctx.stores.store.path().parent().unwrap().join("subagents");
     let mut executor = TurnExecutor::new(ctx);
     executor.local.signal_recovery_guard = true;
     executor.local.guard_bypassed = false;
@@ -173,9 +174,9 @@ async fn draft_signal_recovery_cannot_spawn_an_execution_replan() {
 #[tokio::test]
 async fn todo_sync_is_appended_once_when_file_revision_is_ahead() -> anyhow::Result<()> {
     let ctx = crate::regression::test_context_for_agent("turn-todo-sync").await?;
-    ctx.store.add_user("existing stable history").await?;
-    let stable_prefix = ctx.compaction.active_messages().await?;
-    ctx.todo_store.apply_structure(
+    ctx.stores.store.add_user("existing stable history").await?;
+    let stable_prefix = ctx.stores.compaction.active_messages().await?;
+    ctx.stores.todo_store.apply_structure(
         0,
         crate::session::todo::TodoChanges {
             add: vec![crate::session::todo::TodoAdd {
@@ -184,7 +185,7 @@ async fn todo_sync_is_appended_once_when_file_revision_is_ahead() -> anyhow::Res
             ..Default::default()
         },
     )?;
-    ctx.todo_store.advance(
+    ctx.stores.todo_store.advance(
         1,
         crate::session::todo::TodoTransitions {
             activate: vec!["T0001".into()],
@@ -192,14 +193,15 @@ async fn todo_sync_is_appended_once_when_file_revision_is_ahead() -> anyhow::Res
         },
     )?;
     let executor = TurnExecutor::new(ctx.clone());
-    let mut messages = ctx.compaction.active_messages().await?;
+    let mut messages = ctx.stores.compaction.active_messages().await?;
 
     assert!(executor.reconcile_todo_state(&mut messages).await?);
     assert!(!executor.reconcile_todo_state(&mut messages).await?);
     assert!(messages.starts_with(&stable_prefix));
     assert_eq!(crate::session::todo::visible_revision(&messages)?, 2);
     assert_eq!(
-        ctx.store
+        ctx.stores
+            .store
             .lines()
             .await?
             .iter()
@@ -213,7 +215,7 @@ async fn todo_sync_is_appended_once_when_file_revision_is_ahead() -> anyhow::Res
 #[tokio::test]
 async fn todo_final_guard_reminds_once_but_does_not_force_a_loop() -> anyhow::Result<()> {
     let ctx = crate::regression::test_context_for_agent("turn-todo-final-guard").await?;
-    ctx.todo_store.apply_structure(
+    ctx.stores.todo_store.apply_structure(
         0,
         crate::session::todo::TodoChanges {
             add: vec![crate::session::todo::TodoAdd {
@@ -222,7 +224,7 @@ async fn todo_final_guard_reminds_once_but_does_not_force_a_loop() -> anyhow::Re
             ..Default::default()
         },
     )?;
-    ctx.todo_store.advance(
+    ctx.stores.todo_store.advance(
         1,
         crate::session::todo::TodoTransitions {
             activate: vec!["T0001".into()],
@@ -236,7 +238,7 @@ async fn todo_final_guard_reminds_once_but_does_not_force_a_loop() -> anyhow::Re
         executor.decide_next("stop", None, false).await?,
         Some(TurnDecision::Stop)
     );
-    let messages = ctx.store.lines().await?;
+    let messages = ctx.stores.store.lines().await?;
     assert_eq!(
         messages
             .iter()
@@ -254,7 +256,7 @@ async fn todo_final_guard_reminds_once_but_does_not_force_a_loop() -> anyhow::Re
 #[tokio::test]
 async fn todo_final_guard_on_last_turn_records_reminder_but_stops() -> anyhow::Result<()> {
     let ctx = crate::regression::test_context_for_agent("turn-todo-final-guard-last-turn").await?;
-    ctx.todo_store.apply_structure(
+    ctx.stores.todo_store.apply_structure(
         0,
         crate::session::todo::TodoChanges {
             add: vec![crate::session::todo::TodoAdd {
@@ -263,7 +265,7 @@ async fn todo_final_guard_on_last_turn_records_reminder_but_stops() -> anyhow::R
             ..Default::default()
         },
     )?;
-    ctx.todo_store.advance(
+    ctx.stores.todo_store.advance(
         1,
         crate::session::todo::TodoTransitions {
             activate: vec!["T0001".into()],
@@ -276,7 +278,7 @@ async fn todo_final_guard_on_last_turn_records_reminder_but_stops() -> anyhow::R
         executor.decide_next("stop", None, true).await?,
         Some(TurnDecision::Stop)
     );
-    let messages = ctx.store.lines().await?;
+    let messages = ctx.stores.store.lines().await?;
     assert_eq!(
         messages
             .iter()
@@ -294,7 +296,7 @@ async fn todo_final_guard_on_last_turn_records_reminder_but_stops() -> anyhow::R
 #[tokio::test]
 async fn todo_progress_guard_appends_at_most_one_reminder_per_turn() -> anyhow::Result<()> {
     let ctx = crate::regression::test_context_for_agent("turn-todo-progress-guard").await?;
-    ctx.todo_store.apply_structure(
+    ctx.stores.todo_store.apply_structure(
         0,
         crate::session::todo::TodoChanges {
             add: vec![crate::session::todo::TodoAdd {
@@ -303,7 +305,7 @@ async fn todo_progress_guard_appends_at_most_one_reminder_per_turn() -> anyhow::
             ..Default::default()
         },
     )?;
-    ctx.todo_store.advance(
+    ctx.stores.todo_store.advance(
         1,
         crate::session::todo::TodoTransitions {
             activate: vec!["T0001".into()],
@@ -315,7 +317,7 @@ async fn todo_progress_guard_appends_at_most_one_reminder_per_turn() -> anyhow::
 
     executor.maybe_append_todo_progress_reminder().await?;
     executor.maybe_append_todo_progress_reminder().await?;
-    let messages = ctx.store.lines().await?;
+    let messages = ctx.stores.store.lines().await?;
     assert_eq!(messages.len(), 1);
     assert!(
         messages[0]["content"]
@@ -343,10 +345,12 @@ async fn context_overflow_compacts_and_retries_only_once() -> anyhow::Result<()>
     )
     .await?;
     for index in 0..3 {
-        ctx.store
+        ctx.stores
+            .store
             .add_user(&format!("old request {index}: {}", "x".repeat(1_000)))
             .await?;
-        ctx.store
+        ctx.stores
+            .store
             .add_assistant(
                 &format!("old response {index}: {}", "y".repeat(1_000)),
                 "",
@@ -360,8 +364,8 @@ async fn context_overflow_compacts_and_retries_only_once() -> anyhow::Result<()>
 
     assert_eq!(decision, TurnDecision::Stop);
     assert_eq!(llm.calls.load(AtomicOrdering::SeqCst), 2);
-    assert_eq!(ctx.store.lines().await?.len(), 8);
-    assert!(ctx.compaction.current_summary()?.is_some());
+    assert_eq!(ctx.stores.store.lines().await?.len(), 8);
+    assert!(ctx.stores.compaction.current_summary()?.is_some());
     Ok(())
 }
 
@@ -706,12 +710,14 @@ async fn single_input_compacts_repeatedly_instead_of_failing_the_turn() -> anyho
         backend.compactions()
     );
     assert_eq!(
-        crate::regression::tool_result_ids(&ctx.store).await?.len(),
+        crate::regression::tool_result_ids(&ctx.stores.store)
+            .await?
+            .len(),
         7,
         "every executed round must be preserved"
     );
     ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&ctx.paths.events_path).await?;
     assert!(
         events.matches("\"type\":\"compact\"").count() >= 2,
         "each compaction must stay visible: {events}"
@@ -821,13 +827,15 @@ async fn overflow_recovery_shares_round_deadline() -> anyhow::Result<()> {
         backend.clone(),
     )
     .await?;
-    ctx.store
+    ctx.stores
+        .store
         .add_user(&format!("seed {}", "x".repeat(1_000)))
         .await?;
-    ctx.store
+    ctx.stores
+        .store
         .add_assistant(&format!("progress {}", "y".repeat(1_000)), "", &[])
         .await?;
-    ctx.store.add_user("keep going").await?;
+    ctx.stores.store.add_user("keep going").await?;
     let mut executor = TurnExecutor::new(ctx.clone());
     let error = executor
         .execute("keep going", None)
@@ -844,10 +852,10 @@ async fn overflow_recovery_shares_round_deadline() -> anyhow::Result<()> {
     );
     // 超时后不得再发布任何有损 checkpoint（active_start/generation 与 TodoSync 不变）。
     assert!(
-        ctx.compaction.read_summary().await.is_none(),
+        ctx.stores.compaction.read_summary().await.is_none(),
         "a timed-out round must not publish an emergency checkpoint"
     );
-    let projection = serde_json::to_string(&ctx.compaction.active_messages().await?)?;
+    let projection = serde_json::to_string(&ctx.stores.compaction.active_messages().await?)?;
     assert!(
         !projection.contains("emergency-context-excerpt"),
         "{projection}"
@@ -886,7 +894,7 @@ async fn round_deadline_alive_still_allows_emergency_on_summary_failure() -> any
     assert!(backend.summary_calls() >= 1);
     assert_eq!(executor.compactor.emergency_commits_this_turn(), 1);
     ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&ctx.paths.events_path).await?;
     assert!(events.contains("trigger=emergency"), "{events}");
     Ok(())
 }
@@ -1021,10 +1029,12 @@ async fn seed_history(
     chars: usize,
 ) -> anyhow::Result<()> {
     for index in 0..turns {
-        ctx.store
+        ctx.stores
+            .store
             .add_user(&format!("old task {index} {}", "x".repeat(chars)))
             .await?;
-        ctx.store
+        ctx.stores
+            .store
             .add_assistant(&format!("progress {index} {}", "y".repeat(chars)), "", &[])
             .await?;
     }
@@ -1070,10 +1080,10 @@ async fn summary_outage_falls_back_to_emergency_checkpoint() -> anyhow::Result<(
     // 应急 checkpoint 也计入本输入的提交计数，诊断不再漏计。
     assert_eq!(executor.compactor.emergency_commits_this_turn(), 1);
     ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&ctx.paths.events_path).await?;
     assert!(events.contains(r#""trigger":"emergency""#), "{events}");
     assert!(events.contains("_mode=emergency"), "{events}");
-    let active = ctx.compaction.active_messages().await?;
+    let active = ctx.stores.compaction.active_messages().await?;
     let projection = serde_json::to_string(&active)?;
     assert!(
         projection.contains("emergency-context-excerpt"),
@@ -1088,7 +1098,7 @@ async fn summary_outage_falls_back_to_emergency_checkpoint() -> anyhow::Result<(
         "被折叠的历史不得再进入投影：{projection}"
     );
     // 完整历史只追加不重写：被折叠的内容仍在权威会话记录里。
-    let history = serde_json::to_string(&ctx.store.lines_from(0).await?)?;
+    let history = serde_json::to_string(&ctx.stores.store.lines_from(0).await?)?;
     assert!(history.contains("old task 0"), "{history}");
     assert!(
         history.contains("carry on with the remaining work"),
@@ -1125,7 +1135,7 @@ async fn oversized_summary_input_skips_the_request_and_uses_emergency() -> anyho
     assert_eq!(backend.agent_calls(), 1);
     assert_eq!(backend.summary_calls(), 0, "装不下的摘要请求不应发出");
     ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&ctx.paths.events_path).await?;
     assert!(events.contains("_mode=emergency"), "{events}");
     Ok(())
 }
@@ -1149,16 +1159,16 @@ async fn auto_summary_failure_does_not_block_a_sendable_request() -> anyhow::Res
         backend.clone(),
     )
     .await?;
-    ctx.store.add_user("small task").await?;
+    ctx.stores.store.add_user("small task").await?;
 
     let mut executor = TurnExecutor::new(ctx.clone());
     let (decision, _) = executor.execute("keep going", None).await?;
 
     assert_eq!(decision, TurnDecision::Stop);
     assert_eq!(backend.agent_calls(), 1);
-    assert!(ctx.compaction.read_summary().await.is_none());
+    assert!(ctx.stores.compaction.read_summary().await.is_none());
     ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&ctx.paths.events_path).await?;
     assert!(!events.contains(r#""trigger":"emergency""#), "{events}");
     assert!(!events.contains(r#""type":"compact""#), "{events}");
     Ok(())
@@ -1193,9 +1203,9 @@ async fn oversized_summary_candidate_is_rejected_and_falls_back_to_emergency() -
     assert_eq!(decision, TurnDecision::Stop);
     assert_eq!(backend.agent_calls(), 1);
     ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&ctx.paths.events_path).await?;
     assert!(events.contains("_mode=emergency"), "{events}");
-    let projection = serde_json::to_string(&ctx.compaction.active_messages().await?)?;
+    let projection = serde_json::to_string(&ctx.stores.compaction.active_messages().await?)?;
     assert!(
         !projection.contains("OVERSIZED-SUMMARY-MARKER"),
         "超预算摘要不得进入投影：{projection}"
@@ -1259,12 +1269,13 @@ async fn dynamic_summary_cap_shrinks_the_request_instead_of_giving_up() -> anyho
     .await?;
     // 折叠段 ≈ 37k：窗口 40k 下按 4,096 的固定上限已装不下（需要 ≤ 35,904 才放行），
     // 但按动态 cap 只需留一个最小实用输出，因此摘要请求应带 ~3k 的输出上限发出。
-    ctx.store
+    ctx.stores
+        .store
         .add_user(&format!("old task {}", "x".repeat(111_000)))
         .await?;
-    ctx.store.add_assistant("ack", "", &[]).await?;
-    ctx.store.add_user("next").await?;
-    ctx.store.add_assistant("ok", "", &[]).await?;
+    ctx.stores.store.add_assistant("ack", "", &[]).await?;
+    ctx.stores.store.add_user("next").await?;
+    ctx.stores.store.add_assistant("ok", "", &[]).await?;
 
     let mut executor = TurnExecutor::new(ctx.clone());
     let (decision, _) = executor.execute("keep going", None).await?;
@@ -1278,7 +1289,7 @@ async fn dynamic_summary_cap_shrinks_the_request_instead_of_giving_up() -> anyho
         "输出 cap 必须按剩余空间收紧：{caps:?}"
     );
     ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&ctx.paths.events_path).await?;
     assert!(!events.contains("_mode=emergency"), "{events}");
     Ok(())
 }
@@ -1314,7 +1325,7 @@ async fn summary_output_budget_floor_falls_back_to_emergency() -> anyhow::Result
         "连最小输出都放不下时不得发出摘要请求"
     );
     ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&ctx.paths.events_path).await?;
     assert!(events.contains("_mode=emergency"), "{events}");
     Ok(())
 }
@@ -1352,7 +1363,7 @@ async fn provider_overflow_shrinks_via_emergency_when_summary_is_unavailable() -
     assert_eq!(decision, TurnDecision::Stop);
     assert_eq!(backend.agent_calls(), 2);
     ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&ctx.paths.events_path).await?;
     assert!(events.contains("_mode=emergency"), "{events}");
     assert!(
         events.contains("_emergency_reason=provider_overflow"),
@@ -1382,7 +1393,7 @@ async fn huge_plan_checkpoint_is_bounded_in_the_projection() -> anyhow::Result<(
     )
     .await?;
     // 权威 plan 正文：远超窗口（≈200k 字符）。路径与引擎读取的权威位置一致。
-    let plan_path = ctx.store.path().with_file_name("plan.md");
+    let plan_path = ctx.stores.store.path().with_file_name("plan.md");
     let plan_body = format!(
         "# plan\n{}\nMIDDLE-MARKER\n{}\nTAIL-MARKER\n",
         "p".repeat(100_000),
@@ -1395,7 +1406,7 @@ async fn huge_plan_checkpoint_is_bounded_in_the_projection() -> anyhow::Result<(
     let (decision, _) = executor.execute("keep going", None).await?;
 
     assert_eq!(decision, TurnDecision::Stop);
-    let projection = serde_json::to_string(&ctx.compaction.active_messages().await?)?;
+    let projection = serde_json::to_string(&ctx.stores.compaction.active_messages().await?)?;
     assert!(
         projection.contains("[derived display truncated:"),
         "plan checkpoint 必须有损截短：{}",
@@ -1423,7 +1434,7 @@ async fn huge_plan_checkpoint_is_bounded_in_the_projection() -> anyhow::Result<(
     // 权威 plan 文件不被改写。
     let on_disk = tokio::fs::read_to_string(&plan_path).await?;
     assert_eq!(on_disk, plan_body);
-    let _ = tokio::fs::remove_dir_all(&ctx.home).await;
+    let _ = tokio::fs::remove_dir_all(&ctx.paths.home).await;
     Ok(())
 }
 
@@ -1448,27 +1459,31 @@ async fn emergency_checkpoint_lists_only_existing_artifact_refs() -> anyhow::Res
     .await?;
     // 真实存在的 artifact + 一条只在历史文本里出现的伪造引用。
     let record = ctx
+        .stores
         .artifacts
         .write_text("Bash", "long output", &"o".repeat(4_000))?;
-    ctx.store
+    ctx.stores
+        .store
         .add_user(&format!(
             "old task artifact://{} and artifact://deadbeefdeadbeef",
             record.id
         ))
         .await?;
-    ctx.store
+    ctx.stores
+        .store
         .add_assistant(&"y".repeat(60_000), "", &[])
         .await?;
-    ctx.store
+    ctx.stores
+        .store
         .add_user(&format!("older task {}", "z".repeat(60_000)))
         .await?;
-    ctx.store.add_assistant("ack", "", &[]).await?;
+    ctx.stores.store.add_assistant("ack", "", &[]).await?;
 
     let mut executor = TurnExecutor::new(ctx.clone());
     let (decision, _) = executor.execute("keep going", None).await?;
 
     assert_eq!(decision, TurnDecision::Stop);
-    let projection = serde_json::to_string(&ctx.compaction.active_messages().await?)?;
+    let projection = serde_json::to_string(&ctx.stores.compaction.active_messages().await?)?;
     assert!(
         projection.contains("emergency-context-excerpt"),
         "{projection}"
@@ -1481,7 +1496,7 @@ async fn emergency_checkpoint_lists_only_existing_artifact_refs() -> anyhow::Res
         !projection.contains("artifact://deadbeefdeadbeef"),
         "索引里不存在的引用不得出现：{projection}"
     );
-    let _ = tokio::fs::remove_dir_all(&ctx.home).await;
+    let _ = tokio::fs::remove_dir_all(&ctx.paths.home).await;
     Ok(())
 }
 
@@ -1508,7 +1523,7 @@ async fn emergency_shrink_terminates_and_respects_cancel() -> anyhow::Result<()>
     .await?;
     seed_history(&ctx, 4, 60_000).await?;
 
-    let snapshot = ctx.todo_store.snapshot();
+    let snapshot = ctx.stores.todo_store.snapshot();
     let context = crate::session::compaction::EmergencyCheckpointContext {
         main_request: crate::session::compaction::MainRequestShape {
             system_prompt: "",
@@ -1523,20 +1538,22 @@ async fn emergency_shrink_terminates_and_respects_cancel() -> anyhow::Result<()>
     };
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        ctx.compaction
+        ctx.stores
+            .compaction
             .commit_emergency_checkpoint("regression", &context),
     )
     .await
     .expect("收缩循环必须及时终止（不得自旋）")?;
     assert!(!outcome, "连最小摘录都装不下时应返回 false：{outcome}");
     assert!(
-        ctx.compaction.read_summary().await.is_none(),
+        ctx.stores.compaction.read_summary().await.is_none(),
         "未提交不得写入摘要"
     );
 
     // runtime cancel 后必须拒绝提交并映射为 Interrupted。
     ctx.cancel.cancel();
     let error = ctx
+        .stores
         .compaction
         .commit_emergency_checkpoint("regression-cancel", &context)
         .await
@@ -1545,8 +1562,8 @@ async fn emergency_shrink_terminates_and_respects_cancel() -> anyhow::Result<()>
         crate::session::compaction::is_compaction_interrupted(&error),
         "取消必须定型为 CompactionInterrupted：{error:#}"
     );
-    assert!(ctx.compaction.read_summary().await.is_none());
-    let _ = tokio::fs::remove_dir_all(&ctx.home).await;
+    assert!(ctx.stores.compaction.read_summary().await.is_none());
+    let _ = tokio::fs::remove_dir_all(&ctx.paths.home).await;
     Ok(())
 }
 
@@ -1571,7 +1588,7 @@ async fn emergency_includes_todo_sync_lost_by_the_fold() -> anyhow::Result<()> {
     )
     .await?;
     // 让 store revision=1，并把「可见 revision=1」的消息放进历史（压缩前无需同步）。
-    ctx.todo_store.apply_structure(
+    ctx.stores.todo_store.apply_structure(
         0,
         crate::session::todo::TodoChanges {
             add: vec![crate::session::todo::TodoAdd {
@@ -1581,17 +1598,17 @@ async fn emergency_includes_todo_sync_lost_by_the_fold() -> anyhow::Result<()> {
             remove: Vec::new(),
         },
     )?;
-    let snapshot = ctx.todo_store.snapshot();
+    let snapshot = ctx.stores.todo_store.snapshot();
     assert_eq!(snapshot.revision, 1, "测试前提：store 里有一条待办");
     let sync = crate::session::todo::sync_message_bounded(&snapshot, "TodoRead", usize::MAX);
-    ctx.store.append_runtime_message(sync).await?;
+    ctx.stores.store.append_runtime_message(sync).await?;
     seed_history(&ctx, 4, 60_000).await?;
 
     let mut executor = TurnExecutor::new(ctx.clone());
     let (decision, _) = executor.execute("keep going", None).await?;
 
     assert_eq!(decision, TurnDecision::Stop);
-    let projection = serde_json::to_string(&ctx.compaction.active_messages().await?)?;
+    let projection = serde_json::to_string(&ctx.stores.compaction.active_messages().await?)?;
     assert!(
         projection.contains("emergency-context-excerpt"),
         "{projection}"
@@ -1600,7 +1617,7 @@ async fn emergency_includes_todo_sync_lost_by_the_fold() -> anyhow::Result<()> {
         projection.contains("<todo-sync"),
         "折叠掉最新 revision 后必须补上 TodoSync：{projection}"
     );
-    let _ = tokio::fs::remove_dir_all(&ctx.home).await;
+    let _ = tokio::fs::remove_dir_all(&ctx.paths.home).await;
     Ok(())
 }
 
@@ -1624,8 +1641,9 @@ async fn emergency_refuses_unpaired_tool_exchange() -> anyhow::Result<()> {
     )
     .await?;
     // 有 tool call、没有 result 的损坏历史。
-    ctx.store.add_user("do the thing").await?;
-    ctx.store
+    ctx.stores.store.add_user("do the thing").await?;
+    ctx.stores
+        .store
         .add_assistant(
             "running tests",
             "",
@@ -1651,10 +1669,10 @@ async fn emergency_refuses_unpaired_tool_exchange() -> anyhow::Result<()> {
         "{error:#}"
     );
     assert!(
-        ctx.compaction.read_summary().await.is_none(),
+        ctx.stores.compaction.read_summary().await.is_none(),
         "拒绝提交时不得写入摘要"
     );
-    let _ = tokio::fs::remove_dir_all(&ctx.home).await;
+    let _ = tokio::fs::remove_dir_all(&ctx.paths.home).await;
     Ok(())
 }
 
@@ -1697,10 +1715,12 @@ async fn overflow_shrink_budget_resets_per_round() -> anyhow::Result<()> {
     );
     assert_eq!(backend.agent_calls(), 9);
     assert_eq!(
-        crate::regression::tool_result_ids(&ctx.store).await?.len(),
+        crate::regression::tool_result_ids(&ctx.stores.store)
+            .await?
+            .len(),
         4
     );
-    let _ = tokio::fs::remove_dir_all(&ctx.home).await;
+    let _ = tokio::fs::remove_dir_all(&ctx.paths.home).await;
     Ok(())
 }
 
@@ -1746,9 +1766,9 @@ async fn overflow_shrinks_via_emergency_when_summary_does_not_reduce() -> anyhow
         backend.summary_calls()
     );
     ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&ctx.paths.events_path).await?;
     assert!(events.contains("_mode=emergency"), "{events}");
-    let _ = tokio::fs::remove_dir_all(&ctx.home).await;
+    let _ = tokio::fs::remove_dir_all(&ctx.paths.home).await;
     Ok(())
 }
 
@@ -1792,12 +1812,14 @@ async fn run_summary_outage_endurance(rounds: usize) -> anyhow::Result<()> {
         "摘要服务确实被尝试过（随后失败）"
     );
     assert_eq!(
-        crate::regression::tool_result_ids(&ctx.store).await?.len(),
+        crate::regression::tool_result_ids(&ctx.stores.store)
+            .await?
+            .len(),
         rounds,
         "每个工具调用只能执行一次"
     );
     ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&ctx.paths.events_path).await?;
     assert!(
         !events.contains("\"type\":\"turn_error\""),
         "长跑不得出现压缩类 turn_error：{events}"
@@ -1808,7 +1830,7 @@ async fn run_summary_outage_endurance(rounds: usize) -> anyhow::Result<()> {
         "多次超预算应触发多次应急 checkpoint：{emergencies}"
     );
     // 完整历史只追加：所有写调用的参数仍在权威会话记录里。
-    let history = serde_json::to_string(&ctx.store.lines_from(0).await?)?;
+    let history = serde_json::to_string(&ctx.stores.store.lines_from(0).await?)?;
     assert!(history.contains("grow-0.txt"), "首轮记录必须保留");
     assert!(
         history.contains(&format!("grow-{}.txt", rounds - 1)),
@@ -1850,13 +1872,13 @@ async fn retryable_failures_then_success_use_exactly_three_attempts() -> anyhow:
     assert_eq!(decision, TurnDecision::Stop);
     assert_eq!(backend.calls(), 3);
     ctx.flush_event_log().await?;
-    let events = tokio::fs::read_to_string(&ctx.events_path).await?;
+    let events = tokio::fs::read_to_string(&ctx.paths.events_path).await?;
     assert_eq!(
         events.matches("\"type\":\"retry\"").count(),
         2,
         "one Retry notification per runtime-managed retry: {events}"
     );
-    let lines = ctx.store.lines().await?;
+    let lines = ctx.stores.store.lines().await?;
     assert_eq!(lines.len(), 2, "one user + one accepted assistant round");
     Ok(())
 }
@@ -1999,10 +2021,10 @@ async fn damaged_attempt_discards_candidate_without_side_effects() -> anyhow::Re
     assert_eq!(decision, TurnDecision::Stop);
     assert_eq!(backend.calls(), 2);
     assert!(
-        !ctx.cwd.join("leak.txt").exists(),
+        !ctx.paths.cwd.join("leak.txt").exists(),
         "a damaged attempt must never execute candidate tools"
     );
-    let lines = ctx.store.lines().await?;
+    let lines = ctx.stores.store.lines().await?;
     let assistant = serde_json::to_string(&lines[1])?;
     assert!(assistant.contains("clean"), "{assistant}");
     assert!(!assistant.contains("partial"), "{assistant}");
@@ -2067,10 +2089,10 @@ async fn successful_tool_round_is_not_replayed_by_next_round_retry() -> anyhow::
     assert_eq!(decision, TurnDecision::Stop);
     assert_eq!(backend.calls(), 3);
     assert_eq!(
-        tokio::fs::read_to_string(ctx.cwd.join("once.txt")).await?,
+        tokio::fs::read_to_string(ctx.paths.cwd.join("once.txt")).await?,
         "x"
     );
-    let results = crate::regression::tool_result_ids(&ctx.store).await?;
+    let results = crate::regression::tool_result_ids(&ctx.stores.store).await?;
     assert_eq!(results, vec!["write_once".to_string()]);
     Ok(())
 }
@@ -2104,7 +2126,7 @@ async fn usage_settles_once_per_attempt() -> anyhow::Result<()> {
     let (decision, _) = executor.execute("usage per attempt", None).await?;
 
     assert_eq!(decision, TurnDecision::Stop);
-    let records = ctx.usage.all_records()?;
+    let records = ctx.stores.usage.all_records()?;
     assert_eq!(records.len(), 2, "{records:?}");
     assert_eq!(
         records[0].status,
@@ -2155,7 +2177,7 @@ async fn custom_backend_aggregated_attempt_count_is_preserved() -> anyhow::Resul
     let (_decision, _) = executor.execute("aggregate", None).await?;
 
     assert_eq!(backend.calls(), 2, "outer calls stay bounded");
-    let records = ctx.usage.all_records()?;
+    let records = ctx.stores.usage.all_records()?;
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].attempt_count, 1);
     assert_eq!(
@@ -2188,7 +2210,7 @@ async fn empty_completion_is_format_feedback_not_silent_success() -> anyhow::Res
         2,
         "the empty round is answered with feedback"
     );
-    let lines = ctx.store.lines().await?;
+    let lines = ctx.stores.store.lines().await?;
     assert!(
         lines.iter().any(|line| {
             line["role"] == "user"
@@ -2369,9 +2391,9 @@ async fn write_argument_error_consumes_the_format_budget() -> anyhow::Result<()>
         }
         other => panic!("expected format_recovery_exhausted, got {other:?}"),
     }
-    assert!(!ctx.cwd.join("never-written.txt").exists());
+    assert!(!ctx.paths.cwd.join("never-written.txt").exists());
     assert_eq!(
-        crate::regression::tool_result_ids(&ctx.store).await?,
+        crate::regression::tool_result_ids(&ctx.stores.store).await?,
         vec!["bad_write".to_string()]
     );
     Ok(())
@@ -2400,7 +2422,7 @@ async fn scavenged_plain_json_without_a_surface_tool_is_ignored() -> anyhow::Res
     assert_eq!(decision, TurnDecision::Stop);
     assert_eq!(backend.calls(), 1, "no format-feedback round is needed");
     assert!(
-        crate::regression::tool_result_ids(&ctx.store)
+        crate::regression::tool_result_ids(&ctx.stores.store)
             .await?
             .is_empty(),
         "plain JSON must not produce a tool call"
@@ -2438,7 +2460,7 @@ async fn scavenged_unparsable_call_is_surfaced_not_dropped() -> anyhow::Result<(
     assert_eq!(backend.calls(), 2, "the format feedback round happened");
     assert_eq!(executor.format_error_count(), 1);
     assert_eq!(
-        crate::regression::tool_result_ids(&ctx.store).await?,
+        crate::regression::tool_result_ids(&ctx.stores.store).await?,
         vec!["scavenged_1_0".to_string()]
     );
     let second_request = serde_json::to_string(&backend.requests()[1])?;
@@ -2459,7 +2481,7 @@ async fn todo_final_reminder_reaches_the_next_request() -> anyhow::Result<()> {
         cfg.llm_recovery.request_max_retries = 0;
     })
     .await?;
-    ctx.todo_store.apply_structure(
+    ctx.stores.todo_store.apply_structure(
         0,
         crate::session::todo::TodoChanges {
             add: vec![crate::session::todo::TodoAdd {
@@ -2468,7 +2490,7 @@ async fn todo_final_reminder_reaches_the_next_request() -> anyhow::Result<()> {
             ..Default::default()
         },
     )?;
-    ctx.todo_store.advance(
+    ctx.stores.todo_store.advance(
         1,
         crate::session::todo::TodoTransitions {
             activate: vec!["T0001".into()],
@@ -2556,11 +2578,11 @@ async fn unparsable_nested_function_arguments_are_format_feedback() -> anyhow::R
         other => panic!("the damaged candidate must consume the budget, got {other:?}"),
     }
     assert_eq!(
-        crate::regression::tool_result_ids(&ctx.store).await?,
+        crate::regression::tool_result_ids(&ctx.stores.store).await?,
         vec!["scavenged_1_0".to_string()],
         "the candidate is reported as a failed result"
     );
-    let serialized = serde_json::to_string(&ctx.store.lines().await?)?;
+    let serialized = serde_json::to_string(&ctx.stores.store.lines().await?)?;
     assert!(
         serialized.contains("invalid tool arguments"),
         "TodoRead must not execute with fabricated empty arguments: {serialized}"
@@ -2595,7 +2617,7 @@ async fn damaged_wrapper_json_is_format_feedback_not_a_silent_stop() -> anyhow::
     assert_eq!(decision, TurnDecision::Stop);
     assert_eq!(backend.calls(), 2, "one feedback round happened");
     assert!(
-        crate::regression::tool_result_ids(&ctx.store)
+        crate::regression::tool_result_ids(&ctx.stores.store)
             .await?
             .is_empty()
     );
@@ -2635,7 +2657,7 @@ async fn non_string_nested_arguments_are_format_feedback() -> anyhow::Result<()>
         }
         other => panic!("the type error must consume the budget, got {other:?}"),
     }
-    let serialized = serde_json::to_string(&ctx.store.lines().await?)?;
+    let serialized = serde_json::to_string(&ctx.stores.store.lines().await?)?;
     assert!(
         serialized.contains("must be a JSON string"),
         "TodoRead must not execute with fabricated arguments: {serialized}"
@@ -2670,7 +2692,7 @@ async fn missing_brace_wrapper_is_format_feedback() -> anyhow::Result<()> {
     assert_eq!(decision, TurnDecision::Stop);
     assert_eq!(backend.calls(), 2, "one feedback round happened");
     assert!(
-        crate::regression::tool_result_ids(&ctx.store)
+        crate::regression::tool_result_ids(&ctx.stores.store)
             .await?
             .is_empty()
     );
@@ -2706,7 +2728,7 @@ async fn wrapper_without_identity_is_format_feedback() -> anyhow::Result<()> {
     assert_eq!(decision, TurnDecision::Stop);
     assert_eq!(backend.calls(), 2, "one feedback round happened");
     assert!(
-        crate::regression::tool_result_ids(&ctx.store)
+        crate::regression::tool_result_ids(&ctx.stores.store)
             .await?
             .is_empty()
     );
@@ -2813,7 +2835,7 @@ async fn dsml_invalid_json_parameter_is_format_feedback() -> anyhow::Result<()> 
         }
         other => panic!("the invalid JSON parameter must consume the budget, got {other:?}"),
     }
-    let serialized = serde_json::to_string(&ctx.store.lines().await?)?;
+    let serialized = serde_json::to_string(&ctx.stores.store.lines().await?)?;
     assert!(
         serialized.contains("parse DSML parameter"),
         "no executable call may be produced: {serialized}"
@@ -2892,15 +2914,15 @@ async fn format_feedback_round_trip_corrects_bad_arguments() -> anyhow::Result<(
 
     assert_eq!(decision, TurnDecision::Stop);
     assert!(
-        ctx.cwd.join("round_trip_marker").exists(),
+        ctx.paths.cwd.join("round_trip_marker").exists(),
         "the corrected call executes exactly once"
     );
     assert_eq!(executor.format_error_count(), 1);
     assert_eq!(
-        crate::regression::tool_result_ids(&ctx.store).await?,
+        crate::regression::tool_result_ids(&ctx.stores.store).await?,
         vec!["bad_args".to_string(), "good_args".to_string()]
     );
-    let serialized = serde_json::to_string(&ctx.store.lines().await?)?;
+    let serialized = serde_json::to_string(&ctx.stores.store.lines().await?)?;
     assert!(
         serialized.contains("invalid tool arguments"),
         "the model sees the decode diagnostic"
@@ -2933,14 +2955,14 @@ async fn unpaired_candidate_batch_is_dropped_with_one_diagnostic() -> anyhow::Re
     let (decision, _) = executor.execute("drop the batch", None).await?;
 
     assert_eq!(decision, TurnDecision::Stop);
-    assert!(!ctx.cwd.join("should_not_exist").exists());
+    assert!(!ctx.paths.cwd.join("should_not_exist").exists());
     assert!(
-        crate::regression::tool_result_ids(&ctx.store)
+        crate::regression::tool_result_ids(&ctx.stores.store)
             .await?
             .is_empty(),
         "no orphan tool result for a dropped batch"
     );
-    let serialized = serde_json::to_string(&ctx.store.lines().await?)?;
+    let serialized = serde_json::to_string(&ctx.stores.store.lines().await?)?;
     assert!(serialized.contains("<tool-call-format-error>"));
     Ok(())
 }
@@ -2968,9 +2990,9 @@ async fn duplicate_call_ids_drop_the_whole_candidate_batch() -> anyhow::Result<(
     let (decision, _) = executor.execute("duplicate ids", None).await?;
 
     assert_eq!(decision, TurnDecision::Stop);
-    assert!(!ctx.cwd.join("dup_one").exists() && !ctx.cwd.join("dup_two").exists());
+    assert!(!ctx.paths.cwd.join("dup_one").exists() && !ctx.paths.cwd.join("dup_two").exists());
     assert!(
-        crate::regression::tool_result_ids(&ctx.store)
+        crate::regression::tool_result_ids(&ctx.stores.store)
             .await?
             .is_empty()
     );
@@ -3000,13 +3022,13 @@ async fn truncated_output_never_executes_complete_looking_subcalls() -> anyhow::
     let (decision, _) = executor.execute("hit the limit", None).await?;
 
     assert_eq!(decision, TurnDecision::Stop);
-    assert!(!ctx.cwd.join("truncated_marker").exists());
+    assert!(!ctx.paths.cwd.join("truncated_marker").exists());
     assert!(
-        crate::regression::tool_result_ids(&ctx.store)
+        crate::regression::tool_result_ids(&ctx.stores.store)
             .await?
             .is_empty()
     );
-    let serialized = serde_json::to_string(&ctx.store.lines().await?)?;
+    let serialized = serde_json::to_string(&ctx.stores.store.lines().await?)?;
     assert!(serialized.contains("<output-truncated>"));
     Ok(())
 }
@@ -3072,7 +3094,7 @@ async fn legacy_function_call_rounds_do_not_consume_the_format_budget() -> anyho
     assert_eq!(decision, TurnDecision::Stop);
     assert_eq!(executor.format_error_count(), 0);
     assert_eq!(
-        crate::regression::tool_result_ids(&ctx.store).await?,
+        crate::regression::tool_result_ids(&ctx.stores.store).await?,
         vec!["legacy_1".to_string(), "legacy_2".to_string()]
     );
     Ok(())
@@ -3107,11 +3129,11 @@ async fn exhausted_window_keeps_legal_side_effects_from_the_same_batch() -> anyh
         other => panic!("expected format_recovery_exhausted, got {other:?}"),
     }
     assert_eq!(
-        tokio::fs::read_to_string(ctx.cwd.join("legal.txt")).await?,
+        tokio::fs::read_to_string(ctx.paths.cwd.join("legal.txt")).await?,
         "x"
     );
     assert_eq!(
-        crate::regression::tool_result_ids(&ctx.store).await?,
+        crate::regression::tool_result_ids(&ctx.stores.store).await?,
         vec!["legal_write".to_string(), "bad_args".to_string()]
     );
     Ok(())
@@ -3151,7 +3173,7 @@ async fn format_window_is_independent_of_the_signal_policy() -> anyhow::Result<(
     let (decision, _) = executor.execute("signals off", None).await?;
 
     assert_eq!(decision, TurnDecision::Stop);
-    assert!(ctx.cwd.join("signals_off_marker").exists());
+    assert!(ctx.paths.cwd.join("signals_off_marker").exists());
     assert_eq!(executor.format_error_count(), 1);
     Ok(())
 }
@@ -3186,7 +3208,7 @@ async fn last_round_format_feedback_without_exhaustion_returns_max_turns() -> an
 async fn prepare_request_builds_one_projection_without_compaction() -> anyhow::Result<()> {
     let ctx = crate::regression::test_context_for_agent("projection-build-once").await?;
     let mut executor = TurnExecutor::new(ctx.clone());
-    let mut messages = ctx.store.lines().await?;
+    let mut messages = ctx.stores.store.lines().await?;
     let mut system_prompt = String::new();
     let mut tools = Vec::new();
 
@@ -3207,13 +3229,14 @@ async fn prepare_request_rebuilds_projection_after_compaction() -> anyhow::Resul
     let backend = RepeatedCompactionBackend::new(vec![]);
     let ctx = repeated_compaction_context("projection-rebuild-after-compaction", backend).await?;
     for index in 0..4 {
-        ctx.store
+        ctx.stores
+            .store
             .add_user(&format!("request {index}: {}", "x".repeat(100_000)))
             .await?;
-        ctx.store.add_assistant("ack", "", &[]).await?;
+        ctx.stores.store.add_assistant("ack", "", &[]).await?;
     }
     let mut executor = TurnExecutor::new(ctx.clone());
-    let mut messages = ctx.store.lines().await?;
+    let mut messages = ctx.stores.store.lines().await?;
     let mut system_prompt = String::new();
     let mut tools = Vec::new();
 
