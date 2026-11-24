@@ -326,13 +326,11 @@ pub(super) async fn gated_router(
     max_running: usize,
     release: Arc<tokio::sync::watch::Sender<bool>>,
 ) -> (Router, PathBuf, String, String) {
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let home = std::env::temp_dir().join(format!(
         "mink-server-gated-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     ));
     let cwd = home.join("workspace");
     std::fs::create_dir_all(&cwd).unwrap();

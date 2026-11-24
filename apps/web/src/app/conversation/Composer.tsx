@@ -139,6 +139,10 @@ export function Composer({
   useLayoutEffect(() => {
     const el = area.current
     if (el === null) return
+    if (text === '') {
+      el.style.height = ''
+      return
+    }
     el.style.height = 'auto'
     el.style.height = `${el.scrollHeight}px`
   }, [text])
@@ -172,6 +176,18 @@ export function Composer({
   // One copied surface serves both entries: the add control opens the whole
   // contract, `/` opens it carrying the draft's query. While it is open its own
   // search box holds focus, so the composer stops feeding it.
+  useEffect(() => {
+    if (!panelOpen) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      if (commandPopup.controller.state.getSnapshot().confirming !== null) return
+      event.preventDefault()
+      if (commandMode) dismissedTextRef.current = text
+      commandPopup.close()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => { document.removeEventListener('keydown', onKeyDown) }
+  }, [commandMode, commandPopup, panelOpen, text])
   useEffect(() => {
     if (!commandMode) {
       dismissedTextRef.current = null
@@ -389,7 +405,7 @@ export function Composer({
               </button>
             </Tooltip>
           </div>
-          <div className={panelOpen ? css.trailingActive : css.trailing}>
+          <div className={panelOpen ? `${css.trailing} ${css.trailingActive}` : css.trailing}>
             <span className={css.standardControls} hidden={panelOpen}>
               {showModelSeat && (
                 <Menu

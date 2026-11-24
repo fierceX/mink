@@ -459,4 +459,58 @@ describe('a submission that fails', () => {
     )
     expect(screen.getByText('有附件上传失败，请移除后重试')).toBeDefined()
   })
+
+  it('closes the command popup on document Escape and sends afterward', async () => {
+    const onSend = vi.fn(async () => undefined)
+    render(
+      <Composer
+        hero
+        running={false}
+        targetTurnId={null}
+        disabled={false}
+        attachments={noAttachments()}
+        canAttach
+        model="deepseek-flash"
+        onSend={onSend}
+        onGuide={async () => undefined}
+        onCommand={async () => ({ message: '', ok: true })}
+        onStop={() => {}}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: '命令' }))
+    expect(await screen.findByRole('listbox')).toBeDefined()
+
+    // Pressing Escape on document (when hidden search input does not hold focus) dismisses the popup.
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => {
+      expect(screen.queryByRole('listbox')).toBeNull()
+    })
+
+    const field = screen.getByLabelText('输入消息') as HTMLTextAreaElement
+    fireEvent.change(field, { target: { value: 'hello after escape' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith('hello after escape', [], [])
+    })
+  })
+
+  it('keeps empty textarea inline height cleared so CSS controls resting size', () => {
+    render(
+      <Composer
+        hero
+        running={false}
+        targetTurnId={null}
+        disabled={false}
+        attachments={noAttachments()}
+        canAttach
+        model="deepseek-flash"
+        onSend={async () => undefined}
+        onGuide={async () => undefined}
+        onCommand={async () => ({ message: '', ok: true })}
+        onStop={() => {}}
+      />,
+    )
+    const field = screen.getByLabelText('输入消息') as HTMLTextAreaElement
+    expect(field.style.height).toBe('')
+  })
 })

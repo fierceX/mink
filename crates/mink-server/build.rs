@@ -221,13 +221,12 @@ fn main() {
     let git_dir = resolve_git_dir(&manifest.join("../../.git"));
     let head_path = git_dir.join("HEAD");
     println!("cargo:rerun-if-changed={}", head_path.display());
-    if let Ok(head) = fs::read_to_string(&head_path)
-        && let Some(ref_rel) = head.trim().strip_prefix("ref: ")
-    {
-        println!(
-            "cargo:rerun-if-changed={}",
-            git_dir.join(ref_rel.trim()).display()
-        );
+    if let Some(ref_path) = fs::read_to_string(&head_path).ok().and_then(|head| {
+        head.trim()
+            .strip_prefix("ref: ")
+            .map(|r| git_dir.join(r.trim()))
+    }) {
+        println!("cargo:rerun-if-changed={}", ref_path.display());
     }
     println!(
         "cargo:rerun-if-changed={}",
@@ -284,11 +283,18 @@ fn main() {
 }
 
 fn resolve_git_dir(dot_git: &Path) -> PathBuf {
-    if dot_git.is_file()
-        && let Ok(content) = fs::read_to_string(dot_git)
-        && let Some(raw) = content.trim().strip_prefix("gitdir:")
+    if let Some(raw) = dot_git
+        .is_file()
+        .then(|| fs::read_to_string(dot_git).ok())
+        .flatten()
+        .and_then(|content| {
+            content
+                .trim()
+                .strip_prefix("gitdir:")
+                .map(|r| r.trim().to_string())
+        })
     {
-        let path = PathBuf::from(raw.trim());
+        let path = PathBuf::from(raw);
         return if path.is_absolute() {
             path
         } else {

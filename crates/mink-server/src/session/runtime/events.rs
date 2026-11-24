@@ -123,10 +123,8 @@ pub(super) fn publish(
     projection: &Arc<Mutex<Projection>>,
     value: serde_json::Value,
 ) {
-    let event = {
-        let mut p = projection.lock().unwrap_or_else(|e| e.into_inner());
-        publish_locked(sequence, &mut p, value)
-    };
+    let mut p = projection.lock().unwrap_or_else(|e| e.into_inner());
+    let event = publish_locked(sequence, &mut p, value);
     let _ = tx.send(make_broadcast_event(&event));
 }
 
@@ -144,15 +142,14 @@ pub(super) fn publish_goal(
     goal: Option<mink::runtime::GoalSnapshot>,
 ) {
     let goal = goal.filter(|goal| !goal.hidden);
-    let event = {
-        let mut p = projection.lock().unwrap_or_else(|e| e.into_inner());
-        p.goal = goal.clone();
-        publish_locked(
-            sequence,
-            &mut p,
-            serde_json::json!({"type":"goal_updated","goal":goal.as_ref().map(goal_summary)}),
-        )
-    };
+    let summary = goal.as_ref().map(goal_summary);
+    let mut p = projection.lock().unwrap_or_else(|e| e.into_inner());
+    p.goal = goal;
+    let event = publish_locked(
+        sequence,
+        &mut p,
+        serde_json::json!({"type":"goal_updated","goal":summary}),
+    );
     let _ = tx.send(make_broadcast_event(&event));
 }
 

@@ -518,3 +518,74 @@ fn resource_projection_applies_todo_deltas_without_losing_completed_items() {
     assert_eq!(resources["plan"]["plan"], "plan");
     assert!(resources["plan"]["draft"].is_null());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_publish_and_publish_goal_preserve_monotonic_stream_sequence() {
+    let dir = std::env::temp_dir().join(format!(
+        "mink-server-runtime-seq-order-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let runtime = Arc::new(
+        SessionRuntime::open(AgentOptions::new(&dir, &dir).with_api_key("synthetic"))
+            .await
+            .unwrap(),
+    );
+    let base_goal = runtime
+        .goal_handle()
+        .unwrap()
+        .draft_goal(
+            mink::runtime::GoalSpec::new("ordered publish regression"),
+            60,
+        )
+        .unwrap();
+    let (tx, mut rx) = broadcast::channel(1024);
+
+    let mut handles = Vec::new();
+    for worker in 0..4u64 {
+        let rt = runtime.clone();
+        let tx = tx.clone();
+        let template = base_goal.clone();
+        handles.push(std::thread::spawn(move || {
+            for iter in 0..100u64 {
+                if (worker + iter) % 2 == 0 {
+                    let mut goal = template.clone();
+                    goal.revision = iter + 1;
+                    publish_goal(&tx, &rt.stream_sequence, &rt.projection, Some(goal));
+                } else {
+                    publish(
+                        &tx,
+                        &rt.stream_sequence,
+                        &rt.projection,
+                        serde_json::json!({
+                            "type": "phase_updated",
+                            "phase": if iter % 4 == 1 { "running" } else { "idle" }
+                        }),
+                    );
+                }
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    let mut prev: Option<u64> = None;
+    let mut count = 0usize;
+    while let Ok(event) = rx.try_recv() {
+        let parsed: serde_json::Value = serde_json::from_str(&event.payload).unwrap();
+        let seq = parsed["stream_sequence"].as_u64().unwrap();
+        if let Some(prev_seq) = prev {
+            assert!(
+                seq > prev_seq,
+                "broadcast sequence inverted or duplicated: prev={prev_seq}, seq={seq}, event={parsed}"
+            );
+        }
+        prev = Some(seq);
+        count += 1;
+    }
+    assert_eq!(count, 400);
+    runtime.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
