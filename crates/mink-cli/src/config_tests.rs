@@ -1082,3 +1082,34 @@ fn validate_runtime_config_rejects_invalid_llm_recovery() {
     cfg.llm_recovery.request_timeout_secs = Some(0);
     assert!(validate_runtime_config(&cfg).is_err());
 }
+
+#[test]
+fn parse_size_bytes_rejects_overflow_without_panicking() {
+    let err = parse_size_bytes("99999999999999999g")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("overflow"), "{err}");
+}
+
+#[test]
+fn parse_args_supports_double_dash_and_equals_form() {
+    let cfg = parse_args(vec![
+        "--model=pro".into(),
+        "--edit-mode=replace".into(),
+        "--".into(),
+        "-leading-dash-prompt".into(),
+    ])
+    .unwrap();
+    assert_eq!(cfg.model, "pro");
+    assert_eq!(cfg.edit_mode, EditMode::Replace);
+    assert_eq!(cfg.prompt, "-leading-dash-prompt");
+}
+
+#[cfg(feature = "tui")]
+#[test]
+fn resolve_model_label_honors_configured_aliases() {
+    let mut aliases = BTreeMap::new();
+    aliases.insert("fast".to_string(), "my-custom-fast-model".to_string());
+    assert_eq!(resolve_model_label(" fast ", &aliases), "fast");
+    assert_eq!(resolve_model_label("", &aliases), "flash");
+}

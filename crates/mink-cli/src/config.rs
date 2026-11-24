@@ -207,71 +207,100 @@ pub fn parse_args(args: Vec<String>) -> Result<CliConfig> {
     let mut cfg = CliConfig::default();
     let mut i = 0usize;
     let mut seen_prompt = false;
+    let mut after_double_dash = false;
 
     while i < args.len() {
         let arg = &args[i];
-        match arg.as_str() {
+        if after_double_dash {
+            if seen_prompt {
+                bail!(
+                    "unexpected extra argument: {arg} (prompt already set to {:?})",
+                    cfg.prompt
+                );
+            }
+            cfg.prompt = arg.clone();
+            seen_prompt = true;
+            i += 1;
+            continue;
+        }
+        if arg == "--" {
+            after_double_dash = true;
+            i += 1;
+            continue;
+        }
+        let (flag, inline_val) =
+            if arg.starts_with("--") && !matches!(arg.as_str(), "--tui=full" | "--tui=inline") {
+                match arg.split_once('=') {
+                    Some((name, val)) => (name, Some(val)),
+                    None => (arg.as_str(), None),
+                }
+            } else {
+                (arg.as_str(), None)
+            };
+        match flag {
             "-m" | "--model" => {
-                let val = require_value(&args, i)?;
+                let (val, step) = take_value(&args, i, inline_val)?;
                 if val.trim().is_empty() {
                     bail!("model must not be empty");
                 }
                 cfg.model = val;
                 cfg.cli_overrides.model = true;
-                i += 2;
+                i += step;
             }
             "--mission" => {
-                cfg.mission_file = Some(require_value(&args, i)?.into());
-                i += 2;
+                let (val, step) = take_value(&args, i, inline_val)?;
+                cfg.mission_file = Some(val.into());
+                i += step;
             }
             "--api-key" => {
-                cfg.api_key = require_value(&args, i)?;
+                let (val, step) = take_value(&args, i, inline_val)?;
+                cfg.api_key = val;
                 cfg.cli_overrides.api_key = true;
-                i += 2;
+                i += step;
             }
             "--base-url" => {
-                cfg.base_url = require_value(&args, i)?;
+                let (val, step) = take_value(&args, i, inline_val)?;
+                cfg.base_url = val;
                 cfg.cli_overrides.base_url = true;
-                i += 2;
+                i += step;
             }
-            "--print" => {
+            "--print" if inline_val.is_none() => {
                 cfg.output_format = OutputFormat::StreamJson;
                 cfg.cli_overrides.output_format = true;
                 i += 1;
             }
             "--session" => {
-                let value = require_value(&args, i)?;
-                if value.trim().is_empty() {
-                    bail!("session name must not be empty");
-                }
+                let (value, step) = match inline_val {
+                    Some(v) if v.trim().is_empty() => bail!("missing value for --session"),
+                    Some(v) => (v.trim().to_string(), 1),
+                    None => {
+                        let value = require_value(&args, i)?;
+                        if value.trim().is_empty() {
+                            bail!("session name must not be empty");
+                        }
+                        (value, 2)
+                    }
+                };
                 cfg.session_id = value;
-                i += 2;
+                i += step;
             }
-            arg if arg.starts_with("--session=") => {
-                let value = arg.strip_prefix("--session=").unwrap_or_default().trim();
-                if value.is_empty() {
-                    bail!("missing value for --session");
-                }
-                cfg.session_id = value.to_string();
-                i += 1;
-            }
-            "--continue" => {
+            "--continue" if inline_val.is_none() => {
                 cfg.continue_session = true;
                 i += 1;
             }
-            "--list-sessions" => {
+            "--list-sessions" if inline_val.is_none() => {
                 cfg.list_sessions = true;
                 i += 1;
             }
-            "--list-skills" => {
+            "--list-skills" if inline_val.is_none() => {
                 cfg.list_skills = true;
                 i += 1;
             }
-            "-v" | "--verbose" => {
+            "-v" | "--verbose" if inline_val.is_none() => {
                 cfg.verbose = true;
                 i += 1;
             }
-            "--tui" => {
+            "--tui" if inline_val.is_none() => {
                 cfg.tui_mode = TuiMode::Full;
                 i += 1;
             }
@@ -283,24 +312,24 @@ pub fn parse_args(args: Vec<String>) -> Result<CliConfig> {
                 cfg.tui_mode = TuiMode::Inline;
                 i += 1;
             }
-            "-i" | "--interactive" => {
+            "-i" | "--interactive" if inline_val.is_none() => {
                 cfg.interactive = true;
                 i += 1;
             }
-            "-h" | "--help" => {
+            "-h" | "--help" if inline_val.is_none() => {
                 return Err(anyhow!(CliEarlyExit::Help));
             }
-            "-V" | "--version" => {
+            "-V" | "--version" if inline_val.is_none() => {
                 return Err(anyhow!(CliEarlyExit::Version));
             }
-            "--agent-jsonl" => {
+            "--agent-jsonl" if inline_val.is_none() => {
                 cfg.agent_jsonl = true;
                 cfg.output_format = OutputFormat::StreamJson;
                 cfg.cli_overrides.output_format = true;
                 i += 1;
             }
             "--skill" => {
-                let value = require_value(&args, i)?;
+                let (value, step) = take_value(&args, i, inline_val)?;
                 if value.trim().is_empty() {
                     bail!("skill name must not be empty");
                 }
@@ -308,42 +337,44 @@ pub fn parse_args(args: Vec<String>) -> Result<CliConfig> {
                     cfg.skills.push(value);
                 }
                 cfg.cli_overrides.skills = true;
-                i += 2;
+                i += step;
             }
             "--enabled-tools" => {
-                let value = require_value(&args, i)?;
+                let (value, step) = take_value(&args, i, inline_val)?;
                 cfg.enabled_tools = Some(parse_enabled_tools(value)?);
                 cfg.cli_overrides.enabled_tools = true;
-                i += 2;
+                i += step;
             }
             "--edit-mode" => {
-                cfg.edit_mode = EditMode::parse(&require_value(&args, i)?)?;
+                let (val, step) = take_value(&args, i, inline_val)?;
+                cfg.edit_mode = EditMode::parse(&val)?;
                 cfg.cli_overrides.edit_mode = true;
-                i += 2;
+                i += step;
             }
             "--edit-fuzzy-match" => {
-                cfg.edit_fuzzy_match =
-                    parse_bool_value("--edit-fuzzy-match", &require_value(&args, i)?)?;
+                let (val, step) = take_value(&args, i, inline_val)?;
+                cfg.edit_fuzzy_match = parse_bool_value("--edit-fuzzy-match", &val)?;
                 cfg.cli_overrides.edit_fuzzy_match = true;
-                i += 2;
+                i += step;
             }
             "--edit-fuzzy-threshold" => {
-                cfg.edit_fuzzy_threshold = require_value(&args, i)?.parse().map_err(|_| {
+                let (val, step) = take_value(&args, i, inline_val)?;
+                cfg.edit_fuzzy_threshold = val.parse().map_err(|_| {
                     anyhow!("--edit-fuzzy-threshold requires a number in 0.0..=1.0")
                 })?;
                 cfg.cli_overrides.edit_fuzzy_threshold = true;
-                i += 2;
+                i += step;
             }
             "--edit-enforce-seen-lines" => {
-                cfg.edit_enforce_seen_lines =
-                    parse_bool_value("--edit-enforce-seen-lines", &require_value(&args, i)?)?;
+                let (val, step) = take_value(&args, i, inline_val)?;
+                cfg.edit_enforce_seen_lines = parse_bool_value("--edit-enforce-seen-lines", &val)?;
                 cfg.cli_overrides.edit_enforce_seen_lines = true;
-                i += 2;
+                i += step;
             }
             "--config" => {
-                let toml_str = require_value(&args, i)?;
+                let (toml_str, step) = take_value(&args, i, inline_val)?;
                 cfg.cli_config = Some(mink::config_file::parse_config_file(&toml_str)?);
-                i += 2;
+                i += step;
             }
             _ => {
                 if arg.starts_with('-') {
@@ -363,6 +394,14 @@ pub fn parse_args(args: Vec<String>) -> Result<CliConfig> {
     }
 
     Ok(cfg)
+}
+
+fn take_value(args: &[String], i: usize, inline: Option<&str>) -> Result<(String, usize)> {
+    match inline {
+        Some("") => bail!("missing value for {}", args[i]),
+        Some(val) => Ok((val.to_string(), 1)),
+        None => Ok((require_value(args, i)?, 2)),
+    }
 }
 
 fn require_value(args: &[String], i: usize) -> Result<String> {
@@ -982,8 +1021,8 @@ pub fn validate_runtime_config(cfg: &CliConfig) -> Result<()> {
 
 /// Resolve the display label for the title bar.
 #[cfg(feature = "tui")]
-pub fn resolve_model_label(model: &str) -> String {
-    crate::runtime::ModelResolver::new(&BTreeMap::new())
+pub fn resolve_model_label(model: &str, aliases: &BTreeMap<String, String>) -> String {
+    crate::runtime::ModelResolver::new(aliases)
         .resolve(model)
         .label
 }
@@ -1002,7 +1041,9 @@ pub fn parse_size_bytes(raw: &str) -> Result<usize> {
     } else {
         (lower.as_str(), 1usize)
     };
-    Ok(num.parse::<usize>()? * m)
+    num.parse::<usize>()?
+        .checked_mul(m)
+        .ok_or_else(|| anyhow!("size overflow: {raw}"))
 }
 
 #[cfg(test)]

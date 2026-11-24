@@ -280,7 +280,10 @@ pub(crate) fn start_runtime_broker(
     tokio::spawn(async move {
         while let Some(command) = rx.recv().await {
             match command {
-                RuntimeCmd::Exit => break,
+                RuntimeCmd::Exit => {
+                    handle.interrupt_current_turn();
+                    break;
+                }
                 RuntimeCmd::Interrupt => handle.interrupt_current_turn(),
                 RuntimeCmd::Goal(command)
                     if matches!(
@@ -522,21 +525,21 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
             {
                 let cmd_tx = start_runtime_broker(runtime_handle.clone(), display.clone());
                 if let Some((signal_tx, signal_rx)) = tui_tx {
-                    let model_label = crate::config::resolve_model_label(&cfg.model);
-                    launch_tui_with(|| {
-                        crate::tui::run_tui(
-                            cfg.tui_mode,
-                            signal_rx,
-                            cmd_tx.clone(),
-                            &session,
-                            &model_label,
-                            &cfg.sandbox,
-                            crate::tui::TuiRuntime {
-                                handle: runtime_handle.clone(),
-                                signals: signal_tx,
-                            },
-                        )
-                    })?;
+                    let model_label =
+                        crate::config::resolve_model_label(&cfg.model, &cfg.model_aliases);
+                    launch_tui_with(crate::tui::run_tui(
+                        cfg.tui_mode,
+                        signal_rx,
+                        cmd_tx.clone(),
+                        &session,
+                        &model_label,
+                        &cfg.sandbox,
+                        crate::tui::TuiRuntime {
+                            handle: runtime_handle.clone(),
+                            signals: signal_tx,
+                        },
+                    ))
+                    .await?;
                 }
             }
             #[cfg(not(feature = "tui"))]
@@ -719,6 +722,8 @@ async fn derive_and_persist_title(
     metadata_path: &Path,
     conversation_path: &Path,
 ) -> Option<String> {
+    use tokio::io::AsyncBufReadExt as _;
+
     let metadata_text = tokio::fs::read_to_string(metadata_path).await.ok()?;
     let mut metadata: serde_json::Value = serde_json::from_str(&metadata_text).ok()?;
     if metadata
@@ -728,26 +733,44 @@ async fn derive_and_persist_title(
     {
         return None;
     }
-    let conv_text = tokio::fs::read_to_string(conversation_path).await.ok()?;
-    let title = conv_text.lines().find_map(|line| {
-        let line = line.trim();
-        if line.is_empty() {
+    let file = tokio::fs::File::open(conversation_path).await.ok()?;
+    let mut reader = tokio::io::BufReader::new(file);
+    let mut line = String::new();
+    let title = loop {
+        line.clear();
+        let n = reader.read_line(&mut line).await.ok()?;
+        if n == 0 {
             return None;
         }
-        let msg: serde_json::Value = serde_json::from_str(line).ok()?;
-        if msg.get("role")?.as_str()? != "user" {
-            return None;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
         }
-        let content = msg.get("content")?.as_str()?;
-        crate::session::metadata::title_from_prompt(content)
-    })?;
+        let Ok(msg) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        if msg.get("role").and_then(|v| v.as_str()) != Some("user") {
+            continue;
+        }
+        let Some(content) = msg.get("content").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if let Some(title) = crate::session::metadata::title_from_prompt(content) {
+            break title;
+        }
+    };
     metadata["title"] = serde_json::Value::String(title.clone());
     let now = time::OffsetDateTime::now_utc();
     let fmt = time::format_description::well_known::Rfc3339;
     metadata["updated_at"] = serde_json::Value::String(now.format(&fmt).unwrap_or_default());
     if let Ok(text) = serde_json::to_string_pretty(&metadata) {
         // Cosmetic title write-back: best-effort, never fails the run.
-        let _ = mink::runtime::atomic_replace(metadata_path, format!("{text}\n").as_bytes());
+        let path = metadata_path.to_path_buf();
+        let payload = format!("{text}\n");
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = mink::runtime::atomic_replace(&path, payload.as_bytes());
+        })
+        .await;
     }
     Some(title)
 }
@@ -757,8 +780,11 @@ async fn derive_and_persist_title(
 /// Private seam for tests; deliberately not a long-term public launcher
 /// trait. `shutdown` still runs in the caller after this returns.
 #[cfg(feature = "tui")]
-fn launch_tui_with(run: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
-    run().map_err(|error| anyhow::anyhow!("TUI error: {error}"))
+async fn launch_tui_with(
+    run: impl std::future::Future<Output = anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    run.await
+        .map_err(|error| anyhow::anyhow!("TUI error: {error}"))
 }
 
 /// Await the runtime shutdown even when `turn_result` failed, then combine
@@ -839,29 +865,36 @@ async fn run_interactive(cmd_tx: mpsc::UnboundedSender<RuntimeCmd>, home: &Path)
     #[cfg(not(feature = "repl"))]
     let _ = home;
     let (exit_tx, exit_rx) = tokio::sync::mpsc::channel::<()>(1);
-    {
+    let last_interrupt = Arc::new(std::sync::Mutex::new(None::<Instant>));
+    let signal_task = {
         let sig_tx = cmd_tx.clone();
         let sig_exit_tx = exit_tx;
+        let last_interrupt = last_interrupt.clone();
         tokio::spawn(async move {
-            let mut last: Option<Instant> = None;
             loop {
                 if tokio::signal::ctrl_c().await.is_err() {
                     return;
                 }
                 let now = Instant::now();
-                if let Some(prev) = last
-                    && now.duration_since(prev) < Duration::from_secs(2)
-                {
+                let should_exit = {
+                    let mut guard = last_interrupt.lock().unwrap_or_else(|e| e.into_inner());
+                    if guard.is_some_and(|prev| now.duration_since(prev) < Duration::from_secs(2)) {
+                        true
+                    } else {
+                        *guard = Some(now);
+                        false
+                    }
+                };
+                if should_exit {
                     let _ = sig_tx.send(RuntimeCmd::Exit);
                     let _ = sig_exit_tx.send(()).await;
                     return;
                 }
-                last = Some(now);
                 let _ = sig_tx.send(RuntimeCmd::Interrupt);
             }
-        });
-    }
-    tokio::task::spawn_blocking(move || {
+        })
+    };
+    let repl_result = tokio::task::spawn_blocking(move || {
         #[cfg_attr(not(feature = "repl"), allow(unused_mut))]
         let mut exit_rx = exit_rx;
         #[cfg(feature = "repl")]
@@ -880,20 +913,29 @@ async fn run_interactive(cmd_tx: mpsc::UnboundedSender<RuntimeCmd>, home: &Path)
 
             let _ = rl.load_history(&history_path);
             let history_file = history_path.clone();
-            let mut last_interrupt: Option<Instant> = None;
 
-            loop {
+            'repl: loop {
                 let line = match rl.readline("> ") {
                     Ok(s) => s.trim_end().to_string(),
                     Err(rustyline::error::ReadlineError::Eof) => break,
                     Err(rustyline::error::ReadlineError::Interrupted) => {
-                        if last_interrupt
-                            .is_some_and(|prev| prev.elapsed() < Duration::from_secs(2))
-                        {
+                        let now = Instant::now();
+                        let should_exit = {
+                            let mut guard =
+                                last_interrupt.lock().unwrap_or_else(|e| e.into_inner());
+                            if guard.is_some_and(|prev| {
+                                now.duration_since(prev) < Duration::from_secs(2)
+                            }) {
+                                true
+                            } else {
+                                *guard = Some(now);
+                                false
+                            }
+                        };
+                        if should_exit {
                             let _ = cmd_tx.send(RuntimeCmd::Exit);
                             break;
                         }
-                        last_interrupt = Some(Instant::now());
                         let _ = cmd_tx.send(RuntimeCmd::Interrupt);
                         continue;
                     }
@@ -930,7 +972,7 @@ async fn run_interactive(cmd_tx: mpsc::UnboundedSender<RuntimeCmd>, home: &Path)
                         Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
                             if exit_rx.try_recv().is_ok() {
                                 let _ = cmd_tx.send(RuntimeCmd::Exit);
-                                return;
+                                break 'repl;
                             }
                             std::thread::sleep(std::time::Duration::from_millis(100));
                         }
@@ -941,11 +983,14 @@ async fn run_interactive(cmd_tx: mpsc::UnboundedSender<RuntimeCmd>, home: &Path)
         }
         #[cfg(not(feature = "repl"))]
         {
+            let _ = last_interrupt;
             eprintln!("Readline support is disabled; running in simple stdin mode.");
             simple_stdin_loop(&cmd_tx, exit_rx);
         }
     })
-    .await?;
+    .await;
+    signal_task.abort();
+    repl_result?;
 
     Ok(())
 }
@@ -956,7 +1001,7 @@ fn simple_stdin_loop(
 ) {
     use std::io::BufRead;
     let stdin = std::io::stdin();
-    for line in stdin.lock().lines() {
+    'stdin: for line in stdin.lock().lines() {
         if exit_rx.try_recv().is_ok() {
             break;
         }
@@ -978,7 +1023,7 @@ fn simple_stdin_loop(
         if line == "exit" || line == "quit" {
             break;
         }
-        let (done_tx, done_rx) = oneshot::channel();
+        let (done_tx, mut done_rx) = oneshot::channel();
         if cmd_tx
             .send(RuntimeCmd::Run {
                 input: line,
@@ -988,7 +1033,18 @@ fn simple_stdin_loop(
         {
             break;
         }
-        let _ = done_rx.blocking_recv();
+        loop {
+            match done_rx.try_recv() {
+                Ok(_) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => break,
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    if exit_rx.try_recv().is_ok() {
+                        let _ = cmd_tx.send(RuntimeCmd::Exit);
+                        break 'stdin;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
         if exit_rx.try_recv().is_ok() {
             break;
         }

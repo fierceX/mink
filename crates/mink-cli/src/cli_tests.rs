@@ -135,11 +135,15 @@ async fn wait_until(mut condition: impl FnMut() -> bool) {
 }
 
 #[cfg(feature = "tui")]
-#[test]
-fn tui_launcher_outcome_matrix() {
+#[tokio::test]
+async fn tui_launcher_outcome_matrix() {
     // Success must not be reported as a failure; failure must carry context.
-    launch_tui_with(|| Ok(())).expect("launcher success must stay Ok");
-    let error = launch_tui_with(|| anyhow::bail!("terminal init failed")).unwrap_err();
+    launch_tui_with(async { Ok(()) })
+        .await
+        .expect("launcher success must stay Ok");
+    let error = launch_tui_with(async { anyhow::bail!("terminal init failed") })
+        .await
+        .unwrap_err();
     assert!(
         error
             .to_string()

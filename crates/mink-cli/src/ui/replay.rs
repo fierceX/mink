@@ -9,50 +9,52 @@ use crate::util::truncate_display;
 
 /// Replay last N turns from events.jsonl synchronously to stdout/stderr.
 pub fn replay_last_turns(events_path: &Path) {
-    if !events_path.exists() {
-        return;
-    }
+    use std::collections::VecDeque;
+    use std::io::BufRead as _;
 
-    let data = match std::fs::read_to_string(events_path) {
-        Ok(d) => d,
+    const MAX_REPLAY_TURNS: usize = 10;
+
+    let file = match std::fs::File::open(events_path) {
+        Ok(file) => file,
         Err(_) => return,
     };
 
-    let events: Vec<Value> = data
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
-
-    if events.is_empty() {
-        return;
-    }
-
-    let mut turn_starts: Vec<usize> = Vec::new();
-    for (i, evt) in events.iter().enumerate() {
-        if crate::replay::classify_event(evt) == ReplayEventKind::UserInput {
-            turn_starts.push(i);
+    let mut turns: VecDeque<Vec<Value>> = VecDeque::with_capacity(MAX_REPLAY_TURNS);
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(evt) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        if crate::replay::classify_event(&evt) == ReplayEventKind::UserInput {
+            if turns.len() == MAX_REPLAY_TURNS {
+                turns.pop_front();
+            }
+            turns.push_back(vec![evt]);
+        } else if let Some(current_turn) = turns.back_mut() {
+            current_turn.push(evt);
         }
     }
 
-    if turn_starts.is_empty() {
+    if turns.is_empty() {
         return;
     }
 
-    let keep = turn_starts.len().saturating_sub(10);
-    let start_idx = if keep < turn_starts.len() {
-        turn_starts[keep]
-    } else {
-        0
-    };
-    let had_turns = turn_starts.len().saturating_sub(keep) > 0;
-
+    let events: Vec<Value> = turns.into_iter().flatten().collect();
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
-    render_events(&events[start_idx..], &mut stdout, &mut stderr);
-    if had_turns {
-        let _ = writeln!(stdout);
-    }
+    render_events(&events, &mut stdout, &mut stderr);
+    let _ = writeln!(stdout);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

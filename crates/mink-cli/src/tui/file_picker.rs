@@ -45,13 +45,13 @@ impl FilePickerPolicy {
     }
 
     fn allows_path(&self, path: &Path) -> bool {
+        let Some(allowed_roots) = &self.allowed_roots else {
+            return true;
+        };
         let path = canonical_or_lexical(path.to_path_buf());
-        match &self.allowed_roots {
-            Some(allowed_roots) => allowed_roots
-                .iter()
-                .any(|allowed| path.starts_with(allowed) || allowed.starts_with(&path)),
-            None => true,
-        }
+        allowed_roots
+            .iter()
+            .any(|allowed| path.starts_with(allowed) || allowed.starts_with(&path))
     }
 
     fn allowed_roots_below(&self, root: &Path) -> Vec<PathBuf> {

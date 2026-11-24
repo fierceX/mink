@@ -188,6 +188,56 @@ fn extract_macos_png_bounds_the_staging_read() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+#[test]
+fn escape_applescript_string_escapes_quotes_backslashes_and_newlines() {
+    assert_eq!(
+        escape_applescript_string("a\\b\"c\rd\ne"),
+        "a\\\\b\\\"c\\rd\\ne"
+    );
+}
+
+#[test]
+fn extract_linux_png_tries_wl_paste_then_falls_back_to_xclip() {
+    struct LinuxRunner {
+        wl_result: Result<Vec<u8>, String>,
+        xclip_result: Result<Vec<u8>, String>,
+    }
+    impl CommandRunner for LinuxRunner {
+        fn run(&self, program: &str, _args: &[String]) -> Result<Vec<u8>> {
+            match program {
+                "wl-paste" => self.wl_result.clone().map_err(anyhow::Error::msg),
+                "xclip" => self.xclip_result.clone().map_err(anyhow::Error::msg),
+                other => bail!("unexpected program {other}"),
+            }
+        }
+    }
+
+    let png = png_fixture(16, 16, 64);
+    let wl_ok = LinuxRunner {
+        wl_result: Ok(png.clone()),
+        xclip_result: Err("not called".into()),
+    };
+    assert_eq!(extract_linux_png(&wl_ok, max_bytes()).unwrap(), png);
+
+    let xclip_fallback = LinuxRunner {
+        wl_result: Err("wl-paste not found".into()),
+        xclip_result: Ok(png.clone()),
+    };
+    assert_eq!(
+        extract_linux_png(&xclip_fallback, max_bytes()).unwrap(),
+        png
+    );
+
+    let both_fail = LinuxRunner {
+        wl_result: Err("no wayland".into()),
+        xclip_result: Err("no x11".into()),
+    };
+    let err = extract_linux_png(&both_fail, max_bytes())
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no PNG image"), "{err}");
+}
+
 /// Manual smoke test against the real pasteboard. Ignored so normal test runs
 /// never shell out; run with:
 /// `cargo test -p mink-cli --features tui -- --ignored --nocapture clipboard_smoke`

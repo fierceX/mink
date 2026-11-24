@@ -50,7 +50,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
-pub fn run_tui(
+pub async fn run_tui(
     mode: TuiMode,
     sig_rx: mpsc::Receiver<TuiSignal>,
     orch_tx: tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
@@ -59,19 +59,15 @@ pub fn run_tui(
     sandbox: &SandboxConfig,
     runtime: TuiRuntime,
 ) -> anyhow::Result<()> {
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(async {
-            match mode {
-                TuiMode::Full => {
-                    run_full_tui(sig_rx, orch_tx, session, initial_model, sandbox, runtime).await
-                }
-                TuiMode::Inline => {
-                    run_inline_tui(sig_rx, orch_tx, session, initial_model, sandbox, runtime).await
-                }
-                TuiMode::Off => anyhow::bail!("TUI mode is disabled"),
-            }
-        })
-    })
+    match mode {
+        TuiMode::Full => {
+            run_full_tui(sig_rx, orch_tx, session, initial_model, sandbox, runtime).await
+        }
+        TuiMode::Inline => {
+            run_inline_tui(sig_rx, orch_tx, session, initial_model, sandbox, runtime).await
+        }
+        TuiMode::Off => anyhow::bail!("TUI mode is disabled"),
+    }
 }
 
 async fn run_full_tui(
@@ -633,6 +629,11 @@ fn commit_ready<B: ratatui::backend::Backend>(
         item.cached_lines = None;
         item.cached_offsets.clear();
         item.cached_offsets.shrink_to_fit();
+        item.tool_input = None;
+        item.tool_summary = None;
+        item.goal_message = None;
+        item.artifacts.clear();
+        item.artifacts.shrink_to_fit();
         item.presentation = None;
         item.sub_detail = None;
         state.cache.pending.remove(&index);
