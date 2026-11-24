@@ -59,7 +59,7 @@ export function reduceWorkbench(state: SessionState, event: RawEvent): SessionSt
   if (event.type === "session_snapshot") {
     const caps = (event.capabilities as { image_input?: ImageLimits })?.image_input;
     let next = projectMessages({ ...state, lastSeq: Number(event.stream_sequence), generation: String(event.generation), currentTurn: event.current_turn as string | null,
-      seenTurnEvents: [], overlays: [], resources: event.resources as SessionState["resources"], running: event.running === true, phase: String(event.phase), desynced: false, inputs: event.inputs as InputReceipt[], imageLimits: caps?.kind === "unsupported" ? null : caps,
+      seenTurnEvents: [], lastTurnId: undefined, lastCoreSequence: undefined, overlays: [], resources: event.resources as SessionState["resources"], running: event.running === true, phase: String(event.phase), desynced: false, inputs: event.inputs as InputReceipt[], imageLimits: caps?.kind === "unsupported" ? null : caps,
       // The snapshot is the current truth, goal included: a reopened session must
       // not depend on the next lifecycle change to learn it still has a goal.
       goal: (event.goal as GoalSnapshot | null | undefined)?.hidden ? null : (event.goal as GoalSnapshot | null | undefined) ?? null,
@@ -78,9 +78,30 @@ export function reduceWorkbench(state: SessionState, event: RawEvent): SessionSt
   if (event.generation !== state.generation || Number(event.stream_sequence) <= state.lastSeq) return state;
   if (event.type === "conversation_committed") {
     const message: Record<string, unknown> = { ...(event.message as Record<string, unknown>), seq: event.conversation_seq };
-    const rows = [...state.messages ?? []];
-    if (!rows.some(row => row.seq === message.seq)) rows.push(message);
-    const next = projectMessages(state, rows);
+    const existingRows = state.messages ?? [];
+    const duplicate = existingRows.some(row => row.seq === message.seq);
+    const rows = duplicate ? [...existingRows] : [...existingRows, message];
+    const messageSeq = Number(message.seq);
+    const lastExistingSeq = existingRows.length === 0 ? -Infinity : Number(existingRows[existingRows.length - 1]?.seq ?? NaN);
+    let next: SessionState;
+    if (!duplicate && Number.isFinite(messageSeq) && messageSeq > lastExistingSeq && (state.overlays?.length ?? 0) === 0) {
+      let cut = state.items.length;
+      while (cut > 0 && String(state.items[cut - 1]?.key).startsWith("live:")) cut -= 1;
+      const baseItems = cut === state.items.length ? state.items : state.items.slice(0, cut);
+      next = { ...state, items: baseItems, messages: rows };
+      for (const ev of conversationToEvents(message)) next = reduceEvent(next, ev);
+      next = {
+        ...next,
+        running: state.running,
+        workState: state.workState,
+        waitElapsedSecs: state.waitElapsedSecs,
+        activeSubAgents: state.activeSubAgents,
+        seenTurnEvents: state.seenTurnEvents,
+        lastTurnId: state.lastTurnId,
+      };
+    } else {
+      next = projectMessages(state, rows);
+    }
     next.lastSeq = Number(event.stream_sequence);
     if (next.resources && Array.isArray(message.content)) {
       next.resources = { ...next.resources, plan: {...next.resources.plan}, todo: {...next.resources.todo} };

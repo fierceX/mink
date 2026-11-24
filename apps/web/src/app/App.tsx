@@ -40,6 +40,7 @@ import { useVisualViewport } from './shell/useVisualViewport.ts'
 import { usePreferences } from './settings/preferences.ts'
 import { groupSessions, sessionTitle } from './sidebar/SessionBrowser.tsx'
 import { SidebarRoot } from './sidebar/SidebarRoot.tsx'
+import { useWorkbenchLifecycle } from './useWorkbenchShortcuts.ts'
 
 /** Key that identifies one session inside a project: `cwd:id`. */
 function sessionKey(session: SessionSummary): string {
@@ -126,59 +127,22 @@ export function App() {
     }).catch(() => {})
   }, [])
 
-  // Sync document title to the active conversation or compose draft.
-  useEffect(() => {
-    if (current !== undefined) {
-      document.title = `${sessionTitle(current)} — Mink`
-    } else if (composing !== undefined) {
-      document.title = `新对话 (${composing.name}) — Mink`
-    } else {
-      document.title = 'Mink'
-    }
-  }, [current, composing])
+  const toggleSidebar = useCallback(() => {
+    setSidebarWidth(w => (w === 0 ? SIDEBAR_DEFAULT : 0))
+    setNarrowExpanded(open => !open)
+  }, [])
 
-  // Global workbench shortcuts: Cmd/Ctrl+B toggles the sidebar, Cmd/Ctrl+. interrupts.
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.isComposing || event.defaultPrevented) return
-      const mod = event.metaKey || event.ctrlKey
-      if (!mod || event.altKey) return
-      if (!event.shiftKey && event.key.toLowerCase() === 'b') {
-        event.preventDefault()
-        setSidebarWidth(w => (w === 0 ? SIDEBAR_DEFAULT : 0))
-        setNarrowExpanded(open => !open)
-        return
-      }
-      if (event.key === '.' && view.state?.running === true) {
-        event.preventDefault()
-        view.stop()
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => { window.removeEventListener('keydown', onKeyDown) }
-  }, [view.state?.running, view.stop])
-
-  // Reconnect on the events that say the network or the tab is back. A
-  // connected view only refreshes the catalog; a dropped one also retries its
-  // runtime, which is the case a browser reload used to be needed for.
-  useEffect(() => {
-    const recover = (): void => {
-      void refreshCatalog()
-      checkVersion()
-      if (current !== undefined && ['disconnected', 'offline', 'closed', 'failed'].includes(view.connection)) {
-        view.reconnect()
-      }
-    }
-    const onVisibility = (): void => {
-      if (document.visibilityState === 'visible') recover()
-    }
-    window.addEventListener('online', recover)
-    document.addEventListener('visibilitychange', onVisibility)
-    return () => {
-      window.removeEventListener('online', recover)
-      document.removeEventListener('visibilitychange', onVisibility)
-    }
-  }, [checkVersion, current, refreshCatalog, view.connection, view.reconnect])
+  useWorkbenchLifecycle({
+    current,
+    composingName: composing?.name,
+    connection: view.connection,
+    running: view.state?.running === true,
+    refreshCatalog,
+    checkVersion,
+    reconnect: view.reconnect,
+    stop: view.stop,
+    toggleSidebar,
+  })
   const previousConnection = useRef(view.connection)
   useEffect(() => {
     if (view.connection === 'connected' && previousConnection.current !== 'connected') {

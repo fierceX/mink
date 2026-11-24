@@ -7,7 +7,7 @@
 
 import { memo, useMemo, useState } from 'react'
 import { DisclosureRow, IconChevronDownOutlineRegular, MarkdownText, TextShimmer } from '../../ui/primitives/index.ts'
-import { processSummary, projectTurns } from '../../data/transcriptProjection.ts'
+import { processSummary, projectTurns, type Turn } from '../../data/transcriptProjection.ts'
 import type { ProcessDisplay } from '../settings/preferences.ts'
 import type { ToolItem, TranscriptItem } from '../../data/types.ts'
 import { MARKDOWN_LABELS } from './labels.ts'
@@ -178,6 +178,97 @@ function turnUsage(
   return total === 0 ? undefined : `用量 ${fmtK(total)} tok`
 }
 
+function turnEqual(a: Turn, b: Turn): boolean {
+  if (a.key !== b.key || a.user !== b.user || a.segments.length !== b.segments.length) return false
+  for (let i = 0; i < a.segments.length; i += 1) {
+    const sa = a.segments[i]!
+    const sb = b.segments[i]!
+    if (sa.kind !== sb.kind || sa.key !== sb.key) return false
+    if (sa.kind === 'message' && sb.kind === 'message') {
+      if (sa.item !== sb.item) return false
+    } else if (sa.kind === 'process' && sb.kind === 'process') {
+      if (sa.items.length !== sb.items.length) return false
+      for (let j = 0; j < sa.items.length; j += 1) {
+        if (sa.items[j] !== sb.items[j]) return false
+      }
+    }
+  }
+  return true
+}
+
+const TurnBlock = memo(function TurnBlock({
+  turn, last, active, processDisplay, usage, onOpenFile, onOpenArtifact,
+}: {
+  turn: Turn
+  last: boolean
+  active: boolean
+  processDisplay: ProcessDisplay
+  usage: string | undefined
+  onOpenFile: ((path: string) => void) | undefined
+  onOpenArtifact: ((id: string) => void) | undefined
+}) {
+  const changed = useMemo(
+    () => (onOpenFile === undefined
+      ? []
+      : changedFilesOf(turn.segments.flatMap(segment =>
+          segment.kind === 'process' ? segment.items : [segment.item]))),
+    [turn, onOpenFile],
+  )
+  return (
+    <div
+      className={chatCss.flowItem}
+      data-turn-key={turn.key}
+      {...(last ? {} : { 'data-actions-reveal': 'hover' })}
+    >
+      {turn.user !== undefined && <UserRow text={turn.user.kind === 'user' ? turn.user.text : ''} />}
+      {turn.segments.map((segment) => {
+        if (segment.kind === 'process') {
+          // Concise keeps conclusions only: the process rows stay out.
+          if (processDisplay === 'concise') return null
+          return (
+            <ProcessGroup
+              key={segment.key}
+              items={segment.items}
+              active={active}
+              defaultOpen={processDisplay === 'detailed'}
+              onOpenFile={onOpenFile}
+              onOpenArtifact={onOpenArtifact}
+            />
+          )
+        }
+        const item = segment.item
+        if (item.kind === 'text') {
+          return (
+            <AssistantRow
+              key={segment.key}
+              text={item.text}
+              streaming={active}
+              usage={usage}
+              onOpenArtifact={onOpenArtifact}
+            />
+          )
+        }
+        if (item.kind === 'error') {
+          return <p key={segment.key} className={assistantCss.stopped}>{item.text}</p>
+        }
+        if (item.kind === 'goal_message') {
+          return <GoalNotice key={segment.key} item={item} />
+        }
+        return null
+      })}
+      {changed.length > 0 && <ChangedFiles files={changed} onOpen={onOpenFile!} />}
+    </div>
+  )
+}, (prev, next) => (
+  prev.last === next.last
+  && prev.active === next.active
+  && prev.processDisplay === next.processDisplay
+  && prev.usage === next.usage
+  && prev.onOpenFile === next.onOpenFile
+  && prev.onOpenArtifact === next.onOpenArtifact
+  && turnEqual(prev.turn, next.turn)
+))
+
 /**
  * Render the transcript.
  * @param props.items - projected transcript items, oldest first.
@@ -201,53 +292,17 @@ export function Transcript({ items, running, processDisplay = 'standard', outcom
     <div className={chatCss.column}>
       {turns.map((turn, turnIndex) => {
         const last = turnIndex === turns.length - 1
-        const changed = onOpenFile === undefined ? [] : changedFilesOf(turn.segments.flatMap(segment =>
-          segment.kind === 'process' ? segment.items : [segment.item]))
         return (
-          <div
+          <TurnBlock
             key={turn.key}
-            className={chatCss.flowItem}
-            data-turn-key={turn.key}
-            {...(last ? {} : { 'data-actions-reveal': 'hover' })}
-          >
-            {turn.user !== undefined && <UserRow text={turn.user.kind === 'user' ? turn.user.text : ''} />}
-            {turn.segments.map((segment) => {
-              if (segment.kind === 'process') {
-                // Concise keeps conclusions only: the process rows stay out.
-                if (processDisplay === 'concise') return null
-                return (
-                  <ProcessGroup
-                    key={segment.key}
-                    items={segment.items}
-                    active={running && last}
-                    defaultOpen={processDisplay === 'detailed'}
-                    onOpenFile={onOpenFile}
-                    onOpenArtifact={onOpenArtifact}
-                  />
-                )
-              }
-              const item = segment.item
-              if (item.kind === 'text') {
-                return (
-                  <AssistantRow
-                    key={segment.key}
-                    text={item.text}
-                    streaming={running && last}
-                    usage={turnUsage(outcomes, turn.user)}
-                    onOpenArtifact={onOpenArtifact}
-                  />
-                )
-              }
-              if (item.kind === 'error') {
-                return <p key={segment.key} className={assistantCss.stopped}>{item.text}</p>
-              }
-              if (item.kind === 'goal_message') {
-                return <GoalNotice key={segment.key} item={item} />
-              }
-              return null
-            })}
-            {changed.length > 0 && <ChangedFiles files={changed} onOpen={onOpenFile!} />}
-          </div>
+            turn={turn}
+            last={last}
+            active={running && last}
+            processDisplay={processDisplay}
+            usage={turnUsage(outcomes, turn.user)}
+            onOpenFile={onOpenFile}
+            onOpenArtifact={onOpenArtifact}
+          />
         )
       })}
     </div>

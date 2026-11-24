@@ -15,9 +15,46 @@
  * tag name regardless of namespace.
  */
 
-import { createElement } from 'react'
+import { createElement, useSyncExternalStore } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
-import katex from 'katex'
+
+type KatexModule = {
+  renderToString: (
+    value: string,
+    options: { displayMode?: boolean; strict?: 'ignore'; throwOnError?: boolean },
+  ) => string
+}
+
+let loadedKatex: KatexModule | null = null
+let katexLoadPromise: Promise<void> | null = null
+let katexLoadVersion = 0
+const katexListeners = new Set<() => void>()
+
+function subscribeKatex(listener: () => void): () => void {
+  katexListeners.add(listener)
+  return () => { katexListeners.delete(listener) }
+}
+
+function getKatexVersion(): number {
+  return katexLoadVersion
+}
+
+function ensureKatex(): KatexModule | null {
+  if (loadedKatex !== null) return loadedKatex
+  if (katexLoadPromise === null) {
+    katexLoadPromise = Promise.all([
+      import('katex'),
+      import('katex/dist/katex.min.css'),
+    ]).then(([mod]) => {
+      loadedKatex = ((mod as { default?: KatexModule }).default ?? mod) as KatexModule
+      katexLoadVersion += 1
+      for (const listener of katexListeners) listener()
+    }).catch(() => {
+      katexLoadPromise = null
+    })
+  }
+  return null
+}
 
 /**
  * Convert one inline `style` attribute string into React's style object.
@@ -55,15 +92,7 @@ function domToReact(node: ChildNode, key: number): ReactNode {
     : createElement(element.localName, props, ...children)
 }
 
-/**
- * Render TeX source to React elements through KaTeX.
- * @param value - The TeX source (math node value; fenced `math` blocks append
- * their trailing newline to match the replaced pipeline's text extraction).
- * @param displayMode - Display (block) versus inline rendering.
- * @returns KaTeX's element tree, or the error span when the source does not
- * parse (colored with KaTeX's stock `errorColor`, matching rehype-katex).
- */
-export function renderTexToReact(value: string, displayMode: boolean): ReactNode {
+function renderWithKatex(katex: KatexModule, value: string, displayMode: boolean): ReactNode {
   let html: string
   try {
     html = katex.renderToString(value, { displayMode, throwOnError: true })
@@ -87,4 +116,23 @@ export function renderTexToReact(value: string, displayMode: boolean): ReactNode
   }
   const parsed = new DOMParser().parseFromString(html, 'text/html')
   return [...parsed.body.childNodes].map(domToReact)
+}
+
+function LazyTex({ value, displayMode }: { value: string; displayMode: boolean }) {
+  useSyncExternalStore(subscribeKatex, getKatexVersion)
+  const katex = ensureKatex()
+  if (katex === null) {
+    return displayMode ? <pre><code>{value}</code></pre> : <code>{value}</code>
+  }
+  return <>{renderWithKatex(katex, value, displayMode)}</>
+}
+
+/**
+ * Render TeX source to React elements through KaTeX (lazily loaded with CSS on
+ * first math node).
+ */
+export function renderTexToReact(value: string, displayMode: boolean): ReactNode {
+  const katex = loadedKatex
+  if (katex !== null) return renderWithKatex(katex, value, displayMode)
+  return <LazyTex value={value} displayMode={displayMode} />
 }

@@ -364,13 +364,15 @@ function ensureGrammar(resolved: string): boolean {
 }
 
 // Engine + grammar construction costs a long task (~120-175ms); building it
-// during the first finalized fence's render would jank exactly when a stream
-// completes. Warm the singleton in a deferred task at module load (= plugin
-// boot) instead; the lazy path above stays as the correctness fallback for a
-// fence that renders before the timer fires. `unref` (Node-only) keeps a
-// non-browser import from pinning the event loop.
-const warmupTimer = setTimeout(() => { highlighter() }, 0)
-;(warmupTimer as { unref?: () => void }).unref?.()
+// during initial paint or the first finalized fence's render would jank. Warm
+// the singleton when the browser is idle (with a deferred timer fallback); the
+// lazy path above stays as the correctness fallback.
+if (typeof requestIdleCallback === 'function') {
+  requestIdleCallback(() => { highlighter() }, { timeout: 2000 })
+} else {
+  const warmupTimer = setTimeout(() => { highlighter() }, 1500)
+  ;(warmupTimer as { unref?: () => void }).unref?.()
+}
 
 /**
  * Highlight `code` into shiki's HTML (a single `<pre class="shiki">` tree)

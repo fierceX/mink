@@ -21,7 +21,6 @@ import {
   wrapBlockChildren,
 } from './render.tsx'
 import type { MarkdownFileMentions, MarkdownLabels, MarkdownPathImages, MarkdownRenderContext, ReferenceTargets } from './render.tsx'
-import 'katex/dist/katex.min.css'
 import css from './MarkdownText.module.css'
 
 export type { MarkdownCodeLabels, MarkdownFileMentions, MarkdownLabels, MarkdownPathImages } from './render.tsx'

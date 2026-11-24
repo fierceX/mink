@@ -78,4 +78,25 @@ describe('transcript', () => {
     fireEvent.click(screen.getByText('思考'))
     expect(screen.getByText(/再动手/)).toBeDefined()
   })
+
+  it('skips re-computing settled turns during streaming deltas', () => {
+    const settledUser: TranscriptItem = { kind: 'user', text: 'turn 1', key: 'input:1' }
+    const settledReply: TranscriptItem = { kind: 'text', text: 'reply 1', key: 'message:2:0' }
+    const secondUser: TranscriptItem = { kind: 'user', text: 'turn 2', key: 'input:3' }
+    const growing: TranscriptItem = { kind: 'text', text: 'hello', key: 'live:4' }
+    const { rerender } = render(
+      <Transcript items={[settledUser, settledReply, secondUser, growing]} running onOpenFile={() => {}} />,
+    )
+    const firstTurnEl = document.querySelector('[data-turn-key="input:1"]')
+    expect(firstTurnEl).not.toBeNull()
+    rerender(
+      <Transcript
+        items={[settledUser, settledReply, secondUser, { ...growing, text: 'hello world' }]}
+        running
+        onOpenFile={() => {}}
+      />,
+    )
+    expect(document.querySelector('[data-turn-key="input:1"]')).toBe(firstTurnEl)
+    expect(screen.getByText('hello world')).toBeDefined()
+  })
 })

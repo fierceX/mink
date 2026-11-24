@@ -79,12 +79,26 @@ export function prependEvents(state: SessionState, raws: RawEvent[]): SessionSta
   };
 }
 
+/** Cached O(1) lookup index per immutable `seenTurnEvents` array snapshot. */
+const seenIndexCache = new WeakMap<readonly string[], Set<string>>();
+
+function hasSeenEvent(seen: readonly string[], key: string): boolean {
+  let index = seenIndexCache.get(seen);
+  if (index === undefined) {
+    index = new Set(seen);
+    seenIndexCache.set(seen, index);
+  }
+  return index.has(key);
+}
+
 /** 单一入口：处理一个原始事件，返回新状态 */
 export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
   const turnId = typeof raw.turn_id === "string" ? raw.turn_id : undefined;
   const coreSequence = typeof raw.sequence === "number" ? raw.sequence : undefined;
   const dedupeKey = turnId != null && coreSequence != null ? `${turnId}:${coreSequence}` : undefined;
-  if (dedupeKey && state.seenTurnEvents.includes(dedupeKey)) return state;
+  if (dedupeKey !== undefined && hasSeenEvent(state.seenTurnEvents, dedupeKey)) {
+    return state;
+  }
   const seenTurnEvents = dedupeKey
     ? [...state.seenTurnEvents, dedupeKey].slice(-4096)
     : state.seenTurnEvents;

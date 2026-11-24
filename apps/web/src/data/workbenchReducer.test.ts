@@ -90,4 +90,20 @@ describe('REST goal reads',()=>{
     const current={...snapshot(),goal:null};
     expect(applyGoalRead(current,{...goal('g1',1),hidden:true},current.lastSeq)).toBe(current);
   });
+
+  it('incremental sequential conversation_committed matches full projectMessages replay', () => {
+    const userRow = { seq: 1, role: 'user', content: 'run read', _mink: { input_id: 'u1', turn_id: 't1' } };
+    const assistantCall = { seq: 2, role: 'assistant', content: [{ type: 'tool_use', id: 'tc1', name: 'Read', input: { path: 'a.ts' } }] };
+    const toolResult = { seq: 3, role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tc1', content: 'hello' }] };
+    const assistantFinal = { seq: 4, role: 'assistant', content: [{ type: 'text', text: 'done' }] };
+
+    let inc = snapshot([userRow]);
+    inc = reduceWorkbench(inc, { type: 'text', content: 'partial live', stream_sequence: 1, generation: 'g' });
+    inc = reduceWorkbench(inc, { type: 'conversation_committed', conversation_seq: 2, message: assistantCall, generation: 'g', stream_sequence: 2 });
+    inc = reduceWorkbench(inc, { type: 'conversation_committed', conversation_seq: 3, message: toolResult, generation: 'g', stream_sequence: 3 });
+    inc = reduceWorkbench(inc, { type: 'conversation_committed', conversation_seq: 4, message: assistantFinal, generation: 'g', stream_sequence: 4 });
+
+    const replayed = projectMessages(snapshot(), [userRow, assistantCall, toolResult, assistantFinal]);
+    expect(inc.items).toEqual(replayed.items);
+  });
 });
