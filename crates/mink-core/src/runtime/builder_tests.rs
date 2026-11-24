@@ -7685,6 +7685,10 @@ async fn audit4_empty_approval_is_rejected() {
     let _ = std::fs::remove_dir_all(cwd);
     assert!(result.is_err(), "empty approval accepted");
 }
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "62s wall-clock verifier timeout regression; run with --features slow-tests"
+)]
 #[tokio::test]
 async fn audit4_verifier_attempt_exceeds_old_sixty_second_cap() {
     use crate::runtime::*;
