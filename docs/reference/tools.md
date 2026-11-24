@@ -377,7 +377,7 @@ runtime 启动时 fail closed。
 
 行为：
 
-- 同一批 SubAgent 最多 8 个并发；第 9 个及以后排队等待名额，结果按输入顺序回填。
+- 同一批 SubAgent 最多 20 个并发；第 21 个及以后排队等待名额，结果按输入顺序回填。
 - 子代理不能超过 `sub_agent_max_depth`（默认 1）；到达上限时工具从子代理 surface 隐藏，运行时返回 `SafetyBlocked`。
 - Fork 在 child runtime 初始化前克隆完整 session 目录（跳过已有 `subagents/`）；child 身份与遥测重新初始化，克隆按目录项检查取消。
 - Fork 后 artifact 从克隆 index 的最大序号继续写入，不覆盖父历史正文。

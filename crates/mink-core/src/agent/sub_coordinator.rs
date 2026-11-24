@@ -18,7 +18,10 @@ use std::time::{Duration, Instant};
 
 const SUB_AGENT_ABORT_GRACE_MS: u64 = 250;
 const SUB_AGENT_TICK_MS: u64 = 10;
-const SUB_AGENT_BATCH_LIMIT: usize = 8;
+/// Maximum concurrently running sub-agents per tool batch. Extras wait for a
+/// permit instead of being rejected; the per-child timeout starts only after
+/// admission.
+const SUB_AGENT_BATCH_LIMIT: usize = 20;
 const PHASE_SETUP: u8 = 0;
 const PHASE_RUN: u8 = 1;
 

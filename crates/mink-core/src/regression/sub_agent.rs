@@ -242,11 +242,11 @@ async fn setup_timeout_cancels_before_grace_and_removes_partial_directory() -> a
 }
 
 #[tokio::test]
-async fn twelve_sub_agents_queue_and_complete_in_input_order() -> anyhow::Result<()> {
+async fn twenty_one_sub_agents_queue_and_complete_in_input_order() -> anyhow::Result<()> {
     let h = harness_with("sub-queue", false, 10).await?;
     let coordinator = SubAgentCoordinator::new(h.ctx.clone());
     let mut calls = Vec::new();
-    for idx in 0..12 {
+    for idx in 0..21 {
         let mut result = internal_result("SubAgent");
         result.spawns_sub_agent = true;
         result.sub_agent_prompt = Some(format!("task {idx}"));
@@ -269,7 +269,7 @@ async fn twelve_sub_agents_queue_and_complete_in_input_order() -> anyhow::Result
         })
     });
     let processed = coordinator.process_with_runner(calls, runner).await;
-    assert_eq!(processed.len(), 12);
+    assert_eq!(processed.len(), 21);
     for (idx, result) in processed.iter().enumerate() {
         assert!(result.succeeded(), "slot {idx}: {}", result.content);
         assert!(
@@ -279,6 +279,51 @@ async fn twelve_sub_agents_queue_and_complete_in_input_order() -> anyhow::Result
         );
         assert!(!result.content.contains("limit_reached"));
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn sub_agent_batch_admits_at_most_twenty_children_at_once() -> anyhow::Result<()> {
+    let h = harness_with("sub-concurrency", false, 30).await?;
+    let coordinator = SubAgentCoordinator::new(h.ctx.clone());
+    let mut calls = Vec::new();
+    for idx in 0..21 {
+        let mut result = internal_result("SubAgent");
+        result.spawns_sub_agent = true;
+        result.sub_agent_prompt = Some(format!("task {idx}"));
+        calls.push(result);
+    }
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let runner_active = active.clone();
+    let runner_max = max_active.clone();
+    let runner: SubAgentRunner = Arc::new(move |_, spec| {
+        let active = runner_active.clone();
+        let max_active = runner_max.clone();
+        Box::pin(async move {
+            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+            max_active.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            active.fetch_sub(1, Ordering::SeqCst);
+            SubAgentResult {
+                status: SubAgentStatus::Succeeded,
+                stop_reason: SubAgentStopReason::Completed,
+                diagnostic: None,
+                elapsed_ms: 0,
+                usage_known: true,
+                elapsed_known: true,
+                thinking: String::new(),
+                text: format!("done {}", spec.prompt),
+                usage: Default::default(),
+            }
+        })
+    });
+    let processed = coordinator.process_with_runner(calls, runner).await;
+    assert_eq!(processed.len(), 21);
+    for (idx, result) in processed.iter().enumerate() {
+        assert!(result.succeeded(), "slot {idx}: {}", result.content);
+    }
+    assert_eq!(max_active.load(Ordering::SeqCst), 20);
     Ok(())
 }
 
@@ -764,7 +809,7 @@ async fn queued_child_gets_its_full_budget_after_admission() -> anyhow::Result<(
     let h = harness_with("sub-queue-budget", false, 2).await?;
     let coordinator = SubAgentCoordinator::new(h.ctx.clone());
     let mut calls = Vec::new();
-    for idx in 0..9 {
+    for idx in 0..21 {
         let mut result = internal_result("SubAgent");
         result.spawns_sub_agent = true;
         result.sub_agent_prompt = Some(format!("task {idx}"));
@@ -772,9 +817,9 @@ async fn queued_child_gets_its_full_budget_after_admission() -> anyhow::Result<(
     }
     let runner: SubAgentRunner = Arc::new(|_, spec| {
         Box::pin(async move {
-            // The ninth child waits for a permit (~500ms), then needs 1.8s;
-            // the old shared 2s batch deadline would have killed it.
-            let delay = if spec.prompt == "task 8" { 1800 } else { 500 };
+            // The twenty-first child waits for a permit (~500ms), then needs
+            // 1.8s; the old shared 2s batch deadline would have killed it.
+            let delay = if spec.prompt == "task 20" { 1800 } else { 500 };
             tokio::time::sleep(Duration::from_millis(delay)).await;
             SubAgentResult {
                 status: SubAgentStatus::Succeeded,
@@ -790,7 +835,7 @@ async fn queued_child_gets_its_full_budget_after_admission() -> anyhow::Result<(
         })
     });
     let processed = coordinator.process_with_runner(calls, runner).await;
-    assert_eq!(processed.len(), 9);
+    assert_eq!(processed.len(), 21);
     for (idx, result) in processed.iter().enumerate() {
         assert!(result.succeeded(), "slot {idx}: {}", result.content);
     }
@@ -802,16 +847,16 @@ async fn queued_child_gets_its_full_budget_after_admission() -> anyhow::Result<(
             .expect("elapsed_ms")
     };
     // Permit starts the clock: the first wave runs ~500ms, while the queued
-    // ninth child runs ~1800ms after admission. Use relative, CI-tolerant
-    // bounds rather than pinning scheduler latency.
+    // twenty-first child runs ~1800ms after admission. Use relative,
+    // CI-tolerant bounds rather than pinning scheduler latency.
     assert!(elapsed(0) >= 300, "first={}", elapsed(0));
     assert!(elapsed(0) <= 1500, "first={}", elapsed(0));
-    assert!(elapsed(8) >= 1500, "ninth={}", elapsed(8));
-    assert!(elapsed(8) <= 2500, "ninth={}", elapsed(8));
+    assert!(elapsed(20) >= 1500, "queued={}", elapsed(20));
+    assert!(elapsed(20) <= 2500, "queued={}", elapsed(20));
     assert!(
-        elapsed(8) > elapsed(0),
-        "ninth={} first={}",
-        elapsed(8),
+        elapsed(20) > elapsed(0),
+        "queued={} first={}",
+        elapsed(20),
         elapsed(0)
     );
     Ok(())
