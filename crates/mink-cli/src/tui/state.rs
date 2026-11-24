@@ -1110,6 +1110,12 @@ impl TuiState {
                     for index in self.sub_agents.line_by_session.values_mut() {
                         *index += offset;
                     }
+                    for (session_id, index) in state.sub_agents.line_by_session {
+                        self.sub_agents
+                            .line_by_session
+                            .entry(session_id)
+                            .or_insert(index);
+                    }
                     for index in self.active_tools.values_mut() {
                         *index += offset;
                     }

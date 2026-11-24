@@ -37,36 +37,32 @@ pub(crate) fn detail_lines_for_session_with_width(
     session_id: &str,
     max_width: u16,
 ) -> Vec<Line<'static>> {
-    let Some(line_idx) = state.sub_agents.line_by_session.get(session_id).copied() else {
-        return vec![Line::from(Span::styled(
-            format!("Sub-agent {session_id} is no longer available."),
-            theme::muted(),
-        ))];
+    let restored = state
+        .restored_sub_detail
+        .as_ref()
+        .filter(|(id, _)| id == session_id)
+        .map(|(_, detail)| detail);
+    let line = state
+        .sub_agents
+        .line_by_session
+        .get(session_id)
+        .copied()
+        .and_then(|idx| state.lines.get(idx))
+        .filter(|line| line.kind == TranscriptKind::SubAgent);
+    let (header, detail) = match (line, restored) {
+        (Some(line), _) => (line.text.clone(), line.sub_detail.as_ref().or(restored)),
+        (None, Some(detail)) => (format!("Sub-agent {session_id}"), Some(detail)),
+        (None, None) => {
+            return vec![Line::from(Span::styled(
+                format!("Sub-agent {session_id} is no longer available."),
+                theme::muted(),
+            ))];
+        }
     };
-    let Some(line) = state
-        .lines
-        .get(line_idx)
-        .filter(|line| line.kind == TranscriptKind::SubAgent)
-    else {
-        return vec![Line::from(Span::styled(
-            format!("Sub-agent {session_id} has no detail line."),
-            theme::muted(),
-        ))];
-    };
-    let detail = line.sub_detail.as_ref().or_else(|| {
-        state
-            .restored_sub_detail
-            .as_ref()
-            .filter(|(id, _)| id == session_id)
-            .map(|(_, detail)| detail)
-    });
     let thinking = detail.map(|d| d.thinking.as_str()).unwrap_or("");
     let text = detail.map(|d| d.text.as_str()).unwrap_or("");
     let mut all_lines: Vec<Line<'static>> = Vec::new();
-    all_lines.push(Line::from(Span::styled(
-        line.text.clone(),
-        theme::sub_agent(),
-    )));
+    all_lines.push(Line::from(Span::styled(header, theme::sub_agent())));
     all_lines.push(Line::from(""));
 
     if !thinking.is_empty() {

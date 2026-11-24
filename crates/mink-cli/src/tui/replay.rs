@@ -8,7 +8,12 @@ use std::collections::VecDeque;
 use std::io::BufRead;
 use std::path::Path;
 
-pub(crate) fn load_session(events_path: &Path) -> Vec<TranscriptItem> {
+pub(crate) struct LoadedHistory {
+    pub(crate) lines: Vec<TranscriptItem>,
+    pub(crate) sub_agent_lines: std::collections::HashMap<String, usize>,
+}
+
+pub(crate) fn load_session_history(events_path: &Path) -> LoadedHistory {
     // Guidance is authoritative conversation history, not a new user turn in
     // events.jsonl. Use complete formal turns when that window contains it.
     // Goal boundaries are the same: they exist only as committed rows, so a
@@ -22,21 +27,37 @@ pub(crate) fn load_session(events_path: &Path) -> Vec<TranscriptItem> {
         )
         && rows.iter().any(needs_conversation_rows)
     {
-        return build_lines_from_events(&conversation_events(&rows));
+        return build_history_from_events(&conversation_events(&rows));
     }
     if !events_path.exists() {
-        return Vec::new();
+        return LoadedHistory {
+            lines: Vec::new(),
+            sub_agent_lines: std::collections::HashMap::new(),
+        };
     }
     let file = match std::fs::File::open(events_path) {
         Ok(file) => file,
-        Err(_) => return Vec::new(),
+        Err(_) => {
+            return LoadedHistory {
+                lines: Vec::new(),
+                sub_agent_lines: std::collections::HashMap::new(),
+            };
+        }
     };
     let events = load_recent_turn_events(file);
     if events.is_empty() {
-        return Vec::new();
+        return LoadedHistory {
+            lines: Vec::new(),
+            sub_agent_lines: std::collections::HashMap::new(),
+        };
     }
 
-    build_lines_from_events(&events)
+    build_history_from_events(&events)
+}
+
+#[cfg(test)]
+pub(crate) fn load_session(events_path: &Path) -> Vec<TranscriptItem> {
+    load_session_history(events_path).lines
 }
 
 /// Whether a committed row carries something only conversation rows can show.
@@ -210,7 +231,7 @@ fn load_recent_turn_events(file: std::fs::File) -> Vec<serde_json::Value> {
     turns.into_iter().flatten().collect()
 }
 
-fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> {
+fn build_history_from_events(events: &[serde_json::Value]) -> LoadedHistory {
     let mut state = TuiState::default();
     for evt in events {
         match crate::replay::event_type(evt) {
@@ -342,13 +363,56 @@ fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> 
             }
         }
     }
-    state.lines
+    LoadedHistory {
+        lines: state.lines,
+        sub_agent_lines: state.sub_agents.line_by_session,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> {
+    build_history_from_events(events).lines
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::runtime::GoalMessageKind;
+
+    #[test]
+    fn sub_agent_events_replay_preserves_session_index_and_restored_detail_fallback() {
+        let events = vec![
+            serde_json::json!({"type":"sub_agent","session_id":"sub_42","status":"ok","label":"audit","stop_reason":"completed","input_tokens":10,"output_tokens":5}),
+        ];
+        let loaded = build_history_from_events(&events);
+        assert!(
+            loaded.sub_agent_lines.contains_key("sub_42"),
+            "replayed history must retain sub-agent session mapping"
+        );
+        // Also verify `detail_lines_for_session_with_width` renders
+        // `restored_sub_detail` even when no live transcript line is mapped.
+        let mut state = TuiState::default();
+        state.restored_sub_detail = Some((
+            "sub_disk_only".into(),
+            crate::tui::state::SubAgentDetail {
+                thinking: "checked files".into(),
+                text: "all good".into(),
+            },
+        ));
+        let rendered = crate::tui::render::detail::detail_lines_for_session_with_width(
+            &state,
+            "sub_disk_only",
+            80,
+        );
+        let joined: String = rendered
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Sub-agent sub_disk_only"), "{joined}");
+        assert!(joined.contains("checked files"), "{joined}");
+        assert!(joined.contains("all good"), "{joined}");
+    }
 
     #[test]
     fn sub_agent_events_replay_as_transcript_lines() {

@@ -4,7 +4,7 @@ pub(crate) fn wrap_lines_word(lines: &[Line<'static>], max_w: u16) -> Vec<Line<'
     let mw = max_w.max(1) as usize;
     let mut out = Vec::new();
     for line in lines {
-        if line.spans.is_empty() {
+        if line.spans.is_empty() || line.spans.iter().all(|span| span.content.is_empty()) {
             out.push(Line::from(""));
             continue;
         }
@@ -50,3 +50,26 @@ pub(crate) fn wrap_lines_word(lines: &[Line<'static>], max_w: u16) -> Vec<Line<'
 }
 
 pub(crate) use crate::util::truncate_visual;
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_lines_word;
+    use ratatui::style::Style;
+    use ratatui::text::{Line, Span};
+
+    #[test]
+    fn wrap_lines_word_preserves_empty_and_styled_blank_lines() {
+        let lines = vec![
+            Line::from("first"),
+            Line::from(""),
+            Line::from(Span::styled("", Style::default())),
+            Line::from("second"),
+        ];
+        let wrapped = wrap_lines_word(&lines, 40);
+        assert_eq!(wrapped.len(), 4);
+        assert_eq!(wrapped[0].to_string(), "first");
+        assert_eq!(wrapped[1].to_string(), "");
+        assert_eq!(wrapped[2].to_string(), "");
+        assert_eq!(wrapped[3].to_string(), "second");
+    }
+}

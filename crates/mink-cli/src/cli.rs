@@ -319,10 +319,11 @@ pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         #[cfg(feature = "tui")]
         {
-            // A panic while the Kitty keyboard protocol is active must not
-            // leave the user's shell in CSI-u mode.
-            crate::tui::disable_keyboard_enhancement();
-            let _ = crossterm::terminal::disable_raw_mode();
+            // Restore all active TUI terminal modes *before* printing the panic
+            // payload. Release builds use `panic = "abort"`, so Drop guards
+            // never run; in debug builds restoring first also prevents leaving
+            // the alternate screen from wiping the panic output.
+            crate::tui::restore_terminal_on_exit();
         }
         eprintln!("{info}");
     }));
@@ -365,14 +366,14 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
 
     if !cfg.agent_jsonl {
         apply_provider_defaults(&mut cfg)?;
-        reexec_if_sandbox(&cfg);
+        reexec_if_sandbox(&cfg)?;
     }
 
     // ═══ SDK protocol mode: early stdin parsing (before context creation) ═══
     let sdk_request: Option<SdkRequest> = if cfg.agent_jsonl {
         // Self-sandboxing must happen before reading SDK stdin so the
         // sandboxed child process inherits the original pipe with data intact.
-        reexec_if_sandbox(&cfg);
+        reexec_if_sandbox(&cfg)?;
         let mut input = String::new();
         tokio::io::AsyncReadExt::read_to_string(&mut tokio::io::stdin(), &mut input).await?;
         let req = match parse_agent_jsonl_request(&input) {
@@ -789,22 +790,36 @@ fn combine_turn_and_shutdown(
     }
 }
 
-fn reexec_if_sandbox(cfg: &crate::config::CliConfig) {
-    if cfg.sandbox.is_active() {
-        let current_exe = std::env::current_exe().unwrap_or_default();
-        let args: Vec<String> = std::env::args().collect();
-        let sandbox = crate::runtime::SandboxConfig {
-            enabled: cfg.sandbox.enabled,
-            backend: cfg.sandbox.backend.clone(),
-            read_dirs: cfg.sandbox.read_dirs.clone(),
-            write_dirs: cfg.sandbox.write_dirs.clone(),
-            allow_network: cfg.sandbox.allow_network,
-            max_memory_mb: cfg.sandbox.max_memory_mb,
-            max_pids: cfg.sandbox.max_pids,
-            timeout_secs: cfg.sandbox.timeout_secs,
-        };
-        crate::sandbox::reexec_in_sandbox(&sandbox, &current_exe, &args);
+/// Run sandbox self-re-exec synchronously before spinning up the Tokio runtime
+/// so we do not spawn worker threads solely to `execve()` the sandboxed child.
+pub fn bootstrap_sandbox_if_needed(args: &[String]) -> Result<()> {
+    let mut cfg = match parse_args(args.to_vec()) {
+        Ok(v) => v,
+        Err(e) if e.downcast_ref::<CliEarlyExit>().is_some() => return Ok(()),
+        Err(_) => return Ok(()), // let `main_entry` surface arg errors uniformly
+    };
+    if cfg.list_sessions || cfg.list_skills {
+        return Ok(());
     }
+    apply_config_file(&mut cfg)?;
+    if tui_stream_conflict(cfg.tui_mode.enabled(), cfg.agent_jsonl, cfg.output_format).is_some() {
+        return Ok(());
+    }
+    if !cfg.agent_jsonl && apply_provider_defaults(&mut cfg).is_err() {
+        return Ok(());
+    }
+    reexec_if_sandbox(&cfg)
+}
+
+fn reexec_if_sandbox(cfg: &crate::config::CliConfig) -> Result<()> {
+    if cfg.sandbox.is_active() {
+        let current_exe = std::env::current_exe().map_err(|error| {
+            anyhow::anyhow!("cannot determine current executable path for sandbox re-exec: {error}")
+        })?;
+        let args: Vec<String> = std::env::args().collect();
+        crate::sandbox::reexec_in_sandbox(&cfg.sandbox, &current_exe, &args);
+    }
+    Ok(())
 }
 
 fn emit_stream_json_final_if_needed(cfg: &crate::config::CliConfig, outcome: &TurnOutcome) {

@@ -41,6 +41,7 @@ use file_picker::FilePickerPolicy;
 use input::handle_event_for_mode;
 use notify::send_task_notification;
 use render::render;
+#[cfg(test)]
 use replay::load_session;
 #[cfg(test)]
 use signal::drain_signals;
@@ -84,22 +85,20 @@ async fn run_full_tui(
     struct FullRestoreGuard;
     impl Drop for FullRestoreGuard {
         fn drop(&mut self) {
-            disable_keyboard_enhancement();
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::event::DisableBracketedPaste,
-                crossterm::event::DisableMouseCapture,
-            );
-            ratatui::restore();
+            restore_terminal_on_exit();
         }
     }
     let _guard = FullRestoreGuard;
     let mut terminal = ratatui::try_init()?;
+    TUI_RAW_ACTIVE.store(true, Ordering::SeqCst);
+    TUI_ALT_SCREEN_ACTIVE.store(true, Ordering::SeqCst);
     crossterm::execute!(
         std::io::stdout(),
         crossterm::event::EnableMouseCapture,
         crossterm::event::EnableBracketedPaste
     )?;
+    TUI_MOUSE_CAPTURE_ACTIVE.store(true, Ordering::SeqCst);
+    TUI_BRACKETED_PASTE_ACTIVE.store(true, Ordering::SeqCst);
     enable_keyboard_enhancement();
     tui_main_loop(
         &mut terminal,
@@ -124,14 +123,7 @@ async fn run_inline_tui(
     struct RestoreGuard;
     impl Drop for RestoreGuard {
         fn drop(&mut self) {
-            disable_keyboard_enhancement();
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::event::DisableBracketedPaste,
-                crossterm::event::DisableMouseCapture,
-                crossterm::terminal::LeaveAlternateScreen,
-            );
-            ratatui::restore();
+            restore_terminal_on_exit();
         }
     }
     let _guard = RestoreGuard;
@@ -144,14 +136,22 @@ async fn run_inline_tui(
         match ratatui::try_init_with_options(ratatui::TerminalOptions {
             viewport: ratatui::Viewport::Inline(inline_height),
         }) {
-            Ok(terminal) => (terminal, TuiMode::Inline),
+            Ok(terminal) => {
+                TUI_RAW_ACTIVE.store(true, Ordering::SeqCst);
+                (terminal, TuiMode::Inline)
+            }
             Err(error) => {
                 eprintln!("Inline TUI unavailable ({error}); falling back to fullscreen TUI.");
+                let full_terminal = ratatui::try_init()?;
+                TUI_RAW_ACTIVE.store(true, Ordering::SeqCst);
+                TUI_ALT_SCREEN_ACTIVE.store(true, Ordering::SeqCst);
                 crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture,)?;
-                (ratatui::try_init()?, TuiMode::Full)
+                TUI_MOUSE_CAPTURE_ACTIVE.store(true, Ordering::SeqCst);
+                (full_terminal, TuiMode::Full)
             }
         };
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste,)?;
+    TUI_BRACKETED_PASTE_ACTIVE.store(true, Ordering::SeqCst);
     enable_keyboard_enhancement();
     tui_main_loop(
         &mut terminal,
@@ -196,10 +196,12 @@ async fn tui_main_loop(
     };
     let snapshot = session.clone();
     std::thread::spawn(move || {
+        let loaded = replay::load_session_history(&snapshot.events_path);
         let mut history = TuiState {
-            lines: load_session(&snapshot.events_path),
+            lines: loaded.lines,
             ..Default::default()
         };
+        history.sub_agents.line_by_session = loaded.sub_agent_lines;
         load_persisted_state(&snapshot, &mut history);
         let _ = ui_tx.send(state::TuiUiEvent::HistoryLoaded {
             generation: 0,
@@ -354,6 +356,31 @@ fn async_receiver<T: Send + 'static>(rx: mpsc::Receiver<T>) -> tokio::sync::mpsc
 /// The panic hook and the restore guards share it so neither emits a stray pop
 /// on a terminal that never enabled the protocol.
 static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
+static TUI_RAW_ACTIVE: AtomicBool = AtomicBool::new(false);
+static TUI_ALT_SCREEN_ACTIVE: AtomicBool = AtomicBool::new(false);
+static TUI_MOUSE_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static TUI_BRACKETED_PASTE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Idempotently restore every terminal mode activated by the TUI.
+///
+/// Safe to invoke from both normal Drop guards and the global panic hook
+/// (including release builds with `panic = "abort"` where Drop guards never
+/// execute).
+pub(crate) fn restore_terminal_on_exit() {
+    disable_keyboard_enhancement();
+    if TUI_BRACKETED_PASTE_ACTIVE.swap(false, Ordering::SeqCst) {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
+    }
+    if TUI_MOUSE_CAPTURE_ACTIVE.swap(false, Ordering::SeqCst) {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    }
+    if TUI_ALT_SCREEN_ACTIVE.swap(false, Ordering::SeqCst) {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+    }
+    if TUI_RAW_ACTIVE.swap(false, Ordering::SeqCst) {
+        ratatui::restore();
+    }
+}
 
 /// Push progressive keyboard enhancement flags so Shift+Enter (and Super+V)
 /// arrive distinctly; most terminals send the same CR for Enter and
@@ -454,6 +481,8 @@ fn sync_inline_terminal_mode(
             EnterAlternateScreen,
             crossterm::event::EnableMouseCapture,
         )?;
+        TUI_ALT_SCREEN_ACTIVE.store(true, Ordering::SeqCst);
+        TUI_MOUSE_CAPTURE_ACTIVE.store(true, Ordering::SeqCst);
         let detail_terminal = ratatui::Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
         *saved_inline_terminal = Some(std::mem::replace(terminal, detail_terminal));
     } else {
@@ -462,6 +491,8 @@ fn sync_inline_terminal_mode(
             crossterm::event::DisableMouseCapture,
             LeaveAlternateScreen,
         )?;
+        TUI_MOUSE_CAPTURE_ACTIVE.store(false, Ordering::SeqCst);
+        TUI_ALT_SCREEN_ACTIVE.store(false, Ordering::SeqCst);
         let inline_terminal = saved_inline_terminal
             .take()
             .ok_or_else(|| anyhow::anyhow!("inline terminal state is unavailable"))?;

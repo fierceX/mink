@@ -1071,3 +1071,14 @@ fn image_limits_merge_across_layers_field_wise() {
     assert_eq!(over.max_images_per_request, Some(8));
     assert_eq!(over.detail, Some(mink::runtime::ImageDetail::Low));
 }
+
+#[test]
+fn validate_runtime_config_rejects_invalid_llm_recovery() {
+    let mut cfg = CliConfig::default();
+    cfg.llm_recovery.format_window_size = 0;
+    assert!(validate_runtime_config(&cfg).is_err());
+
+    let mut cfg = CliConfig::default();
+    cfg.llm_recovery.request_timeout_secs = Some(0);
+    assert!(validate_runtime_config(&cfg).is_err());
+}

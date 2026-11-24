@@ -8,6 +8,9 @@
 
 ### 修复
 
+- **沙箱与执行安全加固**：消除 `reexec_in_sandbox` 在多线程 Tokio 运行时中调用 `unsafe std::env::set_var` 的未定义行为（改由 `Command::env` 传参并前置 CLI 沙箱自举）；修复 macOS 空 `write_dirs` 退化为全盘可写、忽略 `allow_network=false` 及 SBPL 路径转义漏洞；修复 Linux `bwrap`/`nsjail` `$HOME` 挂载遮蔽写目录、兄弟读目录前缀误判及 `nsjail` 环境/网络参数缺失；修复 `PythonSandbox` 超时/取消误报成功、`script_file` 越权读宿主机文件及 `cwd` 注入；修复 Bash 安全策略大小写敏感 symlink 绕过、命令串联及拆分 `rm` 参数漏检；`AttachmentStore` 改用 `O_NOFOLLOW | O_NONBLOCK`、原子 `0o600` 权限、单调序列防冲突与父目录 fsync。
+- **核心持久化、并发与 Goal 状态机修复**：`GoalStore::settle_iteration` 首次结算递增 `revision` 保持 CAS 完整；`confirm_goal` 在未启用 driver 且无 Tokio 上下文时不再误触发 `Faulted`；合并 `GoalReviewSession` 双锁并移除锁内回调与 15+ 处生产 `.unwrap()`；`StatsTracker::flush` 在 `spawn_blocking` 前释放读锁；异步/持锁事件日志改用非阻塞 `send_best_effort`；`ConversationStore::ensure` 改用非截断 `create + append`；`CompactionEngine::build_summary_input` 复用 `checkpoint_prefix` 修复活跃 Goal 二次压缩 prefix cache 失配；Fork 子代理清理改用单 `AtomicU8` 状态机消除目录泄漏竞态。
+- **CLI / TUI 关键可用性修复**：Release（`panic = "abort"`）下 panic hook 完整恢复所有已启用的 TUI 终端模式且先恢复后打印错误；修复 `/goal status` 与 `/goal create` 落入默认分支创建错误 Goal；修复 `wrap_lines_word` 静默吞掉空行；修复历史回放子代理无法点击及 `restored_sub_detail` 死路；`mink-cli` 启动校验补齐 `llm_recovery.validate()`。
 - **Web 新建对话复用旧会话身份**：首条消息提交成功后，compose 记录不再残留。原先 composer 在提交前清空输入框，落盘记录因此是空正文，而结算按「提交正文相等」比较，永远不成立；记录里的 `draft_id` 与 `request_id` 于是一直被下一次「新建对话」复用——先用旧 `draft_id` 幂等解析回旧会话（所以提示「会话已创建」），再用旧 `request_id` 提交不同正文，被准入判为 `request ID conflicts with an existing input`，失败后走同一条结算路径，项目从此每次都撞同一句错误。现在按身份（`draftId`+`requestId` 相等）结算且成功与 adopt 两条路径都执行：空正文或与提交正文相同的记录删除，发送开始后新输入的正文保留但换成新身份，读者换成的另一份草稿不碰。新增 compose 结算单元用例与两条 App 级回归（受理后、拒绝后均不再复用旧身份）。
 
 ## v0.9.0 (2026-11-04)

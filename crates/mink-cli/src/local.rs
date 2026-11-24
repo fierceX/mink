@@ -196,6 +196,13 @@ fn near_miss_goal_subcommand(args: &str) -> Option<&'static str> {
         .find(|known| one_edit_apart(token, known) || adjacent_transposition(token, known))
 }
 
+fn split_first_token(input: &str) -> (&str, &str) {
+    match input.find(char::is_whitespace) {
+        Some(idx) => (&input[..idx], input[idx..].trim_start()),
+        None => (input, ""),
+    }
+}
+
 pub(crate) fn parse_goal_command(input: &str) -> Result<GoalCommand> {
     anyhow::ensure!(
         input == "/goal"
@@ -208,31 +215,53 @@ pub(crate) fn parse_goal_command(input: &str) -> Result<GoalCommand> {
         .strip_prefix("/goal")
         .ok_or_else(|| anyhow::anyhow!("expected /goal"))?
         .trim();
-    Ok(match args {
-        "" => GoalCommand::Status,
-        "confirm" | "refine" => {
-            anyhow::bail!("usage: /goal confirm DRAFT_ID REVISION or /goal refine FEEDBACK")
+    if args.is_empty() {
+        return Ok(GoalCommand::Status);
+    }
+    let (head, tail) = split_first_token(args);
+    Ok(match head {
+        "status" if tail.is_empty() => GoalCommand::Status,
+        "create" => {
+            anyhow::ensure!(!tail.is_empty(), "usage: /goal create OBJECTIVE");
+            GoalCommand::Create(tail.into())
         }
-        _ if args.starts_with("confirm ") => {
-            let parts: Vec<_> = args.split_whitespace().skip(1).collect();
+        "confirm" => {
+            let parts: Vec<_> = tail.split_whitespace().collect();
             anyhow::ensure!(parts.len() == 2, "usage: /goal confirm DRAFT_ID REVISION");
             GoalCommand::Confirm {
                 id: parts[0].into(),
                 revision: parts[1].parse()?,
             }
         }
-        _ if args.starts_with("refine ") => GoalCommand::Refine(args[7..].trim().into()),
-        "pause" => GoalCommand::Pause,
-        "resume" => GoalCommand::Resume,
-        "cancel" => GoalCommand::Cancel,
-        "clear" => GoalCommand::Clear,
-        "approve" => GoalCommand::Approve("explicit terminal approval".into()),
-        _ if args.starts_with("reconcile ") => GoalCommand::Reconcile(args[10..].trim().into()),
-        _ if args.starts_with("approve ") => GoalCommand::Approve(args[8..].trim().into()),
-        _ if args.starts_with("human ") => GoalCommand::Human(args[6..].trim().into()),
-        _ if args.starts_with("verified ") => GoalCommand::Verified(args[9..].trim().into()),
-        _ if args == "budget" || args.starts_with("budget ") => {
-            let parts: Vec<_> = args.split_whitespace().skip(1).collect();
+        "refine" => {
+            anyhow::ensure!(!tail.is_empty(), "usage: /goal refine FEEDBACK");
+            GoalCommand::Refine(tail.into())
+        }
+        "pause" if tail.is_empty() => GoalCommand::Pause,
+        "resume" if tail.is_empty() => GoalCommand::Resume,
+        "cancel" if tail.is_empty() => GoalCommand::Cancel,
+        "clear" if tail.is_empty() => GoalCommand::Clear,
+        "approve" => {
+            if tail.is_empty() {
+                GoalCommand::Approve("explicit terminal approval".into())
+            } else {
+                GoalCommand::Approve(tail.into())
+            }
+        }
+        "reconcile" => {
+            anyhow::ensure!(!tail.is_empty(), "usage: /goal reconcile NOTE");
+            GoalCommand::Reconcile(tail.into())
+        }
+        "human" => {
+            anyhow::ensure!(!tail.is_empty(), "usage: /goal human OBJECTIVE");
+            GoalCommand::Human(tail.into())
+        }
+        "verified" => {
+            anyhow::ensure!(!tail.is_empty(), "usage: /goal verified OBJECTIVE");
+            GoalCommand::Verified(tail.into())
+        }
+        "budget" => {
+            let parts: Vec<_> = tail.split_whitespace().collect();
             anyhow::ensure!(
                 (2..=3).contains(&parts.len()),
                 "usage: /goal budget TURNS MINUTES [SOFT_TOKENS]"
@@ -495,5 +524,29 @@ mod goal_tests {
             "retired acceptance mode still advertised: {help}"
         );
         assert!(help.contains("agent_reviewed"));
+    }
+
+    #[test]
+    fn goal_status_create_and_bare_subcommands_parse_correctly() {
+        assert_eq!(parse_goal_command("/goal").unwrap(), GoalCommand::Status);
+        assert_eq!(
+            parse_goal_command("/goal status").unwrap(),
+            GoalCommand::Status
+        );
+        assert_eq!(
+            parse_goal_command("/goal create fix the build").unwrap(),
+            GoalCommand::Create("fix the build".into())
+        );
+        assert_eq!(
+            parse_goal_command("/goal\tconfirm\tdraft-1\t3").unwrap(),
+            GoalCommand::Confirm {
+                id: "draft-1".into(),
+                revision: 3
+            }
+        );
+        assert!(parse_goal_command("/goal create").is_err());
+        assert!(parse_goal_command("/goal reconcile").is_err());
+        assert!(parse_goal_command("/goal human").is_err());
+        assert!(parse_goal_command("/goal verified").is_err());
     }
 }

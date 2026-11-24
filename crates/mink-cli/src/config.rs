@@ -976,6 +976,7 @@ pub fn validate_runtime_config(cfg: &CliConfig) -> Result<()> {
     if cfg.sub_agent_max_depth > 3 {
         bail!("sub_agent_max_depth must be between 0 and 3");
     }
+    cfg.llm_recovery.validate()?;
     Ok(())
 }
 
