@@ -147,7 +147,8 @@ impl TuiState {
             ));
         }
         if !self.input.buf.is_empty() {
-            self.input.history.push(self.input.buf.clone());
+            let entry = self.input.buf.clone();
+            self.input.push_history(entry);
         }
         self.input.buf.clear();
         self.input.cursor = 0;
@@ -223,11 +224,10 @@ impl TuiState {
                 if matches!(completion.action, AdmissionAction::Submit)
                     && !completion.draft.buf.is_empty()
                 {
-                    self.input.history.push(completion.draft.buf.clone());
+                    self.input.push_history(completion.draft.buf.clone());
                 } else if matches!(completion.action, AdmissionAction::Resume) {
                     self.input
-                        .history
-                        .push(compact_user_input_for_display(&receipt.input.text));
+                        .push_history(compact_user_input_for_display(&receipt.input.text));
                 }
                 if same_draft && consumes_text {
                     self.input.buf.clear();
@@ -251,7 +251,7 @@ impl TuiState {
                 }
                 self.admission_cancelled = false;
                 if !same_draft && matches!(completion.action, AdmissionAction::Submit) {
-                    self.failed_drafts.push(completion.draft);
+                    self.push_failed_draft(completion.draft);
                 }
                 self.input_rejected(error);
             }

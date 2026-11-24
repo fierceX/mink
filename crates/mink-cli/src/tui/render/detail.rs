@@ -145,7 +145,8 @@ fn todo_lines(state: &TuiState) -> Vec<Line<'static>> {
             };
             lines.push(Line::from(format!(
                 "{marker} {}  {}",
-                item.id, item.content
+                crate::tui::sanitize::sanitize_tui_text(&item.id),
+                crate::tui::sanitize::sanitize_tui_text(&item.content)
             )));
         }
     } else {

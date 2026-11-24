@@ -6,6 +6,13 @@ pub(crate) fn sanitize_tui_text(input: &str) -> String {
     normalize_control_text(&strip_ansi(input))
 }
 
+pub(crate) fn sanitize_tui_stream_chunk(
+    filter: &mut crate::ui::sanitize::ControlSequenceFilter,
+    chunk: &str,
+) -> String {
+    normalize_control_text(&filter.push(chunk))
+}
+
 pub(crate) fn normalize_tui_input(input: &str) -> String {
     normalize_control_text(input)
 }

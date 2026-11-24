@@ -410,6 +410,7 @@ pub(crate) enum TuiUiEvent {
         id: String,
         result: Result<SubAgentDetail, String>,
     },
+    SkillsLoaded(Result<Vec<String>, String>),
 }
 impl Debug for TuiUiEvent {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -421,6 +422,7 @@ impl Debug for TuiUiEvent {
             Self::HistoryLoaded { .. } => "HistoryLoaded",
             Self::Admission(_) => "Admission",
             Self::SubAgentReady { .. } => "SubAgentReady",
+            Self::SkillsLoaded(_) => "SkillsLoaded",
         })
     }
 }
@@ -554,6 +556,15 @@ impl InputState {
     pub(crate) fn clamp_cursor(&mut self) {
         self.cursor = self.clamped_cursor();
     }
+
+    pub(crate) fn push_history(&mut self, entry: String) {
+        const MAX_INPUT_HISTORY: usize = 500;
+        self.history.push(entry);
+        if self.history.len() > MAX_INPUT_HISTORY {
+            let excess = self.history.len() - MAX_INPUT_HISTORY;
+            self.history.drain(..excess);
+        }
+    }
 }
 
 pub(crate) fn clamp_char_boundary(s: &str, pos: usize) -> usize {
@@ -681,6 +692,7 @@ pub(crate) struct TuiState {
     pub lines: Vec<TranscriptItem>,
     pub inline: InlineSurfaceState,
     pub stream_boundary: super::stream_boundary::StreamBoundary,
+    pub stream_filter: crate::ui::sanitize::ControlSequenceFilter,
     pub stream_line: String,
     pub stream_kind: TranscriptKind,
     pub streaming: bool,
@@ -803,6 +815,7 @@ impl Default for TuiState {
             lines: Vec::new(),
             inline: InlineSurfaceState::default(),
             stream_boundary: super::stream_boundary::StreamBoundary::default(),
+            stream_filter: crate::ui::sanitize::ControlSequenceFilter::new(),
             stream_line: String::new(),
             stream_kind: TranscriptKind::default(),
             streaming: false,
@@ -931,6 +944,7 @@ impl TuiState {
 
     pub(crate) fn save_stream(&mut self) {
         self.stream_boundary = super::stream_boundary::StreamBoundary::default();
+        self.stream_filter.reset();
         let text = std::mem::take(&mut self.stream_line);
         if !text.is_empty() {
             self.push_line(TranscriptItem::new(text, self.stream_kind));
@@ -1155,7 +1169,43 @@ impl TuiState {
                     ));
                 }
             }
+            TuiUiEvent::SkillsLoaded(result) => {
+                self.render_skills_result(result);
+            }
         }
+    }
+
+    pub(crate) fn push_failed_draft(&mut self, draft: InputState) {
+        const MAX_FAILED_DRAFTS: usize = 50;
+        self.failed_drafts.push(draft);
+        if self.failed_drafts.len() > MAX_FAILED_DRAFTS {
+            let excess = self.failed_drafts.len() - MAX_FAILED_DRAFTS;
+            self.failed_drafts.drain(..excess);
+        }
+    }
+
+    fn render_skills_result(&mut self, result: Result<Vec<String>, String>) {
+        self.push_line(TranscriptItem::new(
+            "=== Skills ===".into(),
+            TranscriptKind::Info,
+        ));
+        match result {
+            Ok(lines) => {
+                for line in lines {
+                    self.push_line(TranscriptItem::new(line, TranscriptKind::Text));
+                }
+            }
+            Err(error) => {
+                self.push_line(TranscriptItem::new(
+                    format!("Error loading skills: {error}"),
+                    TranscriptKind::Error,
+                ));
+            }
+        }
+        self.push_line(TranscriptItem::new(
+            crate::local::SKILL_LOAD_HINT.into(),
+            TranscriptKind::Info,
+        ));
     }
 
     pub(crate) fn arm_task_notification(&mut self) {
@@ -1183,27 +1233,16 @@ impl TuiState {
         };
     }
     pub(crate) fn show_skills(&mut self) {
-        self.push_line(TranscriptItem::new(
-            "=== Skills ===".into(),
-            TranscriptKind::Info,
-        ));
-        match crate::local::discoverable_skill_lines() {
-            Ok(lines) => {
-                for line in lines {
-                    self.push_line(TranscriptItem::new(line, TranscriptKind::Text));
-                }
-            }
-            Err(error) => {
-                self.push_line(TranscriptItem::new(
-                    format!("Error loading skills: {error}"),
-                    TranscriptKind::Error,
-                ));
-            }
+        if let Some(tx) = self.ui_tx.clone() {
+            std::thread::spawn(move || {
+                let result =
+                    crate::local::discoverable_skill_lines().map_err(|error| error.to_string());
+                let _ = tx.send(TuiUiEvent::SkillsLoaded(result));
+            });
+            return;
         }
-        self.push_line(TranscriptItem::new(
-            crate::local::SKILL_LOAD_HINT.into(),
-            TranscriptKind::Info,
-        ));
+        let result = crate::local::discoverable_skill_lines().map_err(|error| error.to_string());
+        self.render_skills_result(result);
     }
 
     pub(crate) fn open_sub_agent(&mut self, id: &str) {
@@ -1314,7 +1353,7 @@ impl TuiState {
             Ok((content, truncated)) => {
                 self.artifact_detail = Some(ArtifactDetail {
                     id: id.to_string(),
-                    content,
+                    content: sanitize_tui_text(&content),
                     truncated,
                 });
                 self.view = View::Artifact { scroll: 0 };

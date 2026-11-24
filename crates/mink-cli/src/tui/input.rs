@@ -843,7 +843,7 @@ fn handle_enter(
         return false;
     }
     if !typed.is_empty() {
-        state.input.history.push(typed.clone());
+        state.input.push_history(typed.clone());
     }
     state.input.history_idx = None;
     // 提交新输入前先封口上一轮未结束的流式内容，保证用户输入始终显示在
@@ -970,9 +970,10 @@ pub(crate) fn handle_event_for_mode(
     if !matches!(&ev, Event::Key(key) if matches!(key.code, KeyCode::Up | KeyCode::Down)) {
         state.input.preferred_column = None;
     }
+    let track_draft = matches!(&ev, Event::Key(_) | Event::Paste(_));
     let old_cursor = state.input.cursor;
-    let old_text = state.input.buf.clone();
-    let old_images = state.input.pending_images.clone();
+    let old_snapshot =
+        track_draft.then(|| (state.input.buf.clone(), state.input.pending_images.clone()));
     let mut quit = false;
     match ev {
         Event::Key(key) => quit = handle_key(key, state, orch_tx),
@@ -1021,7 +1022,9 @@ pub(crate) fn handle_event_for_mode(
         }
         _ => {}
     }
-    if old_text != state.input.buf || old_images != state.input.pending_images {
+    if let Some((old_text, old_images)) = old_snapshot
+        && (old_text != state.input.buf || old_images != state.input.pending_images)
+    {
         state.input.revision = state.input.revision.wrapping_add(1);
         if edit {
             state.input.history_idx = None;

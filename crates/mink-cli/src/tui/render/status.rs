@@ -215,16 +215,19 @@ fn build_status_items(state: &TuiState) -> Vec<StatusItem> {
 /// shown. Cleared goals never appear: the user asked to stop seeing them.
 fn goal_status_label(goal: Option<&crate::ui::GoalDisplay>) -> Option<String> {
     let goal = goal.filter(|goal| !goal.hidden)?;
-    let mut label = format!(
-        "goal:{} {}/{}",
-        goal.status, goal.remaining_turns, goal.max_turns
-    );
-    // A finished goal is only interesting when it states how it was accepted;
-    // running goals get the turn budget instead.
-    if !goal.remaining_turns.eq(&0) || goal.status == "active" {
-        return Some(label);
+    // Non-terminal goals show their remaining turn budget; terminal goals
+    // (completed/cancelled/failed) show status plus any completion basis,
+    // even when they finished with turns remaining.
+    if matches!(
+        goal.status.as_str(),
+        "active" | "draft" | "paused" | "blocked"
+    ) {
+        return Some(format!(
+            "goal:{} {}/{}",
+            goal.status, goal.remaining_turns, goal.max_turns
+        ));
     }
-    label = format!("goal:{}", goal.status);
+    let mut label = format!("goal:{}", goal.status);
     if let Some(basis) = goal.completion_basis.as_deref().filter(|b| !b.is_empty()) {
         label.push(' ');
         label.push_str(basis);

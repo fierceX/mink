@@ -6,7 +6,7 @@ use ratatui::{
     layout::Rect,
     style::Modifier,
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 
 const MAX_PICKER_ROWS: usize = 8;
@@ -15,22 +15,24 @@ pub(super) fn render_file_picker(f: &mut Frame, input_area: Rect, state: &mut Tu
     let Some(ActiveOverlay::FilePicker(picker)) = state.overlay.as_mut() else {
         return;
     };
-    let visible_rows = picker.items.len().clamp(1, MAX_PICKER_ROWS);
+    let available_height = input_area.y;
+    let width = input_area.width.saturating_sub(2);
+    if available_height < 3 || width < 10 {
+        return;
+    }
+    let max_rows = ((available_height - 2) as usize).min(MAX_PICKER_ROWS);
+    let visible_rows = picker.items.len().clamp(1, max_rows);
     picker.clamp_scroll(visible_rows);
 
     let height = (visible_rows + 2) as u16;
     let y = input_area.y.saturating_sub(height);
-    let width = input_area.width.saturating_sub(2).max(20);
     let x = input_area.x.saturating_add(1);
     let area = Rect {
         x,
         y,
-        width: width.min(input_area.width),
+        width,
         height,
     };
-    if area.height < 3 || area.width < 10 {
-        return;
-    }
 
     let inner_w = area.width.saturating_sub(2) as usize;
     let mut lines = Vec::new();
@@ -71,5 +73,6 @@ pub(super) fn render_file_picker(f: &mut Frame, input_area: Rect, state: &mut Tu
         .borders(Borders::ALL)
         .border_style(theme::border())
         .title(Span::styled(title, theme::muted()));
+    f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(lines).block(block), area);
 }

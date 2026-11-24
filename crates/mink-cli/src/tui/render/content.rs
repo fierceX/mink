@@ -83,9 +83,18 @@ pub(super) fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState, mo
         Vec::new()
     };
     let mut visible = Vec::with_capacity(viewport);
-    let mut index = state.cache.heights.locate(scroll);
+    let first_visible = state.cache.heights.locate(scroll);
+    let mut index = first_visible;
     let mut row = state.cache.heights.prefix(index);
     while index < state.lines.len() && visible.len() < viewport {
+        if state.lines[index].cached_lines.is_none()
+            && state.lines[index].cached_width == inner_w
+            && state.lines[index].cached_collapsed == state.lines[index].collapsed
+            && state.lines[index].cached_interactive == interactive
+        {
+            // Re-materialize an item whose rendered lines were evicted while off-viewport.
+            rebuild_message_cache(&mut state.lines[index], inner_w, interactive);
+        }
         if let Some(lines) = &state.lines[index].cached_lines {
             let partial = if !interactive && index == start {
                 state.inline.row_offset
@@ -102,6 +111,24 @@ pub(super) fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState, mo
             row += lines.len().saturating_sub(partial);
         }
         index += 1;
+    }
+    let last_visible = index;
+    // Bound Full TUI rendered-line cache memory on long transcripts by evicting
+    // `cached_lines` far outside the viewport while preserving `heights` and
+    // `cached_offsets` so scrolling and reading anchors stay O(log N).
+    const FULL_CACHE_MARGIN: usize = 256;
+    const FULL_CACHE_EVICT_THRESHOLD: usize = 512;
+    if interactive && state.lines.len() > FULL_CACHE_EVICT_THRESHOLD {
+        let keep_start = first_visible.saturating_sub(FULL_CACHE_MARGIN);
+        let keep_end = last_visible.saturating_add(FULL_CACHE_MARGIN);
+        for item in &mut state.lines[..keep_start] {
+            item.cached_lines = None;
+        }
+        if keep_end < state.lines.len() {
+            for item in &mut state.lines[keep_end..] {
+                item.cached_lines = None;
+            }
+        }
     }
     if visible.len() < viewport {
         visible.extend(
@@ -408,8 +435,8 @@ fn tool_header_line(item: &TranscriptItem, interactive: bool) -> Line<'static> {
         None if item.sealed => ("? 状态未记录", theme::muted()),
         None => ("◇", theme::info()),
     };
-    let name = item.tool_name.as_deref().unwrap_or("Tool");
-    let summary = item.tool_summary.as_deref().unwrap_or("");
+    let name = sanitize_tui_text(item.tool_name.as_deref().unwrap_or("Tool"));
+    let summary = sanitize_tui_text(item.tool_summary.as_deref().unwrap_or(""));
     let mut spans = Vec::new();
     if interactive && item.is_collapsible() {
         spans.push(Span::styled(

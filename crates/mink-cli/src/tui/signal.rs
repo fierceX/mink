@@ -1,6 +1,6 @@
 use crate::config::TuiMode;
 use crate::tui::notify::TaskNotificationKind;
-use crate::tui::sanitize::sanitize_tui_text;
+use crate::tui::sanitize::{sanitize_tui_stream_chunk, sanitize_tui_text};
 use crate::tui::state::{SubAgentDetail, TranscriptItem, TranscriptKind, TuiState, WorkState};
 use crate::ui::{ArtifactDisplay, ToolPresentation, ToolResultKind};
 use crate::ui::{StatsSnapshot, SubAgentStreamKind};
@@ -184,14 +184,16 @@ impl TuiState {
                 }
             }
             TuiSignal::Thinking(c) => {
-                let c = sanitize_tui_text(c);
                 self.stream_status = None;
                 if !self.stream_line.is_empty()
                     && self.stream_kind != TranscriptKind::StreamThinking
                 {
                     self.stream_line.push('\n');
                     self.save_stream();
+                } else if !self.streaming || self.stream_kind != TranscriptKind::StreamThinking {
+                    self.stream_filter.reset();
                 }
+                let c = sanitize_tui_stream_chunk(&mut self.stream_filter, c);
                 self.stream_kind = TranscriptKind::StreamThinking;
                 self.streaming = true;
                 self.stream_line.push_str(&c);
@@ -199,13 +201,15 @@ impl TuiState {
                 self.work_state = WorkState::StreamingThinking;
             }
             TuiSignal::Text(c) => {
-                let c = sanitize_tui_text(c);
                 // 新内容到达：清除过期的瞬时等待状态（心跳标签）。
                 self.stream_status = None;
                 if !self.stream_line.is_empty() && self.stream_kind != TranscriptKind::StreamText {
                     self.stream_line.push('\n');
                     self.save_stream();
+                } else if !self.streaming || self.stream_kind != TranscriptKind::StreamText {
+                    self.stream_filter.reset();
                 }
+                let c = sanitize_tui_stream_chunk(&mut self.stream_filter, c);
                 self.stream_kind = TranscriptKind::StreamText;
                 self.streaming = true;
                 self.stream_line.push_str(&c);
@@ -285,8 +289,8 @@ impl TuiState {
                     ))
                 };
                 if let Some(item) = self.lines.get_mut(idx) {
-                    item.text = content.clone();
-                    item.tool_name = Some(tool_name.clone());
+                    item.text = sanitize_tui_text(content);
+                    item.tool_name = Some(sanitize_tui_text(tool_name));
                     item.tool_use_id.clone_from(tool_use_id);
                     item.tool_status = *status;
                     item.tool_exit_code = *exit_code;
@@ -366,7 +370,7 @@ impl TuiState {
                 if let Some(idx) = self.sub_agents.line_by_session.get(session_id).copied()
                     && let Some(line) = self.lines.get_mut(idx)
                 {
-                    line.text = title;
+                    line.text = sanitize_tui_text(&title);
                     line.sealed = !running;
                     if running {
                         self.unsealed.insert(idx);
@@ -435,7 +439,7 @@ impl TuiState {
                 if let Some(idx) = self.sub_agents.line_by_session.get(session_id).copied()
                     && let Some(line) = self.lines.get_mut(idx)
                 {
-                    line.text = title.clone();
+                    line.text = sanitize_tui_text(&title);
                     line.sealed = true;
                     self.unsealed.remove(&idx);
                     if let Some(ref mut detail) = line.sub_detail {

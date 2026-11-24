@@ -3903,3 +3903,77 @@ fn session_fixture_restores_goal_cards_and_never_echoes_internal_rows() {
         ]
     );
 }
+
+#[test]
+fn streaming_text_strips_ansi_escape_split_across_chunks() {
+    let mut state = TuiState::default();
+    state.apply(&TuiSignal::Text("hello \x1b[".into()));
+    state.apply(&TuiSignal::Text("31mworld\x1b[0m!".into()));
+    state.finalize_stream();
+    let combined: String = state.lines.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(combined, "hello world!");
+}
+
+#[test]
+fn status_bar_shows_completion_basis_even_with_remaining_turns() {
+    let mut state = TuiState::default();
+    let mut done = goal_display();
+    done.status = "completed".into();
+    done.phase = "idle".into();
+    done.remaining_turns = 8;
+    done.completion_basis = Some("verified".into());
+    state.goal = Some(done);
+    let line = build_status_line(&state, 100);
+    assert!(
+        line.contains("goal:completed verified"),
+        "early-completed goal must display completion basis: {line}"
+    );
+}
+
+#[test]
+fn input_history_and_failed_drafts_are_bounded() {
+    let mut state = TuiState::default();
+    for i in 0..600 {
+        state.input.push_history(format!("cmd-{i}"));
+    }
+    assert_eq!(state.input.history.len(), 500);
+    assert_eq!(
+        state.input.history.first().map(String::as_str),
+        Some("cmd-100")
+    );
+    assert_eq!(
+        state.input.history.last().map(String::as_str),
+        Some("cmd-599")
+    );
+
+    for i in 0..80 {
+        let draft = state::InputState {
+            buf: format!("draft-{i}"),
+            ..Default::default()
+        };
+        state.push_failed_draft(draft);
+    }
+    assert_eq!(state.failed_drafts.len(), 50);
+    assert_eq!(
+        state.failed_drafts.first().map(|d| d.buf.as_str()),
+        Some("draft-30")
+    );
+    assert_eq!(
+        state.failed_drafts.last().map(|d| d.buf.as_str()),
+        Some("draft-79")
+    );
+}
+
+#[test]
+fn inline_markdown_unmatched_delimiters_stay_linear() {
+    let line = "[".repeat(4_000) + &"*".repeat(4_000) + &"`".repeat(4_000);
+    let started = std::time::Instant::now();
+    let mut lines = Vec::new();
+    markdown::push_msg_with_width(&mut lines, &line, TranscriptKind::StreamText, 80, None);
+    assert!(!lines.is_empty());
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "unmatched delimiters took {:?}",
+        started.elapsed()
+    );
+}

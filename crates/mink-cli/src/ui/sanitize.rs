@@ -34,7 +34,7 @@ enum FilterState {
 /// with `BEL` or `ESC \` terminator, two-byte designations, C1 forms) and
 /// stray control characters are dropped. Sequences may span chunk
 /// boundaries; incomplete sequences at [`Self::reset`] are discarded.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct ControlSequenceFilter {
     state: FilterState,
     consumed: usize,

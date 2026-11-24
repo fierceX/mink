@@ -5,14 +5,24 @@ use ratatui::{
     text::Span,
 };
 
+#[derive(Default)]
+struct InlineScanState {
+    no_backtick: bool,
+    no_strong: bool,
+    no_em: bool,
+    no_link_sep: bool,
+    no_link_close: bool,
+}
+
 pub(crate) fn parse_inline(text: &str) -> Vec<InlineNode> {
     let mut nodes = Vec::new();
     let mut plain = String::new();
     let mut pos = 0usize;
+    let mut scan = InlineScanState::default();
 
     while pos < text.len() {
         let rest = &text[pos..];
-        if let Some((node, consumed)) = parse_inline_token(rest) {
+        if let Some((node, consumed)) = parse_inline_token(rest, &mut scan) {
             if !plain.is_empty() {
                 nodes.push(InlineNode::Text(std::mem::take(&mut plain)));
             }
@@ -34,35 +44,55 @@ pub(crate) fn parse_inline(text: &str) -> Vec<InlineNode> {
     nodes
 }
 
-fn parse_inline_token(rest: &str) -> Option<(InlineNode, usize)> {
-    if let Some(after) = rest.strip_prefix('`')
-        && let Some(end) = after.find('`')
+fn parse_inline_token(rest: &str, scan: &mut InlineScanState) -> Option<(InlineNode, usize)> {
+    if !scan.no_backtick
+        && let Some(after) = rest.strip_prefix('`')
     {
-        return Some((InlineNode::Code(after[..end].to_string()), end + 2));
+        if let Some(end) = after.find('`') {
+            return Some((InlineNode::Code(after[..end].to_string()), end + 2));
+        }
+        scan.no_backtick = true;
     }
 
-    if let Some(after) = rest.strip_prefix("**")
-        && let Some(end) = after.find("**")
+    if !scan.no_strong
+        && let Some(after) = rest.strip_prefix("**")
     {
-        return Some((InlineNode::Strong(parse_inline(&after[..end])), end + 4));
+        if let Some(end) = after.find("**") {
+            return Some((InlineNode::Strong(parse_inline(&after[..end])), end + 4));
+        }
+        scan.no_strong = true;
     }
 
-    if let Some(after) = rest.strip_prefix('*')
+    if !scan.no_em
+        && let Some(after) = rest.strip_prefix('*')
         && !after.starts_with('*')
-        && let Some(end) = after.find('*')
     {
-        return Some((InlineNode::Emphasis(parse_inline(&after[..end])), end + 2));
+        if let Some(end) = after.find('*') {
+            return Some((InlineNode::Emphasis(parse_inline(&after[..end])), end + 2));
+        }
+        scan.no_em = true;
     }
 
-    parse_link_token(rest)
+    parse_link_token(rest, scan)
 }
 
-fn parse_link_token(rest: &str) -> Option<(InlineNode, usize)> {
+fn parse_link_token(rest: &str, scan: &mut InlineScanState) -> Option<(InlineNode, usize)> {
+    if scan.no_link_sep || scan.no_link_close {
+        return None;
+    }
     let after_open = rest.strip_prefix('[')?;
-    let label_end = after_open.find("](")?;
+    let Some(label_end) = after_open.find("](") else {
+        scan.no_link_sep = true;
+        return None;
+    };
     let href_start = label_end + 2;
     let href = &after_open[href_start..];
-    let href_end = find_link_href_end(href)?;
+    let Some(href_end) = find_link_href_end(href) else {
+        if !href.contains(')') {
+            scan.no_link_close = true;
+        }
+        return None;
+    };
     let label = &after_open[..label_end];
     Some((
         InlineNode::Link {
