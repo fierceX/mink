@@ -27,38 +27,27 @@ pub(crate) fn execute_replace_edit(
     }
     let path = resolve_replace_target(ctx.cwd, &args.path)?;
     let display_path = display_relative_path(ctx.cwd, &path);
+    let original = std::fs::read_to_string(&path)
+        .map_err(|error| anyhow!("Error: cannot read {}: {error}", path.display()))?;
+    ensure!(
+        original.len() <= ctx.file_write_max_bytes,
+        "Error: file too large for Edit"
+    );
+    let (shape, mut current_normalized) = TextShape::decode(&original);
     let mut output = Vec::new();
-    let mut wrote = false;
+    let mut changed = false;
     for (index, edit) in args.edits.iter().enumerate() {
-        let original = std::fs::read_to_string(&path)
-            .map_err(|error| anyhow!("Error: cannot read {}: {error}", path.display()))?;
-        ensure!(
-            original.len() <= ctx.file_write_max_bytes,
-            "Error: file too large for Edit"
-        );
-        let (shape, normalized) = TextShape::decode(&original);
         let old_text = crate::tools::snapshot::normalize_snapshot_text(&edit.old_text);
         let new_text = crate::tools::snapshot::normalize_snapshot_text(&edit.new_text);
         let result = crate::tools::replace::replace_text(
-            &normalized,
+            &current_normalized,
             &old_text,
             &new_text,
             edit.all,
             ctx.edit_fuzzy_match,
             ctx.edit_fuzzy_threshold,
             &display_path,
-        )
-        .map_err(|error| {
-            anyhow!(
-                "{}{}",
-                error,
-                if index > 0 {
-                    format!("\n{index} earlier edit(s) in this call were already committed")
-                } else {
-                    String::new()
-                }
-            )
-        })?;
+        )?;
         // Idempotent edits change nothing on disk: skip the write, the diff
         // and the mutation-epoch bump so mtime/inode stay stable and read
         // memos remain valid.
@@ -70,15 +59,16 @@ pub(crate) fn execute_replace_edit(
             ));
             continue;
         }
-        let final_text = shape.restore(&result.content);
+        let candidate_text = shape.restore(&result.content);
         ensure!(
-            final_text.len() <= ctx.file_write_max_bytes,
+            candidate_text.len() <= ctx.file_write_max_bytes,
             "Error: edited file would exceed file_write_max_bytes"
         );
-        atomic_write(&path, &final_text)?;
-        wrote = true;
-        let (diff, added, removed) = inline_diff(&display_path, &normalized, &result.content)?;
-        let first_changed = changed_line_window(&normalized, &result.content).0;
+        let (diff, added, removed) =
+            inline_diff(&display_path, &current_normalized, &result.content)?;
+        let first_changed = changed_line_window(&current_normalized, &result.content).0;
+        current_normalized = result.content;
+        changed = true;
         output.push(format!(
             "Edit({}).{}: updated\nfirstChangedLine: {}\nmatchStrategy: {}\nmatchCount: {}\nlinesAdded: {}\nlinesRemoved: {}\nDiff:\n{}",
             display_path,
@@ -91,8 +81,16 @@ pub(crate) fn execute_replace_edit(
             diff
         ));
     }
+    if changed {
+        let final_text = shape.restore(&current_normalized);
+        ensure!(
+            final_text.len() <= ctx.file_write_max_bytes,
+            "Error: edited file would exceed file_write_max_bytes"
+        );
+        atomic_write(&path, &final_text)?;
+    }
     let mut outcome = tool_outcome(output.join("\n\n"));
-    outcome.no_mutation = !wrote;
+    outcome.no_mutation = !changed;
     Ok(outcome)
 }
 

@@ -177,3 +177,43 @@ fn rejects_block_locators() {
             .contains("positive line number")
     );
 }
+
+#[test]
+fn anchor_locator_supports_dotdot_inside_quotes_and_rejects_trailing_junk() {
+    let patch = parse("[a.rs#1A2B]\nPUT 'for i in 0..10 {'..'}':\n+for i in 0..20 {\n+}").unwrap();
+    let text = "for i in 0..10 {\n    work();\n}\nafter()\n";
+    let result = apply(text, &patch.sections[0], &mut Clipboard::default()).unwrap();
+    assert_eq!(result.text, "for i in 0..20 {\n}\nafter()\n");
+
+    assert!(parse("[a.rs#1A2B]\nCUT 'a'..'b' junk:").is_err());
+}
+
+#[test]
+fn balance_does_not_treat_rust_lifetime_apostrophe_as_unclosed_string() {
+    // A Rust lifetime like `'a` on the same line as `{` must not hide `{` from
+    // structural balance checking.
+    let patch = parse("[a.rs#1A2B]\nPUT 1.=2:\n+fn f<'a>(x: &'a str) {\n+    x\n+}").unwrap();
+    let result = apply(
+        "fn old() {\n}\n",
+        &patch.sections[0],
+        &mut Clipboard::default(),
+    )
+    .unwrap();
+    assert!(
+        result.warnings.is_empty(),
+        "balanced fn with lifetime must not warn: {:?}",
+        result.warnings
+    );
+
+    let unbalanced = balance(&["fn f<'a>(x: &'a str) {".to_string()]);
+    assert_eq!(
+        unbalanced.brace, 1,
+        "unclosed brace after lifetime must still be counted"
+    );
+    let balanced = balance(&[
+        "fn f<'a>(x: &'a str) {".to_string(),
+        "    let c = '{';".to_string(),
+        "}".to_string(),
+    ]);
+    assert_eq!(balanced.brace, 0);
+}

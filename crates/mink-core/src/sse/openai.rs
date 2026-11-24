@@ -178,8 +178,9 @@ impl OpenAIParser {
             .and_then(Value::as_str)
             && !reasoning.is_empty()
         {
+            let had_tag = reasoning.contains("<think>") || reasoning.contains("</think>");
             let reasoning = strip_reasoning_think_tags(reasoning);
-            if !reasoning.trim().is_empty() {
+            if !reasoning.is_empty() && !(had_tag && reasoning.trim().is_empty()) {
                 emit(Event::Thinking(ThinkingEvent { content: reasoning }))?;
             }
         }
@@ -188,13 +189,16 @@ impl OpenAIParser {
             for tc in tool_calls {
                 let idx = tc.get("index").and_then(Value::as_i64).unwrap_or(0);
                 let entry = self.pending_calls.entry(idx).or_default();
-                if let Some(v) = tc.get("id").and_then(Value::as_str) {
+                if let Some(v) = tc.get("id").and_then(Value::as_str)
+                    && !v.is_empty()
+                {
                     entry.id = v.into();
                 }
                 if let Some(v) = tc
                     .get("function")
                     .and_then(|f| f.get("name"))
                     .and_then(Value::as_str)
+                    && !v.is_empty()
                 {
                     entry.name = v.into();
                 }

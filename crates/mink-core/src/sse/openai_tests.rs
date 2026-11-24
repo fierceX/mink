@@ -667,3 +667,35 @@ fn error_in_response() {
             .any(|e| matches!(e, Event::Error(err) if err.message.contains("rate limit")))
     );
 }
+
+#[test]
+fn whitespace_reasoning_delta_is_preserved_and_empty_tool_meta_ignored() {
+    let mut p = OpenAIParser::new();
+    let lines = [
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"step\"}}]}",
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\" \"}}]}",
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"1\"}}]}",
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_keep\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}",
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\",\"function\":{\"name\":\"\",\"arguments\":\"\\\"a.txt\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}",
+        "data: [DONE]",
+    ];
+    let events = collect_lines(&mut p, &lines);
+    let reasoning: String = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Thinking(t) => Some(t.content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasoning, "step 1");
+    let call = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ToolCall(c) => Some(c),
+            _ => None,
+        })
+        .expect("tool call must be emitted");
+    assert_eq!(call.id, "call_keep");
+    assert_eq!(call.name, "Read");
+    assert_eq!(call.input_json, serde_json::json!({"path": "a.txt"}));
+}

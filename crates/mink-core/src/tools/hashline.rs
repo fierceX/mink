@@ -529,36 +529,41 @@ fn parse_operation(
 
 /// Parse an anchor locator: `'start line text'..'end line text'` (single or
 /// double quotes). Anchors are matched trimmed and exact against file lines at
-/// apply time, and must be unique.
-fn parse_anchor_range(raw: &str, line_num: usize) -> Result<(RangeBound, RangeBound)> {
-    let raw = raw.trim();
-    let parse_one = |part: &str| -> Result<String> {
-        let part = part.trim();
-        let Some(quote) = part.chars().next().filter(|c| *c == '\'' || *c == '"') else {
-            bail!("Error: line {line_num}: anchor locator must start with ' or \" (got {part:?})");
-        };
-        let inner = part[quote.len_utf8()..]
-            .split_once(quote)
-            .map(|(inner, _)| inner)
-            .ok_or_else(|| {
-                anyhow!("Error: line {line_num}: unterminated anchor locator {part:?}")
-            })?;
-        ensure!(
-            !inner.trim().is_empty(),
-            "Error: line {line_num}: anchor locator must not be empty"
-        );
-        Ok(inner.to_string())
+/// apply time, and must be unique. Uses a quote-aware scan so `..` inside a
+/// quoted anchor (such as Rust ranges `0..10` or `..Default::default()`) does
+/// not split the locator prematurely, and rejects trailing junk after the end
+/// quote.
+fn parse_quoted_anchor(input: &str, line_num: usize) -> Result<(String, &str)> {
+    let input = input.trim_start();
+    let Some(quote) = input.chars().next().filter(|c| *c == '\'' || *c == '"') else {
+        bail!("Error: line {line_num}: anchor locator must start with ' or \" (got {input:?})");
     };
-    let Some((start_part, end_part)) = raw.split_once("..") else {
-        bail!("Error: line {line_num}: anchor locator must be 'start'..'end' (got {raw:?})");
+    let after_open = &input[quote.len_utf8()..];
+    let Some((inner, rest)) = after_open.split_once(quote) else {
+        bail!("Error: line {line_num}: unterminated anchor locator {input:?}");
     };
     ensure!(
-        !end_part.trim().contains(".."),
-        "Error: line {line_num}: anchor locator has more than one '..' separator"
+        !inner.trim().is_empty(),
+        "Error: line {line_num}: anchor locator must not be empty"
+    );
+    Ok((inner.to_string(), rest))
+}
+
+fn parse_anchor_range(raw: &str, line_num: usize) -> Result<(RangeBound, RangeBound)> {
+    let (start_anchor, after_start) = parse_quoted_anchor(raw, line_num)?;
+    let after_start = after_start.trim_start();
+    let Some(after_sep) = after_start.strip_prefix("..") else {
+        bail!("Error: line {line_num}: anchor locator must be 'start'..'end' (got {raw:?})");
+    };
+    let (end_anchor, trailing) = parse_quoted_anchor(after_sep, line_num)?;
+    let trailing = trailing.trim();
+    ensure!(
+        trailing.is_empty(),
+        "Error: line {line_num}: unexpected trailing text {trailing:?} in anchor locator"
     );
     Ok((
-        RangeBound::Anchor(parse_one(start_part)?),
-        RangeBound::Anchor(parse_one(end_part)?),
+        RangeBound::Anchor(start_anchor),
+        RangeBound::Anchor(end_anchor),
     ))
 }
 
@@ -824,6 +829,15 @@ fn parse_line_number(raw: &str, line_num: usize) -> Result<usize> {
 }
 
 pub fn anchor_lines(section: &Section) -> BTreeSet<usize> {
+    anchor_lines_in_text(section, None)
+}
+
+/// Collect all 1-based line numbers referenced by `section`, resolving
+/// `RangeBound::Anchor` bounds against `file_text` when provided so
+/// `edit_enforce_seen_lines` cannot be bypassed via text anchors.
+pub fn anchor_lines_in_text(section: &Section, file_text: Option<&str>) -> BTreeSet<usize> {
+    let lines: Option<Vec<String>> =
+        file_text.map(|text| text.split('\n').map(str::to_string).collect());
     let mut anchors = BTreeSet::new();
     for operation in &section.operations {
         match operation {
@@ -832,11 +846,22 @@ pub fn anchor_lines(section: &Section) -> BTreeSet<usize> {
             | Operation::Paste {
                 target: PasteTarget::Range { start, end },
                 ..
-            } => {
-                if let (RangeBound::Line(start), RangeBound::Line(end)) = (start, end) {
+            } => match (start, end) {
+                (RangeBound::Line(start), RangeBound::Line(end)) => {
                     anchors.extend(*start..=*end);
                 }
-            }
+                (start_bound, end_bound) => {
+                    if let Some(file_lines) = lines.as_deref()
+                        && let (Ok(s), Ok(e)) = (
+                            resolve_bound(file_lines, start_bound, &section.path),
+                            resolve_bound(file_lines, end_bound, &section.path),
+                        )
+                        && s <= e
+                    {
+                        anchors.extend(s..=e);
+                    }
+                }
+            },
             Operation::Insert { cursor, .. }
             | Operation::Paste {
                 target: PasteTarget::Gap(cursor),
@@ -1369,8 +1394,52 @@ fn balance(lines: &[String]) -> DelimiterBalance {
                 index += 2;
                 continue;
             }
-            if matches!(ch, '\'' | '"' | '`') {
+            if matches!(ch, '"' | '`') {
                 quote = Some(ch);
+                index += 1;
+                continue;
+            }
+            if ch == '\'' {
+                // Distinguish Rust lifetimes/loop labels (`'a`, `'static`, `'outer:`)
+                // from single-quoted string/char literals so apostrophes never swallow
+                // following delimiters on the same line.
+                let is_rust_lifetime = next.is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && {
+                        let prev = index.checked_sub(1).map(|i| chars[i]);
+                        let mut end = index + 2;
+                        while end < chars.len()
+                            && (chars[end].is_ascii_alphanumeric() || chars[end] == '_')
+                        {
+                            end += 1;
+                        }
+                        let after = chars.get(end).copied();
+                        let ident = &chars[index + 1..end];
+                        let is_static_or_anon =
+                            ident == ['_'] || ident == ['s', 't', 'a', 't', 'i', 'c'];
+                        after != Some('\'')
+                            && (matches!(prev, Some('<' | '&'))
+                                || matches!(after, Some('>' | '+' | ',' | ')' | ':'))
+                                || is_static_or_anon)
+                    };
+                let has_closing_single_quote = !is_rust_lifetime && {
+                    let mut scan = index + 1;
+                    let mut found = false;
+                    while scan < chars.len() {
+                        if chars[scan] == '\\' {
+                            scan += 2;
+                            continue;
+                        }
+                        if chars[scan] == '\'' {
+                            found = true;
+                            break;
+                        }
+                        scan += 1;
+                    }
+                    found
+                };
+                if has_closing_single_quote {
+                    quote = Some('\'');
+                }
                 index += 1;
                 continue;
             }

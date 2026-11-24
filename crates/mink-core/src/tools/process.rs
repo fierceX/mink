@@ -190,11 +190,17 @@ pub(crate) enum ProcessTreeCleanup {
 /// gone without evidence. Zombies count as members until reaped, so
 /// liveness is re-checked after `SIGKILL` instead of assumed.
 #[cfg(unix)]
+fn child_pgid(child_pid: u32) -> Option<libc::pid_t> {
+    let pid = i32::try_from(child_pid).ok()?;
+    (pid > 0).then_some(-pid)
+}
+
+#[cfg(unix)]
 fn process_group_alive(child_pid: u32) -> bool {
-    let Ok(pid) = i32::try_from(child_pid) else {
+    let Some(pgid) = child_pgid(child_pid) else {
         return true;
     };
-    let result = unsafe { libc::kill(-pid, 0) };
+    let result = unsafe { libc::kill(pgid, 0) };
     if result == 0 {
         return true;
     }
@@ -348,7 +354,11 @@ pub(crate) fn terminate_child_process_tree_with_grace(
 ) -> ProcessTreeCleanup {
     #[cfg(unix)]
     {
-        let pgid = -(child.id() as i32);
+        let Some(pgid) = child_pgid(child.id()) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return ProcessTreeCleanup::Unconfirmed;
+        };
         // Ask the whole group to terminate; ESRCH (already gone) is fine.
         unsafe {
             libc::kill(pgid, libc::SIGTERM);

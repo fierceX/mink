@@ -610,16 +610,23 @@ impl ToolRunner {
                 }
                 completed
             };
-        for handle in text_handles {
+        let mut remaining_handles = std::collections::VecDeque::from(text_handles);
+        while let Some(handle) = remaining_handles.pop_front() {
             match handle.await {
                 Ok(Ok(result)) => text_results.push(result),
                 Ok(Err(error)) => {
+                    for pending in remaining_handles {
+                        pending.abort();
+                    }
                     return Err(FatalBatchError {
                         error,
                         completed: ordered_prefix(slots, text_results),
                     });
                 }
                 Err(join_error) => {
+                    for pending in remaining_handles {
+                        pending.abort();
+                    }
                     return Err(FatalBatchError {
                         error: anyhow::anyhow!("tool task join failed: {join_error}"),
                         completed: ordered_prefix(slots, text_results),
@@ -1077,6 +1084,12 @@ async fn execute_custom(
     let result = loop {
         tokio::select! {
             result = &mut execution => break result,
+            _ = ctx.cancel.cancelled() => {
+                break Err(crate::tools::extension::ToolError::new(format!(
+                    "custom tool {} cancelled",
+                    definition.name
+                )));
+            }
             _ = &mut deadline => {
                 break Err(crate::tools::extension::ToolError::new(format!(
                     "custom tool {} timed out after {timeout_secs}s",

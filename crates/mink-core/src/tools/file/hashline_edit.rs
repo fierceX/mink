@@ -221,7 +221,9 @@ pub(crate) fn execute_hashline_edit(
         };
 
         if ctx.edit_enforce_seen_lines {
-            let missing = authored_anchors
+            let effective_anchors =
+                crate::tools::hashline::anchor_lines_in_text(&section, Some(&snapshot.text));
+            let missing = effective_anchors
                 .difference(&snapshot.seen_lines)
                 .copied()
                 .collect::<Vec<_>>();

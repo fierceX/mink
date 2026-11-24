@@ -240,3 +240,64 @@ async fn hashline_partial_commit_bumps_mutation_for_committed_files() -> anyhow:
     std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
+
+#[tokio::test]
+async fn replace_edit_rolls_back_all_edits_when_later_entry_fails() -> anyhow::Result<()> {
+    let shared =
+        crate::regression::test_context_for_agent_with_config("replace-edit-atomic", |_| {})
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+    let tool_ctx = crate::context::ToolContext::from(shared.as_ref());
+    let file_path = shared.cwd.join("sample.txt");
+    std::fs::write(&file_path, "alpha\nbeta\n")?;
+
+    let edit_context = tool_ctx.file_edit_context();
+    let input = serde_json::json!({
+        "path": "sample.txt",
+        "edits": [
+            { "old_text": "alpha", "new_text": "ALPHA" },
+            { "old_text": "missing", "new_text": "NOPE" }
+        ]
+    });
+    let err = super::execute_replace_edit(&input, &edit_context)
+        .expect_err("second failing edit must fail the entire Replace Edit call");
+    assert!(err.to_string().contains("Could not find"), "{err:#}");
+    assert_eq!(
+        std::fs::read_to_string(&file_path)?,
+        "alpha\nbeta\n",
+        "failed multi-edit must not leave partial writes on disk"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn hashline_anchor_edit_enforces_seen_lines() -> anyhow::Result<()> {
+    let shared = crate::regression::test_context_for_agent_with_config(
+        "hashline-anchor-seen-lines",
+        |cfg| {
+            cfg.edit_enforce_seen_lines = true;
+        },
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+    let tool_ctx = crate::context::ToolContext::from(shared.as_ref());
+    let file_path = shared.cwd.join("code.txt");
+    let content = "line1\nline2\nline3\nline4\n";
+    std::fs::write(&file_path, content)?;
+
+    let tag = {
+        let mut store = tool_ctx.snapshots.lock().unwrap();
+        // Only line 1 was read; line 3..4 was never seen.
+        store.record(&file_path, content, [1]).tag
+    };
+    let edit_context = tool_ctx.file_edit_context();
+    let input = format!("[code.txt#{tag}]\nPUT 'line3'..'line4':\n+replaced");
+    let err = super::execute_hashline_edit(&serde_json::json!({"input": input}), &edit_context)
+        .expect_err("editing unseen anchor lines must be rejected");
+    assert!(
+        err.to_string().contains("not shown by Read/Grep"),
+        "expected seen_lines rejection, got: {err:#}"
+    );
+    assert_eq!(std::fs::read_to_string(&file_path)?, content);
+    Ok(())
+}
