@@ -1,6 +1,6 @@
 # HTTP 与 SSE API
 
-> 更新日期：2026-10-20
+> 更新日期：2026-11-25
 
 持久输入、快照与服务生命周期。
 
@@ -22,7 +22,7 @@ plan/todo/goal/artifacts 的读取区分“不存在”与“存在但不可读�
 
 - **REST API**：会话管理（列表/创建/删除/打开/关闭/中断）、conversation/plan/todo/goal/artifacts/files 读取，goal 的创建与控制，以及工作台的模型切换与手动压缩（`POST /api/sessions/{id}/model`、`POST /api/sessions/{id}/compact`）。控制请求**同时要求 `goal_id` 与 `revision`**：替换目标的 revision 从 1 重启，只有 id 能区分二者，缺 `goal_id` 返回 400、id 不匹配返回 409。`budget` 的 `soft_token_limit` 是三态补丁：省略字段保持当前上限、JSON 数字设置、显式 `null` 清除；`0`、负数、溢出与错误类型均被拒绝且不改变快照。`resume` 可继续 paused/blocked/budget_exhausted，也用于接起服务重启后恢复出的 active goal：先按容量账本预约许可、再 arm 驱动，由 core 携带租约启动唯一 run；被拒绝的 resume 不启动 run、不发出 provider 请求、也不释放不属于本次尝试的容量。读取响应带 `verifier` 表示该部署是否配置检查器。
 - **SSE 实时流**：`/api/sessions/{id}/stream` 转发 core `AgentEvent` envelope（带 `stream_sequence` 传输序号、心跳与 gap 对账）
-- **嵌入前端**：Vue SPA 构建产物直接嵌入二进制，单文件分发
+- **嵌入前端**：`apps/web` 工作台构建产物按字节直接嵌入二进制，单文件分发（开发时可通过 `MINK_SERVER_DEV_WEB` 从磁盘提供服务并带 SPA 回退）
 - **共享会话布局**：与 TUI/CLI 使用同一 `~/.mink/projects` 目录，终端与浏览器无缝交接
 
 ```
@@ -68,10 +68,13 @@ plan/todo/goal/artifacts 的读取区分“不存在”与“存在但不可读�
 | GET | `/api/sessions/{id}/stream` | **SSE 实时事件流** |
 | GET | `/health` | 健康检查 |
 
-- **project 消歧**：所有 session 路由接受可选 `?project=`（0.4.0 起，用于跨项目同名 session）；不传时按 id 唯一匹配。
+- **project 消歧**：所有 session 路由接受可选 `?project=`（0.4.0 起，用于跨项目同名 session）；提供安全的 `project` 时直接 O(1) 定位目录（仅一次校验并排除子代理），不传或无匹配时回退按 id 扫描。
+- **请求体上限与 JSON 兜底**：标准 `/api/*` 路由限制请求体不超过 2 MiB，`/api/sessions/{id}/attachments` 为 16 MiB；未匹配的 `/api` 与 `/api/*` 返回统一 404 JSON 信封而非 SPA HTML；`create_session`（`first_prompt`）与 `inputs`/`edit_input` 文字上限 128 KiB，`create_goal` 草案输入上限 1 MiB。
+- **文件树与只读安全**：`GET /api/sessions/{id}/files` 使用单次 `session_dir` 解析，目录列表最多返回 `MAX_DIR_ENTRIES = 2000` 项并附带 `truncated` 布尔标记；文件与 artifact 读取使用 `O_NONBLOCK | O_NOFOLLOW` 并校验普通文件类型与上限（1 MiB），拒绝符号链接/FIFO/设备文件。
+- **Host / Origin 防护**：服务端中间件校验证明来源的 `Host`（反向代理可通过 `MINK_SERVER_ALLOWED_HOSTS` 白名单放行）、非安全/变更路由的 `Origin` 与 `Sec-Fetch-Site`，并为 API 响应附加 `Cache-Control: no-store` 与安全响应头。
 - **新对话创建**：Web 在首次发送前不创建服务端会话。点击项目/新建项目只进入 composing 视图；首次发送用稳定 `draft_id` 创建会话，`first_prompt` 生成 `title`/`first_prompt`（最多 128 KiB，超出直接 400）。同一 draft id 的网络重试返回同一会话；无文本创建标记 `untitled=true`，后续首个非空文本用户消息回填标题。空名称不再落成共享的 `unnamed` 会话。列表摘要把 `first_prompt` 截到 512 字节并加省略号，避免大首条输入放大会话目录。
 - **分页约束**：`limit` 必须在 `1..=2000`，超出返回 400；`tail`/`before_seq` 取“最接近目标”的末尾段，`from_seq` 前向读取保留开头；响应注入真实行号 `seq` 作为稳定 key。`turns=true` 时 `max_bytes`（默认 512 KiB，上限 16 MiB）限制一批完整轮次的序列化体积：`tail`/`before_seq` 丢最旧轮并保证最新一轮完整，`from_seq` 则从请求起点向后截断。
-- **错误映射**（typed `RegistryError`）：404 NotFound；409 Ambiguous / Locked / Busy；429 Capacity；500 Internal。
+- **错误映射**（typed `RegistryError`）：404 NotFound；409 Ambiguous / Locked / Busy；429 Capacity；500 Internal（对外返回受限错误描述）。
 
 ### 持久输入与附件
 

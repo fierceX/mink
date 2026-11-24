@@ -1,6 +1,6 @@
 # 沙箱与安全
 
-> 更新日期：2026-10-27
+> 更新日期：2026-11-25
 
 限定访问范围、审批和平台隔离。
 
@@ -11,9 +11,12 @@
 
 ## 沙箱与安全
 
-### mink-server 跨网部署
+### mink-server 跨网部署与 HTTP 边界
 
-`mink-server` 自身不提供登录、Token 或 TLS，默认只监听 loopback 地址 `127.0.0.1`。会话工具可以执行 Bash/Python 并读写 server 文件系统。需要从其他机器访问时，显式设置 `MINK_SERVER_HOST` 或 `--host`，并放在带 TLS 与身份认证的反向代理之后，或限制在受信内网；部署侧负责限制访问源。REST 与 SSE 走同一入口。服务端现已对 REST/静态资源启用 gzip/brotli，SSE 不压缩以避免逐帧缓冲。
+`mink-server` 自身不提供登录、Token 或 TLS，默认只监听 loopback 地址 `127.0.0.1`（监听地址在监听前先校验 `IpAddr`，绑定非 loopback 地址时在 stderr 打印明确警告）。会话工具可以执行 Bash/Python 并读写 server 文件系统。需要从其他机器访问时，显式设置 `MINK_SERVER_HOST` 或 `--host`，并放在带 TLS 与身份认证的反向代理之后（反代域名需配置 `MINK_SERVER_ALLOWED_HOSTS`），或限制在受信内网；部署侧负责限制访问源。REST 与 SSE 走同一入口。服务端现已对 REST/静态资源启用 gzip/brotli，SSE 不压缩以避免逐帧缓冲。
+
+- **来源与头部防护**：HTTP 中间件校验 `Host`、`Origin` 与 `Sec-Fetch-Site`，阻止跨站页面或未知 Host 调用 API；为响应附加 `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY` 与 `Referrer-Policy`，为 API 附加 `Cache-Control: no-store`，为 HTML 附加 CSP，并仅对 `assets/*` 指纹资源设置 `immutable` 缓存。
+- **载荷与文件边界**：API 默认请求体上限 2 MiB（`/attachments` 为 16 MiB），未匹配 `/api/*` 路由统一返回 404 JSON 信封；`/files` 与 `/artifacts/{name}` 使用 `O_NONBLOCK | O_NOFOLLOW` 并校验普通文件类型与 1 MiB 上限，拒绝符号链接/FIFO/设备文件，目录遍历上限 `2000` 项并返回 `truncated` 标记。
 
 ### 进程级沙箱
 
