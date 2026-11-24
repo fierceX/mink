@@ -32,7 +32,12 @@ export class SseClient {
     this.onDisconnect('offline');
   };
   private onOnline = () => {
-    if (!this.closed) this.reconnect();
+    if (this.closed) return;
+    this.retryDelayMs = 0;
+    this.clearRetryTimer();
+    this.es?.close();
+    this.es = null;
+    this.connect();
   };
 
   constructor(

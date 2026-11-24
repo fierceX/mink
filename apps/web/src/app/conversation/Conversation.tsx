@@ -47,7 +47,12 @@ export interface ConversationProps {
   /** The session the composer and the pending strip act on. */
   session: SessionSummary | undefined
   /** Load/open/interrupt failure reported by the session view. */
-  error: string | undefined
+  error?: string | undefined
+  /** Session open/load failure (recoverable via retry). */
+  openError?: string | undefined
+  /** In-session action failure (send/stop), shown without mislabeling session open state. */
+  actionError?: string | undefined
+  onDismissActionError?: (() => void) | undefined
   /** Whether the right detail panel is showing. */
   detailsOpen: boolean
   onToggleDetails: () => void
@@ -123,17 +128,26 @@ export interface ConversationProps {
 /** A reader this close to the end counts as following the tail. */
 const TAIL_SLACK = 24
 
+/** A pending scroll-anchor measurement across prepending older history rows. */
+interface ScrollAnchor {
+  heightBefore: number
+  topBefore: number
+}
+
 /** Follow the transcript tail while the session is at its end. */
 function useStickToBottom(
   state: SessionState | undefined,
   element: React.RefObject<HTMLDivElement | null>,
+  content: React.RefObject<HTMLDivElement | null>,
+  anchorRestore: React.RefObject<ScrollAnchor | null>,
   followTick: number,
 ) {
   const pinned = useRef(true)
   // Whether the transcript is at its tail is visible to the reader (the
   // return-to-latest control), so the ref is mirrored into state.
   const [following, setFollowing] = useState(true)
-  const length = state?.items.length ?? 0
+  const items = state?.items
+  const length = items?.length ?? 0
   useEffect(() => {
     const box = element.current
     if (box === null) return
@@ -148,6 +162,17 @@ function useStickToBottom(
     }
   }, [element])
   useEffect(() => {
+    const target = content.current
+    const box = element.current
+    if (target === null || box === null || typeof ResizeObserver !== 'function') return
+    const observer = new ResizeObserver(() => {
+      if (anchorRestore.current !== null || !pinned.current) return
+      box.scrollTop = box.scrollHeight
+    })
+    observer.observe(target)
+    return () => { observer.disconnect() }
+  }, [element, content, anchorRestore, length])
+  useEffect(() => {
     // An explicit follow request re-pins before it scrolls: the reader asked for
     // the tail, so the gesture wins over the position they had scrolled to.
     if (followTick > 0) {
@@ -155,9 +180,9 @@ function useStickToBottom(
       setFollowing(true)
     }
     const box = element.current
-    if (box === null || !pinned.current) return
+    if (box === null || anchorRestore.current !== null || !pinned.current) return
     box.scrollTop = box.scrollHeight
-  }, [element, length, followTick])
+  }, [element, anchorRestore, length, followTick])
 
   const follow = useCallback(() => {
     pinned.current = true
@@ -212,7 +237,7 @@ function OpenFailure({ reason, onRetry }: { reason: string; onRetry: () => void 
  * @returns the conversation element tree.
  */
 export function Conversation({
-  state, title, session, open, error, detailsOpen, onToggleDetails, processDisplay,
+  state, title, session, open, error, openError, actionError, onDismissActionError, detailsOpen, onToggleDetails, processDisplay,
   onSend, onGuide, onReceiptChanged, onCommand, followTick, notice, chrome,
   hasOlder, onLoadOlder, onGoalAction, onOpenFile, onOpenArtifact, onRetryOpen, onOpenSidebar, draft, pendingDraft, onDraftChange,
   receiptStamp,
@@ -221,8 +246,10 @@ export function Conversation({
   chromeHidden: chromeHiddenProp, onRevealChrome, onOpenSettings,
 }: ConversationProps) {
   const scroller = useRef<HTMLDivElement>(null)
+  const transcriptContent = useRef<HTMLDivElement>(null)
+  const anchorRestore = useRef<ScrollAnchor | null>(null)
   const [loadingOlder, setLoadingOlder] = useState(false)
-  const reading = useStickToBottom(state, scroller, followTick)
+  const reading = useStickToBottom(state, scroller, transcriptContent, anchorRestore, followTick)
   useReadingScroll(chrome, scroller)
   // The reconnect control is an outage state, except for one short confirmation
   // after a successful reopen. Tracking the previous connection here keeps the
@@ -276,8 +303,17 @@ export function Conversation({
   const imageLimits = state?.imageLimits ?? null
   const attachments = useAttachments(session, imageLimits)
   const items = state?.items ?? []
+  const firstItemKey = items[0]?.key
+  useLayoutEffect(() => {
+    const pendingAnchor = anchorRestore.current
+    const box = scroller.current
+    if (pendingAnchor === null || box === null) return
+    anchorRestore.current = null
+    box.scrollTop = pendingAnchor.topBefore + (box.scrollHeight - pendingAnchor.heightBefore)
+  }, [items.length, firstItemKey])
   const running = state?.running === true
   const blank = items.length === 0
+  const effectiveOpenError = openError !== undefined ? openError : (actionError === undefined ? error : undefined)
   const workState = state?.workState ?? 'idle'
   // Only inputs the session still owes an answer for are listed; applied and
   // withdrawn receipts stay in the projection but leave the composer alone.
@@ -316,7 +352,7 @@ export function Conversation({
     running,
     awaitingInputs: awaitingReceipts.length,
     submissionPending: pendingDraft !== undefined || composerOperation.pending,
-    hasError: error !== undefined || composerOperation.failed,
+    hasError: effectiveOpenError !== undefined || actionError !== undefined || composerOperation.failed,
     // A first open is not a recovery: only an outage (or its brief recovered
     // confirmation) keeps the chrome on screen.
     connectionNotice: recovered
@@ -442,6 +478,14 @@ export function Conversation({
       {notice !== undefined && notice !== '' && (
         <p className={rootCss.notice} role="status">{notice}</p>
       )}
+      {actionError !== undefined && (
+        <div className={rootCss.actionError} role="alert" data-action-error="">
+          <span>{actionError}</span>
+          {onDismissActionError !== undefined && (
+            <button type="button" className={rootCss.retry} onClick={onDismissActionError}>关闭</button>
+          )}
+        </div>
+      )}
       {connection === undefined && state?.desynced && (
         <p className={rootCss.notice} role="status">连接已中断，正在重连…</p>
       )}
@@ -463,8 +507,8 @@ export function Conversation({
           {/* A session that cannot be opened says so where the reader is looking
               — the transcript — with what to do about it, instead of a status
               line wedged under the header. */}
-          {error !== undefined && (
-            <OpenFailure reason={error} onRetry={onRetryOpen} />
+          {effectiveOpenError !== undefined && (
+            <OpenFailure reason={effectiveOpenError} onRetry={onRetryOpen} />
           )}
           {blank
             ? (
@@ -489,7 +533,11 @@ export function Conversation({
                       pending={pending}
                       attachments={attachments}
                       canAttach={imageLimits !== null}
-                      model={state?.model ?? ''}
+                      model={modelLabel ?? state?.model ?? ''}
+                      modelChoices={modelChoices}
+                      modelLoading={modelLoading}
+                      modelError={modelError}
+                      onModelChange={onModelChange}
                       onSend={onSend}
                       onGuide={onGuide}
                       onCommand={onCommand}
@@ -503,7 +551,7 @@ export function Conversation({
               </div>
             )
             : (
-              <>
+              <div ref={transcriptContent}>
                 {hasOlder && (
                   <div className={navCss.older}>
                     <button
@@ -513,15 +561,14 @@ export function Conversation({
                         const box = scroller.current
                         // Prepending rows shifts everything down: hold the
                         // reader's viewport on the turn they were reading.
-                        const heightBefore = box?.scrollHeight ?? 0
-                        const topBefore = box?.scrollTop ?? 0
+                        anchorRestore.current = box === null
+                          ? null
+                          : { heightBefore: box.scrollHeight, topBefore: box.scrollTop }
                         setLoadingOlder(true)
-                        void onLoadOlder().finally(() => {
+                        void onLoadOlder().then((added) => {
+                          if (!added) anchorRestore.current = null
+                        }).finally(() => {
                           setLoadingOlder(false)
-                          requestAnimationFrame(() => {
-                            if (box === null) return
-                            box.scrollTop = topBefore + (box.scrollHeight - heightBefore)
-                          })
                         })
                       }}
                     >
@@ -563,7 +610,7 @@ export function Conversation({
                     )
                     : undefined}
                 />
-              </>
+              </div>
             )}
         </div>
         {/* The composer is a sibling of the scrolling transcript, so it docks at

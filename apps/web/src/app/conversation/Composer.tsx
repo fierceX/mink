@@ -6,7 +6,7 @@
  * when the submission fails and the reader has not typed since.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { IconPlusOutlineMedium } from '../../ui/primitives/index.ts'
 import type { ReactNode } from 'react'
 import { ComposerAttachments, DropOverlay, useDocumentDrop } from './ComposerAttachments.tsx'
@@ -134,9 +134,18 @@ export function Composer({
   const revision = useRef(0)
   const area = useRef<HTMLTextAreaElement>(null)
   const picker = useRef<HTMLInputElement>(null)
+  const dismissedTextRef = useRef<string | null>(null)
+
+  useLayoutEffect(() => {
+    const el = area.current
+    if (el === null) return
+    el.style.height = 'auto'
+    el.style.height = `${el.scrollHeight}px`
+  }, [text])
 
   const write = useCallback((value: string) => {
     revision.current += 1
+    if (value !== dismissedTextRef.current) dismissedTextRef.current = null
     setText(value)
     setFailure(undefined)
     setNotice(undefined)
@@ -164,7 +173,11 @@ export function Composer({
   // contract, `/` opens it carrying the draft's query. While it is open its own
   // search box holds focus, so the composer stops feeding it.
   useEffect(() => {
-    if (!commandMode) return
+    if (!commandMode) {
+      dismissedTextRef.current = null
+      return
+    }
+    if (dismissedTextRef.current === text) return
     const query = text.slice(1)
     if (panelOpen) commandPopup.setQuery(query)
     else commandPopup.openWith(query)
@@ -321,6 +334,7 @@ export function Composer({
                   }
                   if (event.key === 'Escape') {
                     event.preventDefault()
+                    dismissedTextRef.current = text
                     commandPopup.close()
                     return
                   }
@@ -365,7 +379,10 @@ export function Composer({
                     return
                   }
                   if (panelOpen) commandPopup.close()
-                  else commandPopup.openAll()
+                  else {
+                    dismissedTextRef.current = null
+                    commandPopup.openAll()
+                  }
                 }}
               >
                 <IconPlusOutlineMedium size={14} />
@@ -425,7 +442,11 @@ export function Composer({
                 (an unavailable session, an upload in flight); a refused submission
                 is announced above the card instead. */}
             <span className={panelOpen ? css.activityExpanded : css.activity} role="status">
-              {disabled ? '会话不可用' : attachments.blocked ? '附件上传中…' : ''}
+              {disabled
+                ? '会话不可用'
+                : attachments.blocked
+                  ? (attachments.entries.some(e => e.status === 'failed') ? '有附件上传失败，请移除后重试' : '附件上传中…')
+                  : ''}
             </span>
             {running && (
               <Tooltip label="停止" side="top" delayMs={400}>

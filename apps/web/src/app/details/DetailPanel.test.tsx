@@ -447,4 +447,34 @@ describe('detail panel', () => {
       expect(calls.some(url => url.includes('path=src%2F'))).toBe(true)
     })
   })
+
+  it('collects approve evidence inline instead of calling window.prompt', async () => {
+    const promptSpy = vi.spyOn(window, 'prompt')
+    const approvableGoal: GoalSnapshot = {
+      ...GOAL,
+      status: 'blocked',
+      spec: { ...GOAL.spec, acceptance: { mode: 'human' } },
+      reviews: [{
+        verdict: 'satisfied',
+        summary: 'ready for approval',
+        next_step: '',
+        criteria: [],
+        constraints: [],
+      }],
+    }
+    const calls = stubApi({}, approvableGoal)
+    render(<Panel />)
+    fireEvent.click(screen.getByRole('tab', { name: '目标' }))
+    const approveBtn = await screen.findByRole('button', { name: '批准完成' })
+    fireEvent.click(approveBtn)
+
+    const input = await screen.findByLabelText('人工验收说明')
+    fireEvent.change(input, { target: { value: '实测通过' } })
+    fireEvent.click(screen.getByRole('button', { name: '确认批准' }))
+
+    await waitFor(() => {
+      expect(calls.some(url => url.includes('/goal/approve'))).toBe(true)
+    })
+    expect(promptSpy).not.toHaveBeenCalled()
+  })
 })

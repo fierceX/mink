@@ -250,8 +250,14 @@ function GoalTab({ session, goal, driven, refresh, onReport }: {
   const [feedback, setFeedback] = useState('')
   const [budgetTurns, setBudgetTurns] = useState('')
   const [budgetMinutes, setBudgetMinutes] = useState('')
+  const [promptAction, setPromptAction] = useState<'approve' | 'reconcile' | null>(null)
+  const [promptEvidence, setPromptEvidence] = useState('')
   const [nowUnixSecs, setNowUnixSecs] = useState(() => Math.floor(Date.now() / 1000))
   const deadline = goal?.spec?.limits?.deadline_unix_secs ?? goal?.budget?.deadline_unix_secs
+  useEffect(() => {
+    setPromptAction(null)
+    setPromptEvidence('')
+  }, [goal?.id, goal?.revision])
   useEffect(() => {
     if (deadline === undefined) return
     const updateClock = () => setNowUnixSecs(Math.floor(Date.now() / 1000))
@@ -262,6 +268,33 @@ function GoalTab({ session, goal, driven, refresh, onReport }: {
     return () => window.clearInterval(timer)
   }, [deadline])
   const budget = goal === null ? undefined : goalBudget(goal, nowUnixSecs)
+  const submitGoalAction = (
+    action: 'pause' | 'resume' | 'cancel' | 'clear' | 'approve' | 'reconcile' | 'confirm' | 'refine' | 'budget',
+    body: Parameters<typeof api.goalAction>[2],
+  ) => {
+    inFlight.current = true
+    setBusy(true)
+    setError(undefined)
+    void (async () => {
+      try {
+        const response = await api.goalAction(session.id, action, body, session.project_key)
+        if (response.code !== 200) throw new Error(response.message || `code ${response.code}`)
+        if (action === 'refine') setFeedback('')
+        if (action === 'budget') { setBudgetTurns(''); setBudgetMinutes('') }
+        if (action === 'approve' || action === 'reconcile') {
+          setPromptAction(null)
+          setPromptEvidence('')
+        }
+        refresh()
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause))
+        if (cause instanceof Error && /409|stale goal|revision/i.test(cause.message)) refresh()
+      } finally {
+        inFlight.current = false
+        setBusy(false)
+      }
+    })()
+  }
   const act = (action: 'pause' | 'resume' | 'cancel' | 'clear' | 'approve' | 'reconcile' | 'confirm' | 'refine' | 'budget') => {
     if (goal === null || busy || inFlight.current) return
     if (action === 'refine' && !feedback.trim()) {
@@ -284,32 +317,15 @@ function GoalTab({ session, goal, driven, refresh, onReport }: {
         budgetChanges[key] = number
       }
     }
-    let evidence: string | undefined
     if (action === 'approve' || action === 'reconcile') {
-      evidence = window.prompt(action === 'approve' ? '人工验收说明' : '副作用对账结论') ?? undefined
-      if (evidence === undefined) return
+      setPromptAction(action)
+      setPromptEvidence('')
+      setError(undefined)
+      return
     }
-    inFlight.current = true
-    setBusy(true)
-    setError(undefined)
     const body: Parameters<typeof api.goalAction>[2] = { goal_id: goal.id, revision: goal.revision, ...budgetChanges }
     if (action === 'refine') body.feedback = feedback.trim()
-    if (evidence !== undefined) body.evidence = evidence
-    void (async () => {
-      try {
-        const response = await api.goalAction(session.id, action, body, session.project_key)
-        if (response.code !== 200) throw new Error(response.message || `code ${response.code}`)
-        if (action === 'refine') setFeedback('')
-        if (action === 'budget') { setBudgetTurns(''); setBudgetMinutes('') }
-        refresh()
-      } catch (cause) {
-        setError(cause instanceof Error ? cause.message : String(cause))
-        if (cause instanceof Error && /409|stale goal|revision/i.test(cause.message)) refresh()
-      } finally {
-        inFlight.current = false
-        setBusy(false)
-      }
-    })()
+    submitGoalAction(action, body)
   }
   if (goal === null) {
     return (
@@ -503,16 +519,59 @@ function GoalTab({ session, goal, driven, refresh, onReport }: {
           </div>
         </>
       ) : (
-        <div className={css.actions}>
-          {goal.status === 'active' && <Button size="sm" variant="outline" disabled={busy || !driven} onClick={() => { act('pause') }}>暂停</Button>}
-          {goalCanResume(goal) && <Button size="sm" variant="outline" disabled={busy || !driven || goalResumeBudgetExhausted(goal, nowUnixSecs) || (goal.pending_effects?.length ?? 0) > 0} onClick={() => { act('resume') }}>
-            {goal.status === 'failed' ? '重试目标' : goal.review_failure_reason == null ? '恢复' : goal.review_failure_stage === 'adjudicating' ? '重试提交' : '重试审核'}
-          </Button>}
-          {awaitingHumanApproval(goal) && <Button size="sm" variant="outline" disabled={busy || !driven} onClick={() => { act('approve') }}>批准完成</Button>}
-          {(goal.status === 'blocked' || goal.status === 'failed') && (goal.pending_effects?.length ?? 0) > 0 && <Button size="sm" variant="outline" disabled={busy || !driven} onClick={() => { act('reconcile') }}>对账副作用</Button>}
-          {!goalIsTerminal(goal) && <Button size="sm" variant="outline" disabled={busy || !driven} onClick={() => { act('cancel') }}>取消</Button>}
-          {goalIsTerminal(goal) && <Button size="sm" variant="ghost" disabled={busy || !driven} onClick={() => { act('clear') }}>清除</Button>}
-        </div>
+        <>
+          <div className={css.actions}>
+            {goal.status === 'active' && <Button size="sm" variant="outline" disabled={busy || !driven} onClick={() => { act('pause') }}>暂停</Button>}
+            {goalCanResume(goal) && <Button size="sm" variant="outline" disabled={busy || !driven || goalResumeBudgetExhausted(goal, nowUnixSecs) || (goal.pending_effects?.length ?? 0) > 0} onClick={() => { act('resume') }}>
+              {goal.status === 'failed' ? '重试目标' : goal.review_failure_reason == null ? '恢复' : goal.review_failure_stage === 'adjudicating' ? '重试提交' : '重试审核'}
+            </Button>}
+            {awaitingHumanApproval(goal) && <Button size="sm" variant="outline" disabled={busy || !driven} onClick={() => { act('approve') }}>批准完成</Button>}
+            {(goal.status === 'blocked' || goal.status === 'failed') && (goal.pending_effects?.length ?? 0) > 0 && <Button size="sm" variant="outline" disabled={busy || !driven} onClick={() => { act('reconcile') }}>对账副作用</Button>}
+            {!goalIsTerminal(goal) && <Button size="sm" variant="outline" disabled={busy || !driven} onClick={() => { act('cancel') }}>取消</Button>}
+            {goalIsTerminal(goal) && <Button size="sm" variant="ghost" disabled={busy || !driven} onClick={() => { act('clear') }}>清除</Button>}
+          </div>
+          {promptAction !== null && (
+            <div className={css.feedbackLabel} data-goal-evidence-prompt={promptAction}>
+              <label>
+                {promptAction === 'approve' ? '人工验收说明' : '副作用对账结论'}
+                <textarea
+                  className={css.goalFeedback}
+                  aria-label={promptAction === 'approve' ? '人工验收说明' : '副作用对账结论'}
+                  value={promptEvidence}
+                  onChange={event => { setPromptEvidence(event.currentTarget.value) }}
+                  rows={2}
+                />
+              </label>
+              <div className={css.actions}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy || !driven}
+                  onClick={() => {
+                    submitGoalAction(promptAction, {
+                      goal_id: goal.id,
+                      revision: goal.revision,
+                      evidence: promptEvidence,
+                    })
+                  }}
+                >
+                  {promptAction === 'approve' ? '确认批准' : '确认对账'}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => {
+                    setPromptAction(null)
+                    setPromptEvidence('')
+                  }}
+                >
+                  取消
+                </Button>
+              </div>
+            </div>
+          )}
+        </>
       )}
       {!driven && <p className={css.hint}>会话未打开：当前是落盘只读镜像，控制需要先打开会话。</p>}
       {goal.status !== 'draft' && <p className={css.hint}>修订 {goal.revision} · 每次变更按修订号提交；契约保持不变，预算仅由明确操作调整。</p>}

@@ -83,4 +83,17 @@ describe('SseClient reconnection', () => {
     expect(FakeEventSource.instances).toHaveLength(1)
     client.close()
   })
+
+  it('reconnects immediately when the browser comes back online', () => {
+    vi.useFakeTimers()
+    const client = new SseClient('s1', () => {}, () => {})
+    client.connect()
+    expect(FakeEventSource.instances).toHaveLength(1)
+
+    FakeEventSource.instances[0]!.onerror?.()
+    window.dispatchEvent(new Event('online'))
+    // Online event resets backoff and opens the next EventSource immediately.
+    expect(FakeEventSource.instances).toHaveLength(2)
+    client.close()
+  })
 })

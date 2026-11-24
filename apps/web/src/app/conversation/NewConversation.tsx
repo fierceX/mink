@@ -109,7 +109,9 @@ export function NewConversation({ cwd, projectName, notice, onFirstSend, onCance
               />
             </div>
             <div className={css.actions}>
-              <span className={css.hint}>首次发送后才会在服务器上创建会话。</span>
+              <span className={css.hint} role={sending ? 'status' : undefined}>
+                {sending ? '正在创建会话并发送…' : '首次发送后才会在服务器上创建会话。'}
+              </span>
               <Button size="sm" variant="ghost" disabled={sending} onClick={onCancel}>取消</Button>
             </div>
           </div>

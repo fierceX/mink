@@ -1,3 +1,4 @@
+import { StrictMode } from 'react'
 import { act, cleanup, render, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionSummary } from '../../data/api.ts'
@@ -234,3 +235,30 @@ function renderAttachmentsProbe() {
   render(<Probe />)
   return () => handle.current!
 }
+
+describe('StrictMode and blob URL cleanup', () => {
+  it('uploads once per file under StrictMode and revokes pending blob URLs on unmount', async () => {
+    const fetchMock = vi.fn(() => new Promise<Response>(() => {}))
+    vi.stubGlobal('fetch', fetchMock)
+    const revokes: string[] = []
+    Object.defineProperty(URL, 'createObjectURL', { value: () => 'blob:strict-1', configurable: true })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      value: (url: string) => { revokes.push(url) },
+      configurable: true,
+    })
+    const handle = { current: undefined as ReturnType<typeof useAttachments> | undefined }
+    function Probe() {
+      handle.current = useAttachments(SESSION, LIMITS)
+      return null
+    }
+    const { unmount } = render(
+      <StrictMode>
+        <Probe />
+      </StrictMode>,
+    )
+    act(() => { handle.current!.add([image('strict.png')]) })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    unmount()
+    expect(revokes).toContain('blob:strict-1')
+  })
+})

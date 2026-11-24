@@ -395,4 +395,68 @@ describe('a submission that fails', () => {
     expect(screen.queryByRole('alert')).toBeNull()
     expect(operation).toHaveBeenLastCalledWith({ pending: false, failed: false })
   })
+
+  it('keeps the slash popup dismissed on Escape until the draft edits', async () => {
+    render(
+      <Composer
+        hero
+        running={false}
+        targetTurnId={null}
+        disabled={false}
+        attachments={noAttachments()}
+        canAttach
+        model="deepseek-flash"
+        onSend={async () => undefined}
+        onGuide={async () => undefined}
+        onCommand={async () => ({ message: '', ok: true })}
+        onStop={() => {}}
+      />,
+    )
+    const field = screen.getByLabelText('输入消息') as HTMLTextAreaElement
+    fireEvent.change(field, { target: { value: '/go' } })
+    expect(await screen.findByRole('listbox')).toBeDefined()
+
+    fireEvent.keyDown(field, { key: 'Escape' })
+    await waitFor(() => {
+      expect(screen.queryByRole('listbox')).toBeNull()
+    })
+    expect(field.value).toBe('/go')
+
+    // Editing the slash draft clears the dismissal and reopens the popup.
+    fireEvent.change(field, { target: { value: '/goal' } })
+    expect(await screen.findByRole('listbox')).toBeDefined()
+  })
+
+  it('distinguishes a failed upload from an active upload in status text', () => {
+    render(
+      <Composer
+        hero
+        running={false}
+        targetTurnId={null}
+        disabled={false}
+        attachments={{
+          entries: [{
+            key: 'fail-1',
+            name: 'bad.png',
+            bytes: 100,
+            preview: 'blob:bad',
+            status: 'failed',
+            error: '413',
+          }],
+          add: () => {},
+          remove: () => {},
+          ids: [],
+          blocked: true,
+          notice: undefined,
+        }}
+        canAttach
+        model="deepseek-flash"
+        onSend={async () => undefined}
+        onGuide={async () => undefined}
+        onCommand={async () => ({ message: '', ok: true })}
+        onStop={() => {}}
+      />,
+    )
+    expect(screen.getByText('有附件上传失败，请移除后重试')).toBeDefined()
+  })
 })

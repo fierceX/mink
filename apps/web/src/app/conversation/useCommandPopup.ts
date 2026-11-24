@@ -6,6 +6,7 @@
  */
 
 import { useCallback, useMemo, useSyncExternalStore } from 'react'
+import { useLatest } from '../../data/useLatest.ts'
 import { allCommandHints } from '../../data/commands.ts'
 import { PopupSelectController } from '../../ui/commands/popup.ts'
 import type { CommandContext, SelectOption, TokenSpan } from '../commands/contract.ts'
@@ -68,18 +69,19 @@ export interface CommandPopupHandle {
  * @returns the controller plus its entry points.
  */
 export function useCommandPopup(options: CommandPopupOptions): CommandPopupHandle {
-  const { write, pickFiles, canAttach, focusComposer } = options
+  const optionsRef = useLatest(options)
   const controller = useMemo(
     () => new PopupSelectController<CommandContext>({
       // The shell is opened from the composer's own draft, which a pick writes
       // back into, so there is no token span to consume.
       consume: () => true,
-      focusComposer,
+      focusComposer: () => { optionsRef.current.focusComposer() },
     }),
-    [focusComposer],
+    [optionsRef],
   )
 
   const start = useCallback((withAttach: boolean, query: string) => {
+    const { write, pickFiles, canAttach } = optionsRef.current
     const context: CommandContext = { write, run: write, pickFiles, canAttach }
     const span: TokenSpan = { start: 0, end: 0, revision: 0 }
     controller.open('mink', {
@@ -89,7 +91,7 @@ export function useCommandPopup(options: CommandPopupOptions): CommandPopupHandl
         empty: '无可用命令',
         noResults: '没有匹配的命令',
       }),
-      options: async () => commandPopupOptions(canAttach, withAttach),
+      options: async () => commandPopupOptions(optionsRef.current.canAttach, withAttach),
       onSelect: (option: SelectOption, ctx: CommandContext) => {
         if (option.id === ATTACH_OPTION_ID) {
           if (ctx.canAttach) ctx.pickFiles()
@@ -101,7 +103,7 @@ export function useCommandPopup(options: CommandPopupOptions): CommandPopupHandl
       },
     }, context, { via: 'menu', span })
     if (query !== '') controller.setSearch(query)
-  }, [canAttach, controller, pickFiles, write])
+  }, [controller, optionsRef])
 
   const openAll = useCallback(() => { start(true, '') }, [start])
   const openWith = useCallback((query: string) => { start(false, query) }, [start])

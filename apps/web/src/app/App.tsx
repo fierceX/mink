@@ -113,14 +113,58 @@ export function App() {
 
   const groups = useMemo(() => groupSessions(catalog.sessions), [catalog.sessions])
   const view = useSessionView(current)
-  const viewError = view.error
   const refreshCatalog = catalog.refresh
+  const checkVersion = useCallback(() => {
+    void api.version().then((response) => {
+      if (response.code !== 200) return
+      const served = response.data.bundle
+      const loaded = [...document.querySelectorAll('script[src]')]
+        .map(node => node.getAttribute('src') ?? '')
+        .find(src => src.includes('/assets/'))
+      if (served === '' || loaded === undefined || loaded.includes(served)) return
+      setStaleBundle(true)
+    }).catch(() => {})
+  }, [])
+
+  // Sync document title to the active conversation or compose draft.
+  useEffect(() => {
+    if (current !== undefined) {
+      document.title = `${sessionTitle(current)} — Mink`
+    } else if (composing !== undefined) {
+      document.title = `新对话 (${composing.name}) — Mink`
+    } else {
+      document.title = 'Mink'
+    }
+  }, [current, composing])
+
+  // Global workbench shortcuts: Cmd/Ctrl+B toggles the sidebar, Cmd/Ctrl+. interrupts.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.isComposing || event.defaultPrevented) return
+      const mod = event.metaKey || event.ctrlKey
+      if (!mod || event.altKey) return
+      if (!event.shiftKey && event.key.toLowerCase() === 'b') {
+        event.preventDefault()
+        setSidebarWidth(w => (w === 0 ? SIDEBAR_DEFAULT : 0))
+        setNarrowExpanded(open => !open)
+        return
+      }
+      if (event.key === '.' && view.state?.running === true) {
+        event.preventDefault()
+        view.stop()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => { window.removeEventListener('keydown', onKeyDown) }
+  }, [view.state?.running, view.stop])
+
   // Reconnect on the events that say the network or the tab is back. A
   // connected view only refreshes the catalog; a dropped one also retries its
   // runtime, which is the case a browser reload used to be needed for.
   useEffect(() => {
     const recover = (): void => {
       void refreshCatalog()
+      checkVersion()
       if (current !== undefined && ['disconnected', 'offline', 'closed', 'failed'].includes(view.connection)) {
         view.reconnect()
       }
@@ -134,7 +178,7 @@ export function App() {
       window.removeEventListener('online', recover)
       document.removeEventListener('visibilitychange', onVisibility)
     }
-  }, [current, refreshCatalog, view.connection, view.reconnect])
+  }, [checkVersion, current, refreshCatalog, view.connection, view.reconnect])
   const previousConnection = useRef(view.connection)
   useEffect(() => {
     if (view.connection === 'connected' && previousConnection.current !== 'connected') {
@@ -182,18 +226,8 @@ export function App() {
   }, [])
 
   useEffect(() => {
-    let live = true
-    void api.version().then((response) => {
-      if (!live || response.code !== 200) return
-      const served = response.data.bundle
-      const loaded = [...document.querySelectorAll('script[src]')]
-        .map(node => node.getAttribute('src') ?? '')
-        .find(src => src.includes('/assets/'))
-      if (served === '' || loaded === undefined || loaded.includes(served)) return
-      setStaleBundle(true)
-    }).catch(() => {})
-    return () => { live = false }
-  }, [])
+    checkVersion()
+  }, [checkVersion])
 
   useEffect(() => {
     if (restored.current || current !== undefined) return
@@ -536,7 +570,10 @@ export function App() {
                     open={view.open}
                     connection={view.connection}
                     onReconnect={view.reconnect}
-                    error={viewError}
+                    error={view.error}
+                    openError={view.openError}
+                    actionError={view.actionError}
+                    onDismissActionError={view.clearActionError}
                     detailsOpen={rightbarWidth > 0}
                     processDisplay={preferences.process}
                     notice={commandNotice ?? sessionNotice}

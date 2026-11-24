@@ -594,3 +594,23 @@ describe('goal bar failures', () => {
     })
   })
 })
+
+describe('keyboard shortcuts and document title', () => {
+  it('syncs document title and interrupts on Cmd/Ctrl+.', async () => {
+    stubShell()
+    vi.spyOn(api, 'listSessions').mockResolvedValue(ok([session('A', { title: 'My Session' })]))
+    const interrupt = vi.spyOn(api, 'interrupt').mockResolvedValue(ok({ id: 'A', interrupted: true }))
+    render(<App />)
+    await waitFor(() => { expect(screen.getByText('My Session')).toBeDefined() })
+
+    fireEvent.click(screen.getByText('My Session'))
+    await waitFor(() => { expect(streams.length).toBe(1) })
+    expect(document.title).toContain('My Session')
+
+    act(() => {
+      streams[0]({ ...snapshot('A'), running: true, current_turn: 'turn-1' })
+    })
+    fireEvent.keyDown(window, { key: '.', ctrlKey: true })
+    await waitFor(() => { expect(interrupt).toHaveBeenCalledWith('A', 'p') })
+  })
+})

@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SessionSummary } from '../../data/api.ts'
 import type { SessionConnection } from '../../data/useSessionView.ts'
+import { ChangedFiles } from './ChangedFiles.tsx'
 import { Conversation } from './Conversation.tsx'
 
 afterEach(cleanup)
@@ -144,5 +145,65 @@ describe('open failure', () => {
     rerender(element('disconnected'))
     rerender(element('connected'))
     expect(screen.getByText('已恢复')).toBeDefined()
+  })
+
+  it('shows actionError as a dismissible banner without rendering OpenFailure', () => {
+    let dismissed = 0
+    render(
+      <Conversation
+        state={undefined}
+        session={SESSION}
+        title="fixture session"
+        open
+        connection="connected"
+        error="send failed"
+        actionError="send failed"
+        onDismissActionError={() => { dismissed += 1 }}
+        detailsOpen
+        processDisplay="standard"
+        notice={undefined}
+        hasOlder={false}
+        onLoadOlder={async () => false}
+        onGoalAction={async () => undefined}
+        onOpenFile={() => {}}
+        onOpenArtifact={() => {}}
+        onRetryOpen={() => {}}
+        draft=""
+        onDraftChange={() => {}}
+        modelLabel="flash"
+        modelChoices={[{ alias: 'flash', model: 'deepseek-chat' }]}
+        onModelChange={() => {}}
+        onSend={async () => undefined}
+        onGuide={async () => undefined}
+        onReceiptChanged={() => {}}
+        onCommand={async () => ({ message: '', ok: true })}
+        followTick={0}
+        onToggleDetails={() => {}}
+        onStop={() => {}}
+      />,
+    )
+    expect(screen.queryByText('无法打开此会话')).toBeNull()
+    const banner = document.querySelector('[data-action-error]')
+    expect(banner?.textContent).toContain('send failed')
+    expect(screen.getByRole('button', { name: /当前模型 flash/ })).toBeDefined()
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }))
+    expect(dismissed).toBe(1)
+  })
+
+  it('ChangedFiles handles empty to non-empty transitions cleanly', () => {
+    const { rerender } = render(<ChangedFiles files={[]} onOpen={() => {}} />)
+    expect(document.querySelector('[data-changed-files]')).toBeNull()
+    rerender(
+      <ChangedFiles
+        files={[{
+          path: 'src/app.ts',
+          added: 3,
+          deleted: 1,
+          diffs: [{ path: 'src/app.ts', oldText: 'a', newText: 'b' }],
+        }]}
+        onOpen={() => {}}
+      />,
+    )
+    expect(screen.getByText('已编辑 src/app.ts')).toBeDefined()
   })
 })

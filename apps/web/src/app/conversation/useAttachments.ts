@@ -119,6 +119,17 @@ export function useAttachments(session: SessionSummary | undefined, limits: Imag
   // A per-hook prefix keeps generated identities unique across reloads, where
   // the counter starts over while restored entries keep their old keys.
   const draftPrefix = useRef(`draft-${Math.random().toString(36).slice(2, 8)}`)
+  const entriesRef = useRef(entries)
+  entriesRef.current = entries
+  const blobUrlsRef = useRef<Set<string>>(new Set())
+
+  useEffect(() => {
+    const blobUrls = blobUrlsRef.current
+    return () => {
+      for (const url of blobUrls) URL.revokeObjectURL(url)
+      blobUrls.clear()
+    }
+  }, [])
 
   useEffect(() => {
     if (storageKey === undefined) return
@@ -182,68 +193,82 @@ export function useAttachments(session: SessionSummary | undefined, limits: Imag
     const perImage = Math.min(limits.max_image_bytes, WORKBENCH_MAX_IMAGE_BYTES)
     const perRequest = Math.min(limits.max_image_bytes_per_request, WORKBENCH_MAX_IMAGE_BYTES)
     const maxCount = Math.min(8, limits.max_images_per_request)
-    setEntries((current) => {
-      const next = [...current]
-      let total = next.reduce((sum, entry) => sum + entry.bytes, 0)
-      for (const file of files) {
-        if (next.length >= maxCount) {
-          setNotice(`最多选择 ${maxCount} 张图片`)
-          break
-        }
-        const format = file.type.replace('image/', '').replace('jpg', 'jpeg')
-        if (!formats.includes(format)) {
-          setNotice(`不支持的图片格式：${file.type || file.name}`)
-          continue
-        }
-        if (file.size > perImage || total + file.size > perRequest) {
-          setNotice('图片超过会话字节上限')
-          continue
-        }
-        total += file.size
-        counter.current += 1
-        const key = `${draftPrefix.current}-${counter.current}`
-        const preview = URL.createObjectURL(file)
-        next.push({ key, name: file.name, bytes: file.size, preview, status: 'uploading' })
-        // One async body owns both failure kinds: a refused upload (the server
-        // answers with a non-200 code inside a 2xx envelope) and a lost request
-        // both leave the entry failed with its reason, never stuck uploading.
-        void (async () => {
-          let failure: string
-          try {
-            const response = await api.upload(session.id, file, session.project_key)
-            if (response.code !== 200) {
-              failure = response.message || `code ${response.code}`
-            } else {
-              setEntries(latest => latest.map((entry) => {
-                if (entry.key !== key) return entry
-                URL.revokeObjectURL(entry.preview)
-                return {
-                  ...entry,
+    const current = entriesRef.current
+    const added: { entry: DraftAttachment; file: File }[] = []
+    let total = current.reduce((sum, entry) => sum + entry.bytes, 0)
+    let nextNotice: string | undefined
+    for (const file of files) {
+      if (current.length + added.length >= maxCount) {
+        nextNotice = `最多选择 ${maxCount} 张图片`
+        break
+      }
+      const format = file.type.replace('image/', '').replace('jpg', 'jpeg')
+      if (!formats.includes(format)) {
+        nextNotice = `不支持的图片格式：${file.type || file.name}`
+        continue
+      }
+      if (file.size > perImage || total + file.size > perRequest) {
+        nextNotice = '图片超过会话字节上限'
+        continue
+      }
+      total += file.size
+      counter.current += 1
+      const key = `${draftPrefix.current}-${counter.current}`
+      const preview = URL.createObjectURL(file)
+      blobUrlsRef.current.add(preview)
+      added.push({
+        file,
+        entry: { key, name: file.name, bytes: file.size, preview, status: 'uploading' },
+      })
+    }
+    if (nextNotice !== undefined) setNotice(nextNotice)
+    if (added.length === 0) return
+
+    const acceptedEntries = added.map(item => item.entry)
+    entriesRef.current = [...current, ...acceptedEntries]
+    setEntries(latest => [...latest, ...acceptedEntries])
+
+    for (const { entry, file } of added) {
+      // One async body owns both failure kinds: a refused upload (the server
+      // answers with a non-200 code inside a 2xx envelope) and a lost request
+      // both leave the entry failed with its reason, never stuck uploading.
+      void (async () => {
+        let failure: string
+        try {
+          const response = await api.upload(session.id, file, session.project_key)
+          if (response.code !== 200) {
+            failure = response.message || `code ${response.code}`
+          } else {
+            blobUrlsRef.current.delete(entry.preview)
+            URL.revokeObjectURL(entry.preview)
+            setEntries(latest => latest.map(candidate => (candidate.key !== entry.key
+              ? candidate
+              : {
+                  ...candidate,
                   status: 'ready',
                   attachment: response.data,
                   preview: sessionUrl(session.id, `/attachments/${response.data.id}`, session.project_key),
-                }
-              }))
-              return
-            }
-          } catch (cause) {
-            failure = cause instanceof Error ? cause.message : String(cause)
+                })))
+            return
           }
-          setEntries(latest => latest.map(entry => (entry.key === key
-            ? { ...entry, status: 'failed', error: failure }
-            : entry)))
-        })()
-      }
-      return next
-    })
+        } catch (cause) {
+          failure = cause instanceof Error ? cause.message : String(cause)
+        }
+        setEntries(latest => latest.map(candidate => (candidate.key === entry.key
+          ? { ...candidate, status: 'failed', error: failure }
+          : candidate)))
+      })()
+    }
   }, [limits, session])
 
   const remove = useCallback((key: string) => {
-    setEntries((current) => {
-      const entry = current.find(candidate => candidate.key === key)
-      if (entry !== undefined && entry.preview.startsWith('blob:')) URL.revokeObjectURL(entry.preview)
-      return current.filter(candidate => candidate.key !== key)
-    })
+    const existing = entriesRef.current.find(candidate => candidate.key === key)
+    if (existing !== undefined && existing.preview.startsWith('blob:')) {
+      blobUrlsRef.current.delete(existing.preview)
+      URL.revokeObjectURL(existing.preview)
+    }
+    entriesRef.current = entriesRef.current.filter(candidate => candidate.key !== key)
+    setEntries(current => current.filter(candidate => candidate.key !== key))
   }, [])
 
   const ids = useMemo(

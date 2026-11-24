@@ -13,6 +13,7 @@ import {
   IconPauseOutlineRegular,
   IconPlayOutlineRegular,
   IconTrashOutlineRegular,
+  Tooltip,
 } from '../../ui/primitives/index.ts'
 import type { GoalSnapshot } from '../../data/api.ts'
 import { goalCanResume, goalIsTerminal, goalResumeBudgetExhausted, goalReviewStageText, latestGoalContinuation } from '../../data/goalReview.ts'
@@ -98,49 +99,62 @@ export function GoalBar({ goal, onAction }: GoalBarProps) {
           ? <span className={css.objective}>{goal.spec?.objective ?? ''}</span>
           : <span className={css.error} role="alert">{error}</span>}
         <div className={css.actions}>
-          {(goalCanResume(goal) && (goal.status !== 'active' || reviewFailure != null)) && (
-            <button
-              type="button"
-              className={css.iconBtn}
-              disabled={pending || goalResumeBudgetExhausted(goal) || (goal.pending_effects?.length ?? 0) > 0}
-              aria-label={goal.status === 'failed' ? '重试目标' : reviewFailure == null ? '恢复目标' : goal.review_failure_stage === 'adjudicating' ? '重试宿主提交' : '重试独立审核'}
-              onClick={() => { run('resume') }}
-            >
-              <IconPlayOutlineRegular size={14} />
-            </button>
-          )}
+          {(goalCanResume(goal) && (goal.status !== 'active' || reviewFailure != null)) && (() => {
+            const label = goal.status === 'failed'
+              ? '重试目标'
+              : reviewFailure == null ? '恢复目标' : goal.review_failure_stage === 'adjudicating' ? '重试宿主提交' : '重试独立审核'
+            return (
+              <Tooltip label={label} side="top" delayMs={400}>
+                <button
+                  type="button"
+                  className={css.iconBtn}
+                  disabled={pending || goalResumeBudgetExhausted(goal) || (goal.pending_effects?.length ?? 0) > 0}
+                  aria-label={label}
+                  onClick={() => { run('resume') }}
+                >
+                  <IconPlayOutlineRegular size={14} />
+                </button>
+              </Tooltip>
+            )
+          })()}
           {!terminal && goal.status === 'active' && (
-            <button
-              type="button"
-              className={css.iconBtn}
-              disabled={pending}
-              aria-label="暂停目标"
-              onClick={() => { run('pause') }}
-            >
-              <IconPauseOutlineRegular size={14} />
-            </button>
+            <Tooltip label="暂停目标" side="top" delayMs={400}>
+              <button
+                type="button"
+                className={css.iconBtn}
+                disabled={pending}
+                aria-label="暂停目标"
+                onClick={() => { run('pause') }}
+              >
+                <IconPauseOutlineRegular size={14} />
+              </button>
+            </Tooltip>
           )}
           {!terminal && (
-            <button
-              type="button"
-              className={css.iconBtn}
-              disabled={pending}
-              aria-label="取消目标"
-              onClick={() => { run('cancel') }}
-            >
-              <IconCloseOutlineRegular size={14} />
-            </button>
+            <Tooltip label="取消目标" side="top" delayMs={400}>
+              <button
+                type="button"
+                className={css.iconBtn}
+                disabled={pending}
+                aria-label="取消目标"
+                onClick={() => { run('cancel') }}
+              >
+                <IconCloseOutlineRegular size={14} />
+              </button>
+            </Tooltip>
           )}
           {terminal && (
-            <button
-              type="button"
-              className={css.iconBtn}
-              disabled={pending}
-              aria-label="清除目标"
-              onClick={() => { run('clear') }}
-            >
-              <IconTrashOutlineRegular size={14} />
-            </button>
+            <Tooltip label="清除目标" side="top" delayMs={400}>
+              <button
+                type="button"
+                className={css.iconBtn}
+                disabled={pending}
+                aria-label="清除目标"
+                onClick={() => { run('clear') }}
+              >
+                <IconTrashOutlineRegular size={14} />
+              </button>
+            </Tooltip>
           )}
         </div>
       </div>

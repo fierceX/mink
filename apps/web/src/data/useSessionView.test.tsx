@@ -656,4 +656,19 @@ describe('receipt stamp guard', () => {
     expect(localStorage.getItem('mink.pending:p:A')).toBeNull()
   })
 
+  it('separates openError and actionError cleanly', async () => {
+    vi.spyOn(api, 'openSession').mockResolvedValue(ok(live('A')))
+    vi.spyOn(api, 'submitInput').mockRejectedValueOnce(new Error('submit exploded'))
+    const { result } = renderHook(() => useSessionView(SESSIONS.A))
+    await waitFor(() => { expect(streams.length).toBe(1) })
+    act(() => { streams[0](snapshot('A')) })
+
+    await act(async () => { await result.current.send('hello') })
+    expect(result.current.openError).toBeUndefined()
+    expect(result.current.actionError).toBe('submit exploded')
+    expect(result.current.error).toBe('submit exploded')
+
+    act(() => { result.current.clearActionError() })
+    expect(result.current.actionError).toBeUndefined()
+  })
 })

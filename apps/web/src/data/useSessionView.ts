@@ -48,7 +48,13 @@ export interface SessionView {
   open: boolean
   /** Live-stream state; `closed` means the runtime must be reopened. */
   connection: SessionConnection
+  /** Combined error (openError ?? actionError) for backwards compatibility. */
   error: string | undefined
+  /** Failure opening or loading the session runtime (recoverable via retry). */
+  openError: string | undefined
+  /** Failure on an in-session action such as send or stop (dismissible). */
+  actionError: string | undefined
+  clearActionError: () => void
   /** Try the open again after a failure; the projection reloads the same way. */
   retry: () => void
   /** Reopen the runtime and rebuild the projection from its snapshot. */
@@ -243,7 +249,8 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
   const [state, setState] = useState<SessionState | undefined>(undefined)
   const [open, setOpen] = useState(false)
   const [connection, setConnection] = useState<SessionConnection>('connecting')
-  const [error, setError] = useState<string | undefined>(undefined)
+  const [openError, setOpenError] = useState<string | undefined>(undefined)
+  const [actionError, setActionError] = useState<string | undefined>(undefined)
   // Bumping this re-runs the open effect for the same session.
   const [attempt, setAttempt] = useState(0)
   const [hasOlder, setHasOlder] = useState(false)
@@ -339,7 +346,8 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
       setState(undefined)
       setOpen(false)
       setConnection('disconnected')
-      setError(undefined)
+      setOpenError(undefined)
+      setActionError(undefined)
       return
     }
     const token = ++generation.current
@@ -348,7 +356,8 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
     setState(emptySession(summary.id, summary.title ?? summary.alias ?? summary.id))
     setOpen(false)
     setConnection('connecting')
-    setError(undefined)
+    setOpenError(undefined)
+    setActionError(undefined)
 
     void (async () => {
       try {
@@ -425,7 +434,7 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
       } catch (cause) {
         if (!current()) return
         setConnection('failed')
-        setError(messageOf(cause))
+        setOpenError(messageOf(cause))
       }
     })()
 
@@ -435,6 +444,42 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
     }
   }, [summary, attempt, identity])
 
+  // Normalize any legacy submission record in an effect so render stays pure.
+  useEffect(() => {
+    if (summary !== undefined) void storedSubmission(summary)
+  }, [summary])
+
+  /** Shared pre-send reconciliation for `send` and `guide`. */
+  const prepareSubmission = async (
+    target: SessionSummary,
+    text: string,
+    targetTurnId: string | null,
+    attachmentIds: readonly string[],
+    attachmentKeys: readonly string[],
+    unknownMessage: string,
+  ): Promise<{ input: PendingSubmission } | { settled: string | undefined }> => {
+    const stored = storedSubmission(target)
+    if (stored !== undefined && sameSubmission(stored, text, targetTurnId, attachmentIds, attachmentKeys)) {
+      const reconciled = await receiptState(target, stored.request_id)
+      if (reconciled === 'accepted') {
+        forgetSubmission(target, stored.request_id)
+        forgetAcceptedAttachments(target, stored)
+        return { settled: undefined }
+      }
+      if (reconciled === 'unknown') return { settled: unknownMessage }
+      return { input: stored }
+    }
+    return {
+      input: {
+        request_id: requestId(),
+        text,
+        target_turn_id: targetTurnId,
+        attachment_ids: [...attachmentIds],
+        attachment_snapshot: attachmentSnapshot(attachmentIds, attachmentKeys),
+      },
+    }
+  }
+
   // A fresh turn goes through the same input queue as guidance — the queue is
   // the session's only admission boundary, and it is the only path that carries
   // attachments. `target_turn_id: null` is what makes it a new turn.
@@ -443,28 +488,10 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
     if (target === undefined) return '会话未打开'
     const view = sessionIdentity(target)
     const started = stampNow()
-    const stored = storedSubmission(target)
-    let input: PendingSubmission
-    if (stored !== undefined && sameSubmission(stored, text, null, attachmentIds, attachmentKeys)) {
-      // An earlier attempt may already hold this input: resolve it before
-      // minting a second request id for the same words.
-      const reconciled = await receiptState(target, stored.request_id)
-      if (reconciled === 'accepted') {
-        forgetSubmission(target, stored.request_id)
-        forgetAcceptedAttachments(target, stored)
-        return undefined
-      }
-      if (reconciled === 'unknown') return UNKNOWN_SEND
-      input = stored
-    } else {
-      input = {
-        request_id: requestId(),
-        text,
-        target_turn_id: null,
-        attachment_ids: [...attachmentIds],
-        attachment_snapshot: attachmentSnapshot(attachmentIds, attachmentKeys),
-      }
-    }
+    setActionError(undefined)
+    const prepared = await prepareSubmission(target, text, null, attachmentIds, attachmentKeys, UNKNOWN_SEND)
+    if ('settled' in prepared) return prepared.settled
+    const input = prepared.input
     // The record goes in before the request: a reload in the middle must not
     // lose the identity the retry depends on.
     rememberSubmission(target, input)
@@ -493,7 +520,7 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
     // a newer snapshot is the newer truth, and the old failure stays its own.
     if (outcome.status !== 'accepted' && stampHolds(started)) {
       setState(previous => (previous === undefined ? previous : { ...previous, running: false }))
-      setError(outcome.message)
+      setActionError(outcome.message)
     }
     return failureOf(outcome)
   }, [summary, identityRef, stateRef])
@@ -503,28 +530,9 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
   const guide = useCallback(async (text: string, turnId: string, attachmentIds: readonly string[] = [], attachmentKeys: readonly string[] = []): Promise<string | undefined> => {
     const target = summary
     if (target === undefined) return '会话未打开'
-    const stored = storedSubmission(target)
-    let input: PendingSubmission
-    if (stored !== undefined && sameSubmission(stored, text, turnId, attachmentIds, attachmentKeys)) {
-      const reconciled = await receiptState(target, stored.request_id)
-      // A receipt the server already holds is not a failure: the guidance is in
-      // the queue, and the strip above the composer shows it.
-      if (reconciled === 'accepted') {
-        forgetSubmission(target, stored.request_id)
-        forgetAcceptedAttachments(target, stored)
-        return undefined
-      }
-      if (reconciled === 'unknown') return UNKNOWN_GUIDE
-      input = stored
-    } else {
-      input = {
-        request_id: requestId(),
-        text,
-        target_turn_id: turnId,
-        attachment_ids: [...attachmentIds],
-        attachment_snapshot: attachmentSnapshot(attachmentIds, attachmentKeys),
-      }
-    }
+    const prepared = await prepareSubmission(target, text, turnId, attachmentIds, attachmentKeys, UNKNOWN_GUIDE)
+    if ('settled' in prepared) return prepared.settled
+    const input = prepared.input
     rememberSubmission(target, input)
     let outcome: SubmitOutcome
     try {
@@ -658,19 +666,27 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
     const target = summary
     if (target === undefined) return
     const started = stampNow()
+    setActionError(undefined)
     void api.interrupt(target.id, target.project_key).catch((cause: unknown) => {
       // A stop that failed on a runtime the projection has already replaced is
       // not an error of the session on screen now.
       if (!stampHolds(started)) return
-      setError(messageOf(cause))
+      setActionError(messageOf(cause))
     })
   }, [summary, stateRef])
 
-  const pendingDraft = summary === undefined ? undefined : storedSubmission(summary)?.text
+  const pendingDraft = summary === undefined
+    ? undefined
+    : (uncertain.current.get(sessionPendingKey(summary)) ?? readPendingSubmission(sessionPendingKey(summary)))?.text
+
+  const clearActionError = useCallback(() => {
+    setActionError(undefined)
+  }, [])
 
   const reconnect = useCallback(() => {
     if (summary === undefined) return
-    setError(undefined)
+    setOpenError(undefined)
+    setActionError(undefined)
     setConnection('connecting')
     setAttempt(value => value + 1)
   }, [summary])
@@ -679,7 +695,10 @@ export function useSessionView(summary: SessionSummary | undefined): SessionView
     state,
     open,
     connection,
-    error,
+    error: openError ?? actionError,
+    openError,
+    actionError,
+    clearActionError,
     retry: reconnect,
     reconnect,
     send,

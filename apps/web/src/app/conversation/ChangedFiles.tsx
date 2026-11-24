@@ -27,6 +27,10 @@ export function ChangedFiles({ files, onOpen }: {
   onOpen: (path: string) => void
 }) {
   const [expanded, setExpanded] = useState(false)
+  // Every row answers a hover with the hunks the turn recorded for it: the same
+  // preview idea the source's changed-files card uses, drawn from data already in
+  // the transcript instead of a second fetch.
+  const previews = useMemo(() => new Map(files.map(file => [file.path, file.diffs])), [files])
   if (files.length === 0) return null
 
   const added = files.reduce((sum, file) => sum + file.added, 0)
@@ -40,10 +44,6 @@ export function ChangedFiles({ files, onOpen }: {
       <span className={css.deleted}>{`-${deleted}`}</span>
     </span>
   )
-  // Every row answers a hover with the hunks the turn recorded for it: the same
-  // preview idea the source's changed-files card uses, drawn from data already in
-  // the transcript instead of a second fetch.
-  const previews = useMemo(() => new Map(files.map(file => [file.path, file.diffs])), [files])
 
   return (
     <div className={css.card} data-changed-files data-single={single !== undefined || undefined}>
