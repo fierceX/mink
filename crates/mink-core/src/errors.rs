@@ -88,12 +88,38 @@ pub fn classify_error_from_message(msg: &str) -> ErrorInfo {
 
 /// Classify an anyhow::Error by inspecting the error chain.
 pub fn classify_anyhow(err: &anyhow::Error) -> ErrorInfo {
+    if let Some(upstream) = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::llm::recovery::LlmUpstreamError>())
+    {
+        return match upstream.kind() {
+            crate::llm::recovery::UpstreamFailureKind::Recoverable => {
+                if upstream.status() == Some(429) {
+                    ErrorInfo::new(ErrorCategory::RateLimit, ErrorSeverity::Warning, true)
+                } else {
+                    ErrorInfo::new(ErrorCategory::Network, ErrorSeverity::Warning, true)
+                }
+            }
+            crate::llm::recovery::UpstreamFailureKind::ProtocolDamaged => {
+                ErrorInfo::new(ErrorCategory::Parse, ErrorSeverity::Warning, true)
+            }
+            crate::llm::recovery::UpstreamFailureKind::Permanent => match upstream.status() {
+                Some(401 | 403) => ErrorInfo::new(ErrorCategory::Auth, ErrorSeverity::Error, false),
+                Some(400 | 404 | 422) => {
+                    ErrorInfo::new(ErrorCategory::Parse, ErrorSeverity::Error, false)
+                }
+                _ => ErrorInfo::new(ErrorCategory::Internal, ErrorSeverity::Error, false),
+            },
+        };
+    }
     let msg = format!("{}", err);
     if let Some(source_err) = err.root_cause().downcast_ref::<reqwest::Error>() {
         if let Some(status) = source_err.status() {
             return match status.as_u16() {
-                400..=403 => ErrorInfo::new(ErrorCategory::Auth, ErrorSeverity::Error, false),
-                404 | 422 => ErrorInfo::new(ErrorCategory::Parse, ErrorSeverity::Error, false),
+                401 | 403 => ErrorInfo::new(ErrorCategory::Auth, ErrorSeverity::Error, false),
+                400 | 404 | 422 => {
+                    ErrorInfo::new(ErrorCategory::Parse, ErrorSeverity::Error, false)
+                }
                 429 => ErrorInfo::new(ErrorCategory::RateLimit, ErrorSeverity::Warning, true),
                 500..=599 => ErrorInfo::new(ErrorCategory::Network, ErrorSeverity::Warning, true),
                 408 => ErrorInfo::new(ErrorCategory::Network, ErrorSeverity::Warning, true),

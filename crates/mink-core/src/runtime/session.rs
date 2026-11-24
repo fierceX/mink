@@ -381,14 +381,34 @@ pub fn paths_for(home: &Path, cwd: &Path, session_id: &str) -> SessionPaths {
     crate::session::paths::paths_for(home, cwd, session_id)
 }
 
+#[derive(Debug, Clone)]
+pub struct ResolvedSessionRecord {
+    pub id: String,
+    pub path: PathBuf,
+    pub metadata: SessionMetadata,
+    pub modified: SystemTime,
+}
+
+impl From<crate::session::metadata::SessionRecord> for ResolvedSessionRecord {
+    fn from(record: crate::session::metadata::SessionRecord) -> Self {
+        Self {
+            id: record.id,
+            path: record.path,
+            metadata: record.metadata,
+            modified: record.modified,
+        }
+    }
+}
+
 pub async fn resolve_record(
     home: &Path,
     cwd: &Path,
     reference: &str,
     layout: super::SessionLayout,
-) -> Result<Option<crate::session::metadata::SessionRecord>> {
+) -> Result<Option<ResolvedSessionRecord>> {
     crate::session::metadata::resolve_session_record_with_layout(home, cwd, reference, layout)
         .await
+        .map(|opt| opt.map(ResolvedSessionRecord::from))
         .map_err(anyhow::Error::from)
 }
 

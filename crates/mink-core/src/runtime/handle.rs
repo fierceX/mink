@@ -438,6 +438,7 @@ impl AgentRuntimeHandle {
             turn_id
         };
         let permit = self.turn_gate.acquire(turn_id.clone())?;
+        let mut inbox_started = false;
         let (source, goal_iteration) = if goal_source.is_some() {
             let goal = self
                 .goal_ctx
@@ -458,6 +459,7 @@ impl AgentRuntimeHandle {
             self.input_inbox
                 .begin_goal_turn(turn_id.as_str())
                 .map_err(|e| RuntimeError::Command(format!("{e:#}")))?;
+            inbox_started = true;
             let key = crate::session::goal::IterationKey {
                 goal_id: goal.id.clone(),
                 iteration,
@@ -486,6 +488,7 @@ impl AgentRuntimeHandle {
             self.input_inbox
                 .begin_goal_turn(turn_id.as_str())
                 .map_err(|e| RuntimeError::Command(format!("{e:#}")))?;
+            inbox_started = true;
         }
         let receipt = if !register {
             Ok(crate::runtime::InputReceipt::transient(
@@ -500,7 +503,12 @@ impl AgentRuntimeHandle {
                     .accept(input.clone(), Some(turn_id.as_str())),
             }
         }
-        .map_err(|e| RuntimeError::Command(e.to_string()))?;
+        .map_err(|e| {
+            if inbox_started {
+                let _ = self.input_inbox.finish();
+            }
+            RuntimeError::Command(e.to_string())
+        })?;
         let stream_turn_id = turn_id.clone();
         let (tx, rx) = mpsc::unbounded_channel();
         let progress_budget = crate::runtime::events::ProgressBudget::new(
@@ -822,8 +830,9 @@ async fn flush_stage<T, E: std::fmt::Display>(
         Ok(Ok(_)) => {}
         Ok(Err(error)) => failures.push(format!("{stage} failed: {error}")),
         Err(_) => {
+            // Pure timeouts must surface as `RuntimeError::ShutdownTimeout`
+            // rather than being misclassified as `RuntimeError::Command`.
             *timed_out = true;
-            failures.push(format!("{stage} timed out after {budget:?}"));
         }
     }
 }
@@ -1030,7 +1039,15 @@ mod shutdown_stage_tests {
     async fn blocking_stage_timeout_bounds_caller() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
+        struct ReleaseGuard(Arc<AtomicBool>);
+        impl Drop for ReleaseGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
         let release = Arc::new(AtomicBool::new(false));
+        let _guard = ReleaseGuard(release.clone());
         let worker_release = release.clone();
         let mut failures = Vec::new();
         let mut timed_out = false;
@@ -1055,10 +1072,9 @@ mod shutdown_stage_tests {
             started.elapsed()
         );
         assert!(
-            failures.iter().any(|line| line.contains("timed out")),
-            "{failures:?}"
+            failures.is_empty(),
+            "pure stage timeout must not push into failures (so shutdown returns ShutdownTimeout): {failures:?}"
         );
-        release.store(true, Ordering::SeqCst);
     }
 
     #[tokio::test]
@@ -1077,8 +1093,8 @@ mod shutdown_stage_tests {
         assert!(timed_out);
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(
-            failures.iter().any(|line| line.contains("timed out")),
-            "{failures:?}"
+            failures.is_empty(),
+            "pure stage timeout must not push into failures: {failures:?}"
         );
     }
 

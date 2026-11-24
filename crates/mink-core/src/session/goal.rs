@@ -1745,22 +1745,31 @@ impl GoalStore {
     /// Pause the current goal when it is still active.
     ///
     /// The user interrupt targets "the goal that is running now"; a replaced
-    /// or already paused goal must not be touched.
+    /// or already paused goal must not be touched. Checked atomically under
+    /// `self.state` lock so a concurrent transition never causes a no-op write
+    /// or revision bump, and clears `review_stage` matching `GoalTransition::Pause`.
     pub(crate) fn pause_if_active(&self, reason: &str) -> Result<Option<GoalSnapshot>> {
-        if self
-            .snapshot()
-            .is_none_or(|goal| goal.status != GoalStatus::Active)
-        {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(current) = state.current.as_ref() else {
+            return Ok(None);
+        };
+        if current.status != GoalStatus::Active {
             return Ok(None);
         }
-        let goal = self.update(|g| {
-            if g.status == GoalStatus::Active {
-                g.status = GoalStatus::Paused;
-                g.reason = Some(reason.to_string());
-            }
-            Ok(())
-        })?;
-        Ok(Some(goal))
+        let mut next = state.clone();
+        let goal = next.current.as_mut().expect("checked current goal");
+        goal.status = GoalStatus::Paused;
+        goal.reason = Some(reason.to_string());
+        goal.review_stage = None;
+        goal.revision = goal
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("goal revision overflow"))?;
+        goal.version = GOAL_FORMAT_VERSION;
+        goal.normalize_phase();
+        let paused = goal.clone();
+        self.publish(&mut state, next)?;
+        Ok(Some(paused))
     }
 
     /// Settle one iteration by identity, exactly once.

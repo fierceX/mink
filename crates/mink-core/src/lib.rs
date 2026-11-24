@@ -60,7 +60,7 @@ mod sandbox;
 mod session;
 mod sse;
 mod tools;
-pub mod ui;
+mod ui;
 
 #[cfg(test)]
 mod regression;

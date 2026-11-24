@@ -461,6 +461,7 @@ impl OrchActor {
             .goal_store
             .associate_iteration_billing(&billing_turn_id)
         {
+            let _ = self.ctx.input_inbox.finish();
             return self.finish_usage(
                 TurnRunResult::failed(format!("goal billing association failed: {error:#}")),
                 &billing_turn_id,
@@ -469,6 +470,7 @@ impl OrchActor {
         // Session-level publish fault: refuse the operation up front instead
         // of requesting the model, touching history or executing tools.
         if let Err(error) = self.ctx.persistence_fault.check() {
+            let _ = self.ctx.input_inbox.finish();
             self.ctx.display.render_error(&format!("{error:#}"));
             self.refresh_title().await;
             let result = self.finish_usage(

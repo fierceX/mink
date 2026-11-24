@@ -299,7 +299,13 @@ impl AgentOptions {
     /// This is the same check used by the runtime builder, exposed for hosts
     /// that need to reject layered config before handing it to the runtime.
     pub fn validate_runtime_config(&self) -> anyhow::Result<()> {
-        crate::config::validate_runtime_config(&self.config)
+        crate::config::validate_runtime_config(&self.config)?;
+        crate::tools::catalog::validate_tool_config(&crate::context::ToolConfig::from_config(
+            &self.config,
+        ))?;
+        let custom_tools = crate::runtime::tools::freeze_custom_tools(self.custom_tools.clone());
+        crate::tools::catalog::validate_custom_tools(&custom_tools)?;
+        Ok(())
     }
 
     pub fn with_session(mut self, session: SessionPolicy) -> Self {

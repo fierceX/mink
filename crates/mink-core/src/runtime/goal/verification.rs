@@ -201,14 +201,32 @@ impl AgentRuntimeHandle {
                 || goal.acceptance_conversation_seq != seq
                 || c.reviewer_id != reviewer_id
         }) {
-            goal = self.goal_ctx.goal_store.transition(
-                &goal.id,
-                goal.revision,
-                GoalTransition::PrepareReview {
-                    conversation_seq: seq,
-                    reviewer_id,
-                },
-            )?;
+            let prepare = |target: &GoalSnapshot| {
+                self.goal_ctx.goal_store.transition(
+                    &target.id,
+                    target.revision,
+                    GoalTransition::PrepareReview {
+                        conversation_seq: seq,
+                        reviewer_id: reviewer_id.clone(),
+                    },
+                )
+            };
+            goal = match prepare(&goal) {
+                Ok(updated) => updated,
+                Err(first) => {
+                    // Retry once if a concurrent `/goal budget` advanced revision.
+                    let Some(fresh) = self
+                        .goal_snapshot()
+                        .filter(|g| g.id == goal.id && g.status == GoalStatus::Active)
+                    else {
+                        return Ok(());
+                    };
+                    if fresh.revision == goal.revision {
+                        return Err(first);
+                    }
+                    prepare(&fresh)?
+                }
+            };
         }
         self.announce_goal(&goal);
         let candidate = goal
