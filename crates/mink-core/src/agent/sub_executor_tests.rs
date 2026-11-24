@@ -224,17 +224,15 @@ async fn fork_inherits_full_history_and_compacted_projection() -> anyhow::Result
 
 #[tokio::test]
 async fn sub_agent_interrupt_is_shared_and_child_cancel_is_linked() -> anyhow::Result<()> {
-    use std::sync::atomic::Ordering;
-
     let parent = crate::regression::test_context_for_agent("sub-interrupt-sharing").await?;
     let config = parent.config.clone();
     let child =
         SubAgentExecutor::new(parent.clone(), "sub-interrupt-child".into(), false, config).await?;
 
-    // Same task tree: interrupt is one shared flag (no "isolation" allowed).
-    assert!(Arc::ptr_eq(&parent.interrupt, &child.child_ctx.interrupt));
-    parent.interrupt.store(true, Ordering::SeqCst);
-    assert!(child.child_ctx.interrupt.load(Ordering::SeqCst));
+    // Same task tree: interrupt is one shared signal (no "isolation" allowed).
+    assert!(parent.interrupt.ptr_eq(&child.child_ctx.interrupt));
+    parent.interrupt.trigger();
+    assert!(child.child_ctx.interrupt.is_set());
 
     // Cancel is a linked child token: the child's own cancel must not leak
     // upward, while a parent cancel propagates downward.

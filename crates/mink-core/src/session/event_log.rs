@@ -220,11 +220,11 @@ impl EventLogWriter {
         &self,
         line: String,
         cancel: &crate::cancel::CancellationToken,
-        interrupt: &AtomicBool,
+        interrupt: &crate::cancel::InterruptSignal,
         deadline: std::time::Duration,
     ) -> io::Result<()> {
         let started = std::time::Instant::now();
-        let aborted = || cancel.is_cancelled() || interrupt.load(Ordering::SeqCst);
+        let aborted = || cancel.is_cancelled() || interrupt.is_set();
         let (done_tx, mut done_rx) = oneshot::channel();
         let mut pending = Some(EventLogCmd::AppendCritical {
             line,
@@ -526,17 +526,14 @@ fn write_event(
 }
 
 /// Completes as soon as the runtime cancel token fires or the current turn
-/// is interrupted (the public `interrupt_current_turn()` flag). Polling the
-/// atomic keeps this dependency-free and prompt (<=5 ms).
-async fn stop_requested(cancel: &crate::cancel::CancellationToken, interrupt: &AtomicBool) {
-    loop {
-        if interrupt.load(Ordering::SeqCst) {
-            return;
-        }
-        tokio::select! {
-            _ = cancel.cancelled() => return,
-            _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
-        }
+/// is interrupted (the public `interrupt_current_turn()` signal).
+async fn stop_requested(
+    cancel: &crate::cancel::CancellationToken,
+    interrupt: &crate::cancel::InterruptSignal,
+) {
+    tokio::select! {
+        _ = cancel.cancelled() => {}
+        _ = interrupt.notified() => {}
     }
 }
 
@@ -1035,7 +1032,7 @@ mod tests {
         gate.set_paused(true);
         let writer = EventLogWriter::start_paused(path.clone(), gate.clone());
         let cancel = crate::cancel::CancellationToken::new();
-        let interrupt = AtomicBool::new(false);
+        let interrupt = crate::cancel::InterruptSignal::new();
         let (result, ()) = tokio::join!(
             writer.send_critical_async(
                 "{\"type\":\"prefix_snapshot\"}".to_string(),
@@ -1073,7 +1070,7 @@ mod tests {
             .send_critical_async(
                 "{\"type\":\"prefix_snapshot\"}".to_string(),
                 &cancel,
-                &AtomicBool::new(false),
+                &crate::cancel::InterruptSignal::new(),
                 CRITICAL_ENQUEUE_DEADLINE,
             )
             .await
@@ -1086,7 +1083,7 @@ mod tests {
             .send_critical_async(
                 "{\"type\":\"prefix_snapshot\"}".to_string(),
                 &cancel,
-                &AtomicBool::new(false),
+                &crate::cancel::InterruptSignal::new(),
                 CRITICAL_ENQUEUE_DEADLINE,
             )
             .await
@@ -1138,7 +1135,7 @@ mod tests {
             .send_critical_async(
                 "{\"type\":\"prefix_snapshot\"}".to_string(),
                 &cancel,
-                &AtomicBool::new(false),
+                &crate::cancel::InterruptSignal::new(),
                 std::time::Duration::from_millis(200),
             )
             .await
@@ -1164,7 +1161,7 @@ mod tests {
             .send_critical_async(
                 "{\"type\":\"prefix_snapshot\"}".to_string(),
                 &cancel,
-                &AtomicBool::new(false),
+                &crate::cancel::InterruptSignal::new(),
                 std::time::Duration::from_secs(5),
             )
             .await
@@ -1203,7 +1200,7 @@ mod tests {
                 .send_critical_async(
                     "{\"type\":\"prefix_snapshot\"}".to_string(),
                     &task_cancel,
-                    &AtomicBool::new(false),
+                    &crate::cancel::InterruptSignal::new(),
                     std::time::Duration::from_secs(5),
                 )
                 .await
@@ -1239,7 +1236,7 @@ mod tests {
         }
 
         let cancel = crate::cancel::CancellationToken::new();
-        let interrupt = Arc::new(AtomicBool::new(false));
+        let interrupt = crate::cancel::InterruptSignal::new();
         let task_writer = writer.clone();
         let task_interrupt = interrupt.clone();
         let handle = tokio::spawn(async move {
@@ -1253,7 +1250,7 @@ mod tests {
                 .await
         });
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        interrupt.store(true, Ordering::SeqCst);
+        interrupt.trigger();
         let error = tokio::time::timeout(std::time::Duration::from_secs(1), handle)
             .await
             .expect("turn interrupt must release the critical commit")

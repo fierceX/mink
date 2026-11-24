@@ -854,9 +854,7 @@ impl AgentRuntimeHandle {
             // Bind a reusable report to the host history even when submission failed.
             let mut report = report;
             report.conversation_seq = seq;
-            if !self.goal_ctx.cancel.is_cancelled()
-                && !self.goal_ctx.interrupt.load(Ordering::SeqCst)
-            {
+            if !self.goal_ctx.cancel.is_cancelled() && !self.goal_ctx.interrupt.is_set() {
                 self.publish_review_report(&session, report)?;
             }
             session.check_budget()?;

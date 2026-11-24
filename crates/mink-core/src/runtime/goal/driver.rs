@@ -210,7 +210,7 @@ impl AgentRuntimeHandle {
         #[cfg(test)]
         self.goal_driver
             .drive_attempts
-            .fetch_add(1, Ordering::SeqCst);
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         while let Some(goal) = self
             .goal_snapshot()
             .filter(|g| g.status == GoalStatus::Active)

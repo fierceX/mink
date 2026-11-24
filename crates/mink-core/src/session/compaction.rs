@@ -365,7 +365,7 @@ pub struct CompactionEngine {
     session_id: String,
     display: Arc<dyn Display>,
     cancel: crate::cancel::CancellationToken,
-    interrupt: Arc<AtomicBool>,
+    interrupt: crate::cancel::InterruptSignal,
     state: RwLock<std::result::Result<CompactionState, String>>,
     compact_lock: tokio::sync::Mutex<()>,
     memo_epoch: Arc<AtomicU64>,
@@ -399,7 +399,7 @@ impl CompactionEngine {
         session_id: String,
         display: Arc<dyn Display>,
         cancel: crate::cancel::CancellationToken,
-        interrupt: Arc<AtomicBool>,
+        interrupt: crate::cancel::InterruptSignal,
         llm_backend: Arc<dyn LlmBackend>,
         event_log_writer: Option<EventLogWriter>,
         session_event_sink: Option<Arc<dyn crate::runtime::SessionEventSink>>,
@@ -680,7 +680,7 @@ impl CompactionEngine {
 
     /// 应急路径的取消/中断检查：runtime cancel 与用户 interrupt 都必须中断提交。
     fn check_emergency_cancelled(&self) -> Result<()> {
-        if self.cancel.is_cancelled() || self.interrupt.load(Ordering::SeqCst) {
+        if self.cancel.is_cancelled() || self.interrupt.is_set() {
             return Err(CompactionInterrupted::error());
         }
         Ok(())
@@ -960,7 +960,7 @@ impl CompactionEngine {
             )
             .await
             .map_err(|error| map_shared_deadline(error, round_deadline))?;
-        if self.interrupt.load(Ordering::SeqCst) {
+        if self.interrupt.is_set() {
             return Err(CompactionInterrupted::error());
         }
 
@@ -1198,15 +1198,11 @@ impl CompactionEngine {
         let cleanup_cancel = request_cancel.clone();
         let interrupt = self.interrupt.clone();
         let watcher = tokio::spawn(async move {
-            loop {
-                if interrupt.load(Ordering::SeqCst) {
+            tokio::select! {
+                _ = interrupt.notified() => {
                     watcher_cancel.cancel();
-                    return;
                 }
-                tokio::select! {
-                    _ = watcher_cancel.cancelled() => return,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
-                }
+                _ = watcher_cancel.cancelled() => {}
             }
         });
         struct WatcherGuard {
@@ -1235,7 +1231,7 @@ impl CompactionEngine {
             )
             .await;
         drop(_watcher_guard);
-        if self.interrupt.load(Ordering::SeqCst) {
+        if self.interrupt.is_set() {
             return Err(CompactionInterrupted::error());
         }
         result
@@ -1282,7 +1278,7 @@ impl CompactionEngine {
             if request_cancel.is_cancelled() {
                 return Err(CompactionInterrupted::error());
             }
-            if self.interrupt.load(Ordering::SeqCst) {
+            if self.interrupt.is_set() {
                 return Err(CompactionInterrupted::error());
             }
             if let Some(review) = &self.review_session {
@@ -1522,17 +1518,20 @@ impl CompactionEngine {
             ) {
                 return Ok(consumption);
             }
+            let wait_timeout_at = summary_next_timeout_instant(
+                saw_any_event,
+                attempt_started,
+                last_event_at,
+                first_event_timeout,
+                idle_timeout,
+            );
             let event = tokio::select! {
                 event = futures::StreamExt::next(&mut stream) => event,
                 _ = request_cancel.cancelled() => return Ok(SummaryConsumption::Interrupted),
                 _ = crate::llm::recovery::wait_until(deadline) => {
                     return Ok(SummaryConsumption::Deadline)
                 }
-                // Deterministic wake-up so a pending stream still hits the
-                // deadline checks above (a stream of events arriving faster
-                // than this tick cannot starve them either: the checks run on
-                // the loop path).
-                _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => continue,
+                _ = crate::llm::recovery::wait_until(wait_timeout_at) => continue,
             };
             let Some(event) = event else { break };
             match event {
@@ -1925,6 +1924,20 @@ async fn wait_first_event_deadline(
     match first_event_timeout {
         Some(timeout) => tokio::time::sleep_until((attempt_started + timeout).into()).await,
         None => std::future::pending::<()>().await,
+    }
+}
+
+fn summary_next_timeout_instant(
+    saw_any_event: bool,
+    attempt_started: std::time::Instant,
+    last_event_at: std::time::Instant,
+    first_event_timeout: Option<std::time::Duration>,
+    idle_timeout: Option<std::time::Duration>,
+) -> Option<std::time::Instant> {
+    if !saw_any_event {
+        first_event_timeout.map(|timeout| attempt_started + timeout)
+    } else {
+        idle_timeout.map(|timeout| last_event_at + timeout)
     }
 }
 

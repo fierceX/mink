@@ -24,7 +24,7 @@ use futures::StreamExt;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -432,7 +432,7 @@ async fn harness_inner(
             session_event_sink: None,
             sub_stream_tx: None,
             cancel: crate::cancel::CancellationToken::new(),
-            interrupt: Arc::new(AtomicBool::new(false)),
+            interrupt: crate::cancel::InterruptSignal::new(),
             is_sub_agent,
             sub_agent_depth: if is_sub_agent { 1 } else { 0 },
             usage_journal: None,

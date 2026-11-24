@@ -1181,9 +1181,7 @@ async fn run_bash(
         .await
         .unwrap();
     if pre_interrupt {
-        shared
-            .interrupt
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        shared.interrupt.trigger();
     }
     let ctx = crate::context::ToolContext::from(shared.as_ref());
     let runner = ToolRunner::new(Arc::new(ctx));

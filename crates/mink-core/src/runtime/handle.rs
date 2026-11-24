@@ -6,7 +6,7 @@ use crate::runtime::events::{EventDisplay, TurnEventEmitter};
 use crate::runtime::{AgentEvent, AgentEventKind, AgentOptions};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -121,7 +121,7 @@ impl TurnOutcome {
 
 pub(crate) struct TurnGate {
     state: Mutex<TurnGateState>,
-    interrupt: Arc<AtomicBool>,
+    interrupt: crate::cancel::InterruptSignal,
     idle: tokio::sync::Notify,
 }
 
@@ -140,7 +140,7 @@ impl TurnGate {
         if let Some(active_turn_id) = state.active.clone() {
             return Err(RuntimeError::Busy { active_turn_id });
         }
-        self.interrupt.store(false, Ordering::SeqCst);
+        self.interrupt.reset();
         state.active = Some(turn_id.clone());
         Ok(TurnPermit {
             gate: self.clone(),
@@ -159,14 +159,14 @@ impl TurnGate {
     pub(crate) fn interrupt(&self) {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.active.is_some() {
-            self.interrupt.store(true, Ordering::SeqCst);
+            self.interrupt.trigger();
         }
     }
 
     fn interrupt_if_owner(&self, turn_id: &TurnId) {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.active.as_ref() == Some(turn_id) {
-            self.interrupt.store(true, Ordering::SeqCst);
+            self.interrupt.trigger();
         }
     }
 
@@ -175,7 +175,7 @@ impl TurnGate {
         state.closed = true;
         let had_active = state.active.is_some();
         if had_active {
-            self.interrupt.store(true, Ordering::SeqCst);
+            self.interrupt.trigger();
         }
         had_active
     }
@@ -422,7 +422,7 @@ impl AgentRuntimeHandle {
             return Ok((receipt, None));
         }
         if input.target_turn_id.is_some() && resume.is_none() {
-            if self.turn_gate.interrupt.load(Ordering::SeqCst) {
+            if self.turn_gate.interrupt.is_set() {
                 return Err(RuntimeError::Command("turn is stopping".into()));
             }
             let receipt = self
@@ -1000,7 +1000,7 @@ impl AgentRuntime {
     }
 }
 
-pub(crate) fn new_turn_gate(interrupt: Arc<AtomicBool>) -> Arc<TurnGate> {
+pub(crate) fn new_turn_gate(interrupt: crate::cancel::InterruptSignal) -> Arc<TurnGate> {
     Arc::new(TurnGate {
         state: Mutex::new(TurnGateState::default()),
         interrupt,
@@ -1011,6 +1011,7 @@ pub(crate) fn new_turn_gate(interrupt: Arc<AtomicBool>) -> Arc<TurnGate> {
 #[cfg(test)]
 mod shutdown_stage_tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     #[tokio::test]
     async fn default_stage_budget_allows_delayed_blocking_flush() {

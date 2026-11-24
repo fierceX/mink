@@ -110,9 +110,7 @@ impl PrefixManager {
             .map_err(|error| {
                 // A cancelled or interrupted turn must stay classified as
                 // interruption, not as an event-log failure.
-                if self.ctx.cancel.is_cancelled()
-                    || self.ctx.interrupt.load(std::sync::atomic::Ordering::SeqCst)
-                {
+                if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
                     anyhow::Error::new(crate::agent::turn::TurnInterrupted)
                 } else {
                     error

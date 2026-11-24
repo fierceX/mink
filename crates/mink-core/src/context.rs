@@ -1,4 +1,4 @@
-use crate::cancel::CancellationToken;
+use crate::cancel::{CancellationToken, InterruptSignal};
 use crate::capabilities::CapabilitySnapshot;
 use crate::config::{
     EditMode, OutputFormat, ResolvedConfig as Config, ToolApprovalMode, ToolApprovalPolicy,
@@ -134,7 +134,7 @@ pub struct ToolContext {
     /// tool runner refuses to dispatch any tool while latched.
     pub(crate) persistence_fault: crate::session::persistence::PersistenceFault,
     pub tool_config: ToolConfig,
-    pub interrupt: Arc<AtomicBool>,
+    pub interrupt: InterruptSignal,
     pub cancel: CancellationToken,
     pub read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
     pub vfs_scope: VfsScope,
@@ -429,8 +429,8 @@ pub struct AgentSharedContext {
     /// Delegation depth of this agent: 0 for a primary agent, parent + 1 for a
     /// delegated child. Persisted in child metadata and enforced by the surface.
     pub sub_agent_depth: u32,
-    /// 用于中断当前任务的原子标志。每轮开始时重置为 false。
-    pub interrupt: Arc<AtomicBool>,
+    /// 用于中断当前任务的事件信号。每轮开始时重置为 false。
+    pub interrupt: InterruptSignal,
     /// Avoid repeated stderr warnings if event logging starts failing.
     pub event_log_warned: AtomicBool,
     /// Optional serialized writer for production runtimes. Hand-built test

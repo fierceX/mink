@@ -10,7 +10,6 @@ use crate::ui::ToolResultDisplay;
 use anyhow::Result;
 use futures::StreamExt;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 mod format_recovery;
@@ -475,7 +474,7 @@ impl TurnExecutor {
             self.ctx
                 .input_inbox
                 .apply_pending(&self.ctx.store, || {
-                    self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst)
+                    self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set()
                 })
                 .await?;
         } else {
@@ -512,7 +511,7 @@ impl TurnExecutor {
         );
 
         while turn < max_turns {
-            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
+            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
                 self.ctx.display.render_stop("interrupted");
                 return Ok((TurnDecision::Interrupted, effects));
             }
@@ -521,14 +520,14 @@ impl TurnExecutor {
                     .ctx
                     .input_inbox
                     .apply_pending(&self.ctx.store, || {
-                        self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst)
+                        self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set()
                     })
                     .await?
                     > 0
             {
                 messages = self.ctx.compaction.active_messages().await?;
             }
-            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
+            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
                 self.ctx.display.render_stop("interrupted");
                 return Ok((TurnDecision::Interrupted, effects));
             }
@@ -715,7 +714,7 @@ impl TurnExecutor {
                 ));
             }
 
-            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
+            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
                 self.ctx.display.render_stop("interrupted");
                 return Ok((TurnDecision::Interrupted, effects));
             }
@@ -842,7 +841,7 @@ impl TurnExecutor {
                     had_format_error |= self
                         .execute_tools_inner(calls, belief.as_deref_mut(), &mut effects)
                         .await?;
-                    if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
+                    if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
                         self.ctx.display.render_stop("interrupted");
                         return Ok((TurnDecision::Interrupted, effects));
                     }

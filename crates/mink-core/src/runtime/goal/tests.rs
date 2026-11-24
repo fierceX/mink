@@ -1,6 +1,6 @@
 use super::*;
 use crate::runtime::{AgentOptions, AgentRuntime, LlmBackend, LlmRequest, LlmResponseStream};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct NoRequest;
 
@@ -2014,7 +2014,7 @@ async fn interrupt_during_an_active_round_pauses_without_admitting_another() {
         GoalStatus::Active,
         "the goal must still be active when the interrupt is set"
     );
-    handle.goal_ctx.interrupt.store(true, Ordering::SeqCst);
+    handle.goal_ctx.interrupt.trigger();
     backend.release.notify_one();
 
     let settled = tokio::time::timeout(std::time::Duration::from_secs(10), handle.wait_goal())

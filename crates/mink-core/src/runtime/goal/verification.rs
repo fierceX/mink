@@ -81,7 +81,7 @@ impl AgentRuntimeHandle {
             };
             if current.status != GoalStatus::Active
                 || current.review_candidate != old.review_candidate
-                || self.goal_ctx.interrupt.load(Ordering::SeqCst)
+                || self.goal_ctx.interrupt.is_set()
                 || self.goal_ctx.cancel.is_cancelled()
             {
                 return Ok(());
@@ -239,21 +239,12 @@ impl AgentRuntimeHandle {
             let _permit = permit;
             handle.review_and_accept(run_id, audit_goal).await
         });
-        let interrupt = self.goal_ctx.interrupt.clone();
-        let stopped = async {
-            loop {
-                if interrupt.load(Ordering::SeqCst) {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        };
         tokio::select! {
             result = &mut task => {
                 match result {
                     Ok(Ok(())) => {},
                     Ok(Err(error)) => self.apply_if_run_scheduled(run_id, || {
-                        if self.goal_ctx.interrupt.load(Ordering::SeqCst)
+                        if self.goal_ctx.interrupt.is_set()
                             || self.goal_ctx.cancel.is_cancelled()
                         {
                             return Ok(());
@@ -265,7 +256,7 @@ impl AgentRuntimeHandle {
                         )
                     })?,
                     Err(error) => self.apply_if_run_scheduled(run_id, || {
-                        if self.goal_ctx.interrupt.load(Ordering::SeqCst)
+                        if self.goal_ctx.interrupt.is_set()
                             || self.goal_ctx.cancel.is_cancelled()
                         {
                             return Ok(());
@@ -279,7 +270,7 @@ impl AgentRuntimeHandle {
                 }
             }
             _ = self.wait_verification_deadline(&goal) => {
-                self.goal_ctx.interrupt.store(true, Ordering::SeqCst);
+                self.goal_ctx.interrupt.trigger();
                 self.apply_if_run_scheduled(run_id, || {
                     if self.goal_snapshot().is_some_and(|g| goal_now() >= g.spec.limits.deadline_unix_secs) {
                         self.goal_review_failure(
@@ -296,7 +287,7 @@ impl AgentRuntimeHandle {
                     }
                 })?;
             }
-            _ = stopped => {},
+            _ = self.goal_ctx.interrupt.notified() => {},
             _ = self.goal_ctx.cancel.cancelled() => {},
         }
         Ok(())
@@ -314,7 +305,7 @@ impl AgentRuntimeHandle {
                 .ok_or_else(|| anyhow::anyhow!("goal missing"))?;
             ensure!(
                 current.status == GoalStatus::Active
-                    && !self.goal_ctx.interrupt.load(Ordering::SeqCst)
+                    && !self.goal_ctx.interrupt.is_set()
                     && !self.goal_ctx.cancel.is_cancelled(),
                 "goal stopped during continuation adjudication"
             );
@@ -440,9 +431,7 @@ impl AgentRuntimeHandle {
                 self.goal_ctx
                     .goal_store
                     .reconcile_usage(&self.goal_ctx.usage.all_records()?)?;
-                if self.goal_ctx.cancel.is_cancelled()
-                    || self.goal_ctx.interrupt.load(Ordering::SeqCst)
-                {
+                if self.goal_ctx.cancel.is_cancelled() || self.goal_ctx.interrupt.is_set() {
                     return Ok(());
                 }
                 if let Some(error) = outcome.as_ref().err()
@@ -474,7 +463,7 @@ impl AgentRuntimeHandle {
                 };
                 if current.status != GoalStatus::Active
                     || current.review_candidate.as_ref() != Some(&candidate)
-                    || self.goal_ctx.interrupt.load(Ordering::SeqCst)
+                    || self.goal_ctx.interrupt.is_set()
                     || self.goal_ctx.cancel.is_cancelled()
                 {
                     return Ok(());
@@ -564,7 +553,7 @@ impl AgentRuntimeHandle {
             if review.verdict != GoalReviewVerdict::Satisfied
                 || !self.run_scheduled(run_id)
                 || goal.status != GoalStatus::Active
-                || self.goal_ctx.interrupt.load(Ordering::SeqCst)
+                || self.goal_ctx.interrupt.is_set()
                 || self.goal_ctx.cancel.is_cancelled()
             {
                 return Ok(());
@@ -586,7 +575,7 @@ impl AgentRuntimeHandle {
                 let context = GoalVerificationContext {
                     cwd: self.goal_ctx.cwd.clone(),
                     goal: goal.clone(),
-                    cancelled: self.goal_ctx.interrupt.clone(),
+                    cancelled: self.goal_ctx.interrupt.as_atomic(),
                     tools: Arc::new(crate::context::ToolContext::from(self.goal_ctx.as_ref())),
                 };
                 let effect_id = format!(
@@ -606,7 +595,7 @@ impl AgentRuntimeHandle {
                     Ok(())
                 })?;
                 if !self.run_scheduled(run_id)
-                    || self.goal_ctx.interrupt.load(Ordering::SeqCst)
+                    || self.goal_ctx.interrupt.is_set()
                     || self.goal_ctx.cancel.is_cancelled()
                 {
                     return Ok(());
@@ -663,7 +652,7 @@ impl AgentRuntimeHandle {
                     return Ok(());
                 }
                 if !self.run_scheduled(run_id)
-                    || self.goal_ctx.interrupt.load(Ordering::SeqCst)
+                    || self.goal_ctx.interrupt.is_set()
                     || self.goal_ctx.cancel.is_cancelled()
                 {
                     return Ok(());
@@ -697,7 +686,7 @@ impl AgentRuntimeHandle {
                 };
                 if current.status != GoalStatus::Active
                     || current.review_candidate.as_ref() != Some(&candidate)
-                    || self.goal_ctx.interrupt.load(Ordering::SeqCst)
+                    || self.goal_ctx.interrupt.is_set()
                     || self.goal_ctx.cancel.is_cancelled()
                 {
                     return Ok(());

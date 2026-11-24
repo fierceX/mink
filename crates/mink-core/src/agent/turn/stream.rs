@@ -29,6 +29,27 @@ struct RetryFailure {
     category: &'static str,
 }
 
+fn next_wait_wake_instant(
+    saw_any_event: bool,
+    stream_started: Instant,
+    last_event_at: Instant,
+    first_event_timeout: Option<Duration>,
+    idle_timeout: Option<Duration>,
+    last_heartbeat_at: Instant,
+    heartbeat: Option<Duration>,
+) -> Option<Instant> {
+    let timeout_at = if !saw_any_event {
+        first_event_timeout.map(|timeout| stream_started + timeout)
+    } else {
+        idle_timeout.map(|timeout| last_event_at + timeout)
+    };
+    let heartbeat_at = heartbeat.map(|interval| last_heartbeat_at + interval);
+    match (timeout_at, heartbeat_at) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 impl super::TurnExecutor {
     pub(super) async fn ensure_prefix(&self) -> Result<(String, Vec<serde_json::Value>)> {
         self.prefix.ensure().await
@@ -163,7 +184,7 @@ impl super::TurnExecutor {
         let mut last_failure = String::new();
         let mut attempt: u32 = 0;
         loop {
-            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
+            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
                 self.ctx.log_event(crate::events::EventLog::Stop {
                     reason: "interrupted".into(),
                 });
@@ -247,7 +268,7 @@ impl super::TurnExecutor {
                         }
                     }
                     // Cancellation always wins over a pending retry.
-                    if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
+                    if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
                         return Err(anyhow::Error::new(TurnInterrupted));
                     }
                     if !retry.can_retry() {
@@ -324,6 +345,24 @@ impl super::TurnExecutor {
             attempt_cancel.clone(),
         ));
         let mut stream = loop {
+            if let Err(error) = self.check_llm_wait_timeout(
+                false,
+                stream_started,
+                stream_started,
+                first_event_timeout,
+                idle_timeout,
+            ) {
+                return Err(attempt_error_failure(error));
+            }
+            let next_wake = next_wait_wake_instant(
+                false,
+                stream_started,
+                stream_started,
+                first_event_timeout,
+                idle_timeout,
+                last_heartbeat_at,
+                heartbeat,
+            );
             tokio::select! {
                 biased;
                 // 已完成的建流结果优先于并发到达的取消：迟到取消不能覆盖
@@ -338,15 +377,14 @@ impl super::TurnExecutor {
                 _ = self.ctx.cancel.cancelled() => {
                     return Err(AttemptFailure::Interrupted);
                 }
+                _ = self.ctx.interrupt.notified() => {
+                    return Err(AttemptFailure::Interrupted);
+                }
                 // 可选总期限覆盖建流：到点必须停止等待，不建流也不重试。
                 _ = recovery::wait_until(deadline) => {
                     return Err(AttemptFailure::Timeout);
                 }
-                // tick 仅负责 interrupt 轮询、首事件 deadline 与等待心跳。
-                _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
-                    if self.ctx.interrupt.load(Ordering::SeqCst) {
-                        return Err(AttemptFailure::Interrupted);
-                    }
+                _ = recovery::wait_until(next_wake) => {
                     if let Err(error) = self.check_llm_wait_timeout(
                         false,
                         stream_started,
@@ -379,7 +417,7 @@ impl super::TurnExecutor {
         let mut last_event_at = Instant::now();
 
         loop {
-            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
+            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
                 self.ctx.log_event(crate::events::EventLog::Stop {
                     reason: "interrupted".into(),
                 });
@@ -387,15 +425,12 @@ impl super::TurnExecutor {
                 saw_stop = true;
                 break;
             }
-            // 可选总期限在消费循环的确定路径上检查：事件比 25ms tick 更快时
-            // 也不能超期继续消费。
+            // 可选总期限在消费循环的确定路径上检查：事件连续到达时也不能超期继续消费。
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Err(AttemptFailure::Timeout);
             }
-            // Deadline enforcement lives on the deterministic loop path: a
-            // stream of events arriving faster than the 25ms tick must not
-            // starve the first-event/idle checks (each iteration recreates
-            // the select's sleep timer).
+            // Deadline enforcement lives on the deterministic loop path so a
+            // continuous burst of events cannot starve the first-event/idle checks.
             if let Err(error) = self.check_llm_wait_timeout(
                 saw_any_event,
                 stream_started,
@@ -406,9 +441,37 @@ impl super::TurnExecutor {
                 return Err(attempt_error_failure(error));
             }
 
+            let next_wake = next_wait_wake_instant(
+                saw_any_event,
+                stream_started,
+                last_event_at,
+                first_event_timeout,
+                idle_timeout,
+                last_heartbeat_at,
+                heartbeat,
+            );
             let result = tokio::select! {
                 result = stream.next() => result,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
+                _ = self.ctx.cancel.cancelled() => {
+                    self.ctx.log_event(crate::events::EventLog::Stop {
+                        reason: "interrupted".into(),
+                    });
+                    stop = "interrupted".into();
+                    saw_stop = true;
+                    break;
+                }
+                _ = self.ctx.interrupt.notified() => {
+                    self.ctx.log_event(crate::events::EventLog::Stop {
+                        reason: "interrupted".into(),
+                    });
+                    stop = "interrupted".into();
+                    saw_stop = true;
+                    break;
+                }
+                _ = recovery::wait_until(deadline) => {
+                    return Err(AttemptFailure::Timeout);
+                }
+                _ = recovery::wait_until(next_wake) => {
                     self.maybe_render_llm_wait_heartbeat(
                         saw_any_event,
                         stream_started,
@@ -638,16 +701,13 @@ impl super::TurnExecutor {
     /// Cancellable backoff wait; `false` means the turn was interrupted or
     /// cancelled while waiting.
     async fn wait_retry_delay(&self, wait: Duration) -> bool {
-        let sleep = tokio::time::sleep(wait);
-        tokio::pin!(sleep);
-        loop {
-            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
-                return false;
-            }
-            tokio::select! {
-                _ = &mut sleep => return true,
-                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
-            }
+        if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
+            return false;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => !(self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set()),
+            _ = self.ctx.cancel.cancelled() => false,
+            _ = self.ctx.interrupt.notified() => false,
         }
     }
 

@@ -39,7 +39,7 @@ pub struct AgentContextBuild {
     pub session_event_sink: Option<Arc<dyn crate::runtime::SessionEventSink>>,
     pub sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
     pub cancel: CancellationToken,
-    pub interrupt: Arc<AtomicBool>,
+    pub interrupt: crate::cancel::InterruptSignal,
     pub is_sub_agent: bool,
     /// Depth of the agent being built (0 = primary).
     pub sub_agent_depth: u32,

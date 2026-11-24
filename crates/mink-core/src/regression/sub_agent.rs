@@ -435,7 +435,7 @@ async fn interrupted_child_reports_interrupted_not_success() -> anyhow::Result<(
         h.ctx.config.clone(),
     )
     .await?;
-    h.ctx.interrupt.store(true, Ordering::SeqCst);
+    h.ctx.interrupt.trigger();
 
     let result = tokio::time::timeout(Duration::from_secs(3), child.execute("task".into()))
         .await
@@ -521,7 +521,7 @@ async fn interrupt_wakes_pending_subagent_collection() -> anyhow::Result<()> {
     let mut task =
         tokio::spawn(async move { coordinator.process_with_runner(vec![result], runner).await });
     tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
-    h.ctx.interrupt.store(true, Ordering::SeqCst);
+    h.ctx.interrupt.trigger();
 
     let completed = tokio::time::timeout(Duration::from_millis(800), &mut task).await;
     let processed = match completed {

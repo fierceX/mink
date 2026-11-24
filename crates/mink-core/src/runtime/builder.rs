@@ -1,5 +1,5 @@
 use crate::agent::orchestrator::new_orchestrator;
-use crate::cancel::CancellationToken;
+use crate::cancel::{CancellationToken, InterruptSignal};
 use crate::config::api_url;
 use crate::llm::client::OpenAiCompatibleBackend;
 use crate::runtime::config::{AgentRuntimeConfig, SessionInfo, SessionPolicy};
@@ -10,7 +10,6 @@ use crate::session::metadata::{SessionSeed, sanitize_alias};
 use crate::session::paths;
 use anyhow::{Result, bail};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
     let AgentRuntimeConfig {
@@ -46,7 +45,7 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
     let event_dispatcher = event_sink.map(EventDispatcher::new);
     let event_display = Arc::new(EventDisplay::new(event_dispatcher));
     let display: Arc<dyn crate::ui::Display> = event_display.clone();
-    let interrupt = Arc::new(AtomicBool::new(false));
+    let interrupt = InterruptSignal::new();
 
     let (sid, session_ref, session_alias, resolved_paths) =
         resolve_session(&home, &cwd, session, session_layout).await?;

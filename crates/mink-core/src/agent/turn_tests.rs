@@ -1227,7 +1227,7 @@ async fn interrupt_during_compaction_reports_interrupted() -> anyhow::Result<()>
     let interrupt = ctx.interrupt.clone();
     let canceller = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        interrupt.store(true, std::sync::atomic::Ordering::SeqCst);
+        interrupt.trigger();
     });
     let mut executor = TurnExecutor::new(ctx.clone());
     let (decision, _) = executor.execute("keep going", None).await?;
@@ -1878,7 +1878,7 @@ async fn retry_backoff_is_cancellable() -> anyhow::Result<()> {
     let interrupt = ctx.interrupt.clone();
     let canceller = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        interrupt.store(true, std::sync::atomic::Ordering::SeqCst);
+        interrupt.trigger();
     });
     let started = std::time::Instant::now();
     let result = TurnExecutor::new(ctx)

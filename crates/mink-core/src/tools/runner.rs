@@ -1076,34 +1076,33 @@ async fn execute_custom(
     let timeout_secs = timeout.as_secs();
     let execution = tool.executor.execute(
         call.input_json.clone(),
-        crate::tools::extension::ToolExecutionContext::new(ctx.cwd.clone(), ctx.interrupt.clone()),
+        crate::tools::extension::ToolExecutionContext::new(
+            ctx.cwd.clone(),
+            ctx.interrupt.as_atomic(),
+        ),
     );
     tokio::pin!(execution);
     let deadline = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs));
     tokio::pin!(deadline);
-    let result = loop {
-        tokio::select! {
-            result = &mut execution => break result,
-            _ = ctx.cancel.cancelled() => {
-                break Err(crate::tools::extension::ToolError::new(format!(
-                    "custom tool {} cancelled",
-                    definition.name
-                )));
-            }
-            _ = &mut deadline => {
-                break Err(crate::tools::extension::ToolError::new(format!(
-                    "custom tool {} timed out after {timeout_secs}s",
-                    definition.name
-                )));
-            }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
-                if ctx.interrupt.load(std::sync::atomic::Ordering::SeqCst) {
-                    break Err(crate::tools::extension::ToolError::new(format!(
-                        "custom tool {} interrupted",
-                        definition.name
-                    )));
-                }
-            }
+    let result = tokio::select! {
+        result = &mut execution => result,
+        _ = ctx.cancel.cancelled() => {
+            Err(crate::tools::extension::ToolError::new(format!(
+                "custom tool {} cancelled",
+                definition.name
+            )))
+        }
+        _ = &mut deadline => {
+            Err(crate::tools::extension::ToolError::new(format!(
+                "custom tool {} timed out after {timeout_secs}s",
+                definition.name
+            )))
+        }
+        _ = ctx.interrupt.notified() => {
+            Err(crate::tools::extension::ToolError::new(format!(
+                "custom tool {} interrupted",
+                definition.name
+            )))
         }
     };
     let raw = match result {

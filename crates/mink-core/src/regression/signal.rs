@@ -1256,7 +1256,7 @@ async fn replace_rollback_preserves_bom_and_crlf_shape() -> anyhow::Result<()> {
 #[tokio::test]
 async fn interrupted_replan_does_not_inject_success_evidence() -> anyhow::Result<()> {
     struct InterruptOnReplanBackend {
-        interrupt: std::sync::Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
+        interrupt: std::sync::Mutex<Option<crate::cancel::InterruptSignal>>,
         calls: std::sync::atomic::AtomicUsize,
     }
 
@@ -1280,7 +1280,7 @@ async fn interrupted_replan_does_not_inject_success_evidence() -> anyhow::Result
                     .as_ref()
             {
                 // The replan child starts while the shared interrupt flips.
-                interrupt.store(true, Ordering::SeqCst);
+                interrupt.trigger();
             }
             let events = match call {
                 0 => (0..8)

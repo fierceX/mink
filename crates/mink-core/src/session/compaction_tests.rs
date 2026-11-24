@@ -1807,8 +1807,7 @@ async fn expired_round_deadline_blocks_emergency_publish() -> anyhow::Result<()>
     );
 
     // 3) cancel 与期限同时到达：取消优先（不得因超时改变中断分类）。
-    ctx.interrupt
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    ctx.interrupt.trigger();
     let error = crate::agent::compactor::commit_emergency_checkpoint(
         &ctx,
         "audit_cancel",
@@ -1821,8 +1820,7 @@ async fn expired_round_deadline_blocks_emergency_publish() -> anyhow::Result<()>
     .await
     .expect_err("cancel must win over the deadline");
     assert!(is_compaction_interrupted(&error), "{error:#}");
-    ctx.interrupt
-        .store(false, std::sync::atomic::Ordering::SeqCst);
+    ctx.interrupt.reset();
     Ok(())
 }
 
@@ -2195,7 +2193,7 @@ async fn compaction_interrupts_pending_summary_without_committing() -> anyhow::R
             .await
     });
     tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-    ctx.interrupt.store(true, Ordering::SeqCst);
+    ctx.interrupt.trigger();
     let error = tokio::time::timeout(std::time::Duration::from_secs(2), task)
         .await??
         .unwrap_err()
@@ -2623,7 +2621,7 @@ async fn cancelled_compaction_records_unknown_usage() -> anyhow::Result<()> {
             .await
     });
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    interrupt.store(true, std::sync::atomic::Ordering::SeqCst);
+    interrupt.trigger();
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
         .await

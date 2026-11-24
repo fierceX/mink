@@ -111,6 +111,78 @@ impl Default for CancellationToken {
     }
 }
 
+/// Event-driven turn interruption signal backed by a shared atomic flag and
+/// async notifier.
+///
+/// Cloning shares the same underlying flag and wakeup notifier so a parent
+/// runtime and its delegated sub-agents observe the same interruption signal.
+/// Sync process helpers can borrow `&AtomicBool` via [`Self::as_atomic_ref`]
+/// or clone an `Arc<AtomicBool>` via [`Self::as_atomic`].
+#[derive(Clone, Debug)]
+pub struct InterruptSignal {
+    flag: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl InterruptSignal {
+    pub fn new() -> Self {
+        Self {
+            flag: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    pub fn is_set(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
+
+    pub fn trigger(&self) {
+        self.flag.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    pub fn reset(&self) {
+        self.flag.store(false, Ordering::SeqCst);
+    }
+
+    /// Resolves once [`Self::trigger`] has been observed. Safe against missed
+    /// wakeups and safe to drop/re-create across loop iterations.
+    pub async fn notified(&self) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            // Register the waiter before inspecting the flag so a concurrent
+            // `trigger()` cannot land between `is_set()` and the first poll.
+            notified.as_mut().enable();
+            if self.is_set() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    pub fn as_atomic(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.flag)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.flag, &other.flag) && Arc::ptr_eq(&self.notify, &other.notify)
+    }
+}
+
+impl AsRef<AtomicBool> for InterruptSignal {
+    fn as_ref(&self) -> &AtomicBool {
+        &self.flag
+    }
+}
+
+impl Default for InterruptSignal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 #[path = "cancel_tests.rs"]
 mod tests;

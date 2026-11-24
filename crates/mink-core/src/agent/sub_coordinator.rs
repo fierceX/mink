@@ -348,7 +348,7 @@ impl SubAgentCoordinator {
         let mut end: Option<BatchEnd> = None;
 
         while !batch.pending.is_empty() {
-            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
+            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
                 self.ctx
                     .display
                     .render_info("Sub-agent collection cancelled.");
@@ -361,12 +361,10 @@ impl SubAgentCoordinator {
                     end = Some(BatchEnd::Interrupted);
                     break;
                 }
-                _ = tokio::time::sleep(Duration::from_millis(SUB_AGENT_TICK_MS)) => {
-                    if self.ctx.interrupt.load(Ordering::SeqCst) {
-                        self.ctx.display.render_info("Sub-agent collection cancelled.");
-                        end = Some(BatchEnd::Interrupted);
-                        break;
-                    }
+                _ = self.ctx.interrupt.notified() => {
+                    self.ctx.display.render_info("Sub-agent collection cancelled.");
+                    end = Some(BatchEnd::Interrupted);
+                    break;
                 }
                 received = sub_result_rx.recv() => {
                     match received {
