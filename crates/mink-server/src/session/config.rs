@@ -113,8 +113,12 @@ where
         .or(fallback)
 }
 
-/// Validate that the server can start: home exists or can be created.
+/// Validate that the server can start: address is valid and home exists or can be created.
 pub fn validate_runtime_config(cfg: &ServerConfig) -> anyhow::Result<()> {
+    let host = cfg.host.trim();
+    if host.parse::<std::net::IpAddr>().is_err() {
+        anyhow::bail!("invalid host value {host:?}: expected an IPv4 or IPv6 address");
+    }
     if !cfg.mink_home.exists() {
         std::fs::create_dir_all(&cfg.mink_home)?;
     }
@@ -158,6 +162,24 @@ mod tests {
         if let Some(value) = saved {
             unsafe { std::env::set_var("MINK_SERVER_HOST", value) };
         }
+    }
+
+    #[test]
+    fn invalid_host_is_rejected_before_listener_bind() {
+        let dir =
+            std::env::temp_dir().join(format!("mink-cfg-invalid-host-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = ServerConfig {
+            host: "not-an-ip".to_string(),
+            port: 8765,
+            mink_home: dir.clone(),
+            model: "flash".to_string(),
+            max_running: 4,
+            idle_close_secs: 1800,
+        };
+        let err = validate_runtime_config(&cfg).unwrap_err();
+        assert!(err.to_string().contains("invalid host value"), "{err}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

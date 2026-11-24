@@ -908,21 +908,13 @@ impl Registry {
         }
     }
 
-    /// The session's working directory (SessionMetadata.cwd).
-    pub async fn session_metadata_cwd(
-        &self,
-        id: &str,
-        project: Option<&str>,
-    ) -> Result<Option<String>> {
-        let dir = self.session_dir(id, project).await?;
-        tokio::task::spawn_blocking(move || {
-            let metadata = read_session_metadata(&dir)?;
-            if metadata.cwd.trim().is_empty() {
-                anyhow::bail!("session metadata cwd is empty in {}", dir.display());
-            }
-            Ok(Some(metadata.cwd))
-        })
-        .await?
+    /// Read a session's working directory from an already-resolved session directory.
+    pub(crate) fn read_session_cwd_sync(dir: &Path) -> Result<Option<String>> {
+        let metadata = read_session_metadata(dir)?;
+        if metadata.cwd.trim().is_empty() {
+            anyhow::bail!("session metadata cwd is empty");
+        }
+        Ok(Some(metadata.cwd))
     }
 
     /// Find the disk path of a session (full-home scan).
@@ -944,9 +936,9 @@ impl Registry {
             [] => Err(RegistryError::NotFound(format!("session {id} not found"))),
             [dir] => Ok(dir.clone()),
             many => Err(RegistryError::Ambiguous(format!(
-                "session {id} is ambiguous; candidates: {}",
+                "session {id} is ambiguous across projects: {}; pass ?project=<key>",
                 many.iter()
-                    .map(|path| path.display().to_string())
+                    .map(|path| project_key_from_dir(path))
                     .collect::<Vec<_>>()
                     .join(", ")
             ))),

@@ -39,7 +39,7 @@ impl ApiResponse {
         }
     }
 
-    fn err(code: u16, message: impl Into<String>) -> Self {
+    pub(crate) fn err(code: u16, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -50,27 +50,17 @@ impl ApiResponse {
 
 impl IntoResponse for ApiResponse {
     fn into_response(self) -> Response {
-        let status = if self.code == 200 {
-            StatusCode::OK
-        } else if self.code == 404 {
-            StatusCode::NOT_FOUND
-        } else if self.code == 400 {
-            StatusCode::BAD_REQUEST
-        } else if self.code == 413 {
-            StatusCode::PAYLOAD_TOO_LARGE
-        } else if self.code == 409 {
-            StatusCode::CONFLICT
-        } else if self.code == 429 {
-            StatusCode::TOO_MANY_REQUESTS
-        } else {
-            StatusCode::INTERNAL_SERVER_ERROR
-        };
+        let status = StatusCode::from_u16(self.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         (status, Json(self)).into_response()
     }
 }
 
-pub fn router(state: Arc<ApiState>) -> Router {
-    Router::new()
+pub fn api_routes(state: Arc<ApiState>) -> Router {
+    let attachment_route = Router::new()
+        .route("/api/sessions/{id}/attachments", post(upload_attachment))
+        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024));
+
+    let standard_routes = Router::new()
         .route("/api/version", get(api_version))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/workspace", get(check_workspace))
@@ -93,7 +83,6 @@ pub fn router(state: Arc<ApiState>) -> Router {
             "/api/sessions/{id}/inputs/{input_id}/resume",
             post(resume_input),
         )
-        .route("/api/sessions/{id}/attachments", post(upload_attachment))
         .route(
             "/api/sessions/{id}/attachments/{attachment_id}",
             get(read_attachment),
@@ -115,8 +104,23 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/api/sessions/{id}/artifacts/{name}", get(get_artifact))
         .route("/api/sessions/{id}/files", get(get_files))
         .route("/health", get(health))
-        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
-        .with_state(state)
+        .route("/api", axum::routing::any(api_not_found))
+        .route("/api/{*path}", axum::routing::any(api_not_found))
+        .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024));
+
+    standard_routes.merge(attachment_route).with_state(state)
+}
+
+async fn api_not_found() -> ApiResponse {
+    ApiResponse::err(404, "not found")
+}
+
+#[cfg(test)]
+pub fn router(state: Arc<ApiState>) -> Router {
+    crate::middleware::apply_security_layer(
+        api_routes(state),
+        Arc::new(crate::middleware::HostGuardConfig::loopback_default()),
+    )
 }
 
 #[derive(Deserialize)]
@@ -490,7 +494,8 @@ async fn list_inputs(
     .await
     {
         Ok(Ok(inputs)) => ApiResponse::ok(json!(input_query(inputs, query.request_id.as_deref()))),
-        result => ApiResponse::err(500, format!("cannot read inputs: {result:?}")),
+        Ok(Err(error)) => ApiResponse::err(500, format!("cannot read inputs: {error}")),
+        Err(error) => ApiResponse::err(500, format!("inputs read task failed: {error}")),
     }
 }
 async fn submit_input(
@@ -503,6 +508,15 @@ async fn submit_input(
         Ok(r) => r,
         Err(e) => return e,
     };
+    if input.request_id.trim().is_empty() {
+        return ApiResponse::err(400, "request_id must not be empty");
+    }
+    if input.request_id.len() > 256 {
+        return ApiResponse::err(400, "request_id too long (max 256 bytes)");
+    }
+    if input.text.len() > 128 * 1024 {
+        return ApiResponse::err(400, "input too large (max 128 KiB)");
+    }
     let submitted_text = input.text.trim().to_string();
     if input.attachment_ids.len() > 8 {
         return ApiResponse::err(400, "max 8 attachments");
@@ -581,6 +595,9 @@ async fn edit_input(
     Query(query): Query<ProjectQuery>,
     Json(edit): Json<InputEdit>,
 ) -> ApiResponse {
+    if edit.text.len() > 128 * 1024 {
+        return ApiResponse::err(400, "input too large (max 128 KiB)");
+    }
     update_input(
         &state,
         &id,
@@ -1140,6 +1157,14 @@ async fn create_goal(
     if objective.is_empty() {
         return ApiResponse::err(400, "goal objective is empty");
     }
+    if objective.len() > 128 * 1024
+        || body.constraints.len() > 64
+        || body.acceptance_criteria.len() > 64
+        || body.constraints.iter().any(|c| c.len() > 16 * 1024)
+        || body.acceptance_criteria.iter().any(|c| c.len() > 16 * 1024)
+    {
+        return ApiResponse::err(400, "goal specification exceeds size limits");
+    }
     let mut spec = mink::runtime::GoalSpec::new(objective);
     if !body.acceptance_criteria.is_empty() {
         spec.acceptance_criteria = body.acceptance_criteria.clone();
@@ -1242,9 +1267,13 @@ async fn create_goal(
     });
     match task.await {
         Ok(Ok(draft)) => ApiResponse::ok(json!({"goal":draft})),
-        other => ApiResponse::err(
+        Ok(Err(error)) => ApiResponse::err(
             409,
-            format!("draft generation failed; proposal preserved: {other:?}"),
+            format!("draft generation failed; proposal preserved: {error}"),
+        ),
+        Err(error) => ApiResponse::err(
+            409,
+            format!("draft generation task failed; proposal preserved: {error}"),
         ),
     }
 }
@@ -1384,7 +1413,12 @@ async fn goal_action(
             });
             return match task.await {
                 Ok(Ok(goal)) => ApiResponse::ok(json!({"goal":goal})),
-                other => ApiResponse::err(409, format!("draft refinement failed: {other:?}")),
+                Ok(Err(error)) => {
+                    ApiResponse::err(409, format!("draft refinement failed: {error}"))
+                }
+                Err(error) => {
+                    ApiResponse::err(409, format!("draft refinement task failed: {error}"))
+                }
             };
         }
         "pause" => {
@@ -1493,6 +1527,82 @@ async fn list_artifacts(
     ApiResponse::ok(json!({ "artifacts": records }))
 }
 
+const MAX_DIR_ENTRIES: usize = 2_000;
+
+enum BoundedReadError {
+    NotFound,
+    Symlink,
+    NotAFile,
+    TooLarge(u64),
+    Utf8,
+    Io(std::io::Error),
+}
+
+fn open_no_follow_nonblock(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    opts.open(path)
+}
+
+fn is_symlink_open_error(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::ELOOP)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+fn read_bounded_regular_file(
+    path: &std::path::Path,
+    max_bytes: u64,
+) -> Result<String, BoundedReadError> {
+    use std::io::Read;
+
+    let file = match open_no_follow_nonblock(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(BoundedReadError::NotFound);
+        }
+        Err(error) if is_symlink_open_error(&error) => {
+            return Err(BoundedReadError::Symlink);
+        }
+        Err(error) => return Err(BoundedReadError::Io(error)),
+    };
+    let meta = file.metadata().map_err(BoundedReadError::Io)?;
+    if !meta.is_file() {
+        return Err(BoundedReadError::NotAFile);
+    }
+    if meta.len() > max_bytes {
+        return Err(BoundedReadError::TooLarge(meta.len()));
+    }
+    let mut buf = Vec::with_capacity((meta.len() as usize).min(64 * 1024));
+    file.take(max_bytes + 1)
+        .read_to_end(&mut buf)
+        .map_err(BoundedReadError::Io)?;
+    if buf.len() as u64 > max_bytes {
+        return Err(BoundedReadError::TooLarge(buf.len() as u64));
+    }
+    String::from_utf8(buf).map_err(|_| BoundedReadError::Utf8)
+}
+
+fn is_valid_artifact_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && !name.contains('\0')
+}
+
 async fn get_artifact(
     State(state): State<Arc<ApiState>>,
     AxumPath((id, name)): AxumPath<(String, String)>,
@@ -1504,7 +1614,7 @@ async fn get_artifact(
     };
     // `artifact://<id>` maps to artifacts/<id>.txt; also accept the raw
     // filename. Reject anything that could escape the artifacts directory.
-    if name.contains('/') || name.contains('\\') || name.contains("..") {
+    if !is_valid_artifact_name(&name) {
         return ApiResponse::err(400, "invalid artifact name");
     }
     let filename = if name.ends_with(".txt") {
@@ -1514,31 +1624,33 @@ async fn get_artifact(
     };
     let path = dir.join("artifacts").join(&filename);
     // artifact 正文可达 MB 级（超长工具输出落盘）：与 /files?raw 相同的
-    // 读取上限，防止内存放大。
-    match tokio::fs::metadata(&path).await {
-        Ok(meta) if meta.len() > FILE_RAW_MAX_BYTES => {
-            return ApiResponse::err(
-                413,
-                format!(
-                    "artifact {name} is {} bytes; the REST API caps reads at {FILE_RAW_MAX_BYTES} bytes",
-                    meta.len()
-                ),
-            );
+    // 读取上限，防止内存放大、符号链接穿透与阻塞特殊文件。
+    match tokio::task::spawn_blocking(move || read_bounded_regular_file(&path, FILE_RAW_MAX_BYTES))
+        .await
+    {
+        Ok(Ok(text)) => ApiResponse::ok(json!({ "name": filename, "content": text })),
+        Ok(Err(BoundedReadError::NotFound)) => {
+            ApiResponse::err(404, format!("artifact {name} not found"))
         }
-        Ok(_) => {}
-        // A missing artifact is the only "absent" answer; anything else (a
-        // permission refusal, an unreadable directory entry) is a real failure.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return ApiResponse::err(404, format!("artifact {name} not found"));
+        Ok(Err(BoundedReadError::TooLarge(len))) => ApiResponse::err(
+            413,
+            format!(
+                "artifact {name} is {len} bytes; the REST API caps reads at {FILE_RAW_MAX_BYTES} bytes"
+            ),
+        ),
+        Ok(Err(BoundedReadError::Symlink)) => {
+            ApiResponse::err(400, format!("refusing symlink artifact {name}"))
         }
-        Err(error) => {
-            return ApiResponse::err(500, format!("failed to inspect artifact {name}: {error}"));
+        Ok(Err(BoundedReadError::NotAFile)) => {
+            ApiResponse::err(500, format!("failed to read artifact {name}: not a file"))
         }
-    }
-    match read_optional(&path).await {
-        Ok(Some(text)) => ApiResponse::ok(json!({ "name": filename, "content": text })),
-        Ok(None) => ApiResponse::err(404, format!("artifact {name} not found")),
-        Err(error) => ApiResponse::err(500, format!("failed to read artifact {name}: {error}")),
+        Ok(Err(BoundedReadError::Utf8)) => {
+            ApiResponse::err(500, format!("artifact {name} is not valid UTF-8"))
+        }
+        Ok(Err(BoundedReadError::Io(error))) => {
+            ApiResponse::err(500, format!("failed to read artifact {name}: {error}"))
+        }
+        Err(error) => ApiResponse::err(500, format!("artifact read task failed: {error}")),
     }
 }
 
@@ -1547,75 +1659,75 @@ async fn get_files(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<FilesQuery>,
 ) -> ApiResponse {
-    if let Err(response) = session_dir_or_err(&state, &id, query.project.as_deref()).await {
-        return response;
-    }
-    // cwd 是会话工作目录（SessionMetadata.cwd），文件浏览限制在其内。
-    let cwd = match state
-        .registry
-        .session_metadata_cwd(&id, query.project.as_deref())
-        .await
-    {
-        Ok(Some(c)) => std::path::PathBuf::from(c),
-        Ok(None) => return ApiResponse::err(500, "session metadata cwd is missing"),
-        Err(error) => return ApiResponse::err(500, format!("failed to read session cwd: {error}")),
+    let dir = match session_dir_or_err(&state, &id, query.project.as_deref()).await {
+        Ok(dir) => dir,
+        Err(response) => return response,
     };
     let rel = query.path.unwrap_or_default();
-    let target = {
-        let cwd = cwd.clone();
-        let rel = rel.clone();
-        match tokio::task::spawn_blocking(move || resolve_within(&cwd, &rel)).await {
-            Ok(target) => target,
-            Err(error) => return ApiResponse::err(500, format!("path task failed: {error}")),
-        }
-    };
-    let Some(target) = target else {
-        return ApiResponse::err(400, "path escapes the workspace");
-    };
-
-    if query.raw {
-        let meta = match tokio::fs::metadata(&target).await {
-            Ok(m) => m,
-            Err(_) => return ApiResponse::err(404, "file not found"),
+    let raw = query.raw;
+    match tokio::task::spawn_blocking(move || -> ApiResponse {
+        let cwd = match Registry::read_session_cwd_sync(&dir) {
+            Ok(Some(c)) => std::path::PathBuf::from(c),
+            Ok(None) => return ApiResponse::err(500, "session metadata cwd is missing"),
+            Err(error) => {
+                return ApiResponse::err(500, format!("failed to read session cwd: {error}"));
+            }
         };
-        if !meta.is_file() {
-            return ApiResponse::err(400, "not a file");
-        }
-        if meta.len() > FILE_RAW_MAX_BYTES {
-            return ApiResponse::err(
-                413,
-                format!("file too large ({} bytes, limit 1 MiB)", meta.len()),
-            );
-        }
-        match tokio::fs::read_to_string(&target).await {
-            Ok(text) => ApiResponse::ok(json!({ "path": rel, "content": text })),
-            Err(e) => ApiResponse::err(500, format!("read failed: {e}")),
-        }
-    } else {
-        let mut entries = match tokio::fs::read_dir(&target).await {
-            Ok(entries) => entries,
-            Err(_) => return ApiResponse::err(404, "directory not found"),
+        let Some(target) = resolve_within(&cwd, &rel) else {
+            return ApiResponse::err(400, "path escapes the workspace");
         };
-        let mut items = Vec::new();
-        loop {
-            let entry = match entries.next_entry().await {
-                Ok(Some(entry)) => entry,
-                Ok(None) => break,
-                Err(error) => {
-                    return ApiResponse::err(500, format!("directory read failed: {error}"));
+        if raw {
+            match read_bounded_regular_file(&target, FILE_RAW_MAX_BYTES) {
+                Ok(text) => ApiResponse::ok(json!({ "path": rel, "content": text })),
+                Err(BoundedReadError::NotFound) => ApiResponse::err(404, "file not found"),
+                Err(BoundedReadError::Symlink) => ApiResponse::err(400, "refusing symlink"),
+                Err(BoundedReadError::NotAFile) => ApiResponse::err(400, "not a file"),
+                Err(BoundedReadError::TooLarge(len)) => {
+                    ApiResponse::err(413, format!("file too large ({len} bytes, limit 1 MiB)"))
                 }
+                Err(BoundedReadError::Utf8) => ApiResponse::err(500, "file is not valid UTF-8"),
+                Err(BoundedReadError::Io(e)) => ApiResponse::err(500, format!("read failed: {e}")),
+            }
+        } else {
+            let entries = match std::fs::read_dir(&target) {
+                Ok(entries) => entries,
+                Err(_) => return ApiResponse::err(404, "directory not found"),
             };
-            let name = entry.file_name().to_string_lossy().to_string();
-            let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
-            items.push(json!({ "name": name, "dir": is_dir }));
+            let mut items = Vec::new();
+            let mut truncated = false;
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        return ApiResponse::err(500, format!("directory read failed: {error}"));
+                    }
+                };
+                if items.len() >= MAX_DIR_ENTRIES {
+                    truncated = true;
+                    break;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                items.push(json!({ "name": name, "dir": is_dir }));
+            }
+            items.sort_by(|a, b| {
+                let da = a["dir"].as_bool().unwrap_or(false);
+                let db = b["dir"].as_bool().unwrap_or(false);
+                db.cmp(&da)
+                    .then_with(|| a["name"].as_str().cmp(&b["name"].as_str()))
+            });
+            ApiResponse::ok(json!({
+                "path": rel,
+                "dir": true,
+                "items": items,
+                "truncated": truncated,
+            }))
         }
-        items.sort_by(|a, b| {
-            let da = a["dir"].as_bool().unwrap_or(false);
-            let db = b["dir"].as_bool().unwrap_or(false);
-            db.cmp(&da)
-                .then_with(|| a["name"].as_str().cmp(&b["name"].as_str()))
-        });
-        ApiResponse::ok(json!({ "path": rel, "dir": true, "items": items }))
+    })
+    .await
+    {
+        Ok(resp) => resp,
+        Err(error) => ApiResponse::err(500, format!("files task failed: {error}")),
     }
 }
 
@@ -3921,5 +4033,178 @@ mod tests {
         drop(stream);
         registry.shutdown_all().await.unwrap();
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn host_and_origin_middleware_blocks_rebinding_and_csrf() {
+        let app = test_router();
+
+        // Loopback Host allowed + security headers + no-store + API 404 JSON
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/version")
+                    .header("host", "127.0.0.1:8765")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers().get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
+        assert_eq!(res.headers().get("referrer-policy").unwrap(), "no-referrer");
+        assert_eq!(res.headers().get("x-frame-options").unwrap(), "DENY");
+        assert_eq!(res.headers().get("cache-control").unwrap(), "no-store");
+
+        let api_404 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/does-not-exist")
+                    .header("host", "localhost:8765")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(api_404.status(), StatusCode::NOT_FOUND);
+
+        // DNS rebinding Host rejected
+        let rebind = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/version")
+                    .header("host", "evil.example:8765")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rebind.status(), StatusCode::FORBIDDEN);
+
+        // Cross-origin POST rejected
+        let csrf_origin = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/sessions/test-session/open")
+                    .header("host", "127.0.0.1:8765")
+                    .header("origin", "https://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(csrf_origin.status(), StatusCode::FORBIDDEN);
+
+        // Sec-Fetch-Site: cross-site rejected on mutations
+        let csrf_fetch_site = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/sessions/test-session/compact")
+                    .header("host", "127.0.0.1:8765")
+                    .header("sec-fetch-site", "cross-site")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(csrf_fetch_site.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn artifact_and_files_reject_symlinks_and_oversized_inputs() {
+        let (app, sess_dir) = test_router_with_session_dir();
+        let outside = sess_dir.parent().unwrap().join("secret.txt");
+        std::fs::write(&outside, "top secret").unwrap();
+        std::os::unix::fs::symlink(&outside, sess_dir.join("artifacts/leak.txt")).unwrap();
+        std::os::unix::fs::symlink(&outside, sess_dir.join("leak_in_cwd.txt")).unwrap();
+
+        let (status, _) = req(
+            &app,
+            Method::GET,
+            "/api/sessions/test-session/artifacts/leak",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _) = req(
+            &app,
+            Method::GET,
+            "/api/sessions/test-session/files?path=leak_in_cwd.txt&raw=true",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _) = req(
+            &app,
+            Method::GET,
+            "/api/sessions/test-session/artifacts/.hidden",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Oversized input payload rejected with 400 after opening
+        let home = std::env::temp_dir().join(format!("mink-open-limit-{}", std::process::id()));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let reg = Arc::new(Registry::with_llm_backend(
+            home.clone(),
+            "flash".to_string(),
+            4,
+            Arc::new(MockRuntimeBackend),
+        ));
+        let created = reg.create("open-limit", &cwd).await.unwrap();
+        let project = created.project_key.clone();
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let open_app = router(Arc::new(ApiState {
+            registry: reg.clone(),
+            cwd,
+            shutdown,
+        }));
+        let (open_status, open_body) = req(
+            &open_app,
+            Method::POST,
+            &format!("/api/sessions/{}/open?project={project}", created.id),
+        )
+        .await;
+        assert_eq!(open_status, StatusCode::OK, "{open_body}");
+        let huge_text = "x".repeat(128 * 1024 + 1);
+        let huge_res = open_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!(
+                        "/api/sessions/{}/inputs?project={project}",
+                        created.id
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "request_id": "req-huge",
+                            "text": huge_text,
+                            "attachment_ids": [],
+                            "target_turn_id": null,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(huge_res.status(), StatusCode::BAD_REQUEST);
+        reg.shutdown_all().await.unwrap();
+        let _ = std::fs::remove_dir_all(home);
+        let _ = std::fs::remove_file(outside);
     }
 }

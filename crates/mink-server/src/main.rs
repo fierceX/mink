@@ -11,10 +11,11 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 
 mod api;
 mod bridge;
+mod middleware;
 mod session;
 mod web_assets;
 
@@ -70,6 +71,18 @@ async fn main() -> Result<()> {
         cwd: cwd.clone(),
         shutdown: shutdown_tx.clone(),
     });
+    let allowed_hosts_env = std::env::var("MINK_SERVER_ALLOWED_HOSTS").ok();
+    let guard = Arc::new(middleware::HostGuardConfig::from_bind_host(
+        &cfg.host,
+        allowed_hosts_env.as_deref(),
+    ));
+    if !guard.loopback_only {
+        eprintln!(
+            "[mink-server] WARNING: listening on non-loopback address {}; run behind TLS and authentication or restrict network access",
+            cfg.host
+        );
+    }
+
     // Web UI：默认服务嵌入二进制的前端产物（build.rs 自动构建 apps/web 并嵌入）。
     // MINK_SERVER_DEV_WEB 指向目录时改为从磁盘 ServeDir（前端热迭代场景）。
     let dev_web = std::env::var("MINK_SERVER_DEV_WEB").ok();
@@ -82,14 +95,17 @@ async fn main() -> Result<()> {
     let use_embedded = dev_web.is_none() && !crate::web_assets::FILES.is_empty();
     let app = if use_embedded {
         use axum::handler::HandlerWithoutStateExt;
-        api::router(state).fallback_service(crate::web_assets::embedded_serve.into_service())
+        api::api_routes(state).fallback_service(crate::web_assets::embedded_serve.into_service())
     } else {
-        api::router(state).fallback_service(ServeDir::new(web_dir))
+        let index = web_dir.join("index.html");
+        api::api_routes(state)
+            .fallback_service(ServeDir::new(&web_dir).not_found_service(ServeFile::new(index)))
     };
     // JSON answers, history pages and the embedded bundle compress on the wire;
     // the tower-http default predicate deliberately leaves SSE out, because a
     // compressor buffering an event stream would add latency to every frame.
-    let app = app.layer(tower_http::compression::CompressionLayer::new());
+    let app = middleware::apply_security_layer(app, guard)
+        .layer(tower_http::compression::CompressionLayer::new());
 
     let addr = bind_address(&cfg.host, cfg.port);
     let listener = TcpListener::bind(&addr).await?;

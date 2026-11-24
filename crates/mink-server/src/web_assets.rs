@@ -53,18 +53,24 @@ fn lookup(path: &str) -> Option<&'static [u8]> {
         .map(|(_, content)| *content)
 }
 
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
+
 fn respond(path: &str, bytes: &'static [u8]) -> Response<Body> {
-    Response::builder()
+    let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type(path))
         .header(
             header::CACHE_CONTROL,
-            if path == "index.html" {
-                "no-cache"
-            } else {
+            if path.starts_with("assets/") {
                 "public, max-age=31536000, immutable"
+            } else {
+                "no-cache"
             },
-        )
+        );
+    if path.ends_with(".html") {
+        builder = builder.header("content-security-policy", CONTENT_SECURITY_POLICY);
+    }
+    builder
         .body(Body::from(bytes))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
