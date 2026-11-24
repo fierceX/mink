@@ -4,11 +4,11 @@ use mink::config_file::*;
 #[test]
 fn cli_long_run_defaults_match_the_requested_limits() {
     let cli = CliConfig::default();
-    assert_eq!(cli.max_turns, 200);
-    assert_eq!(cli.sub_agent_timeout_secs, 1_800);
-    assert_eq!(cli.tool_timeout_secs, 7_200);
-    assert_eq!(cli.tool_timeout_max_secs, 7_200);
-    assert_eq!(cli.provider_http_timeout_secs, 7_200);
+    assert_eq!(cli.generation.max_turns, 200);
+    assert_eq!(cli.tools.sub_agent_timeout_secs, 1_800);
+    assert_eq!(cli.tools.timeout_secs, 7_200);
+    assert_eq!(cli.tools.timeout_max_secs, 7_200);
+    assert_eq!(cli.provider.http_timeout_secs, 7_200);
 }
 
 #[test]
@@ -16,56 +16,68 @@ fn cli_defaults_track_runtime_option_defaults() {
     let cli = CliConfig::default();
 
     let provider = crate::runtime::ProviderOptions::default();
-    assert_eq!(cli.model, provider.model);
-    assert_eq!(cli.model_aliases, provider.model_aliases);
-    assert_eq!(cli.api_key, provider.api_key);
-    assert_eq!(cli.base_url, provider.base_url);
-    assert_eq!(cli.openai_reasoning_effort, provider.reasoning_effort);
-    assert_eq!(cli.openai_include_usage, provider.include_usage);
-    assert_eq!(cli.openai_token_param, provider.token_param);
-    assert_eq!(cli.openai_tool_choice, provider.tool_choice);
-    assert_eq!(cli.openai_extra_body, provider.extra_body);
+    assert_eq!(cli.provider.model, provider.model);
+    assert_eq!(cli.provider.model_aliases, provider.model_aliases);
+    assert_eq!(cli.provider.api_key, provider.api_key);
+    assert_eq!(cli.provider.base_url, provider.base_url);
+    assert_eq!(cli.provider.reasoning_effort, provider.reasoning_effort);
+    assert_eq!(cli.provider.include_usage, provider.include_usage);
+    assert_eq!(cli.provider.token_param, provider.token_param);
+    assert_eq!(cli.provider.tool_choice, provider.tool_choice);
+    assert_eq!(cli.provider.extra_body, provider.extra_body);
 
     let generation = crate::runtime::GenerationOptions::default();
-    assert_eq!(cli.max_tokens, generation.max_tokens);
-    assert_eq!(cli.max_turns, generation.max_turns);
+    assert_eq!(cli.generation.max_tokens, generation.max_tokens);
+    assert_eq!(cli.generation.max_turns, generation.max_turns);
     assert_eq!(
-        cli.llm_first_event_timeout_secs,
+        cli.generation.first_event_timeout_secs,
         generation.first_event_timeout_secs
     );
-    assert_eq!(cli.llm_idle_timeout_secs, generation.idle_timeout_secs);
-    assert_eq!(cli.llm_wait_heartbeat_secs, generation.wait_heartbeat_secs);
+    assert_eq!(
+        cli.generation.idle_timeout_secs,
+        generation.idle_timeout_secs
+    );
+    assert_eq!(
+        cli.generation.wait_heartbeat_secs,
+        generation.wait_heartbeat_secs
+    );
 
     let context = crate::runtime::ContextPolicy::default();
-    assert_eq!(cli.max_context_tokens, context.max_context_tokens);
-    assert_eq!(cli.context_compact_pct, context.compact_pct);
-    assert_eq!(cli.context_reserve_tokens, context.reserve_tokens);
-    assert_eq!(cli.context_compact_tail_tokens, context.compact_tail_tokens);
+    assert_eq!(cli.context.max_context_tokens, context.max_context_tokens);
+    assert_eq!(cli.context.compact_pct, context.compact_pct);
+    assert_eq!(cli.context.reserve_tokens, context.reserve_tokens);
+    assert_eq!(cli.context.compact_tail_tokens, context.compact_tail_tokens);
     assert_eq!(
-        cli.context_compact_max_output_tokens,
+        cli.context.compact_max_output_tokens,
         context.compact_max_output_tokens
     );
     assert_eq!(
-        cli.context_compact_input_reduction,
+        cli.context.compact_input_reduction,
         context.compact_input_reduction
     );
 
     let tools = crate::runtime::ToolOptions::default();
-    assert_eq!(cli.tool_timeout_secs, tools.timeout_secs);
-    assert_eq!(cli.tool_timeout_max_secs, tools.timeout_max_secs);
-    assert_eq!(cli.sub_agent_timeout_secs, tools.sub_agent_timeout_secs);
-    assert_eq!(cli.sub_agent_max_depth, tools.sub_agent_max_depth);
-    assert_eq!(cli.tool_result_max_bytes, tools.result_max_bytes);
-    assert_eq!(cli.file_write_max_bytes, tools.file_write_max_bytes);
-    assert_eq!(cli.edit_mode, tools.edit_mode);
-    assert_eq!(cli.edit_fuzzy_match, tools.edit_fuzzy_match);
-    assert_eq!(cli.edit_fuzzy_threshold, tools.edit_fuzzy_threshold);
-    assert_eq!(cli.edit_enforce_seen_lines, tools.edit_enforce_seen_lines);
-    assert_eq!(cli.max_search_files, tools.max_search_files);
-    assert_eq!(cli.max_search_results, tools.max_search_results);
-    assert_eq!(cli.enabled_tools, tools.enabled_tools);
-    assert_eq!(cli.tool_approval_mode, tools.approval_mode);
-    assert_eq!(cli.tool_approval, tools.approval);
+    assert_eq!(cli.tools.timeout_secs, tools.timeout_secs);
+    assert_eq!(cli.tools.timeout_max_secs, tools.timeout_max_secs);
+    assert_eq!(
+        cli.tools.sub_agent_timeout_secs,
+        tools.sub_agent_timeout_secs
+    );
+    assert_eq!(cli.tools.sub_agent_max_depth, tools.sub_agent_max_depth);
+    assert_eq!(cli.tools.result_max_bytes, tools.result_max_bytes);
+    assert_eq!(cli.tools.file_write_max_bytes, tools.file_write_max_bytes);
+    assert_eq!(cli.tools.edit_mode, tools.edit_mode);
+    assert_eq!(cli.tools.edit_fuzzy_match, tools.edit_fuzzy_match);
+    assert_eq!(cli.tools.edit_fuzzy_threshold, tools.edit_fuzzy_threshold);
+    assert_eq!(
+        cli.tools.edit_enforce_seen_lines,
+        tools.edit_enforce_seen_lines
+    );
+    assert_eq!(cli.tools.max_search_files, tools.max_search_files);
+    assert_eq!(cli.tools.max_search_results, tools.max_search_results);
+    assert_eq!(cli.tools.enabled_tools, tools.enabled_tools);
+    assert_eq!(cli.tools.approval_mode, tools.approval_mode);
+    assert_eq!(cli.tools.approval, tools.approval);
 }
 
 #[test]
@@ -82,7 +94,7 @@ fn sub_agent_depth_maps_from_sdk_and_toml() {
     };
     let mut cfg = CliConfig::default();
     super::apply_sdk_request_options(&mut cfg, &request);
-    assert_eq!(cfg.sub_agent_max_depth, 2);
+    assert_eq!(cfg.tools.sub_agent_max_depth, 2);
 
     let defaults = CliConfig::default();
     let project = MinkConfigFile {
@@ -93,7 +105,7 @@ fn sub_agent_depth_maps_from_sdk_and_toml() {
         ..Default::default()
     };
     apply_config_sources(&mut cfg, &defaults, None, Some(&project), None);
-    assert_eq!(cfg.sub_agent_max_depth, 3);
+    assert_eq!(cfg.tools.sub_agent_max_depth, 3);
 
     let project = MinkConfigFile {
         tools: ToolsConfigFile {
@@ -104,7 +116,7 @@ fn sub_agent_depth_maps_from_sdk_and_toml() {
     };
     let mut cfg = CliConfig::default();
     apply_config_sources(&mut cfg, &defaults, None, Some(&project), None);
-    assert_eq!(cfg.sub_agent_max_depth, 9);
+    assert_eq!(cfg.tools.sub_agent_max_depth, 9);
     assert!(validate_runtime_config(&cfg).is_err());
 }
 
@@ -139,13 +151,13 @@ fn parse_size_bytes_empty_error() {
 #[test]
 fn parse_args_model_provider() {
     let cfg = parse_args(vec!["-m".into(), "flash".into()]).unwrap();
-    assert_eq!(cfg.model, "flash");
+    assert_eq!(cfg.provider.model, "flash");
 }
 
 #[test]
 fn parse_args_model_accepts_custom_model_name() {
     let cfg = parse_args(vec!["-m".into(), "gpt-4.1".into()]).unwrap();
-    assert_eq!(cfg.model, "gpt-4.1");
+    assert_eq!(cfg.provider.model, "gpt-4.1");
 }
 
 #[test]
@@ -221,9 +233,9 @@ fn env_size_limits_lose_to_config_files() {
     let defaults = CliConfig::default();
     let mut cfg = defaults.clone();
     super::apply_size_limit_envs(&mut cfg, Some(111), None, Some(222), Some(333));
-    assert_eq!(cfg.tool_result_max_bytes, 111);
-    assert_eq!(cfg.max_search_files, 222);
-    assert_eq!(cfg.max_search_results, 333);
+    assert_eq!(cfg.tools.result_max_bytes, 111);
+    assert_eq!(cfg.tools.max_search_files, 222);
+    assert_eq!(cfg.tools.max_search_results, 333);
 
     let project = MinkConfigFile {
         tools: ToolsConfigFile {
@@ -233,9 +245,9 @@ fn env_size_limits_lose_to_config_files() {
         ..Default::default()
     };
     apply_config_sources(&mut cfg, &defaults, None, Some(&project), None);
-    assert_eq!(cfg.max_search_files, 9_999);
-    assert_eq!(cfg.max_search_results, 333);
-    assert_eq!(cfg.tool_result_max_bytes, 111);
+    assert_eq!(cfg.tools.max_search_files, 9_999);
+    assert_eq!(cfg.tools.max_search_results, 333);
+    assert_eq!(cfg.tools.result_max_bytes, 111);
 }
 
 #[test]
@@ -262,12 +274,12 @@ fn parse_args_enabled_tools_is_the_only_tool_selection_cli() {
     ])
     .unwrap();
     assert_eq!(
-        selected.enabled_tools,
+        selected.tools.enabled_tools,
         Some(vec!["Read".into(), "Bash".into(), "PythonSandbox".into()])
     );
 
     let none = parse_args(vec!["--enabled-tools".into(), "none".into()]).unwrap();
-    assert_eq!(none.enabled_tools, Some(Vec::new()));
+    assert_eq!(none.tools.enabled_tools, Some(Vec::new()));
     assert!(parse_args(vec!["--disable-bash".into()]).is_err());
 }
 
@@ -323,8 +335,8 @@ fn agent_jsonl_applies_cli_config_without_file_io() {
     let toml = "[tools]\nmax_search_files = 15000\nmax_search_results = 10000";
     let mut cfg = parse_args(vec!["--agent-jsonl".into(), "--config".into(), toml.into()]).unwrap();
     apply_config_file(&mut cfg).unwrap();
-    assert_eq!(cfg.max_search_files, 15000);
-    assert_eq!(cfg.max_search_results, 10000);
+    assert_eq!(cfg.tools.max_search_files, 15000);
+    assert_eq!(cfg.tools.max_search_results, 10000);
 }
 
 #[test]
@@ -341,7 +353,7 @@ fn parse_args_approval_mode() {
     let cli = cfg.cli_config.take();
     apply_config_sources(&mut cfg, &defaults, None, None, cli.as_ref());
     cfg.cli_config = cli;
-    assert_eq!(cfg.tool_approval_mode, ToolApprovalMode::Write);
+    assert_eq!(cfg.tools.approval_mode, ToolApprovalMode::Write);
 }
 
 #[test]
@@ -364,9 +376,9 @@ fn parse_args_llm_timeout_via_config() {
     let cli = cfg.cli_config.take();
     apply_config_sources(&mut cfg, &defaults, None, None, cli.as_ref());
     cfg.cli_config = cli;
-    assert_eq!(cfg.llm_first_event_timeout_secs, 7);
-    assert_eq!(cfg.llm_idle_timeout_secs, 8);
-    assert_eq!(cfg.llm_wait_heartbeat_secs, 9);
+    assert_eq!(cfg.generation.first_event_timeout_secs, 7);
+    assert_eq!(cfg.generation.idle_timeout_secs, 8);
+    assert_eq!(cfg.generation.wait_heartbeat_secs, 9);
 }
 
 #[test]
@@ -380,7 +392,7 @@ fn config_llm_timeout_via_toml() {
     let cli = cfg.cli_config.take();
     apply_config_sources(&mut cfg, &defaults, None, None, cli.as_ref());
     cfg.cli_config = cli;
-    assert_eq!(cfg.llm_wait_heartbeat_secs, 0);
+    assert_eq!(cfg.generation.wait_heartbeat_secs, 0);
 }
 
 #[test]
@@ -530,8 +542,14 @@ fn config_cli_flags_beat_project_config() {
         ..Default::default()
     };
     let mut cfg = CliConfig {
-        model: "flash".into(),
-        max_turns: 12,
+        provider: ProviderOptions {
+            model: "flash".into(),
+            ..Default::default()
+        },
+        generation: GenerationOptions {
+            max_turns: 12,
+            ..Default::default()
+        },
         // `--model flash` marks the flag; max_turns has no CLI flag, so the
         // TOML layer legitimately owns it (12 was only a pre-set default).
         cli_overrides: CliOverrides {
@@ -541,8 +559,8 @@ fn config_cli_flags_beat_project_config() {
         ..Default::default()
     };
     apply_config_sources(&mut cfg, &defaults, None, Some(&project), None);
-    assert_eq!(cfg.model, "flash");
-    assert_eq!(cfg.max_turns, 99);
+    assert_eq!(cfg.provider.model, "flash");
+    assert_eq!(cfg.generation.max_turns, 99);
 }
 
 #[test]
@@ -574,9 +592,9 @@ fn config_project_overrides_user_config() {
     };
     let mut cfg = CliConfig::default();
     apply_config_sources(&mut cfg, &defaults, Some(&user), Some(&project), None);
-    assert_eq!(cfg.api_key, "project-key");
-    assert_eq!(cfg.model, "pro");
-    assert_eq!(cfg.max_turns, 20);
+    assert_eq!(cfg.provider.api_key, "project-key");
+    assert_eq!(cfg.provider.model, "pro");
+    assert_eq!(cfg.generation.max_turns, 20);
 }
 
 #[test]
@@ -592,8 +610,8 @@ fn config_user_overrides_default() {
     };
     let mut cfg = CliConfig::default();
     apply_config_sources(&mut cfg, &defaults, Some(&user), None, None);
-    assert_eq!(cfg.api_key, "user-key");
-    assert_eq!(cfg.base_url, "https://user.example");
+    assert_eq!(cfg.provider.api_key, "user-key");
+    assert_eq!(cfg.provider.base_url, "https://user.example");
 }
 
 #[test]
@@ -612,11 +630,11 @@ fn config_file_sets_compaction_policy() {
     };
     let mut cfg = CliConfig::default();
     apply_config_sources(&mut cfg, &defaults, Some(&user), None, None);
-    assert_eq!(cfg.context_compact_pct, 72);
-    assert_eq!(cfg.context_reserve_tokens, 8_000);
-    assert_eq!(cfg.context_compact_tail_tokens, 12_000);
-    assert_eq!(cfg.context_compact_max_output_tokens, 2_048);
-    assert!(cfg.context_compact_input_reduction);
+    assert_eq!(cfg.context.compact_pct, 72);
+    assert_eq!(cfg.context.reserve_tokens, 8_000);
+    assert_eq!(cfg.context.compact_tail_tokens, 12_000);
+    assert_eq!(cfg.context.compact_max_output_tokens, 2_048);
+    assert!(cfg.context.compact_input_reduction);
 }
 
 #[test]
@@ -634,22 +652,25 @@ fn invalid_compaction_policy_keeps_defaults() {
     };
     let mut cfg = CliConfig::default();
     apply_config_sources(&mut cfg, &defaults, Some(&user), None, None);
-    assert_eq!(cfg.context_compact_pct, defaults.context_compact_pct);
-    assert_eq!(cfg.context_reserve_tokens, defaults.context_reserve_tokens);
+    assert_eq!(cfg.context.compact_pct, defaults.context.compact_pct);
+    assert_eq!(cfg.context.reserve_tokens, defaults.context.reserve_tokens);
     assert_eq!(
-        cfg.context_compact_tail_tokens,
-        defaults.context_compact_tail_tokens
+        cfg.context.compact_tail_tokens,
+        defaults.context.compact_tail_tokens
     );
     assert_eq!(
-        cfg.context_compact_max_output_tokens,
-        defaults.context_compact_max_output_tokens
+        cfg.context.compact_max_output_tokens,
+        defaults.context.compact_max_output_tokens
     );
 }
 
 #[test]
 fn runtime_config_rejects_unusable_context_budget_combinations() {
     let mut cfg = CliConfig {
-        max_context_tokens: 64_000,
+        context: ContextPolicy {
+            max_context_tokens: 64_000,
+            ..ContextPolicy::default()
+        },
         ..CliConfig::default()
     };
     let error = validate_runtime_config(&cfg).unwrap_err().to_string();
@@ -658,16 +679,16 @@ fn runtime_config_rejects_unusable_context_budget_combinations() {
         "{error}"
     );
 
-    cfg.context_reserve_tokens = 12_000;
+    cfg.context.reserve_tokens = 12_000;
     // 软额度：热尾部与摘要输出可以大于窗口/输入预算，运行时按每次请求收紧。
-    cfg.context_compact_tail_tokens = 256_000;
+    cfg.context.compact_tail_tokens = 256_000;
     validate_runtime_config(&cfg).unwrap();
 
-    cfg.context_compact_max_output_tokens = 64_000;
+    cfg.context.compact_max_output_tokens = 64_000;
     validate_runtime_config(&cfg).unwrap();
 
     // 硬约束仍然保留：reserve 必须小于窗口。
-    cfg.context_reserve_tokens = 64_000;
+    cfg.context.reserve_tokens = 64_000;
     let error = validate_runtime_config(&cfg).unwrap_err().to_string();
     assert!(
         error.contains("context_reserve_tokens (64000) must be less than max_context (64000)"),
@@ -678,7 +699,10 @@ fn runtime_config_rejects_unusable_context_budget_combinations() {
 #[test]
 fn runtime_config_allows_zero_context_window() {
     let cfg = CliConfig {
-        max_context_tokens: 0,
+        context: ContextPolicy {
+            max_context_tokens: 0,
+            ..ContextPolicy::default()
+        },
         ..CliConfig::default()
     };
     validate_runtime_config(&cfg).unwrap();
@@ -704,17 +728,20 @@ fn config_file_sets_openai_compatible_options() {
     };
     let mut cfg = CliConfig::default();
     apply_config_sources(&mut cfg, &defaults, None, Some(&project), None);
-    assert_eq!(cfg.openai_reasoning_effort, None);
-    assert!(!cfg.openai_include_usage);
-    assert_eq!(cfg.openai_token_param, TokenParamKind::MaxCompletionTokens);
-    assert_eq!(cfg.openai_tool_choice, Some(serde_json::json!("auto")));
-    assert_eq!(cfg.provider_http_timeout_secs, 0);
+    assert_eq!(cfg.provider.reasoning_effort, None);
+    assert!(!cfg.provider.include_usage);
     assert_eq!(
-        cfg.openai_extra_body["enable_thinking"],
+        cfg.provider.token_param,
+        TokenParamKind::MaxCompletionTokens
+    );
+    assert_eq!(cfg.provider.tool_choice, Some(serde_json::json!("auto")));
+    assert_eq!(cfg.provider.http_timeout_secs, 0);
+    assert_eq!(
+        cfg.provider.extra_body["enable_thinking"],
         serde_json::json!(true)
     );
     assert_eq!(
-        cfg.openai_extra_body["thinking_budget"],
+        cfg.provider.extra_body["thinking_budget"],
         serde_json::json!(8192)
     );
 }
@@ -755,18 +782,21 @@ fn config_file_invalid_llm_timeouts_are_ignored() {
     };
     let mut cfg = CliConfig::default();
     apply_config_sources(&mut cfg, &defaults, None, Some(&project), None);
-    assert_eq!(cfg.tool_timeout_secs, defaults.tool_timeout_secs);
-    assert_eq!(cfg.tool_timeout_max_secs, defaults.tool_timeout_max_secs);
-    assert_eq!(cfg.sub_agent_timeout_secs, -5);
+    assert_eq!(cfg.tools.timeout_secs, defaults.tools.timeout_secs);
+    assert_eq!(cfg.tools.timeout_max_secs, defaults.tools.timeout_max_secs);
+    assert_eq!(cfg.tools.sub_agent_timeout_secs, -5);
     assert!(validate_runtime_config(&cfg).is_err());
     assert_eq!(
-        cfg.llm_first_event_timeout_secs,
-        defaults.llm_first_event_timeout_secs
+        cfg.generation.first_event_timeout_secs,
+        defaults.generation.first_event_timeout_secs
     );
-    assert_eq!(cfg.llm_idle_timeout_secs, defaults.llm_idle_timeout_secs);
     assert_eq!(
-        cfg.llm_wait_heartbeat_secs,
-        defaults.llm_wait_heartbeat_secs
+        cfg.generation.idle_timeout_secs,
+        defaults.generation.idle_timeout_secs
+    );
+    assert_eq!(
+        cfg.generation.wait_heartbeat_secs,
+        defaults.generation.wait_heartbeat_secs
     );
 }
 
@@ -781,18 +811,18 @@ fn config_parse_toml_via_cli() {
     let cli = cfg.cli_config.take();
     apply_config_sources(&mut cfg, &defaults, None, None, cli.as_ref());
     cfg.cli_config = cli;
-    assert_eq!(cfg.max_turns, 50);
-    assert_eq!(cfg.tool_timeout_secs, 300);
-    assert_eq!(cfg.tool_timeout_max_secs, 1200);
+    assert_eq!(cfg.generation.max_turns, 50);
+    assert_eq!(cfg.tools.timeout_secs, 300);
+    assert_eq!(cfg.tools.timeout_max_secs, 1200);
 }
 
 #[test]
 fn edit_configuration_defaults_and_cli_overrides_are_typed() {
     let defaults = CliConfig::default();
-    assert_eq!(defaults.edit_mode, EditMode::Hashline);
-    assert!(defaults.edit_fuzzy_match);
-    assert_eq!(defaults.edit_fuzzy_threshold, 0.95);
-    assert!(!defaults.edit_enforce_seen_lines);
+    assert_eq!(defaults.tools.edit_mode, EditMode::Hashline);
+    assert!(defaults.tools.edit_fuzzy_match);
+    assert_eq!(defaults.tools.edit_fuzzy_threshold, 0.95);
+    assert!(!defaults.tools.edit_enforce_seen_lines);
 
     let cfg = parse_args(vec![
         "--edit-mode".into(),
@@ -805,10 +835,10 @@ fn edit_configuration_defaults_and_cli_overrides_are_typed() {
         "true".into(),
     ])
     .unwrap();
-    assert_eq!(cfg.edit_mode, EditMode::Replace);
-    assert!(!cfg.edit_fuzzy_match);
-    assert_eq!(cfg.edit_fuzzy_threshold, 0.88);
-    assert!(cfg.edit_enforce_seen_lines);
+    assert_eq!(cfg.tools.edit_mode, EditMode::Replace);
+    assert!(!cfg.tools.edit_fuzzy_match);
+    assert_eq!(cfg.tools.edit_fuzzy_threshold, 0.88);
+    assert!(cfg.tools.edit_enforce_seen_lines);
 }
 
 #[test]
@@ -835,7 +865,10 @@ fn edit_configuration_toml_and_threshold_validation_fail_fast() {
     assert!(toml::from_str::<MinkConfigFile>("[tools.edit]\nmode = 'patch'").is_err());
 
     let mut cfg = CliConfig {
-        edit_fuzzy_threshold: f64::NAN,
+        tools: ToolOptions {
+            edit_fuzzy_threshold: f64::NAN,
+            ..ToolOptions::default()
+        },
         ..CliConfig::default()
     };
     assert!(
@@ -844,14 +877,17 @@ fn edit_configuration_toml_and_threshold_validation_fail_fast() {
             .to_string()
             .contains("finite")
     );
-    cfg.edit_fuzzy_threshold = 1.01;
+    cfg.tools.edit_fuzzy_threshold = 1.01;
     assert!(validate_runtime_config(&cfg).is_err());
 }
 
 #[test]
 fn tool_timeout_max_below_five_is_rejected_by_cli_validation() {
     let mut cfg = CliConfig {
-        tool_timeout_max_secs: 4,
+        tools: ToolOptions {
+            timeout_max_secs: 4,
+            ..ToolOptions::default()
+        },
         ..CliConfig::default()
     };
     assert!(
@@ -860,7 +896,7 @@ fn tool_timeout_max_below_five_is_rejected_by_cli_validation() {
             .to_string()
             .contains("tool_timeout_max_secs must be at least 5 seconds")
     );
-    cfg.tool_timeout_max_secs = 5;
+    cfg.tools.timeout_max_secs = 5;
     assert!(validate_runtime_config(&cfg).is_ok());
 }
 
@@ -896,20 +932,20 @@ fn sdk_grouped_options_map_to_cli_config() {
 
     apply_sdk_request_options(&mut config, &request);
 
-    assert_eq!(config.model, "pro");
-    assert_eq!(config.max_tokens, 123);
-    assert_eq!(config.max_turns, 4);
-    assert_eq!(config.max_context_tokens, 64_000);
-    assert_eq!(config.context_reserve_tokens, 12_000);
-    assert_eq!(config.context_compact_tail_tokens, 16_000);
-    assert_eq!(config.context_compact_max_output_tokens, 4_096);
-    assert_eq!(config.tool_timeout_secs, 5);
-    assert_eq!(config.tool_timeout_max_secs, 900);
+    assert_eq!(config.provider.model, "pro");
+    assert_eq!(config.generation.max_tokens, 123);
+    assert_eq!(config.generation.max_turns, 4);
+    assert_eq!(config.context.max_context_tokens, 64_000);
+    assert_eq!(config.context.reserve_tokens, 12_000);
+    assert_eq!(config.context.compact_tail_tokens, 16_000);
+    assert_eq!(config.context.compact_max_output_tokens, 4_096);
+    assert_eq!(config.tools.timeout_secs, 5);
+    assert_eq!(config.tools.timeout_max_secs, 900);
     assert_eq!(
-        config.enabled_tools,
+        config.tools.enabled_tools,
         Some(vec!["Read".to_string(), "Bash".to_string()])
     );
-    assert_eq!(config.edit_mode, EditMode::Replace);
+    assert_eq!(config.tools.edit_mode, EditMode::Replace);
     assert_eq!(config.output_format, OutputFormat::Human);
     assert!(config.verbose);
     assert_eq!(config.session_id, "outer");
@@ -1100,8 +1136,8 @@ fn parse_args_supports_double_dash_and_equals_form() {
         "-leading-dash-prompt".into(),
     ])
     .unwrap();
-    assert_eq!(cfg.model, "pro");
-    assert_eq!(cfg.edit_mode, EditMode::Replace);
+    assert_eq!(cfg.provider.model, "pro");
+    assert_eq!(cfg.tools.edit_mode, EditMode::Replace);
     assert_eq!(cfg.prompt, "-leading-dash-prompt");
 }
 
