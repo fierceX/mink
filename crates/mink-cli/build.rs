@@ -8,15 +8,19 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    // `.git` lives at the workspace root; absolute paths keep rerun tracking
-    // reliable regardless of the build script's working directory.
+    // `.git` lives at the workspace root (or as a `gitdir:` file in a worktree);
+    // absolute paths keep rerun tracking reliable regardless of cwd.
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let git_dir = manifest.join("../../.git");
-    println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
-    println!(
-        "cargo:rerun-if-changed={}",
-        git_dir.join("refs/heads/main").display()
-    );
+    let dot_git = manifest.join("../../.git");
+    let git_dir = resolve_git_dir(&dot_git);
+    let head_path = git_dir.join("HEAD");
+    println!("cargo:rerun-if-changed={}", head_path.display());
+    if let Ok(head) = std::fs::read_to_string(&head_path)
+        && let Some(ref_rel) = head.trim().strip_prefix("ref: ")
+    {
+        let ref_path = git_dir.join(ref_rel.trim());
+        println!("cargo:rerun-if-changed={}", ref_path.display());
+    }
     println!(
         "cargo:rerun-if-changed={}",
         git_dir.join("packed-refs").display()
@@ -37,6 +41,21 @@ fn main() {
     };
 
     println!("cargo:rustc-env=MINK_GIT_HASH={hash}");
+}
+
+fn resolve_git_dir(dot_git: &std::path::Path) -> PathBuf {
+    if dot_git.is_file()
+        && let Ok(content) = std::fs::read_to_string(dot_git)
+        && let Some(raw) = content.trim().strip_prefix("gitdir:")
+    {
+        let path = PathBuf::from(raw.trim());
+        return if path.is_absolute() {
+            path
+        } else {
+            dot_git.parent().unwrap_or(dot_git).join(path)
+        };
+    }
+    dot_git.to_path_buf()
 }
 
 fn git_short_hash() -> Option<String> {

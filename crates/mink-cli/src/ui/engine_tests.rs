@@ -257,3 +257,31 @@ fn sub_agent_output_resets_between_thinking_and_text() {
         "the block boundary must leave the main parser clean: {text:?}"
     );
 }
+
+#[test]
+fn title_update_is_suppressed_in_stream_json_sanitizes_model_and_counts_cache_creation() {
+    let out = SharedBuffer::default();
+    let err = SharedBuffer::default();
+    let json_display =
+        TerminalDisplay::with_writers(false, true, Box::new(out.clone()), Box::new(err.clone()));
+    let stats = StatsSnapshot {
+        total_input_tokens: 1_000,
+        total_cache_read_tokens: 2_000,
+        total_cache_creation_tokens: 3_000,
+        ..Default::default()
+    };
+    json_display.render_title_update("flash", &stats);
+    assert_eq!(err.text(), "", "stream_json mode must not emit OSC 0 title");
+
+    let human_display = display_with(&out, &err, false);
+    human_display.render_title_update("flash\x1b]2;pwn\x07", &stats);
+    let title = err.text();
+    assert!(
+        !title.contains("pwn"),
+        "control sequence must be stripped: {title:?}"
+    );
+    assert!(
+        title.contains("I:6.0k("),
+        "title total_in must include cache creation tokens: {title:?}"
+    );
+}

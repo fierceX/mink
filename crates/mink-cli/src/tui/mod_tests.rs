@@ -3977,3 +3977,82 @@ fn inline_markdown_unmatched_delimiters_stay_linear() {
         started.elapsed()
     );
 }
+
+#[test]
+fn truncate_display_respects_max_width_smaller_than_ellipsis() {
+    assert_eq!(crate::util::truncate_display("hello", 0), "");
+    assert_eq!(crate::util::truncate_display("hello", 1), ".");
+    assert_eq!(crate::util::truncate_display("hello", 2), "..");
+    assert_eq!(crate::util::truncate_display("hello", 3), "...");
+    assert_eq!(crate::util::truncate_display("hello", 4), "h...");
+}
+
+#[test]
+fn details_panel_includes_goal_and_labels_collapsed_goal_card() {
+    let mut state = TuiState {
+        goal: Some(goal_display()),
+        ..Default::default()
+    };
+    let mut card = TranscriptItem::goal_card(crate::runtime::GoalMessage {
+        kind: crate::runtime::GoalMessageKind::Start,
+        goal_id: "g1".into(),
+        contract_revision: 1,
+        iteration: 1,
+        objective: "ship".into(),
+        acceptance_criteria: vec![],
+        constraints: vec![],
+        prior_decision: None,
+        feedback: None,
+    });
+    card.collapsed = true;
+    state.push_line(card);
+
+    let actions = panels::detail_actions(&state);
+    assert!(
+        actions
+            .iter()
+            .any(|(label, _, action)| label == "Goal" && *action == state::ClickAction::OpenGoal),
+        "Goal entry must be listed in /details: {actions:?}"
+    );
+    assert!(
+        actions.iter().any(|(label, _, _)| label == "Expand goal"),
+        "collapsed goal card must be labeled 'Expand goal', not thinking: {actions:?}"
+    );
+}
+
+#[test]
+fn paste_in_detail_view_does_not_mutate_hidden_input() {
+    let mut state = TuiState {
+        view: state::View::Goal { scroll: 0 },
+        ..Default::default()
+    };
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    input::handle_event(
+        crossterm::event::Event::Paste("secret".into()),
+        &mut state,
+        &tx,
+    );
+    assert!(
+        state.input.buf.is_empty(),
+        "paste while viewing a detail screen must not modify hidden input"
+    );
+}
+
+#[test]
+fn replay_preserves_tool_call_input_payload() {
+    let events = vec![serde_json::json!({
+        "type": "tool_call",
+        "id": "call_1",
+        "name": "Read",
+        "input": { "path": "src/lib.rs" }
+    })];
+    let loaded = replay::build_lines_from_events(&events);
+    let item = loaded
+        .iter()
+        .find(|item| item.tool_use_id.as_deref() == Some("call_1"))
+        .expect("replayed tool call item");
+    assert_eq!(
+        item.tool_input,
+        Some(serde_json::json!({ "path": "src/lib.rs" }))
+    );
+}

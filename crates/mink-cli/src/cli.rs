@@ -318,6 +318,36 @@ pub struct CliExit {
     pub code: i32,
 }
 
+/// Shared binary entrypoint for both `mink` and `mink-core`: installs the
+/// terminal-restoring panic hook, bootstraps OS sandboxing before any threads
+/// spawn, then starts the Tokio runtime and executes `main_entry`.
+pub fn run_cli_binary() -> ! {
+    install_panic_hook();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Err(e) = bootstrap_sandbox_if_needed(&args) {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("Error: failed to start async runtime: {e}");
+            std::process::exit(1);
+        }
+    };
+    let code = match runtime.block_on(main_entry(args)) {
+        Ok(exit) => exit.code,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            1
+        }
+    };
+    std::process::exit(code);
+}
+
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         #[cfg(feature = "tui")]
@@ -595,7 +625,10 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
 
     finish_turn(turn_result, runtime.shutdown()).await?;
 
-    if !session.session_id.is_empty() {
+    if !session.session_id.is_empty()
+        && !cfg.agent_jsonl
+        && cfg.output_format != crate::config::OutputFormat::StreamJson
+    {
         let alias_label = read_session_alias(&session).await;
         let label = alias_label.as_deref().unwrap_or(&session.session_ref);
         eprintln!(

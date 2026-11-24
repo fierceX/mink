@@ -286,7 +286,7 @@ fn build_history_from_events(events: &[serde_json::Value]) -> LoadedHistory {
                         .map(str::to_owned),
                     tool_name: name.to_string(),
                     summary,
-                    input: None,
+                    input: evt.get("input").cloned(),
                 });
             }
             ReplayEventKind::SubAgent => {

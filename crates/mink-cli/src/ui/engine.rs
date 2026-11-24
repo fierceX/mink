@@ -261,7 +261,13 @@ impl Display for TerminalDisplay {
     }
 
     fn render_title_update(&self, model: &str, stats: &StatsSnapshot) {
-        let total_in = stats.total_input_tokens + stats.total_cache_read_tokens;
+        if self.stream_json {
+            return;
+        }
+        let model = strip_ansi(model);
+        let total_in = stats.total_input_tokens
+            + stats.total_cache_read_tokens
+            + stats.total_cache_creation_tokens;
         let belief_str = if stats.belief > 0.0 {
             format!(" B:{:.2}", stats.belief)
         } else {

@@ -62,7 +62,20 @@ pub(crate) mod util {
             return value.to_string();
         }
         let ellipsis_width = UnicodeWidthStr::width(ellipsis);
-        let keep = max_width.saturating_sub(ellipsis_width);
+        if max_width < ellipsis_width {
+            let mut out = String::new();
+            let mut width = 0usize;
+            for ch in ellipsis.chars() {
+                let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if width + ch_width > max_width {
+                    break;
+                }
+                out.push(ch);
+                width += ch_width;
+            }
+            return out;
+        }
+        let keep = max_width - ellipsis_width;
         let mut out = String::new();
         let mut width = 0usize;
         for ch in value.chars() {

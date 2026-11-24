@@ -9,6 +9,9 @@ pub(crate) fn detail_actions(state: &TuiState) -> Vec<(String, usize, ClickActio
     if state.todos.is_some() {
         actions.push(("Todos".into(), 0, ClickAction::OpenTodos));
     }
+    if state.goal.as_ref().is_some_and(|goal| !goal.hidden) {
+        actions.push(("Goal".into(), 0, ClickAction::OpenGoal));
+    }
     for (index, item) in state.lines.iter().enumerate() {
         if item.kind == TranscriptKind::SubAgent
             && let Some(id) = state.sub_agents.session_for_line(index)
@@ -31,11 +34,14 @@ pub(crate) fn detail_actions(state: &TuiState) -> Vec<(String, usize, ClickActio
             ));
         }
         if index >= state.inline.committed && item.is_collapsible() {
+            let label = match item.kind {
+                TranscriptKind::Goal => "goal",
+                _ => item.tool_name.as_deref().unwrap_or("thinking"),
+            };
             actions.push((
                 format!(
-                    "{} {}",
+                    "{} {label}",
                     if item.collapsed { "Expand" } else { "Collapse" },
-                    item.tool_name.as_deref().unwrap_or("thinking")
                 ),
                 index,
                 ClickAction::ToggleCollapse,

@@ -970,7 +970,8 @@ pub(crate) fn handle_event_for_mode(
     if !matches!(&ev, Event::Key(key) if matches!(key.code, KeyCode::Up | KeyCode::Down)) {
         state.input.preferred_column = None;
     }
-    let track_draft = matches!(&ev, Event::Key(_) | Event::Paste(_));
+    let track_draft = matches!(&ev, Event::Key(_))
+        || (matches!(&ev, Event::Paste(_)) && matches!(state.view, View::Main));
     let old_cursor = state.input.cursor;
     let old_snapshot =
         track_draft.then(|| (state.input.buf.clone(), state.input.pending_images.clone()));
@@ -1012,13 +1013,15 @@ pub(crate) fn handle_event_for_mode(
         }
         Event::Resize(..) => {}
         Event::Paste(content) => {
-            state.input.clamp_cursor();
-            let to_insert = normalize_tui_input(&content);
-            if !to_insert.is_empty() {
-                state.input.buf.insert_str(state.input.cursor, &to_insert);
-                state.input.cursor += to_insert.len();
+            if matches!(state.view, View::Main) {
+                state.input.clamp_cursor();
+                let to_insert = normalize_tui_input(&content);
+                if !to_insert.is_empty() {
+                    state.input.buf.insert_str(state.input.cursor, &to_insert);
+                    state.input.cursor += to_insert.len();
+                }
+                refresh_file_picker(state);
             }
-            refresh_file_picker(state);
         }
         _ => {}
     }
