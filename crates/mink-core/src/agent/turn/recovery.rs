@@ -131,7 +131,7 @@ impl super::TurnExecutor {
             .restore(&snapshot.text);
             // 权限必须在发布前设置到临时文件上（发布后再 chmod 会留下
             // 错误权限窗口，chmod 失败还会被忽略）。读取失败则拒绝发布。
-            let permissions = match std::fs::metadata(&full) {
+            let permissions = match tokio::fs::metadata(&full).await {
                 Ok(meta) => meta.permissions(),
                 Err(error) => {
                     self.ctx
@@ -145,12 +145,20 @@ impl super::TurnExecutor {
                     continue;
                 }
             };
-            if let Err(error) = crate::session::persistence::publish_state_with_permissions(
-                &full,
-                restored.as_bytes(),
-                permissions,
-                &self.ctx.persistence_fault,
-            ) {
+            let publish_path = full.clone();
+            let publish_bytes = restored.into_bytes();
+            let publish_fault = self.ctx.persistence_fault.clone();
+            let publish_result = tokio::task::spawn_blocking(move || {
+                crate::session::persistence::publish_state_with_permissions(
+                    &publish_path,
+                    &publish_bytes,
+                    permissions,
+                    &publish_fault,
+                )
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("rollback publish task failed: {e}"))?;
+            if let Err(error) = publish_result {
                 self.ctx
                     .log_critical_event(crate::events::EventLog::SignalRollbackError {
                         path: full.display().to_string(),

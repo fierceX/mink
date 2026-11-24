@@ -102,6 +102,53 @@ struct SandboxExecution {
     termination: ProcessTermination,
 }
 
+#[derive(Hash, PartialEq, Eq)]
+struct WasmModuleCacheKey {
+    path: PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+fn load_compiled_wasm(wasm_path: &Path) -> Result<(Engine, Module)> {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+
+    const MAX_CACHED_MODULES: usize = 4;
+    static CACHE: LazyLock<Mutex<HashMap<WasmModuleCacheKey, (Engine, Module)>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    let canonical = wasm_path
+        .canonicalize()
+        .unwrap_or_else(|_| wasm_path.to_path_buf());
+    let meta =
+        std::fs::metadata(&canonical).map_err(|e| anyhow::anyhow!("读取 python.wasm 失败: {e}"))?;
+    let key = WasmModuleCacheKey {
+        path: canonical.clone(),
+        len: meta.len(),
+        modified: meta.modified().ok(),
+    };
+    {
+        let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((engine, module)) = cache.get(&key) {
+            return Ok((engine.clone(), module.clone()));
+        }
+    }
+    let wasm_bytes =
+        std::fs::read(&canonical).map_err(|e| anyhow::anyhow!("读取 python.wasm 失败: {e}"))?;
+    let mut engine_config = Config::new();
+    engine_config.epoch_interruption(true);
+    let engine = Engine::new(&engine_config)?;
+    let module = Module::new(&engine, &wasm_bytes)?;
+    {
+        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= MAX_CACHED_MODULES {
+            cache.clear();
+        }
+        cache.insert(key, (engine.clone(), module.clone()));
+    }
+    Ok((engine, module))
+}
+
 /// 在 CPython WASI 沙箱中执行 Python 脚本并返回结构化终态。
 #[allow(clippy::too_many_arguments)]
 fn execute_in_sandbox_detailed(
@@ -116,13 +163,7 @@ fn execute_in_sandbox_detailed(
     timeout_secs: u64,
     interrupt: Option<&AtomicBool>,
 ) -> Result<SandboxExecution> {
-    let wasm_bytes =
-        std::fs::read(wasm_path).map_err(|e| anyhow::anyhow!("读取 python.wasm 失败: {e}"))?;
-
-    let mut engine_config = Config::new();
-    engine_config.epoch_interruption(true);
-    let engine = Engine::new(&engine_config)?;
-    let module = Module::new(&engine, &wasm_bytes)?;
+    let (engine, module) = load_compiled_wasm(wasm_path)?;
 
     // ── WASI 上下文 ──
     let stdout_pipe = MemoryOutputPipe::new(max_output);
@@ -155,7 +196,7 @@ fn execute_in_sandbox_detailed(
     // wasmtime-wasi preview1 首次匹配，子路径必须在父路径之前
     for dir in write_dirs {
         let abs = resolve_abs(dir, cwd);
-        if abs.exists() || abs.parent().is_some_and(|parent| parent.exists()) {
+        if abs.exists() {
             builder.preopened_dir(
                 &abs,
                 abs.to_string_lossy(),
@@ -170,10 +211,11 @@ fn execute_in_sandbox_detailed(
             builder.preopened_dir(&abs, abs.to_string_lossy(), DirPerms::READ, FilePerms::READ)?;
         }
     }
-    // preopen CWD 到绝对路径（只读），但若 CWD 已在 write_dirs 中则跳过（写权限优先）
+    // preopen CWD 到绝对路径（只读），但若 CWD（或其父目录）已在 write_dirs 中则跳过（写权限优先）
+    let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     let cwd_is_writable = write_dirs.iter().any(|d| {
         let abs = resolve_abs(d, cwd);
-        abs == cwd
+        abs.exists() && (abs == canonical_cwd || canonical_cwd.starts_with(&abs))
     });
     if !cwd_is_writable {
         builder.preopened_dir(cwd, cwd.to_string_lossy(), DirPerms::READ, FilePerms::READ)?;

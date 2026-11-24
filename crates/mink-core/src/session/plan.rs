@@ -157,7 +157,7 @@ impl PlanStore {
         }
         if content.is_empty() {
             return match std::fs::remove_file(&self.draft_path) {
-                Ok(()) => Ok(()),
+                Ok(()) => crate::session::atomic_file::sync_parent(&self.draft_path),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(error) => Err(error.into()),
             };
@@ -226,6 +226,7 @@ impl PlanStore {
                 )),
             };
         }
+        crate::session::atomic_file::sync_parent(&self.plan_path)?;
         Ok(content)
     }
 
@@ -289,6 +290,7 @@ impl PlanStore {
                 )),
             };
         }
+        crate::session::atomic_file::sync_parent(&self.plan_path)?;
         Ok(())
     }
 

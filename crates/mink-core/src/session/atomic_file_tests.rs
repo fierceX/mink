@@ -11,14 +11,14 @@ fn failure_before_replace_preserves_old_body() {
     let target = root.join("state.json");
     let temporary = root.join(".state.json.injected");
     std::fs::write(&target, b"old").unwrap();
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&temporary)
         .unwrap();
 
     let error = write_and_replace_with(
-        &mut file,
+        file,
         &temporary,
         &target,
         b"new",
@@ -45,14 +45,14 @@ fn failure_after_replace_reports_published_but_unsynced() {
     let target = root.join("state.json");
     let temporary = root.join(".state.json.injected");
     std::fs::write(&target, b"old").unwrap();
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&temporary)
         .unwrap();
 
     let error = write_and_replace_with(
-        &mut file,
+        file,
         &temporary,
         &target,
         b"new",
@@ -86,7 +86,7 @@ fn permissions_are_applied_before_publish() {
     let target = root.join("script.sh");
     let temporary = root.join(".script.sh.injected");
     std::fs::write(&target, b"old").unwrap();
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&temporary)
@@ -94,7 +94,7 @@ fn permissions_are_applied_before_publish() {
     let permissions = std::fs::Permissions::from_mode(0o600);
 
     write_and_replace_with(
-        &mut file,
+        file,
         &temporary,
         &target,
         b"new",
@@ -195,7 +195,7 @@ fn rename_failure_before_publish_keeps_old_body() {
     let target = root.join("script.sh");
     let temporary = root.join(".script.sh.injected");
     std::fs::write(&target, b"old").unwrap();
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&temporary)
@@ -205,7 +205,7 @@ fn rename_failure_before_publish_keeps_old_body() {
     // Unlink the staging file in the pre-replace hook: the rename itself
     // fails, so nothing is published and the old body stays.
     let error = write_and_replace_with(
-        &mut file,
+        file,
         &temporary,
         &target,
         b"new",

@@ -621,7 +621,7 @@ impl CompactionEngine {
             active_start: repaired_start,
             summary: state.summary,
         };
-        self.commit_state(next).await?;
+        self.commit_state(next, false).await?;
         Ok(())
     }
 
@@ -736,12 +736,35 @@ impl CompactionEngine {
         let input_limit = ctx
             .target_limit
             .unwrap_or_else(|| request_input_limit(&self.config));
+        // Pre-read authoritative plan & goal checkpoints once outside the shrink
+        // loop instead of re-reading `plan.md` from disk on every iteration.
+        let static_tail_checkpoints = {
+            let mut extra = Vec::new();
+            if let Some(plan) = read_active_plan_checkpoint(
+                &self.summary_path,
+                derived_display_tokens(&self.config),
+            )? {
+                extra.push(plan);
+            }
+            if let Some(goals) = &self.goal_store
+                && let Some(checkpoint) = goals.checkpoint(
+                    crate::runtime::goal::goal_projection_chars(self.config.max_context_tokens),
+                )?
+            {
+                extra.push(checkpoint);
+            }
+            extra
+        };
         loop {
             self.check_emergency_cancelled()?;
             self.check_emergency_deadline(ctx.deadline)?;
             let summary = blocks.render();
             // 候选与真实请求同一投影（含预演 TodoSync）；应急折叠后尾部为空。
-            let candidate = self.checkpoint_prefix(&summary)?;
+            let mut candidate = Vec::with_capacity(1 + static_tail_checkpoints.len());
+            if !summary.trim().is_empty() {
+                candidate.push(compacted_summary_message(&summary));
+            }
+            candidate.extend(static_tail_checkpoints.iter().cloned());
             let tokens =
                 estimate_candidate_tokens(ctx.main_request, &candidate, ctx.todo.as_ref())?;
             if input_limit == usize::MAX || tokens <= input_limit {
@@ -753,11 +776,7 @@ impl CompactionEngine {
                     active_start: state.active_start + active.len(),
                     summary: summary.clone(),
                 };
-                self.commit_state(next).await?;
-                *self
-                    .startup_repair_loss
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()) = Vec::new();
+                self.commit_state(next, true).await?;
                 let result = format!(
                     "compacted_at_trigger=emergency_kept=0_input_reduction={}_cut=all_mode=emergency_emergency_reason={}",
                     self.config.context_compact_input_reduction,
@@ -983,14 +1002,7 @@ impl CompactionEngine {
             active_start: state.active_start + cut,
             summary: summary.clone(),
         };
-        self.commit_state(next).await?;
-        // The committed summary consumed the startup-repair loss (every
-        // summary input includes the current loss); only a successful commit
-        // may clear it, so a failed/interrupted attempt keeps it for retry.
-        *self
-            .startup_repair_loss
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Vec::new();
+        self.commit_state(next, true).await?;
         let result = format!(
             "compacted_at_trigger={trigger}_kept={}_input_reduction={}_input_mode={}_aligned_messages={}_aligned_estimated_tokens={}_reduced_suffix_messages={}_fallback_reason={}{}{}",
             kept.len(),
@@ -1089,7 +1101,7 @@ impl CompactionEngine {
         }
     }
 
-    async fn commit_state(&self, state: CompactionState) -> Result<()> {
+    async fn commit_state(&self, state: CompactionState, clear_repair_loss: bool) -> Result<()> {
         let data = serde_json::to_vec_pretty(&state)?;
         let state_path = self.state_path.clone();
         let fault = self.fault.clone();
@@ -1101,6 +1113,17 @@ impl CompactionEngine {
             .state
             .write()
             .map_err(|_| anyhow::anyhow!("context state lock poisoned"))? = Ok(state.clone());
+        // The authoritative `context-state.json` is now durably committed with
+        // the summary that consumed `startup_repair_loss`; clear it here so a
+        // failure writing the derived `summary.md` cannot re-inject the same
+        // loss on the next compaction. Startup repair commits pass `false`
+        // because they only record the loss for the next summarization.
+        if clear_repair_loss {
+            *self
+                .startup_repair_loss
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Vec::new();
+        }
         self.store.prune_cache_before(state.active_start).await;
         let summary_path = self.summary_path.clone();
         let summary = format!("{}\n", state.summary);
@@ -1186,6 +1209,20 @@ impl CompactionEngine {
                 }
             }
         });
+        struct WatcherGuard {
+            watcher: tokio::task::JoinHandle<()>,
+            cancel: crate::cancel::CancellationToken,
+        }
+        impl Drop for WatcherGuard {
+            fn drop(&mut self) {
+                self.watcher.abort();
+                self.cancel.cancel();
+            }
+        }
+        let _watcher_guard = WatcherGuard {
+            watcher,
+            cancel: cleanup_cancel,
+        };
         let result = self
             .run_summary_call_with_cancel(
                 active,
@@ -1197,8 +1234,7 @@ impl CompactionEngine {
                 round_deadline,
             )
             .await;
-        watcher.abort();
-        cleanup_cancel.cancel();
+        drop(_watcher_guard);
         if self.interrupt.load(Ordering::SeqCst) {
             return Err(CompactionInterrupted::error());
         }

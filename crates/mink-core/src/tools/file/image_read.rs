@@ -90,6 +90,10 @@ pub(crate) fn classify_image_read(
         // Path resolution failures keep the existing text-path error surface.
         Err(_) => return Ok(ImageReadKind::NotImage),
     };
+    // Refuse to open FIFOs/devices/directories before probing magic bytes.
+    if !std::fs::metadata(&path).is_ok_and(|meta| meta.is_file()) {
+        return Ok(ImageReadKind::NotImage);
+    }
     let mut head = [0u8; 16];
     let matched = std::fs::File::open(&path).is_ok_and(|mut file| {
         use std::io::Read as _;

@@ -96,9 +96,9 @@ fn atomic_replace_impl(
             std::process::id()
         ));
         match create_temp_file(&temporary, permissions.is_some()) {
-            Ok(mut file) => {
+            Ok(file) => {
                 let result = write_and_replace_with(
-                    &mut file,
+                    file,
                     &temporary,
                     path,
                     content,
@@ -141,7 +141,7 @@ fn create_temp_file(path: &Path, restrict_permissions: bool) -> std::io::Result<
 }
 
 fn write_and_replace_with(
-    file: &mut File,
+    mut file: File,
     temporary: &Path,
     path: &Path,
     content: &[u8],
@@ -167,6 +167,9 @@ fn write_and_replace_with(
     }
     file.sync_all()
         .map_err(|error| PublishError::NotPublished(error.into()))?;
+    // Close the staging file handle before replacing the target so Windows
+    // `MoveFileExW` never fails with a sharing violation on the open handle.
+    drop(file);
     before_replace().map_err(PublishError::NotPublished)?;
     replace_existing(temporary, path).map_err(PublishError::NotPublished)?;
     // From here on the new bytes are visible: failures are durability

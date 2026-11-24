@@ -24,17 +24,39 @@ fn file_not_found_suggestion(path: &Path) -> String {
     )
 }
 
-/// Read up to `max_lines` lines from the file head. Returns the lines and,
-/// when the whole file was read, the exact line count (None otherwise).
+/// Read up to `max_lines` lines from the file head, bounded by bytes so a
+/// single minified megabyte line cannot exhaust memory during preview.
+/// Returns the lines and, when the whole file was read, the exact line count
+/// (None otherwise).
 fn read_head_lines(path: &Path, max_lines: usize) -> Result<(Vec<String>, Option<usize>)> {
     use std::io::BufRead;
+    const MAX_HEAD_PREVIEW_BYTES: u64 = 256 * 1024;
     let file = std::fs::File::open(path)
         .map_err(|error| anyhow!("Error: cannot read {}: {error}", path.display()))?;
+    let mut reader = std::io::BufReader::new(file.take(MAX_HEAD_PREVIEW_BYTES + 1));
     let mut lines = Vec::with_capacity(max_lines + 1);
-    for line in std::io::BufReader::new(file).lines() {
-        let line =
-            line.map_err(|error| anyhow!("Error: cannot read {}: {error}", path.display()))?;
-        lines.push(line);
+    let mut total_bytes: u64 = 0;
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        let n = reader
+            .read_until(b'\n', &mut buf)
+            .map_err(|error| anyhow!("Error: cannot read {}: {error}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        total_bytes = total_bytes.saturating_add(n as u64);
+        if total_bytes > MAX_HEAD_PREVIEW_BYTES {
+            let text = String::from_utf8_lossy(&buf);
+            let truncated = text.trim_end_matches(['\r', '\n']);
+            if !truncated.is_empty() && lines.len() < max_lines {
+                lines.push(truncated.to_string());
+            }
+            return Ok((lines, None));
+        }
+        let line = String::from_utf8(std::mem::take(&mut buf))
+            .map_err(|error| anyhow!("Error: cannot read {}: {error}", path.display()))?;
+        lines.push(line.trim_end_matches(['\r', '\n']).to_string());
         if lines.len() > max_lines {
             lines.pop();
             return Ok((lines, None));
@@ -171,23 +193,27 @@ pub fn read(path: &str, offset: Option<usize>, limit: Option<usize>) -> Result<S
     let start_byte = line_offsets[range.start];
 
     // End byte: either the start of the next line after the range, or EOF.
+    let mut file = std::fs::File::open(path)?;
     let end_byte = if range.end < line_offsets.len() {
         line_offsets[range.end]
     } else {
-        // Scan to end of file to find the exact byte position
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf)?;
-        reader.stream_position()?
+        file.seek(SeekFrom::End(0))?
     };
 
     if start_byte >= end_byte {
         return Ok(String::new());
     }
 
+    const MAX_SELECTED_READ_BYTES: u64 = 32 * 1024 * 1024;
+    let span_bytes = end_byte - start_byte;
+    ensure!(
+        span_bytes <= MAX_SELECTED_READ_BYTES,
+        "Error: selected range in {path} is too large ({span_bytes} bytes > {MAX_SELECTED_READ_BYTES} bytes); narrow the line range"
+    );
+
     // Seek and read the exact byte range.
-    let mut file = std::fs::File::open(path)?;
     file.seek(SeekFrom::Start(start_byte))?;
-    let mut content = vec![0u8; (end_byte - start_byte) as usize];
+    let mut content = vec![0u8; span_bytes as usize];
     file.read_exact(&mut content)?;
 
     let mut selected = String::from_utf8(content)?;
@@ -794,30 +820,47 @@ fn stage_temp_file(
     kind: &str,
     restrict: bool,
 ) -> Result<(std::fs::File, std::path::PathBuf)> {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
     let name = target
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("file");
-    let temporary = parent.join(format!(".{name}.{kind}-{}-{stamp}", std::process::id()));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    if restrict {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+    let mut last_err = None;
+    for _ in 0..16 {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temporary = parent.join(format!(
+            ".{name}.{kind}-{}-{stamp}-{seq}",
+            std::process::id()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if restrict {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = restrict;
+        match options.open(&temporary) {
+            Ok(file) => return Ok((file, temporary)),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_err = Some(err);
+            }
+            Err(err) => return Err(err.into()),
+        }
     }
-    #[cfg(not(unix))]
-    let _ = restrict;
-    let file = options.open(&temporary)?;
-    Ok((file, temporary))
+    Err(last_err
+        .map(anyhow::Error::from)
+        .unwrap_or_else(|| anyhow::anyhow!("cannot allocate unique temporary file")))
 }
 
 fn atomic_write(path: &Path, content: &str) -> Result<()> {

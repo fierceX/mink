@@ -81,6 +81,7 @@ impl ArtifactManager {
             file.write_all(content.as_bytes())?;
             file.flush()?;
             file.sync_all()?;
+            crate::session::atomic_file::sync_parent(&path)?;
             let record = ArtifactRecord {
                 id: id.clone(),
                 tool: tool.to_string(),
@@ -138,6 +139,24 @@ impl ArtifactManager {
     pub fn get(&self, id: &str) -> Result<ArtifactRecord> {
         self.find(id)?
             .ok_or_else(|| anyhow::anyhow!("Error: artifact not found: {id}"))
+    }
+
+    pub(crate) fn indexed_ids(&self) -> Result<std::collections::HashSet<String>> {
+        let index = match std::fs::read_to_string(&self.index_path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut ids = std::collections::HashSet::new();
+        for line in index.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(record) = serde_json::from_str::<ArtifactRecord>(line) {
+                ids.insert(record.id);
+            }
+        }
+        Ok(ids)
     }
 
     /// Distinguish a new artifact identity from damaged or unreadable metadata.

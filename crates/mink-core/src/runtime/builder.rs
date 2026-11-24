@@ -50,8 +50,12 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
 
     let (sid, session_ref, session_alias, resolved_paths) =
         resolve_session(&home, &cwd, session, session_layout).await?;
-    if !resolved_paths.metadata.exists()
-        && resolved_paths.session_dir.exists()
+    let dir_existed = resolved_paths.session_dir.exists();
+    let lease = Arc::new(crate::session::lease::SessionLease::acquire_directory(
+        &resolved_paths.session_dir,
+    )?);
+    if dir_existed
+        && !resolved_paths.metadata.exists()
         && (session_layout != paths::SessionLayout::Isolated
             || crate::session::metadata::session_dir_has_data(&resolved_paths.session_dir).await?)
     {
@@ -60,9 +64,6 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
             resolved_paths.metadata.display()
         );
     }
-    let lease = Arc::new(crate::session::lease::SessionLease::acquire_directory(
-        &resolved_paths.session_dir,
-    )?);
     config.session_id = sid.clone();
 
     let api_url_str = api_url(&config);

@@ -32,9 +32,12 @@ pub(crate) fn todo_candidate_state<'a>(
 
 /// 折叠历史里真实出现、且仍存在于 artifact 索引中的引用（上限 8 条）。
 /// 只列出可验证的 id：不创建虚构 URL，也不猜测被删除的 artifact。
-fn existing_artifact_refs(ctx: &AgentSharedContext, messages: &[serde_json::Value]) -> Vec<String> {
+async fn existing_artifact_refs(
+    ctx: &AgentSharedContext,
+    messages: &[serde_json::Value],
+) -> Vec<String> {
     const MAX_REFS: usize = 8;
-    let mut refs: Vec<String> = Vec::new();
+    let mut candidates: Vec<String> = Vec::new();
     for message in messages {
         let text = serde_json::to_string(message).unwrap_or_default();
         let mut rest = text.as_str();
@@ -47,15 +50,25 @@ fn existing_artifact_refs(ctx: &AgentSharedContext, messages: &[serde_json::Valu
             if id.is_empty() {
                 continue;
             }
-            if !refs.contains(&id) && ctx.artifacts.get(&id).is_ok() {
-                refs.push(id);
-                if refs.len() >= MAX_REFS {
-                    return refs;
-                }
+            if !candidates.contains(&id) {
+                candidates.push(id);
             }
         }
     }
-    refs
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let artifacts = ctx.artifacts.clone();
+    tokio::task::spawn_blocking(move || {
+        let indexed = artifacts.indexed_ids().unwrap_or_default();
+        candidates
+            .into_iter()
+            .filter(|id| indexed.contains(id))
+            .take(MAX_REFS)
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// 应急 checkpoint 的共用入口（turn 与 manual 两个入口共用同一实现）：
@@ -75,7 +88,7 @@ pub(crate) async fn commit_emergency_checkpoint(
         target_limit,
         current_user_input,
         todo: todo_candidate_state(ctx, &snapshot),
-        artifact_refs: existing_artifact_refs(ctx, messages),
+        artifact_refs: existing_artifact_refs(ctx, messages).await,
         deadline,
     };
     ctx.compaction

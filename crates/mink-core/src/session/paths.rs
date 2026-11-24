@@ -208,12 +208,15 @@ pub fn chrono_session_id() -> String {
     let base = time::OffsetDateTime::now_utc()
         .format(FMT)
         .unwrap_or_else(|_| String::new());
-    // 完整 subsec_nanos（u32）：u16 截断使"随机"后缀每 65.5µs 重复一次，
-    // 并行子代理会话 id 可碰撞导致第二个子代理启动失败。
-    let rand_suffix = std::time::SystemTime::now()
+    // 完整 subsec_nanos 与进程级单调计数器混合，避免微秒级时钟下并行子代理碰撞。
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SESSION_SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
+    let seq = SESSION_SEQ.fetch_add(1, Ordering::Relaxed) as u32;
+    let rand_suffix = nanos ^ seq.wrapping_mul(0x9e37_79b1);
     format!("{}-{:08x}", base, rand_suffix)
 }
 

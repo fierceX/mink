@@ -938,6 +938,7 @@ impl AgentRuntimeHandle {
         }
         let mut versions: BTreeMap<String, String> =
             goal.evidence_versions.iter().cloned().collect();
+        let mut refreshed: BTreeMap<String, String> = BTreeMap::new();
         for reference in review.evidence() {
             let key = if reference.starts_with("artifact://") {
                 reference.clone()
@@ -951,13 +952,24 @@ impl AgentRuntimeHandle {
                 .canonicalize()?;
                 path.to_string_lossy().into_owned()
             };
+            let actual = if let Some(cached) = refreshed.get(&key) {
+                cached.clone()
+            } else {
+                let hash = self.evidence_version(&reference)?;
+                refreshed.insert(key.clone(), hash.clone());
+                hash
+            };
             ensure!(
-                versions.get(&key) == Some(&self.evidence_version(&reference)?),
+                versions.get(&key) == Some(&actual),
                 "review evidence changed or was not inspected"
             );
         }
         for (reference, hash) in &mut versions {
-            *hash = self.evidence_version(reference)?;
+            if let Some(actual) = refreshed.get(reference) {
+                *hash = actual.clone();
+            } else {
+                *hash = self.evidence_version(reference)?;
+            }
         }
         Ok(versions.into_iter().collect())
     }
