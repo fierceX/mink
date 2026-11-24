@@ -8186,7 +8186,7 @@ async fn goal_review_rejects_unread_forged_or_changed_evidence() {
         host_goal_before_submission,
         "recording the host conclusion must not bypass the runtime commit"
     );
-    assert!(session.submission.lock().unwrap().is_some());
+    assert!(session.submitted_conclusion().is_some());
     std::fs::write(cwd.join("proof.txt"), "changed after inspection").unwrap();
     assert!(session.submit(review, &evidence_ctx).is_err());
     runtime.shutdown().await.unwrap();

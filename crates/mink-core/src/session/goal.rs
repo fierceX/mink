@@ -1249,32 +1249,29 @@ impl GoalStore {
         for goal in state.current.iter_mut().chain(state.history.iter_mut()) {
             goal.normalize_phase();
         }
+        if let Some(mut pending) = read(&journal)? {
+            ensure!(
+                pending.version == GOAL_FORMAT_VERSION,
+                "unsupported goal journal"
+            );
+            for goal in pending.current.iter_mut().chain(pending.history.iter_mut()) {
+                goal.normalize_phase();
+            }
+            publish_state(&path, &serde_json::to_vec(&pending)?, &fault)?;
+            state = pending;
+        }
+        ensure!(
+            state.version == GOAL_FORMAT_VERSION,
+            "unsupported goal state"
+        );
         let (changes, _) = tokio::sync::watch::channel(state.current.clone());
-        let store = Self {
+        Ok(Self {
             path,
             journal,
             state: Mutex::new(state),
             fault,
             changes,
-        };
-        if let Some(pending) = read(&store.journal)? {
-            ensure!(
-                pending.version == GOAL_FORMAT_VERSION,
-                "unsupported goal journal"
-            );
-            let mut pending = pending;
-            for goal in pending.current.iter_mut().chain(pending.history.iter_mut()) {
-                goal.normalize_phase();
-            }
-            publish_state(&store.path, &serde_json::to_vec(&pending)?, &store.fault)?;
-            *store.state.lock().unwrap() = pending.clone();
-            store.changes.send_replace(pending.current);
-        }
-        ensure!(
-            store.state.lock().unwrap().version == GOAL_FORMAT_VERSION,
-            "unsupported goal state"
-        );
-        Ok(store)
+        })
     }
     pub fn snapshot(&self) -> Option<GoalSnapshot> {
         self.state
@@ -1862,6 +1859,12 @@ impl GoalStore {
                 goal.review_candidate = None;
                 goal.review_stage = Some(GoalReviewStage::Screening);
             }
+            goal.revision = goal
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("goal revision overflow"))?;
+            goal.version = GOAL_FORMAT_VERSION;
+            goal.normalize_phase();
         }
         self.publish(&mut state, next)?;
         Ok(ApplyResult::Applied)

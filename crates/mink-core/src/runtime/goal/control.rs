@@ -636,13 +636,6 @@ impl AgentRuntimeHandle {
     /// admitted run: it lives in the RunGuard and is destroyed when the run
     /// ends or when this call refuses to start one.
     fn start_goal_run(&self, lease: Option<Box<dyn GoalRunLease>>) -> RuntimeResult<()> {
-        // Verify the execution environment before mutating control state: a
-        // spawn without a runtime would otherwise leave a run that never runs.
-        if tokio::runtime::Handle::try_current().is_err() {
-            return Err(RuntimeError::Command(
-                "goal scheduling requires a running async runtime".into(),
-            ));
-        }
         let started = {
             let mut control = self.goal_driver.lock_control();
             match &control.driver {
@@ -686,6 +679,11 @@ impl AgentRuntimeHandle {
                 }
                 return Ok(());
             };
+            // Verify the execution environment only when we actually need to
+            // spawn a run, and before mutating `control.driver` to Running.
+            let runtime_handle = tokio::runtime::Handle::try_current().map_err(|_| {
+                RuntimeError::Command("goal scheduling requires a running async runtime".into())
+            })?;
             let run_id = control.next_run_id;
             control.next_run_id = run_id.saturating_add(1);
             let goal_id = goal.id.clone();
@@ -696,13 +694,13 @@ impl AgentRuntimeHandle {
                     goal_id: goal_id.clone(),
                 },
             );
-            Some((run_id, goal_id))
+            Some((runtime_handle, run_id, goal_id))
         };
-        let Some((run_id, goal_id)) = started else {
+        let Some((runtime_handle, run_id, goal_id)) = started else {
             return Ok(());
         };
         let handle = self.clone();
-        tokio::spawn(async move {
+        runtime_handle.spawn(async move {
             handle.run_goal_worker(run_id, goal_id, lease).await;
         });
         Ok(())

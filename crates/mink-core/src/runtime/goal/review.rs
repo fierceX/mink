@@ -7,14 +7,21 @@ type EvidenceVersions = Vec<(String, String)>;
 type EvidenceRemapping = BTreeMap<String, String>;
 type StageObserver = Arc<dyn Fn(&GoalSnapshot) + Send + Sync>;
 
+#[derive(Debug, Clone)]
+enum ReviewMailbox {
+    Conclusion(GoalReview),
+    Continuation(GoalContinueProposal),
+}
+
 pub(crate) struct GoalReviewSession {
     pub(crate) goal: GoalSnapshot,
     parent_goal_store: Arc<crate::session::goal::GoalStore>,
     usage: Arc<crate::session::usage::UsageJournal>,
-    /// A host-agent conclusion mailbox, separate from GoalStore. The read-only
-    /// reviewer cannot submit to it; the runtime commits only validated results.
-    pub(crate) submission: Mutex<Option<GoalReview>>,
-    pub(crate) continuation: Mutex<Option<GoalContinueProposal>>,
+    /// Single host-agent conclusion/continuation mailbox, separate from
+    /// GoalStore. Holding both mutually exclusive states behind one lock
+    /// eliminates check-then-lock races between `submit_continue` and
+    /// `submit_conclusion`/`submit`.
+    mailbox: Mutex<Option<ReviewMailbox>>,
     observer: Mutex<Option<StageObserver>>,
     last_rejection: Mutex<Option<String>>,
     pub(crate) reads: Mutex<BTreeMap<String, String>>,
@@ -31,8 +38,7 @@ impl GoalReviewSession {
             goal,
             parent_goal_store,
             usage,
-            submission: Mutex::new(None),
-            continuation: Mutex::new(None),
+            mailbox: Mutex::new(None),
             observer: Mutex::new(None),
             last_rejection: Mutex::new(None),
             reads: Mutex::new(BTreeMap::new()),
@@ -41,8 +47,43 @@ impl GoalReviewSession {
     }
 
     pub(crate) fn has_submission(&self) -> bool {
-        self.submission.lock().unwrap().is_some() || self.continuation.lock().unwrap().is_some()
+        self.mailbox
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
+
+    pub(crate) fn submitted_conclusion(&self) -> Option<GoalReview> {
+        match self
+            .mailbox
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            Some(ReviewMailbox::Conclusion(review)) => Some(review.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn submitted_continuation(&self) -> Option<GoalContinueProposal> {
+        match self
+            .mailbox
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            Some(ReviewMailbox::Continuation(proposal)) => Some(proposal.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn clear_continuation(&self) {
+        let mut mailbox = self.mailbox.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(*mailbox, Some(ReviewMailbox::Continuation(_))) {
+            *mailbox = None;
+        }
+    }
+
     pub(crate) fn snapshot_for_read(&self) -> GoalSnapshot {
         self.parent_goal_store
             .snapshot()
@@ -72,7 +113,14 @@ impl GoalReviewSession {
                     stage,
                 },
             )?;
-            if let Some(observer) = self.observer.lock().unwrap().as_ref() {
+            // Clone the observer handle and release the lock before invoking it
+            // so a re-entrant read or panic cannot deadlock/poison the mutex.
+            let observer = self
+                .observer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(observer) = observer {
                 observer(&next);
             }
         }
@@ -93,16 +141,18 @@ impl GoalReviewSession {
                 .is_some_and(|r| r.candidate == proposal.candidate),
             "a successful independent descriptive report is required"
         );
-        ensure!(
-            self.submission.lock().unwrap().is_none(),
-            "full conclusion already submitted"
-        );
-        let mut mailbox = self.continuation.lock().unwrap();
-        ensure!(
-            mailbox.as_ref().is_none_or(|p| p == &proposal),
-            "different continuation already submitted"
-        );
-        *mailbox = Some(proposal);
+        let mut mailbox = self.mailbox.lock().unwrap_or_else(|e| e.into_inner());
+        match mailbox.as_ref() {
+            Some(ReviewMailbox::Conclusion(_)) => {
+                anyhow::bail!("full conclusion already submitted")
+            }
+            Some(ReviewMailbox::Continuation(existing)) if existing != &proposal => {
+                anyhow::bail!("different continuation already submitted")
+            }
+            _ => {
+                *mailbox = Some(ReviewMailbox::Continuation(proposal));
+            }
+        }
         Ok(())
     }
 
@@ -212,7 +262,9 @@ impl GoalReviewSession {
                 hash_bytes(content.as_bytes()) == *hash && hash_file(path)? == *hash,
                 "reviewer artifact changed after inspection"
             );
-            let id = reference.strip_prefix("artifact://").unwrap();
+            let id = reference
+                .strip_prefix("artifact://")
+                .ok_or_else(|| anyhow::anyhow!("invalid artifact reference: {reference}"))?;
             let parent_path = parent.session.artifacts_dir.join(format!("{id}.txt"));
             match parent.goal_ctx.artifacts.find(id)? {
                 Some(_) => {
@@ -274,10 +326,7 @@ impl GoalReviewSession {
         parent: &AgentRuntimeHandle,
     ) -> Result<(GoalReview, Vec<(String, String)>)> {
         let mut feedback = self
-            .submission
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .submitted_conclusion()
             .ok_or_else(|| anyhow::anyhow!("missing host goal conclusion"))?;
         let (reads, replacements) = self.import_evidence(parent)?;
         let remap = |refs: &mut Vec<String>| {
@@ -354,7 +403,7 @@ impl GoalReviewSession {
             });
         }
         ensure!(
-            self.continuation.lock().unwrap().is_none(),
+            self.submitted_continuation().is_none(),
             "continuation already submitted"
         );
         let verdict = match conclusion.decision {
@@ -412,12 +461,18 @@ impl GoalReviewSession {
             blocker,
         };
         review.validate(&current)?;
-        let mut mailbox = self.submission.lock().unwrap();
-        ensure!(
-            mailbox.as_ref().is_none_or(|r| r == &review),
-            "different conclusion already submitted"
-        );
-        *mailbox = Some(review);
+        let mut mailbox = self.mailbox.lock().unwrap_or_else(|e| e.into_inner());
+        match mailbox.as_ref() {
+            Some(ReviewMailbox::Continuation(_)) => {
+                anyhow::bail!("continuation already submitted")
+            }
+            Some(ReviewMailbox::Conclusion(existing)) if existing != &review => {
+                anyhow::bail!("different conclusion already submitted")
+            }
+            _ => {
+                *mailbox = Some(ReviewMailbox::Conclusion(review));
+            }
+        }
         Ok(())
     }
 
@@ -427,7 +482,7 @@ impl GoalReviewSession {
         ctx: &crate::goal_review::GoalReviewToolContext<'_>,
     ) -> Result<()> {
         ensure!(
-            self.continuation.lock().unwrap().is_none(),
+            self.submitted_continuation().is_none(),
             "continuation already submitted"
         );
         ensure!(
@@ -478,12 +533,18 @@ impl GoalReviewSession {
                 "review evidence must be inspected with Read and remain unchanged: {reference}"
             );
         }
-        let mut result = self.submission.lock().unwrap_or_else(|e| e.into_inner());
-        ensure!(
-            result.as_ref().is_none_or(|old| old == &feedback),
-            "host conclusion already submitted with different facts"
-        );
-        *result = Some(feedback);
+        let mut mailbox = self.mailbox.lock().unwrap_or_else(|e| e.into_inner());
+        match mailbox.as_ref() {
+            Some(ReviewMailbox::Continuation(_)) => {
+                anyhow::bail!("continuation already submitted")
+            }
+            Some(ReviewMailbox::Conclusion(old)) if old != &feedback => {
+                anyhow::bail!("host conclusion already submitted with different facts")
+            }
+            _ => {
+                *mailbox = Some(ReviewMailbox::Conclusion(feedback));
+            }
+        }
         Ok(())
     }
 }
@@ -625,7 +686,8 @@ impl AgentRuntimeHandle {
             &conclusion,
         )?;
         let owner = self.clone();
-        *session.observer.lock().unwrap() = Some(Arc::new(move |g| owner.announce_goal(g)));
+        *session.observer.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(Arc::new(move |g| owner.announce_goal(g)));
         let mut child = None;
         loop {
             session.check_budget()?;
@@ -667,7 +729,7 @@ impl AgentRuntimeHandle {
                 session
                     .reads
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|e| e.into_inner())
                     .extend(report.evidence_versions.clone());
                 report
             } else {
@@ -808,12 +870,12 @@ impl AgentRuntimeHandle {
                     session
                         .last_rejection
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(|e| e.into_inner())
                         .as_deref()
                         .unwrap_or("none")
                 );
             }
-            let proposal = session.continuation.lock().unwrap().clone();
+            let proposal = session.submitted_continuation();
             if let Some(proposal) = proposal {
                 let current = session.snapshot_for_read();
                 let fingerprint = proposal.fingerprint()?;
@@ -831,7 +893,7 @@ impl AgentRuntimeHandle {
                         },
                     )?;
                     self.announce_goal(&next);
-                    *session.continuation.lock().unwrap() = None;
+                    session.clear_continuation();
                     continue;
                 }
             }

@@ -441,7 +441,7 @@ impl AgentRuntimeHandle {
                     return Ok(());
                 }
                 let expected_conversation_seq = outcome?;
-                let proposal = session.continuation.lock().unwrap().clone();
+                let proposal = session.submitted_continuation();
                 if let Some(proposal) = proposal {
                     self.commit_goal_continue(run_id, proposal, expected_conversation_seq)?;
                     return Ok(());

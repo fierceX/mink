@@ -389,7 +389,7 @@ async fn host_conclusion_tool_is_scoped_and_rejections_preserve_goal_state() {
         rejected[0].failure_source, None,
         "a conclusion rejection is not a damaged model format"
     );
-    assert!(session.submission.lock().unwrap().is_none());
+    assert!(session.submitted_conclusion().is_none());
     assert_eq!(handle.goal_snapshot().unwrap(), goal);
     close_fixture(runtime, &handle, root).await;
 }
@@ -1259,7 +1259,7 @@ async fn simple_conclusion_cannot_complete_without_independent_evidence() {
         serde_json::json!({"decision":"continue","summary":"The independent report confirms work remains","next_step":"Implement deliverable","remaining_requirements":[]})
     );
     assert!(tool.execute(&payload, &ctx).unwrap().success);
-    let review = session.submission.lock().unwrap().clone().unwrap();
+    let review = session.submitted_conclusion().unwrap();
     assert_eq!(review.verdict, GoalReviewVerdict::NeedsWork);
     assert!(review.original_request.is_none() && review.criteria.is_empty());
     assert_eq!(
@@ -2147,4 +2147,89 @@ fn missing_blocker_evidence_names_only_the_unavailable_reference() {
     })
     .expect("the readable reference still resolves");
     assert_eq!(ok, vec![("file://present", "hash-present".to_string())]);
+}
+
+#[tokio::test]
+async fn confirm_goal_with_disabled_driver_outside_tokio_does_not_fault_driver() {
+    let root = std::env::temp_dir().join(format!(
+        "mink-confirm-disabled-sync-{}",
+        time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let options = AgentOptions::new(root.join("home"), &root).with_llm_backend(Arc::new(NoRequest));
+    let runtime = AgentRuntime::start(options).await.unwrap();
+    let handle = runtime.handle();
+    let draft = handle
+        .goal_ctx
+        .goal_store
+        .draft(GoalSpec::new("sync confirm check"), "env".into(), 60)
+        .unwrap();
+    // Call `confirm_goal` from a plain OS thread with no Tokio runtime context
+    // while the goal driver has not been enabled yet.
+    let sync_handle = handle.clone();
+    let confirmed = std::thread::spawn(move || sync_handle.confirm_goal(&draft.id, draft.revision))
+        .join()
+        .expect("sync thread")
+        .expect("confirm_goal must succeed when driver is disabled outside Tokio");
+    assert_eq!(confirmed.status, GoalStatus::Active);
+    // Subsequent control operations must still work (driver must not be Faulted).
+    let paused = handle
+        .pause_goal(&confirmed.id, confirmed.revision)
+        .unwrap();
+    assert_eq!(paused.status, GoalStatus::Paused);
+    close_fixture(runtime, &handle, root).await;
+}
+
+#[test]
+fn settle_iteration_increments_revision_once_per_applied_settlement() {
+    use crate::agent::orchestrator::{TurnRunResult, TurnStatus};
+    use crate::session::goal::{ApplyResult, GoalStore, IterationKey, SettlementFacts};
+    let dir = std::env::temp_dir().join(format!(
+        "mink-settle-rev-{}",
+        time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = GoalStore::load(
+        &dir,
+        crate::session::persistence::PersistenceFault::default(),
+    )
+    .unwrap();
+    let active = store
+        .create(GoalSpec::new("bump revision"), "env".into())
+        .unwrap();
+    let started = store.begin_iteration("turn-1", 0).unwrap();
+    let key = IterationKey {
+        goal_id: active.id.clone(),
+        iteration: started.iterations.last().unwrap().iteration,
+        turn_id: "turn-1".into(),
+    };
+    let before = store.snapshot().unwrap();
+    let result = TurnRunResult {
+        billing_turn_id: "bill-1".into(),
+        status: TurnStatus::Ok,
+        failure: None,
+        tool_call_count: 0,
+        tool_error_count: 0,
+        error: None,
+        usage_records: vec![],
+        usage: Default::default(),
+        text: "done".into(),
+        thinking: String::new(),
+    };
+    let first = store
+        .settle_iteration(&key, &result, &SettlementFacts::default())
+        .unwrap();
+    assert_eq!(first, ApplyResult::Applied);
+    let after = store.snapshot().unwrap();
+    assert_eq!(
+        after.revision,
+        before.revision + 1,
+        "settling the current goal iteration must advance revision for CAS safety"
+    );
+    let repeat = store
+        .settle_iteration(&key, &result, &SettlementFacts::default())
+        .unwrap();
+    assert_eq!(repeat, ApplyResult::AlreadyApplied);
+    assert_eq!(store.snapshot().unwrap().revision, after.revision);
+    let _ = std::fs::remove_dir_all(dir);
 }
