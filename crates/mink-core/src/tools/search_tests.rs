@@ -32,7 +32,7 @@ fn glob_basic_matches() {
 fn glob_recursive_pattern() {
     let result = glob("**/*.rs", "src/tools", 5000).unwrap();
     assert!(result.contains("search.rs") || result.contains("bash.rs"));
-    assert!(result.contains("runner.rs"));
+    assert!(result.contains("runner/mod.rs"));
 }
 
 #[test]
