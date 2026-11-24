@@ -89,7 +89,7 @@ fn visible_status_items(state: &TuiState, width: u16) -> Vec<StatusItem> {
     if status_width(&items) > width as usize
         && let Some(model) = items.iter_mut().find(|item| item.priority == 1)
     {
-        let work_width = state.work_state.label().len() + 3;
+        let work_width = state.stream.work_state.label().len() + 3;
         model.text = truncate_visual(&model.text, (width as usize).saturating_sub(work_width + 1));
     }
     items.retain(|item| !item.text.is_empty());
@@ -97,29 +97,30 @@ fn visible_status_items(state: &TuiState, width: u16) -> Vec<StatusItem> {
 }
 
 fn build_status_items(state: &TuiState) -> Vec<StatusItem> {
-    let s = &state.stats;
+    let s = &state.mirrors.stats;
     let ti = s
         .total_input_tokens
         .saturating_add(s.total_cache_read_tokens)
         .saturating_add(s.total_cache_creation_tokens);
     let mut items = vec![StatusItem {
-        text: super::super::sanitize::sanitize_tui_text(&state.model),
+        text: super::super::sanitize::sanitize_tui_text(&state.mirrors.model),
         style: theme::primary_bold(),
         priority: 1,
         click: None,
     }];
-    if !state.cwd_label.is_empty() {
+    if !state.mirrors.cwd_label.is_empty() {
         items.push(StatusItem {
-            text: format!("@{}", state.cwd_label),
+            text: format!("@{}", state.mirrors.cwd_label),
             style: theme::muted(),
             priority: 4,
             click: None,
         });
     }
-    if let Some(label) = goal_status_label(state.goal.as_ref()) {
+    if let Some(label) = goal_status_label(state.mirrors.goal.as_ref()) {
         items.push(StatusItem {
             text: super::super::sanitize::sanitize_tui_text(&label),
             style: if state
+                .mirrors
                 .goal
                 .as_ref()
                 .is_some_and(|goal| goal.status == "active")
@@ -140,7 +141,7 @@ fn build_status_items(state: &TuiState) -> Vec<StatusItem> {
             click: None,
         });
     }
-    if let Some(plan) = state.plan.as_ref() {
+    if let Some(plan) = state.mirrors.plan.as_ref() {
         let label = match plan.transition {
             PlanTransitionDisplay::DraftSaved => "plan:draft",
             PlanTransitionDisplay::Confirmed => "plan:confirmed",
@@ -153,7 +154,7 @@ fn build_status_items(state: &TuiState) -> Vec<StatusItem> {
             click: None,
         });
     }
-    if let Some(todos) = state.todos.as_ref()
+    if let Some(todos) = state.mirrors.todos.as_ref()
         && todos.counts.in_progress + todos.counts.pending > 0
     {
         items.push(StatusItem {
@@ -194,7 +195,7 @@ fn build_status_items(state: &TuiState) -> Vec<StatusItem> {
         click: None,
     });
     // 流式等待心跳的精简状态标签（如 `·30s`），渲染宽度不足时优先被裁剪。
-    if let Some(status) = state.stream_status.as_deref() {
+    if let Some(status) = state.stream.stream_status.as_deref() {
         items.push(StatusItem {
             text: status.to_string(),
             style: theme::info(),
@@ -203,8 +204,8 @@ fn build_status_items(state: &TuiState) -> Vec<StatusItem> {
         });
     }
     items.push(StatusItem {
-        text: format!("[{}]", state.work_state.label()),
-        style: theme::work_state(state.work_state),
+        text: format!("[{}]", state.stream.work_state.label()),
+        style: theme::work_state(state.stream.work_state),
         priority: 0,
         click: None,
     });

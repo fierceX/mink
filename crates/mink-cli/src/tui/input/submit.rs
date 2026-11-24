@@ -5,7 +5,7 @@ pub(super) fn handle_enter(
     orch_tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
 ) -> bool {
     state.input.clamp_cursor();
-    if state.edit_input.is_some() {
+    if state.admission.edit_input.is_some() {
         if let Err(error) = state.submit_human_input(orch_tx) {
             state.input_rejected(error.to_string());
         }
@@ -54,7 +54,7 @@ pub(super) fn handle_enter(
         state.input.cursor = 0;
         return false;
     }
-    if state.runtime.is_some() {
+    if state.admission.runtime.is_some() {
         if matches!(parsed, Ok(None)) {
             if let Err(error) = state.submit_human_input(orch_tx) {
                 // Admission failures must not finalize the current stream or
@@ -72,7 +72,7 @@ pub(super) fn handle_enter(
             }
             return false;
         }
-        if state.active_turn_id.is_some()
+        if state.stream.active_turn_id.is_some()
             && matches!(
                 parsed,
                 Ok(Some(
@@ -132,7 +132,7 @@ pub(super) fn handle_enter(
                 SlashCommand::Compact => {
                     if orch_tx.send(RuntimeCmd::Compact).is_ok() {
                         state.arm_task_notification();
-                        state.work_state = WorkState::Compacting;
+                        state.stream.work_state = WorkState::Compacting;
                     } else {
                         state.push_line(TranscriptItem::new(
                             "Failed to send compact command.".into(),
@@ -168,7 +168,7 @@ pub(super) fn handle_enter(
             let input = submitted_user_input(&typed, &images);
             if orch_tx.send(RuntimeCmd::Run { input, done: None }).is_ok() {
                 state.arm_task_notification();
-                state.work_state = WorkState::WaitingModel;
+                state.stream.work_state = WorkState::WaitingModel;
             } else {
                 // The runtime channel is closed: put the text and the queued
                 // images back so a failed send never silently discards them.

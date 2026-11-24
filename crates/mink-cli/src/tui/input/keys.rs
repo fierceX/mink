@@ -37,12 +37,13 @@ pub(super) fn handle_key(
         }
         if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('o') {
             if let Some(index) = state
+                .transcript
                 .lines
                 .iter()
                 .rposition(|item| item.kind == TranscriptKind::Goal)
-                && index >= state.inline.committed
+                && index >= state.transcript.inline.committed
             {
-                state.lines[index].toggle_collapsed();
+                state.transcript.lines[index].toggle_collapsed();
                 state.invalidate_item(index);
             }
             return false;
@@ -63,13 +64,13 @@ pub(super) fn handle_key(
             }
             (KeyModifiers::NONE, KeyCode::PageUp) => {
                 if let Some(scroll) = view_scroll_mut(&mut state.view) {
-                    *scroll = scroll.saturating_sub(state.detail_height.max(1));
+                    *scroll = scroll.saturating_sub(state.mirrors.detail_height.max(1));
                 }
                 return false;
             }
             (KeyModifiers::NONE, KeyCode::PageDown) => {
                 if let Some(scroll) = view_scroll_mut(&mut state.view) {
-                    *scroll = scroll.saturating_add(state.detail_height.max(1));
+                    *scroll = scroll.saturating_add(state.mirrors.detail_height.max(1));
                 }
                 return false;
             }
@@ -144,8 +145,8 @@ pub(super) fn handle_key(
         (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
             if state.input.buf.is_empty()
                 && state.input.pending_images.is_empty()
-                && state.clipboard_started.is_none()
-                && !state.admission_pending
+                && state.async_load.clipboard_started.is_none()
+                && !state.admission.admission_pending
             {
                 state.quit = true;
                 return true;
@@ -244,7 +245,7 @@ fn handle_panel_key(
         Vec::new()
     };
     let count = if panel == PanelKind::Inputs {
-        state.inputs.len() + state.failed_drafts.len()
+        state.admission.inputs.len() + state.admission.failed_drafts.len()
     } else {
         actions.len()
     };
@@ -278,21 +279,21 @@ fn handle_panel_key(
         KeyCode::Char('r') | KeyCode::Char('e') | KeyCode::Char('w')
             if panel == PanelKind::Inputs =>
         {
-            if state.admission_pending {
+            if state.admission.admission_pending {
                 return true;
             }
-            if let Some(receipt) = state.inputs.get(selected).cloned() {
+            if let Some(receipt) = state.admission.inputs.get(selected).cloned() {
                 if !matches!(
                     receipt.status,
                     crate::runtime::InputStatus::Pending | crate::runtime::InputStatus::Unapplied
                 ) {
-                    state.input_notice = Some(
+                    state.admission.input_notice = Some(
                         "Input is already applying; wait for its authoritative result.".into(),
                     );
                     return true;
                 }
                 if key.code == KeyCode::Char('e') {
-                    state.edit_input = Some((receipt.input_id, receipt.revision));
+                    state.admission.edit_input = Some((receipt.input_id, receipt.revision));
                     state.input.buf = receipt.input.text;
                     state.input.cursor = state.input.buf.len();
                     state.input.revision = state.input.revision.wrapping_add(1);
@@ -309,10 +310,10 @@ fn handle_panel_key(
                         state.input_rejected(error.to_string());
                     }
                 }
-            } else if key.code == KeyCode::Char('r') && selected >= state.inputs.len() {
-                let index = selected - state.inputs.len();
-                if index < state.failed_drafts.len() {
-                    let draft = state.failed_drafts.remove(index);
+            } else if key.code == KeyCode::Char('r') && selected >= state.admission.inputs.len() {
+                let index = selected - state.admission.inputs.len();
+                if index < state.admission.failed_drafts.len() {
+                    let draft = state.admission.failed_drafts.remove(index);
                     state.input.buf = draft.buf;
                     state.input.cursor = draft.cursor;
                     state.input.pending_images = draft.pending_images;
@@ -331,8 +332,8 @@ fn handle_panel_key(
 fn activate_action(state: &mut TuiState, index: usize, action: ClickAction) {
     match action {
         ClickAction::ToggleCollapse => {
-            if index >= state.inline.committed
-                && let Some(item) = state.lines.get_mut(index)
+            if index >= state.transcript.inline.committed
+                && let Some(item) = state.transcript.lines.get_mut(index)
             {
                 item.toggle_collapsed();
                 state.invalidate_item(index);

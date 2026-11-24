@@ -10,32 +10,35 @@ use crate::runtime::{HumanInput, InputReceipt, InputStatus};
 impl TuiState {
     pub(crate) fn input_rejected(&mut self, message: String) {
         self.invalidate_detail_resource("panel:Inputs");
-        self.input_notice = Some(super::sanitize::sanitize_tui_text(&message));
-        if self.streaming {
-            self.pending_infos.push(message);
+        self.admission.input_notice = Some(super::sanitize::sanitize_tui_text(&message));
+        if self.stream.streaming {
+            self.transcript.pending_infos.push(message);
         } else {
             self.push_line(TranscriptItem::new(message, TranscriptKind::Error));
         }
     }
     pub(crate) fn refresh_inputs(&mut self) {
-        let Some(runtime) = &self.runtime else { return };
+        let Some(runtime) = &self.admission.runtime else {
+            return;
+        };
         let source = runtime.handle.input_inbox();
         if self
+            .admission
             .inbox_source
             .as_ref()
             .is_none_or(|old| !std::sync::Arc::ptr_eq(old, source))
         {
-            self.inbox_source = Some(source.clone());
+            self.admission.inbox_source = Some(source.clone());
             let mut subscription = source.subscribe();
-            self.inputs = subscription.borrow_and_update().as_ref().clone();
-            self.input_subscription = Some(subscription);
+            self.admission.inputs = subscription.borrow_and_update().as_ref().clone();
+            self.admission.input_subscription = Some(subscription);
             self.invalidate_detail_resource("panel:Inputs");
             self.invalidate_detail_resource("panel:Status");
             self.dirty = true;
-        } else if let Some(subscription) = self.input_subscription.as_mut()
+        } else if let Some(subscription) = self.admission.input_subscription.as_mut()
             && subscription.has_changed().unwrap_or(false)
         {
-            self.inputs = subscription.borrow_and_update().as_ref().clone();
+            self.admission.inputs = subscription.borrow_and_update().as_ref().clone();
             self.invalidate_detail_resource("panel:Inputs");
             self.invalidate_detail_resource("panel:Status");
             self.dirty = true;
@@ -49,14 +52,20 @@ impl TuiState {
         tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
     ) -> anyhow::Result<()> {
         if let Some(stream) = stream {
-            let signals = self.runtime.as_ref().expect("TUI runtime").signals.clone();
+            let signals = self
+                .admission
+                .runtime
+                .as_ref()
+                .expect("TUI runtime")
+                .signals
+                .clone();
             tx.send(RuntimeCmd::RenderTuiStream { stream, signals })
                 .map_err(|_| {
                     anyhow::anyhow!("Runtime channel closed; input retained in /inputs.")
                 })?;
-            self.active_turn_id = Some(receipt.turn_id.clone());
-            self.stopping = false;
-            self.work_state = WorkState::WaitingModel;
+            self.stream.active_turn_id = Some(receipt.turn_id.clone());
+            self.stream.stopping = false;
+            self.stream.work_state = WorkState::WaitingModel;
             self.arm_task_notification();
         }
         self.refresh_inputs();
@@ -67,13 +76,13 @@ impl TuiState {
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
     ) -> anyhow::Result<()> {
-        if self.admission_pending {
+        if self.admission.admission_pending {
             return Ok(());
         }
-        if self.edit_input.is_some() {
+        if self.admission.edit_input.is_some() {
             return self.save_input_edit(tx);
         }
-        if self.stopping {
+        if self.stream.stopping {
             anyhow::bail!("Turn is stopping; draft kept.")
         }
         if self.input.buf.is_empty() && self.input.pending_images.is_empty() {
@@ -82,7 +91,7 @@ impl TuiState {
         if tx.is_closed() {
             anyhow::bail!("Runtime channel closed; draft kept.")
         }
-        let runtime = &self.runtime.as_ref().expect("TUI runtime").handle;
+        let runtime = &self.admission.runtime.as_ref().expect("TUI runtime").handle;
         let request_id = format!(
             "tui-{:x}",
             std::time::SystemTime::now()
@@ -92,7 +101,7 @@ impl TuiState {
         let input = HumanInput {
             request_id,
             text: submitted_user_input(&self.input.buf, &self.input.pending_images),
-            target_turn_id: self.active_turn_id.clone(),
+            target_turn_id: self.stream.active_turn_id.clone(),
             attachment_ids: self
                 .input
                 .pending_images
@@ -106,11 +115,11 @@ impl TuiState {
                 })
                 .collect(),
         };
-        if let Some(ui_tx) = self.ui_tx.clone() {
-            self.admission_pending = true;
-            self.admission_cancelled = false;
-            if self.active_turn_id.is_none() {
-                self.work_state = WorkState::WaitingModel;
+        if let Some(ui_tx) = self.async_load.ui_tx.clone() {
+            self.admission.admission_pending = true;
+            self.admission.admission_cancelled = false;
+            if self.stream.active_turn_id.is_none() {
+                self.stream.work_state = WorkState::WaitingModel;
             }
             self.viewport.auto_scroll = true;
             self.viewport.anchor = None;
@@ -154,7 +163,7 @@ impl TuiState {
         self.input.cursor = 0;
         self.input.pending_images.clear();
         self.input.history_idx = None;
-        self.input_notice = None;
+        self.admission.input_notice = None;
         self.input.undo.clear();
         self.input.redo.clear();
         self.viewport.auto_scroll = true;
@@ -163,7 +172,7 @@ impl TuiState {
     }
 
     pub(crate) fn finish_admission(&mut self, completion: AdmissionResult) {
-        self.admission_pending = false;
+        self.admission.admission_pending = false;
         let same_draft = self.input.revision == completion.draft.revision
             && self.input.buf == completion.draft.buf
             && self.input.pending_images == completion.draft.pending_images;
@@ -188,18 +197,18 @@ impl TuiState {
                 ) {
                     self.refresh_inputs();
                     if matches!(completion.action, AdmissionAction::Edit) {
-                        self.edit_input = None;
+                        self.admission.edit_input = None;
                     }
                 } else if let Err(error) = self.accept_stream(&receipt, stream, &completion.tx) {
                     self.input_rejected(error.to_string());
                     return;
                 }
-                if self.admission_cancelled {
-                    if let Some(runtime) = &self.runtime {
+                if self.admission.admission_cancelled {
+                    if let Some(runtime) = &self.admission.runtime {
                         runtime.handle.interrupt_current_turn();
                     }
-                    self.stopping = self.active_turn_id.is_some();
-                    self.admission_cancelled = false;
+                    self.stream.stopping = self.stream.active_turn_id.is_some();
+                    self.admission.admission_cancelled = false;
                 }
                 if !receipt.guidance && matches!(completion.action, AdmissionAction::Submit) {
                     self.finalize_stream();
@@ -242,14 +251,14 @@ impl TuiState {
                 if consumes_text {
                     self.input.history_idx = None;
                 }
-                self.input_notice = None;
+                self.admission.input_notice = None;
             }
             Err(error) => {
-                if self.active_turn_id.is_none() {
-                    self.work_state = WorkState::Idle;
-                    self.stopping = false;
+                if self.stream.active_turn_id.is_none() {
+                    self.stream.work_state = WorkState::Idle;
+                    self.stream.stopping = false;
                 }
-                self.admission_cancelled = false;
+                self.admission.admission_cancelled = false;
                 if !same_draft && matches!(completion.action, AdmissionAction::Submit) {
                     self.push_failed_draft(completion.draft);
                 }
@@ -262,16 +271,17 @@ impl TuiState {
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
     ) -> anyhow::Result<()> {
-        let (id, revision) = self.edit_input.clone().expect("edit target");
+        let (id, revision) = self.admission.edit_input.clone().expect("edit target");
         let runtime = self
+            .admission
             .runtime
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("TUI runtime unavailable"))?
             .handle
             .clone();
         let draft = self.input.draft_snapshot();
-        if let Some(ui_tx) = self.ui_tx.clone() {
-            self.admission_pending = true;
+        if let Some(ui_tx) = self.async_load.ui_tx.clone() {
+            self.admission.admission_pending = true;
             let tx = tx.clone();
             std::thread::spawn(move || {
                 let result = runtime
@@ -309,6 +319,7 @@ impl TuiState {
     ) -> anyhow::Result<()> {
         self.refresh_inputs();
         let runtime = self
+            .admission
             .runtime
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("TUI runtime unavailable"))?
@@ -324,24 +335,25 @@ impl TuiState {
             }
             SlashCommand::Resume(id) | SlashCommand::Withdraw(id) => {
                 let receipt = self
+                    .admission
                     .inputs
                     .iter()
                     .find(|i| &i.input_id == id)
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("Outstanding input not found; use /inputs."))?;
-                if self.admission_pending {
+                if self.admission.admission_pending {
                     return Ok(());
                 }
-                if let Some(ui_tx) = self.ui_tx.clone() {
+                if let Some(ui_tx) = self.async_load.ui_tx.clone() {
                     let resume = matches!(command, SlashCommand::Resume(_));
                     if resume
-                        && (self.active_turn_id.is_some()
-                            || self.work_state.is_working()
+                        && (self.stream.active_turn_id.is_some()
+                            || self.stream.work_state.is_working()
                             || tx.is_closed())
                     {
                         anyhow::bail!("Cannot resume while working or disconnected.");
                     }
-                    self.admission_pending = true;
+                    self.admission.admission_pending = true;
                     if resume {
                         self.viewport.auto_scroll = true;
                         self.viewport.anchor = None;
@@ -379,8 +391,8 @@ impl TuiState {
                     return Ok(());
                 }
                 if matches!(command, SlashCommand::Resume(_)) {
-                    if self.active_turn_id.is_some()
-                        || self.work_state.is_working()
+                    if self.stream.active_turn_id.is_some()
+                        || self.stream.work_state.is_working()
                         || tx.is_closed()
                     {
                         anyhow::bail!("Cannot resume while working or disconnected.")
@@ -408,7 +420,7 @@ impl TuiState {
             self.input.buf.clear();
             self.input.cursor = 0;
         }
-        self.input_notice = None;
+        self.admission.input_notice = None;
         Ok(())
     }
 }

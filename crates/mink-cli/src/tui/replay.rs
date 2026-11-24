@@ -351,7 +351,7 @@ fn build_history_from_events(events: &[serde_json::Value]) -> LoadedHistory {
         }
     }
     state.finalize_stream();
-    for item in &mut state.lines {
+    for item in &mut state.transcript.lines {
         if !item.sealed {
             item.sealed = true;
             if item.kind == TranscriptKind::Tool {
@@ -364,8 +364,8 @@ fn build_history_from_events(events: &[serde_json::Value]) -> LoadedHistory {
         }
     }
     LoadedHistory {
-        lines: state.lines,
-        sub_agent_lines: state.sub_agents.line_by_session,
+        lines: state.transcript.lines,
+        sub_agent_lines: state.transcript.sub_agents.line_by_session,
     }
 }
 
@@ -392,7 +392,7 @@ mod tests {
         // Also verify `detail_lines_for_session_with_width` renders
         // `restored_sub_detail` even when no live transcript line is mapped.
         let mut state = TuiState::default();
-        state.restored_sub_detail = Some((
+        state.mirrors.restored_sub_detail = Some((
             "sub_disk_only".into(),
             crate::tui::state::SubAgentDetail {
                 thinking: "checked files".into(),
@@ -565,8 +565,8 @@ mod status_tests {
             let replay = build_lines_from_events(&[serde_json::json!({
                 "type": "tool_result", "tool_use_id": "call", "name": "Bash", "content": "body", "status": status,
             })]);
-            assert_eq!(live.lines[0].tool_status, Some(status));
-            assert_eq!(replay[0].tool_status, live.lines[0].tool_status);
+            assert_eq!(live.transcript.lines[0].tool_status, Some(status));
+            assert_eq!(replay[0].tool_status, live.transcript.lines[0].tool_status);
         }
     }
 }

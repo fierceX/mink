@@ -23,7 +23,7 @@ pub(crate) mod detail;
 /// Detail body for the goal view. Read-only: the runtime owns the contract,
 /// budget and lifecycle, so this view never proposes a change to them.
 pub(crate) fn goal_detail_lines(state: &TuiState) -> Vec<Line<'static>> {
-    let Some(goal) = state.goal.as_ref().filter(|goal| !goal.hidden) else {
+    let Some(goal) = state.mirrors.goal.as_ref().filter(|goal| !goal.hidden) else {
         return vec![Line::from(Span::styled(
             "No goal state is available in this session.",
             theme::muted(),
@@ -281,13 +281,13 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState, mode: TuiMode) {
                 usize::from(area.height.saturating_sub(5)).min(2)
             };
             let mut chips = Vec::new();
-            if let Some(notice) = &state.input_notice {
+            if let Some(notice) = &state.admission.input_notice {
                 chips.push(crate::util::truncate_visual(notice, inner_w));
             }
-            if let Some(input) = state.inputs.first() {
+            if let Some(input) = state.admission.inputs.first() {
                 let label = format!(
                     "Inputs {} · {} (/inputs)",
-                    state.inputs.len(),
+                    state.admission.inputs.len(),
                     super::inbox::input_status(input.status)
                 );
                 chips.extend(split_at_visual_width(&label, inner_w));
@@ -343,13 +343,13 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState, mode: TuiMode) {
             if chips_height > 0 {
                 render_chips(f, chunks[1], &chips);
             }
-            let label = if state.admission_pending {
+            let label = if state.admission.admission_pending {
                 "Accepting input · draft editable"
-            } else if state.edit_input.is_some() {
+            } else if state.admission.edit_input.is_some() {
                 "Enter: save input edit"
-            } else if state.stopping {
+            } else if state.stream.stopping {
                 "Stopping · draft kept"
-            } else if state.active_turn_id.is_some() {
+            } else if state.stream.active_turn_id.is_some() {
                 "Enter: submit guidance"
             } else {
                 "Enter: send task"
@@ -369,8 +369,8 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState, mode: TuiMode) {
             // Record where the goal marker landed so a click can open it.
             // The status bar only exists in the main view, so the span is
             // cleared for every other view rather than left stale.
-            state.status_row = status_area.y;
-            state.status_goal_span = status_goal_span(state, status_area.width);
+            state.mirrors.status_row = status_area.y;
+            state.mirrors.status_goal_span = status_goal_span(state, status_area.width);
         }
         View::Panel {
             panel,

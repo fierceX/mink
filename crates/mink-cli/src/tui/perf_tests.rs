@@ -66,7 +66,7 @@ fn tui_release_stress_benchmark() {
     for width in [40, 80, 120, 200] {
         let mut state = TuiState::default();
         let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
-        state.artifact_detail = Some(state::ArtifactDetail {
+        state.mirrors.artifact_detail = Some(state::ArtifactDetail {
             id: "a0001".into(),
             content: "artifact line 中文\n".repeat(12_480),
             truncated: true,
@@ -120,7 +120,7 @@ fn tui_release_stress_benchmark() {
                 content: "thinking\n".repeat(128),
             });
             let input = serde_json::json!({"request_id":format!("input-{n}"),"text":"pending input","target_turn_id":"turn","attachment_ids":[]});
-            state.inputs.push(serde_json::from_value(serde_json::json!({"input_id":format!("input-{n}"),"revision":1,"turn_id":"turn","status":"pending","guidance":true,"input":input,"original":input})).unwrap());
+            state.admission.inputs.push(serde_json::from_value(serde_json::json!({"input_id":format!("input-{n}"),"revision":1,"turn_id":"turn","status":"pending","guidance":true,"input":input,"original":input})).unwrap());
         }
         let start = Instant::now();
         terminal
@@ -220,7 +220,7 @@ fn tui_release_remaining_tail_benchmark() {
             println!(
                 "remaining_tail,{kind},update_p95_us={},bytes={}",
                 samples[18],
-                state.stream_line.len()
+                state.stream.stream_line.len()
             );
         }
     }

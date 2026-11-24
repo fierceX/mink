@@ -38,16 +38,18 @@ pub(crate) fn detail_lines_for_session_with_width(
     max_width: u16,
 ) -> Vec<Line<'static>> {
     let restored = state
+        .mirrors
         .restored_sub_detail
         .as_ref()
         .filter(|(id, _)| id == session_id)
         .map(|(_, detail)| detail);
     let line = state
+        .transcript
         .sub_agents
         .line_by_session
         .get(session_id)
         .copied()
-        .and_then(|idx| state.lines.get(idx))
+        .and_then(|idx| state.transcript.lines.get(idx))
         .filter(|line| line.kind == TranscriptKind::SubAgent);
     let (header, detail) = match (line, restored) {
         (Some(line), _) => (line.text.clone(), line.sub_detail.as_ref().or(restored)),
@@ -97,7 +99,7 @@ pub(super) fn render_plan_content(f: &mut Frame, area: Rect, scroll: usize, stat
 }
 fn plan_lines(state: &TuiState, inner_w: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    if let Some(plan) = state.plan.as_ref() {
+    if let Some(plan) = state.mirrors.plan.as_ref() {
         let status = match plan.transition {
             PlanTransitionDisplay::DraftSaved => "Plan draft · awaiting confirmation",
             PlanTransitionDisplay::DraftCancelled => "Plan draft cancelled",
@@ -125,7 +127,7 @@ pub(super) fn render_todos_content(f: &mut Frame, area: Rect, scroll: usize, sta
 }
 fn todo_lines(state: &TuiState) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    if let Some(todos) = state.todos.as_ref() {
+    if let Some(todos) = state.mirrors.todos.as_ref() {
         lines.push(Line::from(Span::styled(
             format!(
                 "Todos r{} · {} active · {} pending · {} completed",
@@ -167,6 +169,7 @@ pub(super) fn render_artifact_content(
     let identity = format!(
         "artifact:{}",
         state
+            .mirrors
             .artifact_detail
             .as_ref()
             .map_or("", |artifact| artifact.id.as_str())
@@ -177,7 +180,7 @@ pub(super) fn render_artifact_content(
 }
 fn artifact_lines(state: &TuiState) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    if let Some(artifact) = state.artifact_detail.as_ref() {
+    if let Some(artifact) = state.mirrors.artifact_detail.as_ref() {
         lines.push(Line::from(Span::styled(
             format!("artifact://{}", artifact.id),
             theme::primary_bold(),
@@ -227,13 +230,13 @@ pub(super) fn render_cached_detail(
     let valid = state.cache.detail.as_ref().is_some_and(|cache| {
         cache.identity == identity
             && cache.width == width
-            && cache.revision == state.detail_revision
+            && cache.revision == state.mirrors.detail_revision
     });
     if !valid {
         let lines = wrap_lines_word(&build(state, width), width);
         state.cache.detail = Some(crate::tui::state::DetailLayout {
             identity,
-            revision: state.detail_revision,
+            revision: state.mirrors.detail_revision,
             width,
             lines: std::sync::Arc::new(lines),
         });
@@ -243,8 +246,8 @@ pub(super) fn render_cached_detail(
     let viewport = content_area.height as usize;
     let max_scroll = lines.len().saturating_sub(viewport);
     let scroll = scroll.min(max_scroll);
-    state.detail_height = viewport;
-    state.detail_max_scroll = max_scroll;
+    state.mirrors.detail_height = viewport;
+    state.mirrors.detail_max_scroll = max_scroll;
     match &mut state.view {
         crate::tui::state::View::SubAgentDetail {
             scroll: current, ..

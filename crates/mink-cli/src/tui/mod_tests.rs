@@ -157,13 +157,16 @@ fn apply_switches_stream_kinds_and_collapses_thinking() {
     state.apply(&TuiSignal::Thinking("think".into()));
     state.apply(&TuiSignal::Text("answer".into()));
 
-    assert_eq!(state.lines.len(), 1);
-    assert_eq!(state.lines[0].kind, TranscriptKind::StreamThinking);
-    assert!(state.lines[0].collapsed);
-    assert_eq!(state.stream_kind, TranscriptKind::StreamText);
-    assert_eq!(state.stream_line, "answer");
-    assert!(state.streaming);
-    assert_eq!(state.work_state, WorkState::StreamingText);
+    assert_eq!(state.transcript.lines.len(), 1);
+    assert_eq!(
+        state.transcript.lines[0].kind,
+        TranscriptKind::StreamThinking
+    );
+    assert!(state.transcript.lines[0].collapsed);
+    assert_eq!(state.stream.stream_kind, TranscriptKind::StreamText);
+    assert_eq!(state.stream.stream_line, "answer");
+    assert!(state.stream.streaming);
+    assert_eq!(state.stream.work_state, WorkState::StreamingText);
 }
 
 #[test]
@@ -177,7 +180,7 @@ fn sub_agent_meta_label_and_stop_reason_are_visible() {
         in_tokens: 0,
         out_tokens: 0,
     });
-    assert!(state.lines[0].text.contains("review diff"));
+    assert!(state.transcript.lines[0].text.contains("review diff"));
     state.apply(&TuiSignal::SubAgentStatus {
         session_id: "sub_1".into(),
         status: "ok".into(),
@@ -186,8 +189,8 @@ fn sub_agent_meta_label_and_stop_reason_are_visible() {
         in_tokens: 4,
         out_tokens: 2,
     });
-    assert!(state.lines[0].text.contains("review diff"));
-    assert!(state.lines[0].text.contains("[completed]"));
+    assert!(state.transcript.lines[0].text.contains("review diff"));
+    assert!(state.transcript.lines[0].text.contains("[completed]"));
 }
 
 #[test]
@@ -201,7 +204,7 @@ fn sub_agent_output_invalidates_updated_line_cache() {
         in_tokens: 0,
         out_tokens: 0,
     });
-    state.lines[0].cached_lines = Some(vec![Line::from("stale")]);
+    state.transcript.lines[0].cached_lines = Some(vec![Line::from("stale")]);
     state.cache.rebuild_next = None;
 
     state.apply(&TuiSignal::SubAgentOutput {
@@ -215,10 +218,10 @@ fn sub_agent_output_invalidates_updated_line_cache() {
         out_tokens: 34,
     });
 
-    assert!(state.lines[0].text.contains("ok"));
-    assert!(state.lines[0].cached_lines.is_none());
+    assert!(state.transcript.lines[0].text.contains("ok"));
+    assert!(state.transcript.lines[0].cached_lines.is_none());
     assert!(state.cache.pending.contains(&0));
-    let detail = state.lines[0].sub_detail.as_ref().unwrap();
+    let detail = state.transcript.lines[0].sub_detail.as_ref().unwrap();
     assert_eq!(detail.thinking, "child thinking");
     assert_eq!(detail.text, "child text");
 }
@@ -234,7 +237,7 @@ fn sub_agent_status_updates_existing_line() {
         in_tokens: 0,
         out_tokens: 0,
     });
-    state.lines[0].cached_lines = Some(vec![Line::from("stale")]);
+    state.transcript.lines[0].cached_lines = Some(vec![Line::from("stale")]);
     state.cache.rebuild_next = None;
 
     state.apply(&TuiSignal::SubAgentStatus {
@@ -246,10 +249,10 @@ fn sub_agent_status_updates_existing_line() {
         out_tokens: 4,
     });
 
-    assert_eq!(state.lines.len(), 1);
-    assert_eq!(state.sub_agents.active_sessions.len(), 1);
-    assert!(state.lines[0].text.contains("running"));
-    assert!(state.lines[0].cached_lines.is_none());
+    assert_eq!(state.transcript.lines.len(), 1);
+    assert_eq!(state.transcript.sub_agents.active_sessions.len(), 1);
+    assert!(state.transcript.lines[0].text.contains("running"));
+    assert!(state.transcript.lines[0].cached_lines.is_none());
     assert!(state.cache.pending.contains(&0));
 }
 
@@ -274,16 +277,19 @@ fn sub_agent_terminal_status_clears_active_state() {
         out_tokens: 0,
     });
 
-    assert!(state.sub_agents.active_sessions.is_empty());
-    assert_eq!(state.work_state, WorkState::WaitingModel);
-    assert!(state.lines[0].text.contains("timed_out"));
+    assert!(state.transcript.sub_agents.active_sessions.is_empty());
+    assert_eq!(state.stream.work_state, WorkState::WaitingModel);
+    assert!(state.transcript.lines[0].text.contains("timed_out"));
 }
 
 #[test]
 fn user_task_stop_emits_completion_notification() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut state = TuiState {
-        model: "pro".into(),
+        mirrors: state::SessionMirrors {
+            model: "pro".into(),
+            ..Default::default()
+        },
         ..TuiState::default()
     };
     state.input.buf = "do the task".into();
@@ -355,7 +361,7 @@ fn compact_stop_emits_completion_notification() {
         &mut state,
         &tx,
     ));
-    assert_eq!(state.work_state, WorkState::Compacting);
+    assert_eq!(state.stream.work_state, WorkState::Compacting);
 
     state.apply(&TuiSignal::Stop);
 
@@ -366,7 +372,10 @@ fn compact_stop_emits_completion_notification() {
 #[test]
 fn compact_error_then_stop_is_visible_and_restores_input() {
     let mut state = TuiState {
-        work_state: WorkState::Compacting,
+        stream: state::StreamState {
+            work_state: WorkState::Compacting,
+            ..Default::default()
+        },
         ..TuiState::default()
     };
     state.apply(&TuiSignal::Error(
@@ -374,8 +383,8 @@ fn compact_error_then_stop_is_visible_and_restores_input() {
     ));
     state.apply(&TuiSignal::Stop);
 
-    assert_eq!(state.work_state, WorkState::Idle);
-    assert!(state.lines.iter().any(|line| {
+    assert_eq!(state.stream.work_state, WorkState::Idle);
+    assert!(state.transcript.lines.iter().any(|line| {
         line.kind == TranscriptKind::Error && line.text.contains("compaction interrupted")
     }));
 }
@@ -405,9 +414,9 @@ fn duplicate_sub_agent_output_does_not_drift_active_state() {
     state.apply(&output);
     state.apply(&output);
 
-    assert!(state.sub_agents.active_sessions.is_empty());
-    assert_eq!(state.work_state, WorkState::WaitingModel);
-    assert_eq!(state.lines.len(), 1);
+    assert!(state.transcript.sub_agents.active_sessions.is_empty());
+    assert_eq!(state.stream.work_state, WorkState::WaitingModel);
+    assert_eq!(state.transcript.lines.len(), 1);
 }
 
 #[test]
@@ -428,8 +437,8 @@ fn unknown_slash_command_does_not_reach_orchestrator() {
         &tx
     ));
     assert!(rx.try_recv().is_err());
-    assert_eq!(state.work_state, WorkState::Idle);
-    assert!(state.lines.iter().any(|line| {
+    assert_eq!(state.stream.work_state, WorkState::Idle);
+    assert!(state.transcript.lines.iter().any(|line| {
         line.kind == TranscriptKind::Info && line.text.contains("Unknown command")
     }));
 }
@@ -458,6 +467,7 @@ fn mistyped_goal_subcommand_is_refused_with_a_suggestion_and_no_dispatch() {
         "a typo must not reach the runtime as a command"
     );
     let line = state
+        .transcript
         .lines
         .iter()
         .find(|line| line.text.contains("cancel"))
@@ -802,8 +812,11 @@ fn malformed_table_separator_falls_back_to_plain_lines() {
 fn ctrl_c_interrupts_working_state_then_exits_on_second_press() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut state = TuiState {
-        streaming: true,
-        work_state: WorkState::StreamingText,
+        stream: state::StreamState {
+            streaming: true,
+            work_state: WorkState::StreamingText,
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -822,7 +835,10 @@ fn ctrl_c_interrupts_working_state_then_exits_on_second_press() {
 fn ctrl_shift_c_interrupts_working_state() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut state = TuiState {
-        work_state: WorkState::WaitingModel,
+        stream: state::StreamState {
+            work_state: WorkState::WaitingModel,
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -903,9 +919,9 @@ fn tool_result_signal_preserves_tool_name_for_summaries() {
         artifacts: Vec::new(),
     });
 
-    assert_eq!(state.lines.len(), 1);
-    assert_eq!(state.lines[0].tool_name.as_deref(), Some("Edit"));
-    assert_eq!(state.lines[0].kind, TranscriptKind::Tool);
+    assert_eq!(state.transcript.lines.len(), 1);
+    assert_eq!(state.transcript.lines[0].tool_name.as_deref(), Some("Edit"));
+    assert_eq!(state.transcript.lines[0].kind, TranscriptKind::Tool);
 }
 
 #[test]
@@ -917,8 +933,8 @@ fn structured_tool_result_updates_the_running_transcript_item() {
         summary: "PlanDraft".into(),
         input: None,
     });
-    assert_eq!(state.lines.len(), 1);
-    assert!(!state.lines[0].sealed);
+    assert_eq!(state.transcript.lines.len(), 1);
+    assert!(!state.transcript.lines[0].sealed);
 
     let presentation = crate::ui::ToolPresentation::Plan(crate::ui::PlanDisplay {
         transition: crate::ui::PlanTransitionDisplay::DraftSaved,
@@ -935,13 +951,13 @@ fn structured_tool_result_updates_the_running_transcript_item() {
         artifacts: Vec::new(),
     });
 
-    assert_eq!(state.lines.len(), 1);
-    assert!(state.lines[0].sealed);
+    assert_eq!(state.transcript.lines.len(), 1);
+    assert!(state.transcript.lines[0].sealed);
     assert_eq!(
-        state.lines[0].tool_status,
+        state.transcript.lines[0].tool_status,
         Some(crate::runtime::ToolStatus::Succeeded)
     );
-    assert!(state.plan.is_some());
+    assert!(state.mirrors.plan.is_some());
 }
 
 #[test]
@@ -976,15 +992,18 @@ fn tool_result_with_mismatched_id_does_not_merge_by_tool_name() {
         artifacts: Vec::new(),
     });
 
-    assert_eq!(state.lines.len(), 2);
-    assert!(!state.lines[0].sealed);
-    assert_eq!(state.lines[0].tool_use_id.as_deref(), Some("call-1"));
-    assert!(state.lines[1].sealed);
+    assert_eq!(state.transcript.lines.len(), 2);
+    assert!(!state.transcript.lines[0].sealed);
     assert_eq!(
-        state.lines[1].tool_use_id.as_deref(),
+        state.transcript.lines[0].tool_use_id.as_deref(),
+        Some("call-1")
+    );
+    assert!(state.transcript.lines[1].sealed);
+    assert_eq!(
+        state.transcript.lines[1].tool_use_id.as_deref(),
         Some("provider-call-1")
     );
-    let rendered = render::transcript_item_lines(&state.lines[1], 80)
+    let rendered = render::transcript_item_lines(&state.transcript.lines[1], 80)
         .iter()
         .map(line_text)
         .collect::<Vec<_>>()
@@ -992,7 +1011,7 @@ fn tool_result_with_mismatched_id_does_not_merge_by_tool_name() {
     assert!(rendered.contains("Todos r2"));
     assert!(rendered.contains("activated T0001"));
     assert!(!rendered.contains("<todo-event>"));
-    assert_eq!(state.todos.as_ref().unwrap().revision, 2);
+    assert_eq!(state.mirrors.todos.as_ref().unwrap().revision, 2);
 }
 
 #[test]
@@ -1014,7 +1033,7 @@ fn reused_tool_id_updates_the_latest_unsealed_call() {
         presentation: None,
         artifacts: Vec::new(),
     });
-    state.inline.committed = 1;
+    state.transcript.inline.committed = 1;
     state.apply(&TuiSignal::ToolCall {
         tool_use_id: Some("call-1".into()),
         tool_name: "Read".into(),
@@ -1032,10 +1051,10 @@ fn reused_tool_id_updates_the_latest_unsealed_call() {
         artifacts: Vec::new(),
     });
 
-    assert_eq!(state.lines.len(), 2);
-    assert_eq!(state.lines[0].text, "old result");
-    assert_eq!(state.lines[1].text, "new result");
-    assert!(state.lines[1].sealed);
+    assert_eq!(state.transcript.lines.len(), 2);
+    assert_eq!(state.transcript.lines[0].text, "old result");
+    assert_eq!(state.transcript.lines[1].text, "new result");
+    assert!(state.transcript.lines[1].sealed);
 }
 
 #[test]
@@ -1065,27 +1084,30 @@ fn todo_delta_preserves_items_not_mentioned_by_the_update() {
     };
 
     let mut state = TuiState {
-        todos: Some(TodoDisplay {
-            revision: 1,
-            counts: TodoCountsDisplay {
-                pending: 2,
-                in_progress: 0,
-                completed: 0,
-            },
-            items: vec![
-                TodoItemDisplay {
-                    id: "todo-1".into(),
-                    content: "first".into(),
-                    status: TodoStatusDisplay::Pending,
+        mirrors: state::SessionMirrors {
+            todos: Some(TodoDisplay {
+                revision: 1,
+                counts: TodoCountsDisplay {
+                    pending: 2,
+                    in_progress: 0,
+                    completed: 0,
                 },
-                TodoItemDisplay {
-                    id: "todo-2".into(),
-                    content: "second".into(),
-                    status: TodoStatusDisplay::Pending,
-                },
-            ],
-            changes: Vec::new(),
-        }),
+                items: vec![
+                    TodoItemDisplay {
+                        id: "todo-1".into(),
+                        content: "first".into(),
+                        status: TodoStatusDisplay::Pending,
+                    },
+                    TodoItemDisplay {
+                        id: "todo-2".into(),
+                        content: "second".into(),
+                        status: TodoStatusDisplay::Pending,
+                    },
+                ],
+                changes: Vec::new(),
+            }),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -1106,7 +1128,7 @@ fn todo_delta_preserves_items_not_mentioned_by_the_update() {
         }],
     });
 
-    let todos = state.todos.unwrap();
+    let todos = state.mirrors.todos.unwrap();
     assert_eq!(todos.items.len(), 2);
     assert_eq!(todos.items[0].status, TodoStatusDisplay::InProgress);
     assert_eq!(todos.items[1].content, "second");
@@ -1166,7 +1188,7 @@ fn full_tui_restores_mouse_toggle_for_collapsible_cards() {
     terminal
         .draw(|frame| render(frame, &mut state, TuiMode::Full))
         .unwrap();
-    assert!(state.lines[0].collapsed);
+    assert!(state.transcript.lines[0].collapsed);
     assert!(!state.viewport.click_map.is_empty());
     let row = state.viewport.content_y + state.viewport.click_map[0].start_row as u16;
 
@@ -1181,8 +1203,8 @@ fn full_tui_restores_mouse_toggle_for_collapsible_cards() {
         &tx,
     );
 
-    assert!(!state.lines[0].collapsed);
-    assert!(state.lines[0].collapse_overridden);
+    assert!(!state.transcript.lines[0].collapsed);
+    assert!(state.transcript.lines[0].collapse_overridden);
 }
 
 #[test]
@@ -1194,10 +1216,10 @@ fn inline_stream_promotes_complete_markdown_blocks_before_stop() {
 
     state.promote_stable_stream_prefix();
 
-    assert_eq!(state.lines.len(), 1);
-    assert_eq!(state.lines[0].text, "first paragraph\n\n");
-    assert_eq!(state.stream_line, "second paragraph");
-    assert!(state.lines[0].sealed);
+    assert_eq!(state.transcript.lines.len(), 1);
+    assert_eq!(state.transcript.lines[0].text, "first paragraph\n\n");
+    assert_eq!(state.stream.stream_line, "second paragraph");
+    assert!(state.transcript.lines[0].sealed);
 }
 
 #[test]
@@ -1243,22 +1265,22 @@ data/demo/material/
         30, 0,
     )));
     // 心跳不打断流：尚未落入 transcript，状态栏标签就位。
-    assert!(state.streaming);
-    assert_eq!(state.lines.len(), 0);
-    assert_eq!(state.stream_status.as_deref(), Some("·30s"));
+    assert!(state.stream.streaming);
+    assert_eq!(state.transcript.lines.len(), 0);
+    assert_eq!(state.stream.stream_status.as_deref(), Some("·30s"));
     state.apply(&TuiSignal::Text(tail.into()));
     // 新内容到达后等待标签清除。
-    assert_eq!(state.stream_status, None);
+    assert_eq!(state.stream.stream_status, None);
     state.apply(&TuiSignal::Stop);
 
     // 最终 transcript：完整文本一条，心跳不落盘（瞬态状态）。
-    assert_eq!(state.lines.len(), 1);
-    assert_eq!(state.lines[0].text, text);
-    assert!(!state.streaming);
+    assert_eq!(state.transcript.lines.len(), 1);
+    assert_eq!(state.transcript.lines[0].text, text);
+    assert!(!state.stream.streaming);
 
     // Render the final transcript the same way the TUI does.
     let mut rendered = String::new();
-    for item in &state.lines {
+    for item in &state.transcript.lines {
         for line in crate::tui::render::transcript_item_lines(item, 104) {
             rendered.push_str(&line_text(&line));
             rendered.push('\n');
@@ -1317,24 +1339,27 @@ fn info_during_streaming_non_heartbeat_is_deferred_until_stream_ends() {
     let mut state = TuiState::default();
     state.apply(&TuiSignal::Text("first".into()));
     state.apply(&TuiSignal::Info("Retrying (1/3)...".into()));
-    assert!(state.streaming);
-    assert_eq!(state.lines.len(), 0);
+    assert!(state.stream.streaming);
+    assert_eq!(state.transcript.lines.len(), 0);
     assert_eq!(
-        state.pending_infos.as_slice(),
+        state.transcript.pending_infos.as_slice(),
         &["Retrying (1/3)...".to_string()]
     );
     state.apply(&TuiSignal::Text("second".into()));
     state.apply(&TuiSignal::Stop);
-    assert_eq!(state.lines.len(), 2);
-    assert_eq!(state.lines[0].kind, TranscriptKind::StreamText);
-    assert_eq!(state.lines[1].kind, TranscriptKind::Info);
-    assert_eq!(state.lines[1].text, "Retrying (1/3)...");
+    assert_eq!(state.transcript.lines.len(), 2);
+    assert_eq!(state.transcript.lines[0].kind, TranscriptKind::StreamText);
+    assert_eq!(state.transcript.lines[1].kind, TranscriptKind::Info);
+    assert_eq!(state.transcript.lines[1].text, "Retrying (1/3)...");
 }
 
 #[test]
 fn status_bar_shows_transient_wait_label() {
     let mut state = TuiState {
-        cwd_label: String::new(),
+        mirrors: state::SessionMirrors {
+            cwd_label: String::new(),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let line = build_status_line(&state, 80);
@@ -1343,20 +1368,20 @@ fn status_bar_shows_transient_wait_label() {
     state.apply(&TuiSignal::Info(mink::runtime::llm_wait_heartbeat_message(
         30, 0,
     )));
-    assert_eq!(state.lines.len(), 0);
-    assert_eq!(state.stream_status.as_deref(), Some("·30s"));
+    assert_eq!(state.transcript.lines.len(), 0);
+    assert_eq!(state.stream.stream_status.as_deref(), Some("·30s"));
     // 流式阶段心跳替换更新标签。
     state.apply(&TuiSignal::Text("hello".into()));
-    assert_eq!(state.stream_status, None);
+    assert_eq!(state.stream.stream_status, None);
     state.apply(&TuiSignal::Info(mink::runtime::llm_wait_heartbeat_message(
         60, 45,
     )));
-    assert_eq!(state.stream_status.as_deref(), Some("·60s"));
+    assert_eq!(state.stream.stream_status.as_deref(), Some("·60s"));
     let line = build_status_line(&state, 80);
     assert!(line.contains("·60s"));
     assert!(line.contains("[generating]"));
     state.apply(&TuiSignal::Stop);
-    assert_eq!(state.stream_status, None);
+    assert_eq!(state.stream.stream_status, None);
 }
 
 #[test]
@@ -1382,9 +1407,9 @@ fn committed_boundary_stops_at_the_first_live_item() {
     state.push_line(TranscriptItem::new("later".into(), TranscriptKind::Text));
 
     assert_eq!(sealed_prefix_end(&state), 1);
-    state.lines[1].sealed = true;
+    state.transcript.lines[1].sealed = true;
     assert_eq!(sealed_prefix_end(&state), 3);
-    state.inline.committed = 2;
+    state.transcript.inline.committed = 2;
     assert_eq!(sealed_prefix_end(&state), 3);
 }
 
@@ -1405,7 +1430,7 @@ fn tool_call_headers_sanitize_name_and_summary_and_keep_input() {
         input: Some(serde_json::json!({"command": "ls"})),
     });
 
-    let item = &state.lines[0];
+    let item = &state.transcript.lines[0];
     assert_eq!(item.tool_name.as_deref(), Some("Bash"));
     assert_eq!(item.tool_summary.as_deref(), Some("cmd red"));
     assert_eq!(item.tool_input, Some(serde_json::json!({"command": "ls"})));
@@ -1424,10 +1449,10 @@ fn terminal_signal_seals_orphan_tool_calls() {
 
     state.apply(&TuiSignal::Error("connection failed".into()));
 
-    assert!(state.lines[0].sealed);
-    assert_eq!(state.lines[0].tool_status, None);
-    assert!(state.lines[0].text.contains("turn failed"));
-    assert_eq!(sealed_prefix_end(&state), state.lines.len());
+    assert!(state.transcript.lines[0].sealed);
+    assert_eq!(state.transcript.lines[0].tool_status, None);
+    assert!(state.transcript.lines[0].text.contains("turn failed"));
+    assert_eq!(sealed_prefix_end(&state), state.transcript.lines.len());
 }
 
 #[test]
@@ -1453,13 +1478,13 @@ fn commit_ready_moves_only_the_sealed_prefix_into_native_history() {
     ));
 
     assert!(commit_ready(&mut terminal, &mut state).unwrap());
-    assert_eq!(state.inline.committed, 1);
+    assert_eq!(state.transcript.inline.committed, 1);
     assert!(!commit_ready(&mut terminal, &mut state).unwrap());
 
-    state.lines[1].sealed = true;
-    state.work_state = WorkState::WaitingModel;
+    state.transcript.lines[1].sealed = true;
+    state.stream.work_state = WorkState::WaitingModel;
     assert!(commit_ready(&mut terminal, &mut state).unwrap());
-    assert_eq!(state.inline.committed, 2);
+    assert_eq!(state.transcript.inline.committed, 2);
 }
 
 #[test]
@@ -1472,25 +1497,31 @@ fn inline_keeps_the_final_item_in_the_viewport_until_new_work_starts() {
 
     assert_eq!(committable_prefix_end(&state), 0);
 
-    state.work_state = WorkState::WaitingModel;
+    state.stream.work_state = WorkState::WaitingModel;
     assert_eq!(committable_prefix_end(&state), 1);
 }
 
 #[test]
 fn status_line_adapts_to_terminal_width() {
     let mut state = TuiState {
-        work_state: WorkState::StreamingText,
-        cwd_label: "mink-new".into(),
+        stream: state::StreamState {
+            work_state: WorkState::StreamingText,
+            ..Default::default()
+        },
+        mirrors: state::SessionMirrors {
+            cwd_label: "mink-new".into(),
+            ..Default::default()
+        },
         ..Default::default()
     };
-    state.stats.current_turn_count = 12;
-    state.stats.agent_request_count = 18;
-    state.stats.total_input_tokens = 14_000;
-    state.stats.total_cache_read_tokens = 2_000;
-    state.stats.total_output_tokens = 3_000;
-    state.stats.current_context_tokens = 58_000;
-    state.stats.max_context_tokens = 80_000;
-    state.stats.belief = 0.75;
+    state.mirrors.stats.current_turn_count = 12;
+    state.mirrors.stats.agent_request_count = 18;
+    state.mirrors.stats.total_input_tokens = 14_000;
+    state.mirrors.stats.total_cache_read_tokens = 2_000;
+    state.mirrors.stats.total_output_tokens = 3_000;
+    state.mirrors.stats.current_context_tokens = 58_000;
+    state.mirrors.stats.max_context_tokens = 80_000;
+    state.mirrors.stats.belief = 0.75;
 
     let narrow = build_status_line(&state, 40);
     let medium = build_status_line(&state, 80);
@@ -1510,12 +1541,18 @@ fn status_line_adapts_to_terminal_width() {
 #[test]
 fn status_spans_style_path_and_work_state() {
     let mut state = TuiState {
-        model: "deepseek-chat".into(),
-        cwd_label: "mink-new".into(),
-        work_state: WorkState::RunningTool,
+        mirrors: state::SessionMirrors {
+            model: "deepseek-chat".into(),
+            cwd_label: "mink-new".into(),
+            ..Default::default()
+        },
+        stream: state::StreamState {
+            work_state: WorkState::RunningTool,
+            ..Default::default()
+        },
         ..Default::default()
     };
-    state.stats.belief = 0.75;
+    state.mirrors.stats.belief = 0.75;
 
     let line = build_status_spans(&state, 120);
 
@@ -1547,8 +1584,14 @@ fn status_spans_style_path_and_work_state() {
 #[test]
 fn status_spans_color_error_state_as_error() {
     let state = TuiState {
-        work_state: WorkState::Error,
-        cwd_label: "mink-new".into(),
+        stream: state::StreamState {
+            work_state: WorkState::Error,
+            ..Default::default()
+        },
+        mirrors: state::SessionMirrors {
+            cwd_label: "mink-new".into(),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -2180,15 +2223,17 @@ fn render_clamps_invalid_cursor_and_repairs_missing_cache() {
     state.input.buf = "a中b".into();
     state.input.cursor = 2;
     state
+        .transcript
         .lines
         .push(TranscriptItem::new("first".into(), TranscriptKind::Text));
     state
+        .transcript
         .lines
         .push(TranscriptItem::new("second".into(), TranscriptKind::Text));
     state.cache.width = 78;
     state.cache.rebuild_next = None;
-    state.lines[0].cached_lines = Some(vec![Line::from("first")]);
-    state.lines[0].cached_collapsed = state.lines[0].collapsed;
+    state.transcript.lines[0].cached_lines = Some(vec![Line::from("first")]);
+    state.transcript.lines[0].cached_collapsed = state.transcript.lines[0].collapsed;
 
     let backend = TestBackend::new(80, 20);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -2197,7 +2242,7 @@ fn render_clamps_invalid_cursor_and_repairs_missing_cache() {
         .unwrap();
 
     assert_eq!(state.input.cursor, "a".len());
-    assert!(state.lines[1].cached_lines.is_some());
+    assert!(state.transcript.lines[1].cached_lines.is_some());
     assert!(state.cache.heights.total() >= 2);
 }
 
@@ -2266,7 +2311,7 @@ fn new_user_input_is_appended_after_the_open_stream() {
     let mut state = TuiState::default();
 
     state.apply(&TuiSignal::Text("previous answer".into()));
-    assert!(state.streaming);
+    assert!(state.stream.streaming);
 
     state.input.buf = "next question".into();
     state.input.cursor = state.input.buf.len();
@@ -2276,8 +2321,13 @@ fn new_user_input_is_appended_after_the_open_stream() {
         &tx,
     ));
 
-    assert!(!state.streaming);
-    let texts: Vec<&str> = state.lines.iter().map(|item| item.text.as_str()).collect();
+    assert!(!state.stream.streaming);
+    let texts: Vec<&str> = state
+        .transcript
+        .lines
+        .iter()
+        .map(|item| item.text.as_str())
+        .collect();
     assert_eq!(
         texts,
         vec!["previous answer", "> next question"],
@@ -2286,9 +2336,14 @@ fn new_user_input_is_appended_after_the_open_stream() {
 
     // A late Stop must not move the previous answer behind the new input.
     state.apply(&TuiSignal::Stop);
-    let texts: Vec<&str> = state.lines.iter().map(|item| item.text.as_str()).collect();
+    let texts: Vec<&str> = state
+        .transcript
+        .lines
+        .iter()
+        .map(|item| item.text.as_str())
+        .collect();
     assert_eq!(texts, vec!["previous answer", "> next question"]);
-    assert_eq!(state.work_state, WorkState::Idle);
+    assert_eq!(state.stream.work_state, WorkState::Idle);
 }
 
 fn pending_image(name: &str) -> crate::tui::state::PendingImage {
@@ -2338,10 +2393,16 @@ fn ctrl_v_stages_clipboard_image_and_queues_it() {
     let (ui_tx, ui_rx) = std::sync::mpsc::channel();
     let dir = unique_test_dir("clipboard-stage");
     let mut state = TuiState {
-        image_input: Some(mink::runtime::OpenAiChatImageUrlLimits::default()),
-        attachments_dir: dir.clone(),
-        ui_tx: Some(ui_tx),
-        clipboard_reader: Some(fake_clipboard_reader()),
+        mirrors: state::SessionMirrors {
+            image_input: Some(mink::runtime::OpenAiChatImageUrlLimits::default()),
+            attachments_dir: dir.clone(),
+            ..Default::default()
+        },
+        async_load: state::AsyncLoadState {
+            ui_tx: Some(ui_tx),
+            clipboard_reader: Some(fake_clipboard_reader()),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -2350,14 +2411,14 @@ fn ctrl_v_stages_clipboard_image_and_queues_it() {
         &mut state,
         &tx,
     ));
-    assert!(state.clipboard_started.is_some());
+    assert!(state.async_load.clipboard_started.is_some());
 
     let event = ui_rx
         .recv_timeout(std::time::Duration::from_secs(10))
         .expect("clipboard worker must report back");
     state.apply_ui_event(event);
 
-    assert!(state.clipboard_started.is_none());
+    assert!(state.async_load.clipboard_started.is_none());
     assert_eq!(state.input.pending_images.len(), 1);
     let image = &state.input.pending_images[0];
     assert!(image.path.starts_with(&dir), "{:?}", image.path);
@@ -2372,10 +2433,16 @@ fn super_v_also_requests_clipboard_image() {
     let (ui_tx, ui_rx) = std::sync::mpsc::channel();
     let dir = unique_test_dir("clipboard-super");
     let mut state = TuiState {
-        image_input: Some(mink::runtime::OpenAiChatImageUrlLimits::default()),
-        attachments_dir: dir.clone(),
-        ui_tx: Some(ui_tx),
-        clipboard_reader: Some(fake_clipboard_reader()),
+        mirrors: state::SessionMirrors {
+            image_input: Some(mink::runtime::OpenAiChatImageUrlLimits::default()),
+            attachments_dir: dir.clone(),
+            ..Default::default()
+        },
+        async_load: state::AsyncLoadState {
+            ui_tx: Some(ui_tx),
+            clipboard_reader: Some(fake_clipboard_reader()),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -2400,13 +2467,19 @@ fn stale_clipboard_read_allows_a_retry() {
     let (ui_tx, ui_rx) = std::sync::mpsc::channel();
     let dir = unique_test_dir("clipboard-stale");
     let mut state = TuiState {
-        image_input: Some(mink::runtime::OpenAiChatImageUrlLimits::default()),
-        attachments_dir: dir.clone(),
-        ui_tx: Some(ui_tx),
-        clipboard_reader: Some(fake_clipboard_reader()),
-        // A read that never reported back (hung osascript) must not disable
-        // paste for the rest of the session.
-        clipboard_started: Some(std::time::Instant::now() - std::time::Duration::from_secs(60)),
+        mirrors: state::SessionMirrors {
+            image_input: Some(mink::runtime::OpenAiChatImageUrlLimits::default()),
+            attachments_dir: dir.clone(),
+            ..Default::default()
+        },
+        async_load: state::AsyncLoadState {
+            ui_tx: Some(ui_tx),
+            clipboard_reader: Some(fake_clipboard_reader()),
+            // A read that never reported back (hung osascript) must not disable
+            // paste for the rest of the session.
+            clipboard_started: Some(std::time::Instant::now() - std::time::Duration::from_secs(60)),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -2429,10 +2502,16 @@ fn ctrl_v_without_image_capability_reports_and_queues_nothing() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (ui_tx, _ui_rx) = std::sync::mpsc::channel();
     let mut state = TuiState {
-        image_input: None,
-        attachments_dir: unique_test_dir("clipboard-disabled"),
-        ui_tx: Some(ui_tx),
-        clipboard_reader: Some(fake_clipboard_reader()),
+        mirrors: state::SessionMirrors {
+            image_input: None,
+            attachments_dir: unique_test_dir("clipboard-disabled"),
+            ..Default::default()
+        },
+        async_load: state::AsyncLoadState {
+            ui_tx: Some(ui_tx),
+            clipboard_reader: Some(fake_clipboard_reader()),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -2442,9 +2521,9 @@ fn ctrl_v_without_image_capability_reports_and_queues_nothing() {
         &tx,
     ));
 
-    assert!(state.clipboard_started.is_none());
+    assert!(state.async_load.clipboard_started.is_none());
     assert!(state.input.pending_images.is_empty());
-    let last = state.lines.last().unwrap();
+    let last = state.transcript.lines.last().unwrap();
     assert_eq!(last.kind, TranscriptKind::Info);
     assert!(
         last.text.contains("no image input capability"),
@@ -2503,7 +2582,7 @@ fn enter_expands_image_markers_and_keeps_history_clean() {
     assert_eq!(state.input.history, vec!["look at this".to_string()]);
     assert!(state.input.pending_images.is_empty());
     assert_eq!(
-        state.lines.last().unwrap().text,
+        state.transcript.lines.last().unwrap().text,
         "> [image #1] look at this"
     );
 }
@@ -2526,7 +2605,7 @@ fn enter_with_only_images_submits_marker_text() {
     };
     assert_eq!(input, "[Attached image: \"/tmp/a.png\" - Read it to view.]");
     assert!(state.input.history.is_empty());
-    assert_eq!(state.lines.last().unwrap().text, "> [image #1]");
+    assert_eq!(state.transcript.lines.last().unwrap().text, "> [image #1]");
 }
 
 #[test]
@@ -2551,6 +2630,7 @@ fn slash_command_keeps_pending_images_queued() {
     assert_eq!(state.input.pending_images.len(), 1);
     assert!(
         state
+            .transcript
             .lines
             .iter()
             .any(|line| line.text.contains("stay queued")),
@@ -2578,6 +2658,7 @@ fn failed_send_keeps_text_and_queued_images() {
     assert_eq!(state.input.pending_images.len(), 1);
     assert!(
         state
+            .transcript
             .lines
             .iter()
             .any(|line| line.kind == TranscriptKind::Error
@@ -2592,10 +2673,16 @@ fn unrepresentable_attachment_path_fails_closed() {
     let (ui_tx, ui_rx) = std::sync::mpsc::channel();
     let root = unique_test_dir("clipboard-quote");
     let mut state = TuiState {
-        image_input: Some(mink::runtime::OpenAiChatImageUrlLimits::default()),
-        attachments_dir: root.join("bad\"dir"),
-        ui_tx: Some(ui_tx),
-        clipboard_reader: Some(fake_clipboard_reader()),
+        mirrors: state::SessionMirrors {
+            image_input: Some(mink::runtime::OpenAiChatImageUrlLimits::default()),
+            attachments_dir: root.join("bad\"dir"),
+            ..Default::default()
+        },
+        async_load: state::AsyncLoadState {
+            ui_tx: Some(ui_tx),
+            clipboard_reader: Some(fake_clipboard_reader()),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -2612,6 +2699,7 @@ fn unrepresentable_attachment_path_fails_closed() {
     assert!(state.input.pending_images.is_empty());
     assert!(
         state
+            .transcript
             .lines
             .iter()
             .any(|line| line.kind == TranscriptKind::Error
@@ -2677,6 +2765,7 @@ fn load_image_limits_reads_frozen_snapshot() {
 fn render_draws_queued_image_chips_above_the_input() {
     let mut state = TuiState::default();
     state
+        .transcript
         .lines
         .push(TranscriptItem::new("hello".into(), TranscriptKind::Text));
     state.input.pending_images = vec![pending_image("a")];
@@ -2727,6 +2816,7 @@ fn duplicate_paste_is_not_queued_twice() {
 
     assert_eq!(state.input.pending_images.len(), 1);
     let notice = state
+        .transcript
         .lines
         .iter()
         .find(|line| line.text.contains("already queued"))
@@ -2741,10 +2831,16 @@ fn ctrl_v_and_newline_keys_are_ignored_while_the_file_picker_is_open() {
     let (ui_tx, ui_rx) = std::sync::mpsc::channel();
     let dir = unique_test_dir("clipboard-overlay");
     let mut state = TuiState {
-        image_input: Some(mink::runtime::OpenAiChatImageUrlLimits::default()),
-        attachments_dir: dir.clone(),
-        ui_tx: Some(ui_tx),
-        clipboard_reader: Some(fake_clipboard_reader()),
+        mirrors: state::SessionMirrors {
+            image_input: Some(mink::runtime::OpenAiChatImageUrlLimits::default()),
+            attachments_dir: dir.clone(),
+            ..Default::default()
+        },
+        async_load: state::AsyncLoadState {
+            ui_tx: Some(ui_tx),
+            clipboard_reader: Some(fake_clipboard_reader()),
+            ..Default::default()
+        },
         overlay: Some(ActiveOverlay::FilePicker(
             FilePickerState::open_with_candidates("", 0, Vec::new()),
         )),
@@ -2765,7 +2861,7 @@ fn ctrl_v_and_newline_keys_are_ignored_while_the_file_picker_is_open() {
     }
 
     assert!(
-        state.clipboard_started.is_none(),
+        state.async_load.clipboard_started.is_none(),
         "Ctrl+V must not start a clipboard read behind the overlay"
     );
     assert!(ui_rx.try_recv().is_err());
@@ -2989,8 +3085,11 @@ fn tui_display_preserves_tool_call_and_title_fields() {
 #[test]
 fn stale_background_queries_do_not_replace_current_resource_or_closed_picker() {
     let mut state = TuiState {
-        artifact_generation: 2,
-        picker_generation: 2,
+        async_load: state::AsyncLoadState {
+            artifact_generation: 2,
+            picker_generation: 2,
+            ..Default::default()
+        },
         ..Default::default()
     };
     state.view = View::Artifact { scroll: 0 };
@@ -3003,7 +3102,7 @@ fn stale_background_queries_do_not_replace_current_resource_or_closed_picker() {
             truncated: false,
         }),
     });
-    assert!(state.artifact_detail.is_none());
+    assert!(state.mirrors.artifact_detail.is_none());
     state.apply_ui_event(state::TuiUiEvent::FilePickerReady {
         generation: 2,
         picker: FilePickerState::default(),
@@ -3026,7 +3125,7 @@ fn late_failed_admission_keeps_new_draft_and_recovers_old_draft_separately() {
         tx,
     });
     assert_eq!(state.input.buf, "new draft");
-    assert_eq!(state.failed_drafts[0].buf, "submitted");
+    assert_eq!(state.admission.failed_drafts[0].buf, "submitted");
 }
 
 #[test]
@@ -3111,7 +3210,7 @@ fn failed_control_receipt_does_not_create_a_failed_submission_from_an_unrelated_
         tx,
     });
     assert_eq!(state.input.buf, "later draft");
-    assert!(state.failed_drafts.is_empty());
+    assert!(state.admission.failed_drafts.is_empty());
 }
 
 fn goal_display() -> GoalDisplay {
@@ -3161,7 +3260,7 @@ fn goal_display() -> GoalDisplay {
 fn status_bar_shows_goal_marker_with_status_and_remaining_turns() {
     let mut state = TuiState::default();
     assert!(!build_status_line(&state, 100).contains("goal:"));
-    state.goal = Some(goal_display());
+    state.mirrors.goal = Some(goal_display());
     let line = build_status_line(&state, 100);
     assert!(line.contains("goal:active 12/20"), "{line}");
 }
@@ -3174,13 +3273,13 @@ fn status_bar_omits_hidden_goal_and_marks_completion_basis() {
     done.phase = "idle".into();
     done.remaining_turns = 0;
     done.completion_basis = Some("verified".into());
-    state.goal = Some(done.clone());
+    state.mirrors.goal = Some(done.clone());
     assert!(
         build_status_line(&state, 100).contains("goal:completed verified"),
         "completed goals state their basis"
     );
     done.hidden = true;
-    state.goal = Some(done);
+    state.mirrors.goal = Some(done);
     assert!(!build_status_line(&state, 100).contains("goal:"));
 }
 
@@ -3188,7 +3287,7 @@ fn status_bar_omits_hidden_goal_and_marks_completion_basis() {
 fn status_goal_marker_reports_its_column_range() {
     let mut state = TuiState::default();
     assert_eq!(status_goal_span(&state, 100), None);
-    state.goal = Some(goal_display());
+    state.mirrors.goal = Some(goal_display());
     let (start, end) = status_goal_span(&state, 100).expect("goal marker is clickable");
     assert!(start < end, "marker must occupy a non-empty column range");
     // The reported range must line up with the rendered marker text.
@@ -3206,9 +3305,12 @@ fn status_goal_marker_reports_its_column_range() {
 fn clicking_the_goal_marker_opens_the_goal_view() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut state = TuiState {
-        goal: Some(goal_display()),
-        status_row: 4,
-        status_goal_span: Some((10, 28)),
+        mirrors: state::SessionMirrors {
+            goal: Some(goal_display()),
+            status_row: 4,
+            status_goal_span: Some((10, 28)),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -3240,14 +3342,17 @@ fn clicking_the_goal_marker_opens_the_goal_view() {
 #[test]
 fn goal_updated_signal_replaces_state_goal() {
     let mut state = TuiState {
-        goal: Some(goal_display()),
+        mirrors: state::SessionMirrors {
+            goal: Some(goal_display()),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let mut paused = goal_display();
     paused.status = "paused".into();
     paused.phase = "idle".into();
     state.apply(&TuiSignal::GoalUpdated(Box::new(paused)));
-    let goal = state.goal.expect("goal retained");
+    let goal = state.mirrors.goal.expect("goal retained");
     assert_eq!(goal.status, "paused");
     assert_eq!(goal.phase, "idle");
 }
@@ -3260,7 +3365,10 @@ fn goals_slash_command_opens_the_goal_view() {
     );
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut state = TuiState {
-        goal: Some(goal_display()),
+        mirrors: state::SessionMirrors {
+            goal: Some(goal_display()),
+            ..Default::default()
+        },
         ..Default::default()
     };
     state.input.buf = "/goals".into();
@@ -3302,7 +3410,10 @@ fn goal_view_derives_progress_from_current_contract_review() {
         candidate.generation = generation;
         goal.review_candidate = Some(candidate);
         let state = TuiState {
-            goal: Some(goal.clone()),
+            mirrors: state::SessionMirrors {
+                goal: Some(goal.clone()),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let text = super::render::goal_detail_lines(&state)
@@ -3324,7 +3435,10 @@ fn goal_view_renders_objective_limits_and_reason() {
     goal.status = "blocked".into();
     goal.reason = Some("needs a decision".into());
     let state = TuiState {
-        goal: Some(goal),
+        mirrors: state::SessionMirrors {
+            goal: Some(goal),
+            ..Default::default()
+        },
         view: View::Goal { scroll: 0 },
         ..Default::default()
     };
@@ -3360,7 +3474,10 @@ fn goal_view_sanitises_persisted_user_text_before_rendering() {
     goal.constraints = vec!["no \u{1b}[2Jclear".into()];
     goal.reason = Some("needs \u{1b}[1minput".into());
     let state = TuiState {
-        goal: Some(goal),
+        mirrors: state::SessionMirrors {
+            goal: Some(goal),
+            ..Default::default()
+        },
         view: View::Goal { scroll: 0 },
         ..Default::default()
     };
@@ -3473,6 +3590,7 @@ fn goal_boundary_cards_render_from_the_structured_payload() {
         None,
     ))));
     let cards: Vec<_> = state
+        .transcript
         .lines
         .iter()
         .filter(|item| item.kind == TranscriptKind::Goal)
@@ -3542,12 +3660,15 @@ fn goal_card_keyboard_collapses_the_newest_card_and_opens_the_detail() {
         1,
         None,
     ))));
-    let index = state.lines.len() - 1;
-    assert!(!state.lines[index].collapsed);
+    let index = state.transcript.lines.len() - 1;
+    assert!(!state.transcript.lines[index].collapsed);
 
     let collapse = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
     assert!(!handle_event(Event::Key(collapse), &mut state, &tx));
-    assert!(state.lines[index].collapsed, "Ctrl+O folds the newest card");
+    assert!(
+        state.transcript.lines[index].collapsed,
+        "Ctrl+O folds the newest card"
+    );
     assert!(matches!(state.view, View::Main));
 
     let open = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
@@ -3578,10 +3699,10 @@ fn inline_goal_card_output_is_stable_across_renders() {
     state.apply(&TuiSignal::GoalCard(Box::new(
         item.goal_message.take().unwrap(),
     )));
-    let before = state.lines.len();
-    let _ = goal_card_lines(&state.lines[0], 50);
-    let _ = goal_card_lines(&state.lines[0], 50);
-    assert_eq!(state.lines.len(), before);
+    let before = state.transcript.lines.len();
+    let _ = goal_card_lines(&state.transcript.lines[0], 50);
+    let _ = goal_card_lines(&state.transcript.lines[0], 50);
+    assert_eq!(state.transcript.lines.len(), before);
 }
 
 #[test]
@@ -3620,8 +3741,8 @@ fn goal_card_fold_and_unfold_render_the_screen_marker() {
         screen(&terminal)
     );
 
-    let index = state.lines.len() - 1;
-    state.lines[index].toggle_collapsed();
+    let index = state.transcript.lines.len() - 1;
+    state.transcript.lines[index].toggle_collapsed();
     state.invalidate_item(index);
     terminal
         .draw(|frame| render(frame, &mut state, TuiMode::Full))
@@ -3633,7 +3754,7 @@ fn goal_card_fold_and_unfold_render_the_screen_marker() {
         screen(&terminal)
     );
 
-    state.lines[index].toggle_collapsed();
+    state.transcript.lines[index].toggle_collapsed();
     state.invalidate_item(index);
     terminal
         .draw(|frame| render(frame, &mut state, TuiMode::Full))
@@ -3651,11 +3772,17 @@ fn history_load_adopts_the_goal_mirror_without_overwriting_a_live_one() {
     // The background state reads goal.json; a restored session must show the
     // marker before any GoalUpdated arrives.
     let mut live = TuiState {
-        loading_history: true,
+        async_load: state::AsyncLoadState {
+            loading_history: true,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let history = TuiState {
-        goal: Some(goal_display()),
+        mirrors: state::SessionMirrors {
+            goal: Some(goal_display()),
+            ..Default::default()
+        },
         ..Default::default()
     };
     live.apply_ui_event(crate::tui::state::TuiUiEvent::HistoryLoaded {
@@ -3663,7 +3790,7 @@ fn history_load_adopts_the_goal_mirror_without_overwriting_a_live_one() {
         state: Box::new(history),
     });
     assert_eq!(
-        live.goal.as_ref().map(|goal| goal.id.clone()),
+        live.mirrors.goal.as_ref().map(|goal| goal.id.clone()),
         Some("goal-1".to_string())
     );
 
@@ -3671,12 +3798,21 @@ fn history_load_adopts_the_goal_mirror_without_overwriting_a_live_one() {
     let mut paused = goal_display();
     paused.status = "paused".into();
     let mut live = TuiState {
-        loading_history: true,
-        goal: Some(paused),
+        async_load: state::AsyncLoadState {
+            loading_history: true,
+            ..Default::default()
+        },
+        mirrors: state::SessionMirrors {
+            goal: Some(paused),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let history = TuiState {
-        goal: Some(goal_display()),
+        mirrors: state::SessionMirrors {
+            goal: Some(goal_display()),
+            ..Default::default()
+        },
         ..Default::default()
     };
     live.apply_ui_event(crate::tui::state::TuiUiEvent::HistoryLoaded {
@@ -3684,7 +3820,7 @@ fn history_load_adopts_the_goal_mirror_without_overwriting_a_live_one() {
         state: Box::new(history),
     });
     assert_eq!(
-        live.goal.as_ref().map(|goal| goal.status.clone()),
+        live.mirrors.goal.as_ref().map(|goal| goal.status.clone()),
         Some("paused".to_string())
     );
 }
@@ -3846,7 +3982,10 @@ fn session_fixture_restores_goal_cards_and_never_echoes_internal_rows() {
 
     let items = crate::tui::replay::load_session(&directory.join("events.jsonl"));
     let mut state = TuiState {
-        lines: items,
+        transcript: state::TranscriptState {
+            lines: items,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let backend = TestBackend::new(80, 60);
@@ -3885,6 +4024,7 @@ fn session_fixture_restores_goal_cards_and_never_echoes_internal_rows() {
     assert!(raw.contains("Goal goal-1 ended (revision 9)"), "{raw}");
 
     let cards: Vec<_> = state
+        .transcript
         .lines
         .iter()
         .filter(|item| item.kind == TranscriptKind::Goal)
@@ -3910,7 +4050,12 @@ fn streaming_text_strips_ansi_escape_split_across_chunks() {
     state.apply(&TuiSignal::Text("hello \x1b[".into()));
     state.apply(&TuiSignal::Text("31mworld\x1b[0m!".into()));
     state.finalize_stream();
-    let combined: String = state.lines.iter().map(|l| l.text.as_str()).collect();
+    let combined: String = state
+        .transcript
+        .lines
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect();
     assert_eq!(combined, "hello world!");
 }
 
@@ -3922,7 +4067,7 @@ fn status_bar_shows_completion_basis_even_with_remaining_turns() {
     done.phase = "idle".into();
     done.remaining_turns = 8;
     done.completion_basis = Some("verified".into());
-    state.goal = Some(done);
+    state.mirrors.goal = Some(done);
     let line = build_status_line(&state, 100);
     assert!(
         line.contains("goal:completed verified"),
@@ -3953,13 +4098,17 @@ fn input_history_and_failed_drafts_are_bounded() {
         };
         state.push_failed_draft(draft);
     }
-    assert_eq!(state.failed_drafts.len(), 50);
+    assert_eq!(state.admission.failed_drafts.len(), 50);
     assert_eq!(
-        state.failed_drafts.first().map(|d| d.buf.as_str()),
+        state
+            .admission
+            .failed_drafts
+            .first()
+            .map(|d| d.buf.as_str()),
         Some("draft-30")
     );
     assert_eq!(
-        state.failed_drafts.last().map(|d| d.buf.as_str()),
+        state.admission.failed_drafts.last().map(|d| d.buf.as_str()),
         Some("draft-79")
     );
 }
@@ -3990,7 +4139,10 @@ fn truncate_display_respects_max_width_smaller_than_ellipsis() {
 #[test]
 fn details_panel_includes_goal_and_labels_collapsed_goal_card() {
     let mut state = TuiState {
-        goal: Some(goal_display()),
+        mirrors: state::SessionMirrors {
+            goal: Some(goal_display()),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let mut card = TranscriptItem::goal_card(crate::runtime::GoalMessage {

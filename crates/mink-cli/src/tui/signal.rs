@@ -111,7 +111,7 @@ impl TuiState {
         }
         match sig {
             TuiSignal::GoalUpdated(goal) => {
-                self.goal = Some(goal.as_ref().clone());
+                self.mirrors.goal = Some(goal.as_ref().clone());
                 self.invalidate_detail_resource("goal");
             }
             TuiSignal::GoalCard(message) => {
@@ -127,13 +127,13 @@ impl TuiState {
                 ));
             }
             TuiSignal::GoalTurnStarted { turn_id } => {
-                self.active_turn_id = Some(turn_id.clone());
-                self.stopping = false;
-                self.work_state = WorkState::WaitingModel;
+                self.stream.active_turn_id = Some(turn_id.clone());
+                self.stream.stopping = false;
+                self.stream.work_state = WorkState::WaitingModel;
                 self.arm_task_notification();
             }
             TuiSignal::GuidanceApplied { input_id, text } => {
-                if self.applied_inputs.insert(input_id.clone()) {
+                if self.admission.applied_inputs.insert(input_id.clone()) {
                     self.finalize_stream();
                     self.push_line(TranscriptItem::new(
                         format!(
@@ -142,23 +142,24 @@ impl TuiState {
                         ),
                         TranscriptKind::Info,
                     ));
-                    self.inputs.retain(|i| &i.input_id != input_id);
-                    self.work_state = WorkState::WaitingModel;
+                    self.admission.inputs.retain(|i| &i.input_id != input_id);
+                    self.stream.work_state = WorkState::WaitingModel;
                 }
             }
             TuiSignal::TurnFinished { turn_id, status } => {
-                if self.active_turn_id.as_ref() == Some(turn_id) {
+                if self.stream.active_turn_id.as_ref() == Some(turn_id) {
                     self.finalize_stream();
                     self.seal_incomplete_transcript("Result unavailable: turn ended.");
-                    self.active_turn_id = None;
-                    self.stopping = false;
+                    self.stream.active_turn_id = None;
+                    self.stream.stopping = false;
                     self.refresh_inputs();
                     let ok = *status == crate::runtime::TurnStatus::Ok;
-                    self.work_state = if ok || *status == crate::runtime::TurnStatus::Interrupted {
-                        WorkState::Idle
-                    } else {
-                        WorkState::Error
-                    };
+                    self.stream.work_state =
+                        if ok || *status == crate::runtime::TurnStatus::Interrupted {
+                            WorkState::Idle
+                        } else {
+                            WorkState::Error
+                        };
                     if *status == crate::runtime::TurnStatus::Interrupted {
                         self.push_line(TranscriptItem::new(
                             "Turn interrupted; unapplied inputs remain in /inputs.".into(),
@@ -184,49 +185,55 @@ impl TuiState {
                 }
             }
             TuiSignal::Thinking(c) => {
-                self.stream_status = None;
-                if !self.stream_line.is_empty()
-                    && self.stream_kind != TranscriptKind::StreamThinking
+                self.stream.stream_status = None;
+                if !self.stream.stream_line.is_empty()
+                    && self.stream.stream_kind != TranscriptKind::StreamThinking
                 {
-                    self.stream_line.push('\n');
+                    self.stream.stream_line.push('\n');
                     self.save_stream();
-                } else if !self.streaming || self.stream_kind != TranscriptKind::StreamThinking {
-                    self.stream_filter.reset();
+                } else if !self.stream.streaming
+                    || self.stream.stream_kind != TranscriptKind::StreamThinking
+                {
+                    self.stream.stream_filter.reset();
                 }
-                let c = sanitize_tui_stream_chunk(&mut self.stream_filter, c);
-                self.stream_kind = TranscriptKind::StreamThinking;
-                self.streaming = true;
-                self.stream_line.push_str(&c);
-                self.stream_revision = self.stream_revision.wrapping_add(1);
-                self.work_state = WorkState::StreamingThinking;
+                let c = sanitize_tui_stream_chunk(&mut self.stream.stream_filter, c);
+                self.stream.stream_kind = TranscriptKind::StreamThinking;
+                self.stream.streaming = true;
+                self.stream.stream_line.push_str(&c);
+                self.stream.stream_revision = self.stream.stream_revision.wrapping_add(1);
+                self.stream.work_state = WorkState::StreamingThinking;
             }
             TuiSignal::Text(c) => {
                 // 新内容到达：清除过期的瞬时等待状态（心跳标签）。
-                self.stream_status = None;
-                if !self.stream_line.is_empty() && self.stream_kind != TranscriptKind::StreamText {
-                    self.stream_line.push('\n');
+                self.stream.stream_status = None;
+                if !self.stream.stream_line.is_empty()
+                    && self.stream.stream_kind != TranscriptKind::StreamText
+                {
+                    self.stream.stream_line.push('\n');
                     self.save_stream();
-                } else if !self.streaming || self.stream_kind != TranscriptKind::StreamText {
-                    self.stream_filter.reset();
+                } else if !self.stream.streaming
+                    || self.stream.stream_kind != TranscriptKind::StreamText
+                {
+                    self.stream.stream_filter.reset();
                 }
-                let c = sanitize_tui_stream_chunk(&mut self.stream_filter, c);
-                self.stream_kind = TranscriptKind::StreamText;
-                self.streaming = true;
-                self.stream_line.push_str(&c);
-                self.stream_revision = self.stream_revision.wrapping_add(1);
-                self.work_state = WorkState::StreamingText;
+                let c = sanitize_tui_stream_chunk(&mut self.stream.stream_filter, c);
+                self.stream.stream_kind = TranscriptKind::StreamText;
+                self.stream.streaming = true;
+                self.stream.stream_line.push_str(&c);
+                self.stream.stream_revision = self.stream.stream_revision.wrapping_add(1);
+                self.stream.work_state = WorkState::StreamingText;
             }
             TuiSignal::Stop => {
                 self.finalize_stream();
                 self.seal_incomplete_transcript("Result unavailable: turn stopped.");
-                if self.active_turn_id.is_none() {
-                    self.work_state = WorkState::Idle;
+                if self.stream.active_turn_id.is_none() {
+                    self.stream.work_state = WorkState::Idle;
                     self.finish_task_notification(TaskNotificationKind::Completed);
                 }
             }
             TuiSignal::Retry => {
                 self.finalize_stream();
-                self.work_state = WorkState::WaitingModel;
+                self.stream.work_state = WorkState::WaitingModel;
             }
             TuiSignal::ToolCall {
                 tool_use_id,
@@ -235,7 +242,7 @@ impl TuiState {
                 input,
             } => {
                 self.finalize_stream();
-                self.work_state = WorkState::RunningTool;
+                self.stream.work_state = WorkState::RunningTool;
                 let index = self.push_line(TranscriptItem::new_tool_call(
                     tool_use_id.clone(),
                     tool_name.clone(),
@@ -243,19 +250,19 @@ impl TuiState {
                     input.clone(),
                 ));
                 if let Some(id) = tool_use_id {
-                    self.active_tools.insert(id.clone(), index);
+                    self.transcript.active_tools.insert(id.clone(), index);
                 }
             }
             TuiSignal::Info(n) => {
                 // 等待心跳（LLM 流式等待/首事件等待）：只在状态栏瞬时展示（如 `·30s`），
                 // 无论是否流式都不进入 transcript。
                 if let Some(label) = crate::tui::state::heartbeat_status_label(n) {
-                    self.stream_status = Some(label);
-                } else if self.streaming {
+                    self.stream.stream_status = Some(label);
+                } else if self.stream.streaming {
                     // 流式期间不打断：文本可能正处在未闭合的 markdown 围栏中间，
                     // 直接 finalize 会让后续内容丢失围栏上下文而无法正确渲染。
                     // 非心跳告警推迟到流结束时落盘。
-                    self.pending_infos.push(n.clone());
+                    self.transcript.pending_infos.push(n.clone());
                 } else {
                     self.finalize_stream();
                     self.push_line(TranscriptItem::new(n.clone(), TranscriptKind::Info));
@@ -272,13 +279,17 @@ impl TuiState {
                 artifacts,
             } => {
                 self.finalize_stream();
-                self.work_state = WorkState::WaitingModel;
+                self.stream.work_state = WorkState::WaitingModel;
                 let existing = tool_use_id
                     .as_ref()
-                    .and_then(|id| self.active_tools.remove(id))
+                    .and_then(|id| self.transcript.active_tools.remove(id))
                     .filter(|index| {
-                        *index >= self.inline.committed
-                            && self.lines.get(*index).is_some_and(|item| !item.sealed)
+                        *index >= self.transcript.inline.committed
+                            && self
+                                .transcript
+                                .lines
+                                .get(*index)
+                                .is_some_and(|item| !item.sealed)
                     });
                 let idx = if let Some(idx) = existing {
                     idx
@@ -288,7 +299,7 @@ impl TuiState {
                         String::new(),
                     ))
                 };
-                if let Some(item) = self.lines.get_mut(idx) {
+                if let Some(item) = self.transcript.lines.get_mut(idx) {
                     item.text = sanitize_tui_text(content);
                     item.tool_name = Some(sanitize_tui_text(tool_name));
                     item.tool_use_id.clone_from(tool_use_id);
@@ -300,12 +311,12 @@ impl TuiState {
                     item.sealed = true;
                     item.invalidate_cache();
                 }
-                self.unsealed.remove(&idx);
+                self.transcript.unsealed.remove(&idx);
                 match presentation {
                     Some(ToolPresentation::Plan(plan)) => {
                         self.invalidate_detail_resource("plan");
                         self.invalidate_detail_resource("panel:Status");
-                        self.plan = Some(plan.clone());
+                        self.mirrors.plan = Some(plan.clone());
                     }
                     Some(ToolPresentation::Todo(todos)) => self.apply_todo_presentation(todos),
                     None => {}
@@ -315,19 +326,19 @@ impl TuiState {
             TuiSignal::Error(m) => {
                 self.finalize_stream();
                 self.seal_incomplete_transcript("Result unavailable: turn failed.");
-                self.work_state = WorkState::Error;
+                self.stream.work_state = WorkState::Error;
                 self.push_line(TranscriptItem::new(
                     format!("Error: {m}"),
                     TranscriptKind::Error,
                 ));
-                if self.active_turn_id.is_none() {
+                if self.stream.active_turn_id.is_none() {
                     self.finish_task_notification(TaskNotificationKind::Failed);
                 }
             }
             TuiSignal::TitleUpdate(m, s) => {
                 self.invalidate_detail_resource("panel:Status");
-                self.model = m.clone();
-                self.stats = s.clone();
+                self.mirrors.model = m.clone();
+                self.mirrors.stats = s.clone();
             }
             TuiSignal::SubAgentStatus {
                 session_id,
@@ -359,23 +370,34 @@ impl TuiState {
                     None
                 };
                 if running {
-                    self.sub_agents.active_sessions.insert(session_id.clone());
-                    self.work_state = WorkState::RunningSubAgent;
+                    self.transcript
+                        .sub_agents
+                        .active_sessions
+                        .insert(session_id.clone());
+                    self.stream.work_state = WorkState::RunningSubAgent;
                 } else if terminal {
-                    self.sub_agents.active_sessions.remove(session_id);
-                    if self.sub_agents.active_sessions.is_empty() {
-                        self.work_state = WorkState::WaitingModel;
+                    self.transcript
+                        .sub_agents
+                        .active_sessions
+                        .remove(session_id);
+                    if self.transcript.sub_agents.active_sessions.is_empty() {
+                        self.stream.work_state = WorkState::WaitingModel;
                     }
                 }
-                if let Some(idx) = self.sub_agents.line_by_session.get(session_id).copied()
-                    && let Some(line) = self.lines.get_mut(idx)
+                if let Some(idx) = self
+                    .transcript
+                    .sub_agents
+                    .line_by_session
+                    .get(session_id)
+                    .copied()
+                    && let Some(line) = self.transcript.lines.get_mut(idx)
                 {
                     line.text = sanitize_tui_text(&title);
                     line.sealed = !running;
                     if running {
-                        self.unsealed.insert(idx);
+                        self.transcript.unsealed.insert(idx);
                     } else {
-                        self.unsealed.remove(&idx);
+                        self.transcript.unsealed.remove(&idx);
                     }
                     if running && line.sub_detail.is_none() {
                         line.sub_detail = sub_detail;
@@ -387,7 +409,8 @@ impl TuiState {
                         .with_sub_detail(sub_detail);
                     item.sealed = !running;
                     let idx = self.push_line(item);
-                    self.sub_agents
+                    self.transcript
+                        .sub_agents
                         .line_by_session
                         .insert(session_id.clone(), idx);
                 }
@@ -397,8 +420,13 @@ impl TuiState {
                 kind,
                 content,
             } => {
-                if let Some(idx) = self.sub_agents.line_by_session.get(session_id).copied()
-                    && let Some(line) = self.lines.get_mut(idx)
+                if let Some(idx) = self
+                    .transcript
+                    .sub_agents
+                    .line_by_session
+                    .get(session_id)
+                    .copied()
+                    && let Some(line) = self.transcript.lines.get_mut(idx)
                     && let Some(ref mut detail) = line.sub_detail
                 {
                     let content = sanitize_tui_text(content);
@@ -419,8 +447,11 @@ impl TuiState {
                 out_tokens,
             } => {
                 self.finalize_stream();
-                self.sub_agents.active_sessions.remove(session_id);
-                self.work_state = if self.sub_agents.active_sessions.is_empty() {
+                self.transcript
+                    .sub_agents
+                    .active_sessions
+                    .remove(session_id);
+                self.stream.work_state = if self.transcript.sub_agents.active_sessions.is_empty() {
                     WorkState::WaitingModel
                 } else {
                     WorkState::RunningSubAgent
@@ -436,12 +467,17 @@ impl TuiState {
                 let thinking = sanitize_tui_text(thinking);
                 let text = sanitize_tui_text(text);
                 let mut found = false;
-                if let Some(idx) = self.sub_agents.line_by_session.get(session_id).copied()
-                    && let Some(line) = self.lines.get_mut(idx)
+                if let Some(idx) = self
+                    .transcript
+                    .sub_agents
+                    .line_by_session
+                    .get(session_id)
+                    .copied()
+                    && let Some(line) = self.transcript.lines.get_mut(idx)
                 {
                     line.text = sanitize_tui_text(&title);
                     line.sealed = true;
-                    self.unsealed.remove(&idx);
+                    self.transcript.unsealed.remove(&idx);
                     if let Some(ref mut detail) = line.sub_detail {
                         detail.thinking = thinking.clone();
                         detail.text = text.clone();
@@ -449,7 +485,9 @@ impl TuiState {
                     line.invalidate_cache();
                     found = true;
                 }
-                if found && let Some(&idx) = self.sub_agents.line_by_session.get(session_id) {
+                if found
+                    && let Some(&idx) = self.transcript.sub_agents.line_by_session.get(session_id)
+                {
                     self.invalidate_item(idx);
                 }
                 if !found {
@@ -460,7 +498,8 @@ impl TuiState {
                         }));
                     item.sealed = true;
                     let idx = self.push_line(item);
-                    self.sub_agents
+                    self.transcript
+                        .sub_agents
                         .line_by_session
                         .insert(session_id.clone(), idx);
                 }

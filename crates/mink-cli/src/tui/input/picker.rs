@@ -22,7 +22,7 @@ pub(super) fn accept_file_picker(state: &mut TuiState, keep_open_for_dirs: bool)
 }
 
 pub(super) fn open_file_picker(state: &mut TuiState) {
-    if state.ui_tx.is_none() {
+    if state.async_load.ui_tx.is_none() {
         state.overlay = Some(ActiveOverlay::FilePicker(FilePickerState::open(
             &state.input.buf,
             state.input.cursor,
@@ -34,7 +34,7 @@ pub(super) fn open_file_picker(state: &mut TuiState) {
     request_file_picker(state, true);
 }
 fn request_file_picker(state: &mut TuiState, initial: bool) {
-    let Some(tx) = state.ui_tx.clone() else {
+    let Some(tx) = state.async_load.ui_tx.clone() else {
         return;
     };
     let Some(ActiveOverlay::FilePicker(picker)) = state.overlay.as_mut() else {
@@ -54,12 +54,13 @@ fn request_file_picker(state: &mut TuiState, initial: bool) {
     picker.replace_end = end;
     // Stale candidates may not be accepted while a new query is being scanned.
     picker.items.clear();
-    state.picker_generation = state.picker_generation.wrapping_add(1);
-    let generation = state.picker_generation;
+    state.async_load.picker_generation = state.async_load.picker_generation.wrapping_add(1);
+    let generation = state.async_load.picker_generation;
     let input = state.input.buf.clone();
     let cursor = state.input.cursor;
     let policy = state.file_picker_policy.clone();
     let worker = state
+        .async_load
         .picker_worker
         .get_or_insert_with(|| crate::tui::file_picker::start_worker(tx));
     let _ = worker.send(crate::tui::file_picker::PickerRequest {
@@ -70,7 +71,7 @@ fn request_file_picker(state: &mut TuiState, initial: bool) {
     });
 }
 pub(super) fn refresh_file_picker(state: &mut TuiState) {
-    if state.ui_tx.is_some() {
+    if state.async_load.ui_tx.is_some() {
         request_file_picker(state, false);
     } else if let Some(ActiveOverlay::FilePicker(picker)) = state.overlay.as_mut() {
         picker.refresh_with_policy(

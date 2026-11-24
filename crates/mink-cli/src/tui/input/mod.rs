@@ -84,8 +84,8 @@ pub(crate) fn handle_event_for_mode(
                     MouseEventKind::ScrollUp => scroll_by(state, -(SCROLL_STEP as isize)),
                     MouseEventKind::ScrollDown => scroll_by(state, SCROLL_STEP as isize),
                     MouseEventKind::Down(crossterm::event::MouseButton::Left)
-                        if mouse.row == state.status_row
-                            && state.status_goal_span.is_some_and(|(start, end)| {
+                        if mouse.row == state.mirrors.status_row
+                            && state.mirrors.status_goal_span.is_some_and(|(start, end)| {
                                 (start..end).contains(&mouse.column)
                             }) =>
                     {
@@ -153,7 +153,7 @@ fn handle_full_click(state: &mut TuiState, mouse_row: u16) {
         .map(|target| (target.line_idx, target.action.clone()));
     match action {
         Some((idx, ClickAction::ToggleCollapse)) => {
-            if let Some(item) = state.lines.get_mut(idx) {
+            if let Some(item) = state.transcript.lines.get_mut(idx) {
                 item.toggle_collapsed();
                 state.invalidate_item(idx);
             }

@@ -10,6 +10,7 @@ pub(crate) fn handle_ctrl_c(
 ) -> bool {
     let now = Instant::now();
     if state
+        .stream
         .last_interrupt
         .is_some_and(|at| now.duration_since(at) <= INTERRUPT_EXIT_WINDOW)
     {
@@ -17,19 +18,20 @@ pub(crate) fn handle_ctrl_c(
         return true;
     }
 
-    if state.active_turn_id.is_some()
-        || state.work_state.is_working()
-        || state.admission_pending
-        || state.runtime.as_ref().is_some_and(|r| {
+    if state.stream.active_turn_id.is_some()
+        || state.stream.work_state.is_working()
+        || state.admission.admission_pending
+        || state.admission.runtime.as_ref().is_some_and(|r| {
             r.handle
                 .goal_snapshot()
                 .is_some_and(|g| g.status == crate::runtime::GoalStatus::Active)
         })
     {
         let _ = orch_tx.send(RuntimeCmd::Interrupt);
-        state.stopping = state.active_turn_id.is_some() || state.admission_pending;
-        state.admission_cancelled |= state.admission_pending;
-        state.last_interrupt = Some(now);
+        state.stream.stopping =
+            state.stream.active_turn_id.is_some() || state.admission.admission_pending;
+        state.admission.admission_cancelled |= state.admission.admission_pending;
+        state.stream.last_interrupt = Some(now);
         return false;
     }
 
@@ -47,7 +49,7 @@ pub(super) fn insert_char(state: &mut TuiState, c: char) {
 /// spawns a subprocess, so it must not block the event loop) and stage the
 /// image under the session attachment directory.
 pub(super) fn request_clipboard_image(state: &mut TuiState) {
-    let Some(limits) = state.image_input.clone() else {
+    let Some(limits) = state.mirrors.image_input.clone() else {
         state.push_line(TranscriptItem::new(
             "Clipboard image paste is unavailable: this session has no image input capability."
                 .into(),
@@ -56,15 +58,16 @@ pub(super) fn request_clipboard_image(state: &mut TuiState) {
         return;
     };
     if state
+        .async_load
         .clipboard_started
         .is_some_and(|started| started.elapsed() < CLIPBOARD_RETRY_WINDOW)
     {
         return;
     }
-    let Some(ui_tx) = state.ui_tx.clone() else {
+    let Some(ui_tx) = state.async_load.ui_tx.clone() else {
         return;
     };
-    if state.attachments_dir.as_os_str().is_empty() {
+    if state.mirrors.attachments_dir.as_os_str().is_empty() {
         state.push_line(TranscriptItem::new(
             "Clipboard image paste is unavailable: the session attachment directory is unknown."
                 .into(),
@@ -72,9 +75,9 @@ pub(super) fn request_clipboard_image(state: &mut TuiState) {
         ));
         return;
     }
-    state.clipboard_started = Some(Instant::now());
-    let dir = state.attachments_dir.clone();
-    let reader = state.clipboard_reader.clone();
+    state.async_load.clipboard_started = Some(Instant::now());
+    let dir = state.mirrors.attachments_dir.clone();
+    let reader = state.async_load.clipboard_reader.clone();
     std::thread::spawn(move || {
         let staged = match reader {
             Some(reader) => reader(&dir, &limits),

@@ -127,31 +127,35 @@ async fn running_enter_uses_current_turn_and_formal_commit_handoff_without_break
         Arc::new(TuiDisplay::new(signals.clone())),
     );
     let mut state = TuiState {
-        runtime: Some(TuiRuntime {
-            handle: runtime.handle(),
-            signals,
-        }),
+        admission: state::AdmissionState {
+            runtime: Some(TuiRuntime {
+                handle: runtime.handle(),
+                signals,
+            }),
+            ..Default::default()
+        },
         ..Default::default()
     };
     submit(&mut state, &tx, "start task");
     until(&mut state, &mut rx, |s| {
-        s.stream_line.contains("answer one")
+        s.stream.stream_line.contains("answer one")
     })
     .await;
-    let turn = state.active_turn_id.clone();
+    let turn = state.stream.active_turn_id.clone();
     submit(&mut state, &tx, "keep the public API");
-    assert_eq!(state.active_turn_id, turn);
-    assert!(state.streaming);
-    assert_eq!(state.stream_line, "answer one");
+    assert_eq!(state.stream.active_turn_id, turn);
+    assert!(state.stream.streaming);
+    assert_eq!(state.stream.stream_line, "answer one");
     assert!(
         !state
+            .transcript
             .lines
             .iter()
             .any(|line| line.text.contains("keep the public API"))
     );
-    assert_eq!(state.inputs.len(), 1);
-    assert_eq!(state.inputs[0].status, InputStatus::Pending);
-    let input_id = state.inputs[0].input_id.clone();
+    assert_eq!(state.admission.inputs.len(), 1);
+    assert_eq!(state.admission.inputs[0].status, InputStatus::Pending);
+    let input_id = state.admission.inputs[0].input_id.clone();
     for mode in [TuiMode::Full, TuiMode::Inline] {
         let mut surface = state.clone();
         let mut terminal =
@@ -174,10 +178,11 @@ async fn running_enter_uses_current_turn_and_formal_commit_handoff_without_break
     // Submission leaves room for a new draft, preserved by the eventual final.
     state.input.buf = "next draft".into();
     backend.release.notify_one();
-    until(&mut state, &mut rx, |s| s.active_turn_id.is_none()).await;
+    until(&mut state, &mut rx, |s| s.stream.active_turn_id.is_none()).await;
     assert_eq!(state.input.buf, "next draft");
-    assert_eq!(state.stats.current_turn_count, 1);
+    assert_eq!(state.mirrors.stats.current_turn_count, 1);
     let texts = state
+        .transcript
         .lines
         .iter()
         .map(|l| l.text.as_str())
@@ -213,6 +218,7 @@ async fn running_enter_uses_current_turn_and_formal_commit_handoff_without_break
     });
     assert_eq!(
         state
+            .transcript
             .lines
             .iter()
             .filter(|l| l.text.contains("keep the public API"))
@@ -272,25 +278,29 @@ async fn interrupted_inputs_survive_reopen_and_only_explicit_resume_runs_them() 
         Arc::new(TuiDisplay::new(signals.clone())),
     );
     let mut state = TuiState {
-        runtime: Some(TuiRuntime {
-            handle: runtime.handle(),
-            signals: signals.clone(),
-        }),
+        admission: state::AdmissionState {
+            runtime: Some(TuiRuntime {
+                handle: runtime.handle(),
+                signals: signals.clone(),
+            }),
+            ..Default::default()
+        },
         ..Default::default()
     };
     submit(&mut state, &tx, "start task");
-    until(&mut state, &mut rx, |s| s.streaming).await;
+    until(&mut state, &mut rx, |s| s.stream.streaming).await;
     submit(&mut state, &tx, "resume this");
     submit(&mut state, &tx, "withdraw this");
-    let first = state.inputs[0].input_id.clone();
-    let second = state.inputs[1].input_id.clone();
+    let first = state.admission.inputs[0].input_id.clone();
+    let second = state.admission.inputs[1].input_id.clone();
     assert!(!handle_ctrl_c(&mut state, &tx));
-    assert!(state.stopping);
+    assert!(state.stream.stopping);
     submit(&mut state, &tx, "draft while stopping");
     assert_eq!(state.input.buf, "draft while stopping");
-    until(&mut state, &mut rx, |s| s.active_turn_id.is_none()).await;
+    until(&mut state, &mut rx, |s| s.stream.active_turn_id.is_none()).await;
     assert!(
         state
+            .admission
             .inputs
             .iter()
             .all(|i| i.status == InputStatus::Unapplied)
@@ -308,12 +318,12 @@ async fn interrupted_inputs_survive_reopen_and_only_explicit_resume_runs_them() 
         runtime.handle(),
         Arc::new(TuiDisplay::new(signals.clone())),
     );
-    state.runtime = Some(TuiRuntime {
+    state.admission.runtime = Some(TuiRuntime {
         handle: runtime.handle(),
         signals,
     });
     state.refresh_inputs();
-    assert_eq!(state.inputs.len(), 2);
+    assert_eq!(state.admission.inputs.len(), 2);
     assert_eq!(backend.requests.lock().unwrap().len(), 1);
     submit(&mut state, &tx, "/inputs");
     let panel = super::panels::panel_lines(&state, super::state::PanelKind::Inputs, 0);
@@ -328,14 +338,14 @@ async fn interrupted_inputs_survive_reopen_and_only_explicit_resume_runs_them() 
         &tx,
     );
     submit(&mut state, &tx, &format!("/withdraw {second}"));
-    assert_eq!(state.inputs.len(), 1);
+    assert_eq!(state.admission.inputs.len(), 1);
     assert_eq!(backend.requests.lock().unwrap().len(), 1);
     submit(&mut state, &tx, &format!("/resume {first}"));
-    until(&mut state, &mut rx, |s| s.active_turn_id.is_none()).await;
+    until(&mut state, &mut rx, |s| s.stream.active_turn_id.is_none()).await;
     assert_eq!(backend.requests.lock().unwrap().len(), 2);
-    assert!(state.inputs.is_empty());
+    assert!(state.admission.inputs.is_empty());
     // A stale UI turn identity is a rejected guide, never a new queued turn.
-    state.active_turn_id = Some("ended-turn".into());
+    state.stream.active_turn_id = Some("ended-turn".into());
     state.input.pending_images.push(super::state::PendingImage {
         path: root.join("attachments/image.png"),
         width: 1,
@@ -347,12 +357,13 @@ async fn interrupted_inputs_survive_reopen_and_only_explicit_resume_runs_them() 
     assert_eq!(state.input.pending_images.len(), 1);
     assert!(
         state
+            .admission
             .input_notice
             .as_deref()
             .unwrap()
             .contains("Input rejected")
     );
-    assert!(state.inputs.is_empty());
+    assert!(state.admission.inputs.is_empty());
     assert_eq!(backend.requests.lock().unwrap().len(), 2);
     runtime.shutdown().await.unwrap();
     std::fs::remove_dir_all(root).unwrap();
@@ -361,8 +372,11 @@ async fn interrupted_inputs_survive_reopen_and_only_explicit_resume_runs_them() 
 #[test]
 fn round_stop_and_stale_final_cannot_end_an_active_guided_turn() {
     let mut state = TuiState {
-        active_turn_id: Some("current".into()),
-        work_state: WorkState::RunningTool,
+        stream: state::StreamState {
+            active_turn_id: Some("current".into()),
+            work_state: WorkState::RunningTool,
+            ..Default::default()
+        },
         ..Default::default()
     };
     state.arm_task_notification();
@@ -371,7 +385,7 @@ fn round_stop_and_stale_final_cannot_end_an_active_guided_turn() {
         turn_id: "old".into(),
         status: crate::runtime::TurnStatus::Ok,
     });
-    assert_eq!(state.active_turn_id.as_deref(), Some("current"));
+    assert_eq!(state.stream.active_turn_id.as_deref(), Some("current"));
     assert!(state.take_task_notification().is_none());
     assert_eq!(
         parse_slash_command("/resume saved-id").unwrap(),
@@ -397,26 +411,32 @@ async fn asynchronous_admission_preserves_later_draft_and_stop_during_admission(
     );
     let (ui_tx, ui_rx) = mpsc::channel();
     let mut state = TuiState {
-        runtime: Some(TuiRuntime {
-            handle: runtime.handle(),
-            signals,
-        }),
-        ui_tx: Some(ui_tx),
+        admission: state::AdmissionState {
+            runtime: Some(TuiRuntime {
+                handle: runtime.handle(),
+                signals,
+            }),
+            ..Default::default()
+        },
+        async_load: state::AsyncLoadState {
+            ui_tx: Some(ui_tx),
+            ..Default::default()
+        },
         ..Default::default()
     };
     submit(&mut state, &tx, "old draft");
-    assert!(state.admission_pending);
+    assert!(state.admission.admission_pending);
     state.input.buf = "new draft".into();
     state.input.revision += 1;
     assert!(!handle_ctrl_c(&mut state, &tx));
-    assert!(state.stopping);
+    assert!(state.stream.stopping);
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             while let Ok(event) = ui_rx.try_recv() {
                 state.apply_ui_event(event);
             }
             drain_signals(&mut rx, &mut state, TuiMode::Full);
-            if !state.admission_pending && state.active_turn_id.is_none() {
+            if !state.admission.admission_pending && state.stream.active_turn_id.is_none() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(2)).await;
@@ -426,9 +446,10 @@ async fn asynchronous_admission_preserves_later_draft_and_stop_during_admission(
     .unwrap();
     assert_eq!(state.input.buf, "new draft");
     assert!(!state.quit);
-    assert!(!state.stopping);
+    assert!(!state.stream.stopping);
     assert!(
         state
+            .transcript
             .lines
             .iter()
             .any(|line| line.text.contains("Turn interrupted"))

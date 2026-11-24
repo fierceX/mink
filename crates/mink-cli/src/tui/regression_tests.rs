@@ -52,10 +52,10 @@ fn reading_anchor_survives_sealing_new_output_collapse_resize_and_detail_return(
     key(&mut state, KeyCode::PageUp, KeyModifiers::NONE);
     draw(&mut terminal, &mut state);
     let anchor = state.viewport.anchor.clone().unwrap();
-    state.lines[0].collapse_policy = state::CollapsePolicy::Auto {
+    state.transcript.lines[0].collapse_policy = state::CollapsePolicy::Auto {
         threshold_lines: 20,
     };
-    state.lines[0].toggle_collapsed();
+    state.transcript.lines[0].toggle_collapsed();
     state.invalidate_item(0);
     state.apply(&TuiSignal::Text("answer\n\nnext".into()));
     state.promote_stable_stream_prefix();
@@ -77,7 +77,7 @@ fn reading_anchor_survives_sealing_new_output_collapse_resize_and_detail_return(
 #[test]
 fn detail_scroll_reuses_layout_and_clamps_authoritative_position() {
     let mut state = TuiState::default();
-    state.artifact_detail = Some(state::ArtifactDetail {
+    state.mirrors.artifact_detail = Some(state::ArtifactDetail {
         id: "a0001".into(),
         content: "long line 中文\n".repeat(20_000),
         truncated: false,
@@ -91,13 +91,18 @@ fn detail_scroll_reuses_layout_and_clamps_authoritative_position() {
     assert_eq!(state.cache.detail_parses, parses);
     state.view = View::Artifact { scroll: usize::MAX };
     draw(&mut terminal, &mut state);
-    assert!(matches!(state.view, View::Artifact { scroll } if scroll == state.detail_max_scroll));
+    assert!(
+        matches!(state.view, View::Artifact { scroll } if scroll == state.mirrors.detail_max_scroll)
+    );
 }
 
 #[test]
 fn inline_batches_release_committed_text_and_preserve_the_idle_last_item() {
     let mut state = TuiState {
-        work_state: WorkState::WaitingModel,
+        stream: state::StreamState {
+            work_state: WorkState::WaitingModel,
+            ..Default::default()
+        },
         ..Default::default()
     };
     state.push_line(TranscriptItem::new(
@@ -112,19 +117,19 @@ fn inline_batches_release_committed_text_and_preserve_the_idle_last_item() {
     )
     .unwrap();
     assert!(commit_ready(&mut terminal, &mut state).unwrap());
-    assert_eq!(state.inline.committed, 0);
-    assert_eq!(state.inline.row_offset, 256);
+    assert_eq!(state.transcript.inline.committed, 0);
+    assert_eq!(state.transcript.inline.row_offset, 256);
     assert!(commit_ready(&mut terminal, &mut state).unwrap());
-    assert_eq!(state.inline.row_offset, 512);
+    assert_eq!(state.transcript.inline.row_offset, 512);
     assert!(commit_ready(&mut terminal, &mut state).unwrap());
-    assert_eq!(state.inline.committed, 1);
-    assert!(state.lines[0].text.is_empty());
-    assert!(state.lines[0].cached_lines.is_none());
+    assert_eq!(state.transcript.inline.committed, 1);
+    assert!(state.transcript.lines[0].text.is_empty());
+    assert!(state.transcript.lines[0].cached_lines.is_none());
     assert!(!commit_ready(&mut terminal, &mut state).unwrap());
     state.push_line(TranscriptItem::new("last".into(), TranscriptKind::Text));
-    state.work_state = WorkState::Idle;
+    state.stream.work_state = WorkState::Idle;
     assert!(!commit_ready(&mut terminal, &mut state).unwrap());
-    assert_eq!(state.lines[1].text, "last");
+    assert_eq!(state.transcript.lines[1].text, "last");
 }
 
 #[test]
@@ -135,7 +140,7 @@ fn streaming_long_unclosed_structure_keeps_earlier_text_visible() {
         "line\n".repeat(20_000)
     )));
     state.promote_stable_stream_prefix();
-    assert!(state.lines.is_empty());
+    assert!(state.transcript.lines.is_empty());
     state.viewport.auto_scroll = false;
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     draw(&mut terminal, &mut state);
@@ -224,8 +229,8 @@ fn local_panels_do_not_echo_or_seal_model_stream_and_esc_does_not_quit() {
         state.input.buf = command.into();
         key(&mut state, KeyCode::Enter, KeyModifiers::NONE);
         assert!(matches!(state.view, View::Panel { .. }));
-        assert_eq!(state.stream_line, "open stream");
-        assert!(state.lines.is_empty());
+        assert_eq!(state.stream.stream_line, "open stream");
+        assert!(state.transcript.lines.is_empty());
         key(&mut state, KeyCode::Esc, KeyModifiers::NONE);
         assert!(matches!(state.view, View::Main));
     }
@@ -243,24 +248,33 @@ fn local_panels_do_not_echo_or_seal_model_stream_and_esc_does_not_quit() {
 #[test]
 fn narrow_status_preserves_work_and_counts_cache_creation_as_input() {
     let mut state = TuiState {
-        model: "very-long-model-name".repeat(20),
-        work_state: WorkState::RunningTool,
+        mirrors: state::SessionMirrors {
+            model: "very-long-model-name".repeat(20),
+            ..Default::default()
+        },
+        stream: state::StreamState {
+            work_state: WorkState::RunningTool,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let narrow = render::build_status_line(&state, 40);
     assert!(narrow.contains("[tool]"));
     assert!(unicode_width::UnicodeWidthStr::width(narrow.as_str()) <= 40);
-    state.model = "m".into();
-    state.stats.total_input_tokens = 100;
-    state.stats.total_cache_read_tokens = 100;
-    state.stats.total_cache_creation_tokens = 100;
+    state.mirrors.model = "m".into();
+    state.mirrors.stats.total_input_tokens = 100;
+    state.mirrors.stats.total_cache_read_tokens = 100;
+    state.mirrors.stats.total_cache_creation_tokens = 100;
     assert!(render::build_status_line(&state, 120).contains("I:300(33%)"));
 }
 
 #[test]
 fn resize_only_reflows_the_uncommitted_inline_remainder() {
     let mut state = TuiState {
-        work_state: WorkState::WaitingModel,
+        stream: state::StreamState {
+            work_state: WorkState::WaitingModel,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let prefix = (0..256)
@@ -278,7 +292,7 @@ fn resize_only_reflows_the_uncommitted_inline_remainder() {
     )
     .unwrap();
     commit_ready(&mut terminal, &mut state).unwrap();
-    assert_eq!(state.inline.row_offset, 256);
+    assert_eq!(state.transcript.inline.row_offset, 256);
     terminal.backend_mut().resize(40, 16);
     let before = terminal
         .backend()
@@ -303,7 +317,10 @@ fn resize_only_reflows_the_uncommitted_inline_remainder() {
 #[test]
 fn inline_can_draw_after_committing_the_entire_active_queue() {
     let mut state = TuiState {
-        work_state: WorkState::WaitingModel,
+        stream: state::StreamState {
+            work_state: WorkState::WaitingModel,
+            ..Default::default()
+        },
         ..Default::default()
     };
     state.push_line(TranscriptItem::new(
@@ -321,14 +338,17 @@ fn inline_can_draw_after_committing_the_entire_active_queue() {
     terminal
         .draw(|f| render(f, &mut state, TuiMode::Inline))
         .unwrap();
-    assert_eq!(state.inline.committed, state.lines.len());
+    assert_eq!(
+        state.transcript.inline.committed,
+        state.transcript.lines.len()
+    );
     assert_eq!(state.cache.heights.total(), 0);
 }
 
 #[test]
 fn unrelated_subagent_progress_preserves_artifact_layout() {
     let mut state = TuiState::default();
-    state.artifact_detail = Some(state::ArtifactDetail {
+    state.mirrors.artifact_detail = Some(state::ArtifactDetail {
         id: "a0001".into(),
         content: "body\n".repeat(100),
         truncated: false,
@@ -411,8 +431,8 @@ fn budgeted_signal_processing_retains_reliable_order_and_pending_events() {
     while !pending.is_empty() {
         process_signal_batch(&mut pending, &mut state, TuiMode::Full);
     }
-    assert_eq!(state.lines.len(), 800);
-    for (index, item) in state.lines.iter().enumerate() {
+    assert_eq!(state.transcript.lines.len(), 800);
+    for (index, item) in state.transcript.lines.iter().enumerate() {
         assert_eq!(item.text, format!("event {index}"));
     }
 }
@@ -503,7 +523,10 @@ fn inline_partial_terminal_write_failure_preserves_commit_position_and_body() {
     )
     .unwrap();
     let mut state = TuiState {
-        work_state: WorkState::WaitingModel,
+        stream: state::StreamState {
+            work_state: WorkState::WaitingModel,
+            ..Default::default()
+        },
         ..Default::default()
     };
     state.push_line(TranscriptItem::new(
@@ -513,7 +536,7 @@ fn inline_partial_terminal_write_failure_preserves_commit_position_and_body() {
     let error = commit_ready(&mut terminal, &mut state).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
     assert_eq!(terminal.backend().1, 1);
-    assert_eq!(state.inline.committed, 0);
-    assert_eq!(state.inline.row_offset, 0);
-    assert_eq!(state.lines[0].text, "body to preserve");
+    assert_eq!(state.transcript.inline.committed, 0);
+    assert_eq!(state.transcript.inline.row_offset, 0);
+    assert_eq!(state.transcript.lines[0].text, "body to preserve");
 }

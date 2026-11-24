@@ -174,30 +174,42 @@ async fn tui_main_loop(
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let (ui_tx, ui_rx) = mpsc::channel::<state::TuiUiEvent>();
     let mut state = TuiState {
-        loading_history: true,
-        session_dir: session
-            .events_path
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .to_path_buf(),
-        cwd_label: short_cwd_label(),
-        artifacts_dir: session.artifacts_dir.clone(),
-        attachments_dir: attachments_dir(session),
-        image_input: load_image_limits(session),
-        ui_tx: Some(ui_tx.clone()),
-        model: initial_model.to_string(),
+        async_load: state::AsyncLoadState {
+            loading_history: true,
+            ui_tx: Some(ui_tx.clone()),
+            ..Default::default()
+        },
+        mirrors: state::SessionMirrors {
+            session_dir: session
+                .events_path
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf(),
+            cwd_label: short_cwd_label(),
+            artifacts_dir: session.artifacts_dir.clone(),
+            attachments_dir: attachments_dir(session),
+            image_input: load_image_limits(session),
+            model: initial_model.to_string(),
+            ..Default::default()
+        },
         file_picker_policy: FilePickerPolicy::from_sandbox(cwd, sandbox),
-        runtime: Some(runtime),
+        admission: state::AdmissionState {
+            runtime: Some(runtime),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let snapshot = session.clone();
     std::thread::spawn(move || {
         let loaded = replay::load_session_history(&snapshot.events_path);
         let mut history = TuiState {
-            lines: loaded.lines,
+            transcript: state::TranscriptState {
+                lines: loaded.lines,
+                ..Default::default()
+            },
             ..Default::default()
         };
-        history.sub_agents.line_by_session = loaded.sub_agent_lines;
+        history.transcript.sub_agents.line_by_session = loaded.sub_agent_lines;
         load_persisted_state(&snapshot, &mut history);
         let _ = ui_tx.send(state::TuiUiEvent::HistoryLoaded {
             generation: 0,
@@ -215,8 +227,8 @@ async fn tui_main_loop(
     let mut pending_signals = std::collections::VecDeque::new();
     let mut goal_driver_started = false;
     loop {
-        if !state.loading_history && !goal_driver_started {
-            if let Some(runtime) = &state.runtime {
+        if !state.async_load.loading_history && !goal_driver_started {
+            if let Some(runtime) = &state.admission.runtime {
                 // UI and input wiring are ready: enable scheduling and pick up
                 // a goal the previous session left active.
                 runtime.handle.start_goal_driver_and_run()?;
@@ -225,7 +237,7 @@ async fn tui_main_loop(
         }
         if mode == TuiMode::Inline {
             sync_inline_terminal_mode(terminal, &state, &mut saved_inline_terminal)?;
-            if !state.loading_history
+            if !state.async_load.loading_history
                 && matches!(state.view, state::View::Main)
                 && commit_ready(terminal, &mut state)?
             {
@@ -276,20 +288,20 @@ async fn tui_main_loop(
                 draw_at = tokio::time::Instant::now();
             }
             _ = async {
-                if let Some(subscription) = state.input_subscription.as_mut() { let _ = subscription.changed().await; }
+                if let Some(subscription) = state.admission.input_subscription.as_mut() { let _ = subscription.changed().await; }
                 else { std::future::pending::<()>().await; }
             } => {
-                if let Some(subscription) = state.input_subscription.as_mut() {
-                    state.inputs = subscription.borrow_and_update().as_ref().clone();
+                if let Some(subscription) = state.admission.input_subscription.as_mut() {
+                    state.admission.inputs = subscription.borrow_and_update().as_ref().clone();
                     state.invalidate_detail_resource("panel:Inputs");
                     state.invalidate_detail_resource("panel:Status");
                     state.dirty = true;
                 }
             }
             _ = tokio::time::sleep_until(draw_at), if state.dirty => {}
-            _ = tokio::task::yield_now(), if mode == TuiMode::Inline && !state.loading_history && matches!(state.view, state::View::Main)
-                && state.lines.get(state.inline.committed).is_some_and(|item| item.sealed)
-                && (state.work_state.is_working() || state.inline.committed + 1 < state.lines.len()) => {}
+            _ = tokio::task::yield_now(), if mode == TuiMode::Inline && !state.async_load.loading_history && matches!(state.view, state::View::Main)
+                && state.transcript.lines.get(state.transcript.inline.committed).is_some_and(|item| item.sealed)
+                && (state.stream.work_state.is_working() || state.transcript.inline.committed + 1 < state.transcript.lines.len()) => {}
         }
     }
     Ok(())
@@ -521,21 +533,21 @@ fn load_persisted_state(session: &crate::runtime::SessionInfo, state: &mut TuiSt
                     content: Some(content),
                 })
         });
-    state.plan = plan;
+    state.mirrors.plan = plan;
 
     // Read-only goal mirror: a resumed session must show its unfinished goal
     // in the status bar before the driver emits anything.
-    state.goal = mink::runtime::session::read_goal_snapshot(&session.goal_path())
+    state.mirrors.goal = mink::runtime::session::read_goal_snapshot(&session.goal_path())
         .as_ref()
         .map(crate::ui::GoalDisplay::from)
         .filter(|goal| !goal.hidden);
 
     let Ok(bytes) = std::fs::read(&session.todos_path) else {
-        state.todos = None;
+        state.mirrors.todos = None;
         return;
     };
     let Ok(snapshot) = serde_json::from_slice::<TodoSnapshot>(&bytes) else {
-        state.todos = None;
+        state.mirrors.todos = None;
         return;
     };
     let (pending, in_progress, completed) =
@@ -547,7 +559,7 @@ fn load_persisted_state(session: &crate::runtime::SessionInfo, state: &mut TuiSt
                 TodoStatus::InProgress => (counts.0, counts.1 + 1, counts.2),
                 TodoStatus::Completed => (counts.0, counts.1, counts.2 + 1),
             });
-    state.todos = Some(TodoDisplay {
+    state.mirrors.todos = Some(TodoDisplay {
         revision: snapshot.revision,
         counts: TodoCountsDisplay {
             pending,
@@ -578,18 +590,18 @@ fn commit_ready<B: ratatui::backend::Backend>(
     use ratatui::text::Text;
     use ratatui::widgets::{Paragraph, Widget};
 
-    let end = if !state.work_state.is_working() {
-        state.lines.len().saturating_sub(1)
+    let end = if !state.stream.work_state.is_working() {
+        state.transcript.lines.len().saturating_sub(1)
     } else {
-        state.lines.len()
+        state.transcript.lines.len()
     };
     let width = terminal.size()?.width.saturating_sub(2).max(1);
     let mut batch = Vec::new();
     let mut consumed = Vec::new();
-    let mut index = state.inline.committed;
-    let mut offset = state.inline.row_offset;
+    let mut index = state.transcript.inline.committed;
+    let mut offset = state.transcript.inline.row_offset;
     while index < end && batch.len() < 256 {
-        let item = &mut state.lines[index];
+        let item = &mut state.transcript.lines[index];
         if !item.sealed {
             break;
         }
@@ -615,13 +627,13 @@ fn commit_ready<B: ratatui::backend::Backend>(
         })?;
     }
     // Advance only after terminal insertion succeeds; never retry partial writes.
-    state.inline.committed = index;
-    state.inline.row_offset = offset;
-    if index < state.lines.len() {
+    state.transcript.inline.committed = index;
+    state.transcript.inline.row_offset = offset;
+    if index < state.transcript.lines.len() {
         state.cache.pending.insert(index);
     }
     for index in consumed {
-        let item = &mut state.lines[index];
+        let item = &mut state.transcript.lines[index];
         if item.kind != state::TranscriptKind::SubAgent {
             item.text.clear();
             item.text.shrink_to_fit();
@@ -647,8 +659,13 @@ fn commit_ready<B: ratatui::backend::Backend>(
 
 #[cfg(test)]
 fn sealed_prefix_end(state: &TuiState) -> usize {
-    let mut end = state.inline.committed;
-    while state.lines.get(end).is_some_and(|item| item.sealed) {
+    let mut end = state.transcript.inline.committed;
+    while state
+        .transcript
+        .lines
+        .get(end)
+        .is_some_and(|item| item.sealed)
+    {
         end += 1;
     }
     end
@@ -657,7 +674,10 @@ fn sealed_prefix_end(state: &TuiState) -> usize {
 #[cfg(test)]
 fn committable_prefix_end(state: &TuiState) -> usize {
     let end = sealed_prefix_end(state);
-    if !state.work_state.is_working() && end == state.lines.len() && end > state.inline.committed {
+    if !state.stream.work_state.is_working()
+        && end == state.transcript.lines.len()
+        && end > state.transcript.inline.committed
+    {
         end - 1
     } else {
         end
