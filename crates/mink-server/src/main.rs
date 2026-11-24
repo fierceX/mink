@@ -15,7 +15,6 @@ use tower_http::services::{ServeDir, ServeFile};
 
 mod api;
 mod bridge;
-mod middleware;
 mod session;
 mod web_assets;
 
@@ -32,14 +31,13 @@ async fn main() -> Result<()> {
         }
         ServerArgs::Serve { config, host } => (config, host),
     };
-    let mut cfg = ServerConfig::load(config_path.as_deref())?;
+    let (mut cfg, user_layer) = ServerConfig::load_with_user_layer(config_path.as_deref())?;
     if let Some(host) = host_override {
         cfg.host = host;
     }
     validate_runtime_config(&cfg)?;
 
     let cwd = std::env::current_dir()?;
-    let user_layer = session::agent_config::load_user_layer()?;
     let registry = Arc::new(
         Registry::new(cfg.mink_home.clone(), cfg.model.clone(), cfg.max_running)
             .with_agent_layer(user_layer),
@@ -72,7 +70,7 @@ async fn main() -> Result<()> {
         shutdown: shutdown_tx.clone(),
     });
     let allowed_hosts_env = std::env::var("MINK_SERVER_ALLOWED_HOSTS").ok();
-    let guard = Arc::new(middleware::HostGuardConfig::from_bind_host(
+    let guard = Arc::new(api::middleware::HostGuardConfig::from_bind_host(
         &cfg.host,
         allowed_hosts_env.as_deref(),
     ));
@@ -104,7 +102,7 @@ async fn main() -> Result<()> {
     // JSON answers, history pages and the embedded bundle compress on the wire;
     // the tower-http default predicate deliberately leaves SSE out, because a
     // compressor buffering an event stream would add latency to every frame.
-    let app = middleware::apply_security_layer(app, guard)
+    let app = api::middleware::apply_security_layer(app, guard)
         .layer(tower_http::compression::CompressionLayer::new());
 
     let addr = bind_address(&cfg.host, cfg.port);

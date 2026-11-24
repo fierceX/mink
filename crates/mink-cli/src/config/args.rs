@@ -236,75 +236,16 @@ pub(super) fn parse_bool_value(name: &str, value: &str) -> Result<bool> {
     }
 }
 
-/// Parse `image_input = "on" | "off"` from TOML/env into the explicit
-/// capability override (v7 §3.1 priority: explicit > backend > Unsupported).
 pub fn parse_image_input(value: &str) -> Result<mink::runtime::ImageInputCapability> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "on" | "true" | "1" => Ok(mink::runtime::ImageInputCapability::OpenAiChatImageUrl(
-            mink::runtime::OpenAiChatImageUrlLimits::default(),
-        )),
-        "off" | "false" | "0" => Ok(mink::runtime::ImageInputCapability::Unsupported),
-        other => anyhow::bail!("invalid image_input {other:?}: expected \"on\" or \"off\""),
-    }
+    mink::config_file::parse_image_input(value)
 }
 
-/// Parse the `[provider.image]` TOML section into per-field overrides.
-/// `Ok(None)` for an all-empty section; any invalid field fails the whole
-/// section (callers warn and ignore).
 pub fn parse_image_limits(
     file: &ImageConfigFile,
 ) -> Result<Option<mink::runtime::ImageLimitsOverrides>> {
-    let detail = match file.detail.as_deref() {
-        None => None,
-        Some(value) => Some(match value.trim().to_ascii_lowercase().as_str() {
-            "high" => mink::runtime::ImageDetail::High,
-            "low" => mink::runtime::ImageDetail::Low,
-            other => anyhow::bail!("invalid image.detail {other:?}: expected \"high\" or \"low\""),
-        }),
-    };
-    let parse_u64 = |name: &str, value: &str| -> Result<u64> {
-        parse_size_bytes(value)
-            .map(|n| n as u64)
-            .map_err(|_| anyhow!("invalid image.{name} {value:?}: expected a byte count"))
-    };
-    let max_image_bytes_per_request = match file.max_image_bytes_per_request.as_deref() {
-        None => None,
-        Some(value) => Some(parse_u64("max_image_bytes_per_request", value)?),
-    };
-    let max_image_bytes = match file.max_image_bytes.as_deref() {
-        None => None,
-        Some(value) => Some(parse_u64("max_image_bytes", value)?),
-    };
-    let max_pixels = match file.max_pixels.as_deref() {
-        None => None,
-        Some(value) => Some(parse_u64("max_pixels", value)?),
-    };
-    let overrides = mink::runtime::ImageLimitsOverrides {
-        detail,
-        max_images_per_request: file.max_images_per_request,
-        max_image_bytes_per_request,
-        max_image_bytes,
-        max_dimension: file.max_dimension,
-        max_pixels,
-    };
-    Ok((!overrides.is_empty()).then_some(overrides))
+    mink::config_file::parse_image_limits(file)
 }
 
 pub fn parse_size_bytes(raw: &str) -> Result<usize> {
-    if raw.is_empty() {
-        bail!("empty size");
-    }
-    let lower = raw.to_lowercase();
-    let (num, m) = if let Some(v) = lower.strip_suffix('k') {
-        (v, 1_000usize)
-    } else if let Some(v) = lower.strip_suffix('m') {
-        (v, 1_000_000usize)
-    } else if let Some(v) = lower.strip_suffix('g') {
-        (v, 1_000_000_000usize)
-    } else {
-        (lower.as_str(), 1usize)
-    };
-    num.parse::<usize>()?
-        .checked_mul(m)
-        .ok_or_else(|| anyhow!("size overflow: {raw}"))
+    mink::config_file::parse_size_bytes(raw)
 }

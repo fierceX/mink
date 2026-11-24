@@ -193,7 +193,8 @@ pub(super) fn apply_config_sources(
             }
         }
         if let Some(reasoning_effort) = &toml_cfg.provider.openai_reasoning_effort {
-            cfg.provider.reasoning_effort = normalize_openai_reasoning_effort(reasoning_effort);
+            cfg.provider.reasoning_effort =
+                mink::config_file::normalize_openai_reasoning_effort(reasoning_effort);
         }
         if let Some(include_usage) = toml_cfg.provider.openai_include_usage {
             cfg.provider.include_usage = include_usage;
@@ -397,10 +398,13 @@ fn apply_positive_i32_config(target: &mut i32, value: i32, name: &str) {
 }
 
 fn apply_tool_timeout_max_config(target: &mut i32, value: i32, name: &str) {
-    if value >= 5 {
+    if value >= mink::config_file::MIN_TOOL_TIMEOUT_MAX_SECS {
         *target = value;
     } else {
-        eprintln!("[mink] Warning: ignoring {name}={value}; must be at least 5");
+        eprintln!(
+            "[mink] Warning: ignoring {name}={value}; must be at least {}",
+            mink::config_file::MIN_TOOL_TIMEOUT_MAX_SECS
+        );
     }
 }
 
@@ -409,20 +413,6 @@ fn apply_nonnegative_i32_config(target: &mut i32, value: i32, name: &str) {
         *target = value;
     } else {
         eprintln!("[mink] Warning: ignoring {name}={value}; must be zero or greater");
-    }
-}
-
-fn normalize_openai_reasoning_effort(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty()
-        || matches!(
-            trimmed.to_ascii_lowercase().as_str(),
-            "off" | "none" | "false" | "disabled"
-        )
-    {
-        None
-    } else {
-        Some(trimmed.to_string())
     }
 }
 

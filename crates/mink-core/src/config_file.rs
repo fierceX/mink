@@ -3,7 +3,10 @@
 //! Host-specific precedence and conversion into runtime options stay with the
 //! host adapters; the accepted TOML shape and unknown-field behavior live here.
 
-use crate::runtime::{EditMode, SignalPolicy, ToolApprovalMode, ToolApprovalPolicy};
+use crate::runtime::{
+    EditMode, ImageDetail, ImageInputCapability, ImageLimitsOverrides, OpenAiChatImageUrlLimits,
+    SignalPolicy, ToolApprovalMode, ToolApprovalPolicy,
+};
 use std::collections::BTreeMap;
 
 /// Root of the grouped `.minkrc` TOML format.
@@ -150,9 +153,95 @@ pub struct SandboxPythonConfigFile {
     pub package_dirs: Option<Vec<String>>,
 }
 
+pub const MIN_TOOL_TIMEOUT_MAX_SECS: i32 = 5;
+
 /// Parse a `.minkrc` using the one shared schema and strict unknown-field rule.
 pub fn parse_config_file(text: &str) -> anyhow::Result<MinkConfigFile> {
     Ok(toml::from_str(text)?)
+}
+
+/// Parse a decimal integer with optional `k`/`m`/`g` suffix (1e3/1e6/1e9).
+pub fn parse_size_bytes(raw: &str) -> anyhow::Result<usize> {
+    if raw.is_empty() {
+        anyhow::bail!("empty size");
+    }
+    let lower = raw.to_lowercase();
+    let (num, m) = if let Some(v) = lower.strip_suffix('k') {
+        (v, 1_000usize)
+    } else if let Some(v) = lower.strip_suffix('m') {
+        (v, 1_000_000usize)
+    } else if let Some(v) = lower.strip_suffix('g') {
+        (v, 1_000_000_000usize)
+    } else {
+        (lower.as_str(), 1usize)
+    };
+    num.parse::<usize>()?
+        .checked_mul(m)
+        .ok_or_else(|| anyhow::anyhow!("size overflow: {raw}"))
+}
+
+pub fn normalize_openai_reasoning_effort(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || matches!(
+            trimmed.to_ascii_lowercase().as_str(),
+            "off" | "none" | "false" | "disabled"
+        )
+    {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Parse `image_input = "on" | "off"` from TOML/env into the explicit
+/// capability override.
+pub fn parse_image_input(value: &str) -> anyhow::Result<ImageInputCapability> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" => Ok(ImageInputCapability::OpenAiChatImageUrl(
+            OpenAiChatImageUrlLimits::default(),
+        )),
+        "off" | "false" | "0" => Ok(ImageInputCapability::Unsupported),
+        other => anyhow::bail!("invalid image_input {other:?}: expected \"on\" or \"off\""),
+    }
+}
+
+/// Parse the `[provider.image]` TOML section into per-field overrides.
+pub fn parse_image_limits(file: &ImageConfigFile) -> anyhow::Result<Option<ImageLimitsOverrides>> {
+    let detail = match file.detail.as_deref() {
+        None => None,
+        Some(value) => Some(match value.trim().to_ascii_lowercase().as_str() {
+            "high" => ImageDetail::High,
+            "low" => ImageDetail::Low,
+            other => anyhow::bail!("invalid image.detail {other:?}: expected \"high\" or \"low\""),
+        }),
+    };
+    let parse_u64 = |name: &str, value: &str| -> anyhow::Result<u64> {
+        parse_size_bytes(value)
+            .map(|n| n as u64)
+            .map_err(|_| anyhow::anyhow!("invalid image.{name} {value:?}: expected a byte count"))
+    };
+    let max_image_bytes_per_request = match file.max_image_bytes_per_request.as_deref() {
+        None => None,
+        Some(value) => Some(parse_u64("max_image_bytes_per_request", value)?),
+    };
+    let max_image_bytes = match file.max_image_bytes.as_deref() {
+        None => None,
+        Some(value) => Some(parse_u64("max_image_bytes", value)?),
+    };
+    let max_pixels = match file.max_pixels.as_deref() {
+        None => None,
+        Some(value) => Some(parse_u64("max_pixels", value)?),
+    };
+    let overrides = ImageLimitsOverrides {
+        detail,
+        max_images_per_request: file.max_images_per_request,
+        max_image_bytes_per_request,
+        max_image_bytes,
+        max_dimension: file.max_dimension,
+        max_pixels,
+    };
+    Ok((!overrides.is_empty()).then_some(overrides))
 }
 
 #[cfg(test)]

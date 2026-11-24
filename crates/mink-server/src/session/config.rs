@@ -22,7 +22,14 @@ pub struct ServerConfig {
 impl ServerConfig {
     /// Load configuration from `mink-server.toml`（显式参数）+ `~/.minkrc`（默认）+ 环境变量。
     /// 优先级：环境变量 > mink-server.toml > ~/.minkrc > 默认值。
+    #[cfg(test)]
     pub fn load(toml_path: Option<&std::path::Path>) -> anyhow::Result<Self> {
+        Ok(Self::load_with_user_layer(toml_path)?.0)
+    }
+
+    pub(crate) fn load_with_user_layer(
+        toml_path: Option<&std::path::Path>,
+    ) -> anyhow::Result<(Self, crate::session::agent_config::AgentConfig)> {
         let file_cfg = toml_path.map(parse_toml).transpose()?.unwrap_or_default();
         // 用户层 agent 配置：~/.minkrc（分组格式，与 CLI 同一文件）。
         let user_layer = crate::session::agent_config::load_user_layer()?;
@@ -33,12 +40,12 @@ impl ServerConfig {
             .unwrap_or_else(default_home);
         let model = env_or("MODEL")
             .or(file_cfg.model)
-            .or(user_layer.model)
+            .or_else(|| user_layer.model.clone())
             .unwrap_or_else(|| "flash".to_string());
 
         // Base mink config: environment keys are the canonical source for a
         // single-user deployment (same variables the TUI/CLI honours).
-        Ok(ServerConfig {
+        let server_cfg = ServerConfig {
             host: env_or("MINK_SERVER_HOST")
                 .or(file_cfg.host)
                 .unwrap_or_else(|| "127.0.0.1".to_string()),
@@ -48,7 +55,8 @@ impl ServerConfig {
             max_running: env_parsed_or("MINK_SERVER_MAX_RUNNING", file_cfg.max_running)
                 .unwrap_or(4),
             idle_close_secs: file_cfg.idle_close_secs.unwrap_or(1800),
-        })
+        };
+        Ok((server_cfg, user_layer))
     }
 }
 
