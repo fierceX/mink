@@ -1953,7 +1953,7 @@ fn utf8_prefix_by_bytes(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
-static RE_ANSI_ESCAPE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+static RE_ANSI_ESCAPE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
     // CSI (including private parameter bytes like `\x1b[?25l`), OSC strings
     // terminated by BEL or ST, and single-character escapes.
     regex::Regex::new(

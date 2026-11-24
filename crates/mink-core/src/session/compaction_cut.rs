@@ -433,7 +433,10 @@ pub(crate) fn is_safe_context_start(message: &Value) -> bool {
         || is_real_user_message(message)
 }
 
+static RE_DSML_TAGS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"</?ds_\w+[^>]*>").expect("valid DSML tag regex")
+});
+
 pub(crate) fn strip_dsml_tags(text: &str) -> String {
-    let regex = regex::Regex::new(r"</?ds_\w+[^>]*>").unwrap();
-    regex.replace_all(text, "").into_owned()
+    RE_DSML_TAGS.replace_all(text, "").into_owned()
 }

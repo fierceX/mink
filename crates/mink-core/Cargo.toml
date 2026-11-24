@@ -27,8 +27,8 @@ path = "src/lib.rs"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+bytes.workspace = true
 futures.workspace = true
-once_cell.workspace = true
 regex.workspace = true
 ignore.workspace = true
 globset.workspace = true

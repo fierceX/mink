@@ -1,25 +1,25 @@
-use once_cell::sync::Lazy;
 use regex::Regex;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
-static RE_FIND_DELETE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)(^|[;&|])\s*find\b.*\bdelete\b").expect("regex"));
-static RE_FORK_BOMB: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:").expect("regex"));
-static RE_DANGEROUS_CMD: Lazy<Regex> = Lazy::new(|| {
+static RE_FIND_DELETE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(^|[;&|])\s*find\b.*\bdelete\b").expect("regex"));
+static RE_FORK_BOMB: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:").expect("regex"));
+static RE_DANGEROUS_CMD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)(?:^|[;&|\n])\s*(?:(?:env|command)\s+)*(sudo|shutdown|reboot|halt|poweroff|mkfs[^\s;&|]*|fdisk)(?:\s|$|[;&|])",
     )
     .expect("regex")
 });
-static RE_BLOCK_DEVICE_WRITE: Lazy<Regex> = Lazy::new(|| {
+static RE_BLOCK_DEVICE_WRITE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(^|\s)(of=|>|1>|>>|1>>)\s*/dev/(sd[a-z][0-9]*|disk[0-9]+|rdisk[0-9]+|nvme[0-9]+n[0-9]+(p[0-9]+)?|vd[a-z][0-9]*|xvd[a-z][0-9]*|hd[a-z][0-9]*)(\s|$)")
         .expect("regex")
 });
 /// 匹配 `rm` 命令调用的参数段（到 shell 分隔符为止），随后通过词法扫描识别
 /// 合并或拆分的递归+强制选项（`-rf` / `-fr` / `-r -f` / `--recursive --force` 等）
 /// 并将原始大小写目标路径交由 symlink 感知解析器校验。
-static RE_RM_INVOCATION: Lazy<Regex> = Lazy::new(|| {
+static RE_RM_INVOCATION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:^|[;&|\n])\s*(?:(?:env|command)\s+)*rm\s+([^\n;&|]+)").expect("regex")
 });
 

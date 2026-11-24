@@ -311,3 +311,26 @@ fn estimate_counts_only_unconsumed_after_projection() {
     .unwrap();
     assert!(counted >= fresh_only, "{counted} vs {fresh_only}");
 }
+
+#[test]
+fn estimate_openai_converted_matches_materialized_json_byte_count() {
+    let converted = vec![
+        json!({"role": "user", "content": "hello \"world\"\nline2"}),
+        json!({"role": "assistant", "content": "ok", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "Read", "arguments": "{}"}}]}),
+    ];
+    let tools = vec![
+        json!({"type": "function", "function": {"name": "Read", "description": "read", "parameters": {}}}),
+    ];
+    for system in ["", "You are helpful.\nLine 2"] {
+        let mut expected_msgs = Vec::new();
+        if !system.is_empty() {
+            expected_msgs.push(json!({"role": "system", "content": system}));
+        }
+        expected_msgs.extend(converted.iter().cloned());
+        let expected_bytes = serde_json::to_vec(&expected_msgs).unwrap().len()
+            + serde_json::to_vec(&tools).unwrap().len();
+        let expected_tokens = expected_bytes.div_ceil(3);
+        let actual_tokens = estimate_openai_converted(&converted, &tools, system).unwrap();
+        assert_eq!(actual_tokens, expected_tokens, "system={system:?}");
+    }
+}

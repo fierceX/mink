@@ -143,16 +143,31 @@ pub(crate) fn estimate_openai_context_tokens(
 /// top of the separate tile estimate. The caller keeps `tool_attachment`
 /// metadata in the projection until send time, exactly like the pre-refactor
 /// estimate did.
+#[derive(Default)]
+struct ByteCounter(usize);
+
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(serde::Serialize)]
+struct SystemMessageRef<'a> {
+    role: &'static str,
+    content: &'a str,
+}
+
 pub(crate) fn estimate_openai_converted(
     converted: &[Value],
     openai_tools: &[Value],
     system_prompt: &str,
 ) -> Result<usize> {
-    let mut request_messages = Vec::with_capacity(converted.len() + 1);
-    if !system_prompt.is_empty() {
-        request_messages.push(json!({"role":"system","content":system_prompt}));
-    }
-    request_messages.extend_from_slice(converted);
     // Single-consumption: `project_request_messages` already turned consumed
     // references into text citations, so only the unconsumed batch counts
     // image tokens. The JSON byte estimate covers text and already-
@@ -160,7 +175,7 @@ pub(crate) fn estimate_openai_converted(
     // is only metadata, so its eventual pixel payload is added with the
     // tile estimator (review fix #3).
     let mut image_tokens = 0usize;
-    for message in &request_messages {
+    for message in converted {
         let Some(blocks) = message.get("content").and_then(Value::as_array) else {
             continue;
         };
@@ -180,10 +195,33 @@ pub(crate) fn estimate_openai_converted(
             );
         }
     }
-    let message_bytes = serde_json::to_vec(&request_messages)?.len();
-    let tool_bytes = serde_json::to_vec(openai_tools)?.len();
-    Ok(message_bytes
-        .saturating_add(tool_bytes)
+    // Count serialized JSON bytes without cloning `converted` or allocating
+    // temporary byte buffers. Produces the exact same length as
+    // `serde_json::to_vec(&request_messages)?.len()`.
+    let mut msg_counter = ByteCounter(2); // `[` and `]`
+    let mut first = true;
+    if !system_prompt.is_empty() {
+        serde_json::to_writer(
+            &mut msg_counter,
+            &SystemMessageRef {
+                role: "system",
+                content: system_prompt,
+            },
+        )?;
+        first = false;
+    }
+    for message in converted {
+        if !first {
+            msg_counter.0 = msg_counter.0.saturating_add(1); // `,`
+        }
+        serde_json::to_writer(&mut msg_counter, message)?;
+        first = false;
+    }
+    let mut tool_counter = ByteCounter(0);
+    serde_json::to_writer(&mut tool_counter, openai_tools)?;
+    Ok(msg_counter
+        .0
+        .saturating_add(tool_counter.0)
         .div_ceil(3)
         .saturating_add(image_tokens))
 }

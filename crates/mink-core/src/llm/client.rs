@@ -388,11 +388,19 @@ impl OpenAiCompatibleBackend {
             ));
         }
 
+        struct SharedBody(Arc<Vec<u8>>);
+        impl AsRef<[u8]> for SharedBody {
+            fn as_ref(&self) -> &[u8] {
+                &self.0
+            }
+        }
+
         // One `stream()` call is exactly one physical request: request-level
         // retries are owned by the runtime attempt loop, so retry counts can
-        // never multiply.
+        // never multiply. `Bytes::from_owner` hands the shared buffer to
+        // reqwest with zero cloning across attempts.
         let resp = client
-            .send_once((*body).clone(), &request.cancel)
+            .send_once(bytes::Bytes::from_owner(SharedBody(body)), &request.cancel)
             .await
             .map_err(anyhow::Error::new)?;
         let (tx, rx) = mpsc::channel(SSE_QUEUE_CAPACITY);
@@ -588,12 +596,19 @@ impl AsyncLlClient {
                                     clean_end = true;
                                     break 'outer;
                                 }
-                                while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                                    let line = String::from_utf8_lossy(&buf[..=pos]).to_string();
-                                    buf.drain(..=pos);
-                                    let l = line.trim();
-                                    if l.is_empty() { continue; }
-                                    let full = format!("{l}\n");
+                                let mut cursor = 0usize;
+                                while let Some(rel) = buf[cursor..].iter().position(|&b| b == b'\n') {
+                                    let end = cursor + rel;
+                                    let full = {
+                                        let line = String::from_utf8_lossy(&buf[cursor..=end]);
+                                        let l = line.trim();
+                                        if l.is_empty() {
+                                            cursor = end + 1;
+                                            continue;
+                                        }
+                                        format!("{l}\n")
+                                    };
+                                    cursor = end + 1;
                                     let parsed = parser.process_line(&full, &mut |e| {
                                         pending.push(e);
                                         Ok(())
@@ -619,6 +634,9 @@ impl AsyncLlClient {
                                             break 'outer;
                                         }
                                     }
+                                }
+                                if cursor > 0 {
+                                    buf.drain(..cursor);
                                 }
                             }
                             Some(Err(e)) => {
@@ -724,7 +742,7 @@ impl AsyncLlClient {
     /// `Retry-After` waits.
     async fn send_once(
         &self,
-        body: Vec<u8>,
+        body: impl Into<bytes::Bytes>,
         cancel: &crate::cancel::CancellationToken,
     ) -> std::result::Result<reqwest::Response, LlmUpstreamError> {
         if cancel.is_cancelled() {
@@ -733,7 +751,7 @@ impl AsyncLlClient {
         let req = self
             .client
             .post(&self.api_url)
-            .body(body)
+            .body(body.into())
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {}", self.api_key));
         let resp = tokio::select! {

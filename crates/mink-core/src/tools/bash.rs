@@ -1,20 +1,20 @@
 use crate::safety;
 use anyhow::{Result, bail};
-use once_cell::sync::Lazy;
 use regex::Regex;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::LazyLock;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-static RE_BASH_READ_MISUSE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^\s*(cat|head|tail|less|more)\b").expect("regex"));
-static RE_BASH_SEARCH_MISUSE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^\s*(rg|grep|ag|ack)\b").expect("regex"));
-static RE_BASH_FIND_MISUSE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^\s*(find|fd|ls|tree)\b").expect("regex"));
-static RE_BASH_RG_FILES_MISUSE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^\s*rg\s+--files\b").expect("regex"));
+static RE_BASH_READ_MISUSE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^\s*(cat|head|tail|less|more)\b").expect("regex"));
+static RE_BASH_SEARCH_MISUSE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^\s*(rg|grep|ag|ack)\b").expect("regex"));
+static RE_BASH_FIND_MISUSE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^\s*(find|fd|ls|tree)\b").expect("regex"));
+static RE_BASH_RG_FILES_MISUSE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^\s*rg\s+--files\b").expect("regex"));
 
 #[cfg(test)]
 pub fn execute(
