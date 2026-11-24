@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api, type ApiResponse, type SessionLiveState, type SessionSummary } from '../data/api.ts'
+import { composeDraftKey, readComposeDraft } from '../data/sessionDraft.ts'
 import { App } from './App.tsx'
 
 /**
@@ -264,6 +265,71 @@ describe('session switching and creation', () => {
     })
     expect(localStorage.getItem('mink.draft:p:fresh')).toBe('后来输入')
     expect((screen.getByLabelText('输入消息') as HTMLTextAreaElement).value).toBe('后来输入')
+  })
+
+  it('forgets the composing ids once the first send is accepted', async () => {
+    stubShell()
+    vi.spyOn(api, 'listSessions').mockResolvedValue(ok([]))
+    vi.spyOn(api, 'workspace').mockResolvedValue(ok({ cwd: '/tmp/fresh', project_key: 'p', name: 'fresh' }))
+    vi.spyOn(api, 'createSession').mockResolvedValue(ok(session('fresh', {
+      cwd: '/tmp/fresh', title: '新目录里的任务', project_key: 'p',
+    })))
+    vi.spyOn(api, 'submitInput').mockResolvedValue(ok({} as never))
+    render(<App />)
+
+    const empty = await waitFor(() => {
+      const node = document.querySelector('[data-empty-state]')
+      expect(node).not.toBeNull()
+      return node as HTMLElement
+    })
+    fireEvent.click(within(empty).getByRole('button', { name: '新建项目' }))
+    fireEvent.change(screen.getByLabelText('工作目录'), { target: { value: '/tmp/fresh' } })
+    fireEvent.click(screen.getByRole('button', { name: '打开目录' }))
+    await waitFor(() => { expect(document.querySelector('[data-new-conversation]')).not.toBeNull() })
+    fireEvent.change(screen.getByLabelText('输入消息'), { target: { value: '新目录里的任务' } })
+    const sent = JSON.parse(localStorage.getItem(composeDraftKey('/tmp/fresh')) ?? '{}') as Record<string, string>
+    fireEvent.keyDown(screen.getByLabelText('输入消息'), { key: 'Enter' })
+
+    await waitFor(() => { expect(api.submitInput).toHaveBeenCalledTimes(1) })
+    await waitFor(() => { expect(document.querySelector('[data-new-conversation]')).toBeNull() })
+    // The conversation exists now, so its draft id and admission id are spent.
+    // Reusing them would resolve the same session and then refuse the new words
+    // as "request ID conflicts with an existing input".
+    expect(localStorage.getItem(composeDraftKey('/tmp/fresh'))).toBeNull()
+    const next = readComposeDraft('/tmp/fresh')
+    expect(next.draftId).not.toBe(sent.draftId)
+    expect(next.requestId).not.toBe(sent.requestId)
+  })
+
+  it('forgets the composing ids after a refused first send', async () => {
+    stubShell()
+    vi.spyOn(api, 'listSessions').mockResolvedValue(ok([]))
+    vi.spyOn(api, 'workspace').mockResolvedValue(ok({ cwd: '/tmp/fresh', project_key: 'p', name: 'fresh' }))
+    vi.spyOn(api, 'createSession').mockResolvedValue(ok(session('fresh', { cwd: '/tmp/fresh', project_key: 'p' })))
+    vi.spyOn(api, 'submitInput').mockResolvedValue({
+      code: 409, message: 'request ID conflicts with an existing input', data: undefined as never,
+    })
+    render(<App />)
+
+    const empty = await waitFor(() => {
+      const node = document.querySelector('[data-empty-state]')
+      expect(node).not.toBeNull()
+      return node as HTMLElement
+    })
+    fireEvent.click(within(empty).getByRole('button', { name: '新建项目' }))
+    fireEvent.change(screen.getByLabelText('工作目录'), { target: { value: '/tmp/fresh' } })
+    fireEvent.click(screen.getByRole('button', { name: '打开目录' }))
+    await waitFor(() => { expect(document.querySelector('[data-new-conversation]')).not.toBeNull() })
+    fireEvent.change(screen.getByLabelText('输入消息'), { target: { value: '新目录里的任务' } })
+    fireEvent.keyDown(screen.getByLabelText('输入消息'), { key: 'Enter' })
+
+    await waitFor(() => {
+      expect(screen.getByText(/首条消息提交失败：request ID conflicts/)).toBeDefined()
+    })
+    // The session exists even though the input was refused; keeping the
+    // composing record would make every later new conversation in this project
+    // repeat the same refusal.
+    expect(localStorage.getItem(composeDraftKey('/tmp/fresh'))).toBeNull()
   })
 
   it('keeps completed first-send uploads as session drafts when a later upload fails', async () => {

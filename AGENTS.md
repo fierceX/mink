@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-11-03
+> 更新日期：2026-11-12
 
 ## 项目概览
 
@@ -116,7 +116,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - **草稿与附件按会话身份隔离**：`Conversation` 以会话身份为 key，草稿（`mink.draft:<project>:<id>`）与已上传附件条目（`mink.attachments:<project>:<id>`，每项含草稿条目身份 `key` 与内容 id）随会话保存与恢复，切换会话不串、返回即可继续；存储不可用时退化为内存草稿。草稿必须按 key 在渲染期同步读取（keyed composer 首次挂载即拿到目标会话正文），不得靠 effect 延后换内容。
 - **会话级异步身份与提交幂等**：投影、草稿、附件与在途提交按完整会话身份维护，提交记录（`mink.pending:<project>:<id>`）与草稿同生命周期：离开会话、刷新页面都不丢，只有服务端明确受理或拒绝才删除。发送/引导/回执合并/详情加载/历史分页/命令副作用只在发起它的会话仍是当前视图时落地；发送与 stop 的完成还必须验发起时的视图 epoch + 投影 runtime generation + 当前 turn（新的 `session_snapshot` 是更新的真相，旧 HTTP 失败不得回滚 running/写旧错误）。历史以投影 `messages` 为唯一已提交集合，按 `seq` 合并去重排序，分页不得覆盖快照之后的 committed 消息。提交以稳定 request ID 对账：答复丢失（网络）时先查回执或以同一 ID 重试，已受理不得再当失败恢复草稿；附件上传的非 200 拒绝与网络失败都落到失败条目及原因。附件消费按提交记录中冻结的草稿条目快照（`attachment_snapshot`，只存本地）执行：内容 id 仅用于请求引用与资源读取，不得单独决定移除哪些草稿条目（内容寻址下同一图片重选会有相同 id）；旧记录在恢复边界一次性迁移为显式 `known:false` 并持久化，确认时保守保留草稿、仍用原 request_id 对账；“无快照”与“已知空快照”必须区分，存储与已挂载 rail 共用同一纯消费判据；上传合并必须同时更新存储与已挂载 rail，禁止只写存储。Composer 只报告操作状态，确认消费只由会话视图或首次发送流程执行；首条发送成功同样只能按冻结快照消费附件，失败恢复旧正文仅在会话尚无草稿时写入，不得覆盖后来输入。
 - **模型座位与目标详情的版本顺序**：模型读取与切换共享单调 request revision（每次 refresh、每次已接受切换与每次视图生命周期都推进），只有最新一次可写，A→B→A 与“先切换后回来”的旧响应一律作废；`/model`、`/flash`、`/pro` 成功后重读运行时。目标页签的 REST seed 在发起时记录投影目标更新计数，计数变化则丢弃 seed（清空/新建也不靠 null 或 ID 猜顺序），revision 相等时仍独立更新 `driven`。
-- **新建任务面板**：正常路径不再弹目录/名称表单。项目行 ➕ 直接进入 composing 视图，**首次发送才创建服务端会话**：客户端用稳定 `draft_id` 幂等创建，`first_prompt`（≤128 KiB）生成标题；无文本会话标记 `untitled`，后续首个非空文本用户消息回填。空名称不得复用 `unnamed` 会话。composing 复用 `ConversationRoot` 的内容宽度轴并水平/垂直居中，项目名与目录收成输入卡上的胶囊，禁止让 hero 在左缘 shrink-wrap。首条 `request_id` 与 `draft_id` 一起写入 compose draft，刷新后重试仍是同一次提交；暂存附件总字节≤16 MiB，首次发送前图片刷新会丢失，文本与 ids 保留。「新建项目」只校验/选择 server 工作目录，不创建会话；项目仍由会话工作目录派生。
+- **新建任务面板**：正常路径不再弹目录/名称表单。项目行 ➕ 直接进入 composing 视图，**首次发送才创建服务端会话**：客户端用稳定 `draft_id` 幂等创建，`first_prompt`（≤128 KiB）生成标题；无文本会话标记 `untitled`，后续首个非空文本用户消息回填。空名称不得复用 `unnamed` 会话。composing 复用 `ConversationRoot` 的内容宽度轴并水平/垂直居中，项目名与目录收成输入卡上的胶囊，禁止让 hero 在左缘 shrink-wrap。首条 `request_id` 与 `draft_id` 一起写入 compose draft，刷新后重试仍是同一次提交；首条消息得到答复后必须按**身份**结算该记录（`draftId`+`requestId` 相等；正文相等不能作判据，composer 提交前已清空输入框），使这对身份不可再复用：空正文或与提交正文相同的记录删除，发送开始后新输入的正文换成新身份保留；暂存附件总字节≤16 MiB，首次发送前图片刷新会丢失，文本与 ids 保留。「新建项目」只校验/选择 server 工作目录，不创建会话；项目仍由会话工作目录派生。
 - **新前端已实现的契约**：会话目录与打开（筛选/搜索四种范围、切换保留关键词、新建与删除）、`/conversation` 历史 + SSE 实时投影（`src/data` 的纯 reducer/SSE 客户端，`/open` 的 snapshot 提议优先）、历史分页（`before_seq` 回溯，翻页保持阅读位置；`turns=true` 批体积上限 512 KiB）、composer 的 `/turn` 与 `/interrupt`、运行中引导（`/inputs` 队列：按 revision 编辑/撤回/续发，未取得 turn id 时拒绝并保留草稿）、附件与图片（粘贴/拖放/选择 → `/attachments` 会话副本，id 随输入提交，图片仍只经 Read 进上下文；新对话首发送前暂存于浏览器）、斜杠命令（与终端共用 `crates/mink-cli/src/tui/slash_commands.json` 契约；无会话的 composing 视图隐藏命令和模型位）、工具卡家族（终端/文件/差异/搜索/通用）与逐轮「已编辑 N 个文件」摘要卡、消息 chrome（复制与该轮用量；旧轮次悬停显现）、目标条与目标边界卡（拷贝的 GoalBar 样式，暂停/恢复/取消/清除全部按 revision CAS；流只传摘要，详情按需 full）、详情面板五页签（任务/目标/文件/输出/诊断，诊断与 TUI StatsSnapshot 同口径）、轮次选择器与「返回最新内容」、移动端阅读 chrome（仅窄布局生效，宽屏点击不得隐藏；运行中/待处理强制可见，隐藏不 close/interrupt）、断线连接按钮（重新 `/open` + 权威 snapshot 重载，不靠浏览器刷新）、主区宽度随中间列发布与宽表列内横向滚动、设置与偏好（外观/字号/过程展示）。
 - **本地视觉对照**：在本地参考客户端上截取的对照图可能含用户私有会话，不得入库。
 - **按「mink 没有的功能不抄」排除**：插件面板、Pin/Archive、权限 pill、`Standard mode` 模式标签、`Chat/Trajectory` 页签、消息时间戳（mink 对话行没有时间数据）。新增这类能力时先补运行时契约，再对齐界面。
@@ -188,7 +188,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - 子代理终态由内部 `SubAgentStatus` 表达（Interrupted/TimedOut 不得映射为成功）；未完成子代理只在 `SubAgentBatch.pending`，每个任务只有一个结果发送点，`Drop` 必须 cancel+abort；fork 在 runtime 初始化前以目录级克隆继承父 session 状态，子代理复用父 `LlmBackend` 与当前活动模型。
 - 子代理身份：父 `events.jsonl` 的 `sub_agent` 事件携带可选 version/label/mode/parent_session_id/depth/stop_reason/duration_ms/phase，目录折叠只是派生视图（events 仍为 best-effort，conversation 仍是权威）；子 `session.json` 写 `parent` 与 `subagent{version,origin,mode,label,depth}`，origin 区分 `sub_agent`/`goal_review`/`replan`。
 - 子代理结果：模型可见文本只取最后一条含非空 text 的 assistant 的全部 text 块（空为 `(no output)`，无匹配时回退 captured），默认不注入 thinking；失败/超时由有界 diagnostic（含截断标记总长 <=4096 字节、含 phase 与稳定错误码）承载；`_mink.sub_agent` 携带结构化身份/用量/耗时，未测量时带 `usage_known/elapsed_known=false`；父 display 的 SubAgentOutput 展示侧有界，tool_result 大小与 artifact 保护不变。
-- 子代理生命周期：`sub_agent_timeout_secs`（必须 >0）从获得并发名额后起算并覆盖 setup+run；不存在批次 deadline；批内上限 8 只排队不拒绝，状态按 `launched(queued)→running→终态` 记录；fork 克隆按目录项检查取消；setup 失败/超时/取消由清理 guard 删除部分 child home；`elapsed_ms`/`duration_ms` 不含排队。
+- 子代理生命周期：`sub_agent_timeout_secs`（必须 >0）从获得并发名额后起算并覆盖 setup+run；不存在批次 deadline；批内上限 20 只排队不拒绝，状态按 `launched(queued)→running→终态` 记录；fork 克隆按目录项检查取消；setup 失败/超时/取消由清理 guard 删除部分 child home；`elapsed_ms`/`duration_ms` 不含排队。
 - 子代理委派边界：`sub_agent_max_depth` 默认 1（0 禁用、最大 3），深度持久化在子会话元数据；`depth < max_depth` 时 surface 才保留 SubAgent，运行时以 `child_depth = depth + 1 > max_depth` 返回 SafetyBlocked；`model` 仅接受 `ModelResolver` 别名或当前实际模型。
 - 子代理提示词：子角色渲染固定委派 scope 声明，到达深度上限时显式给出剩余 0；主代理不渲染该段。
 - `TurnExecutor::new/new_for_model` 是模型与 backend 的唯一装配路径；禁止第二 backend 字段或构造后覆盖模型；`SubAgentCoordinator` 不持有 Config；默认 approval mode 为 `yolo`，`prompt` 无交互式 UI 时 fail closed。

@@ -8,12 +8,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, type GoalSnapshot, type SessionSummary } from '../data/api.ts'
 import { useNow, useSessionCatalog } from '../data/useSessionCatalog.ts'
 import {
-  clearComposeDraft,
   forgetAcceptedAttachments,
   mergeAttachments,
   sessionAttachmentsKey,
   sessionDraftKey,
   sessionPendingKey,
+  settleComposeDraft,
   useSessionDraft,
   writePendingSubmission,
   writeSessionDraftIfAbsent,
@@ -286,8 +286,10 @@ export function App() {
     let created: SessionSummary | undefined
     const adopt = (session: SessionSummary, message: string): void => {
       writeSessionDraftIfAbsent(session, text)
+      // The session exists from here on, wherever the reader has navigated to:
+      // its composing ids must not be reused for a later first message.
+      settleComposeDraft(project.cwd, { draftId, requestId: firstRequestId, text })
       if (mayAdopt()) {
-        clearComposeDraft(project.cwd, { draftId, requestId: firstRequestId, text })
         openSession(session)
         setSessionNotice(message)
       }
@@ -348,7 +350,7 @@ export function App() {
         return undefined
       }
       forgetAcceptedAttachments(sessionAttachmentsKey(created), input.attachment_snapshot)
-      clearComposeDraft(project.cwd, { draftId, requestId: firstRequestId, text })
+      settleComposeDraft(project.cwd, { draftId, requestId: firstRequestId, text })
       if (mayAdopt()) openSession(created)
       void catalog.refresh()
       return undefined

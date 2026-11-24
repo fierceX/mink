@@ -124,16 +124,27 @@ export function writeComposeDraft(cwd: string, draft: ComposeDraft): void {
   }
 }
 
-/** Drop the composing draft once the conversation has been created. */
-export function clearComposeDraft(cwd: string, expected?: ComposeDraft): void {
+/**
+ * Settle a composing draft once its first send has been answered.
+ *
+ * The conversation exists from that moment on, so the record's `draftId` and
+ * `requestId` are spent: a later submit that reuses them resolves the same
+ * session and then asks admission to admit *different* words under the same id,
+ * which the inbox refuses as a conflict. Anything typed after the send started
+ * is kept, but under a fresh pair; nothing else survives.
+ */
+export function settleComposeDraft(cwd: string, submitted: ComposeDraft): void {
   try {
     const key = composeDraftKey(cwd)
-    if (expected !== undefined) {
-      const current = readComposeDraft(cwd)
-      if (current.draftId !== expected.draftId || current.requestId !== expected.requestId
-        || current.text !== expected.text) return
+    const current = readComposeDraft(cwd)
+    if (current.draftId !== submitted.draftId || current.requestId !== submitted.requestId) return
+    // The composer empties the box before submitting, so the settled record is
+    // normally blank; text identical to the payload was consumed by it.
+    if (current.text.trim() === '' || current.text === submitted.text) {
+      localStorage.removeItem(key)
+      return
     }
-    localStorage.removeItem(key)
+    writeComposeDraft(cwd, { draftId: newComposeDraftId(), text: current.text, requestId: requestId() })
   } catch {
     // Storage is optional.
   }

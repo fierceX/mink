@@ -81,6 +81,32 @@ test('creates the session only when the first message is sent', async ({ page })
   await expect(page.locator('[data-new-conversation]')).toHaveCount(0)
 })
 
+test('starts a second new conversation in the same project instead of reusing the first', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: '新建任务', exact: true }).first().click()
+  await expect(page.locator('[data-new-conversation]')).toBeVisible()
+  await page.getByLabel('输入消息').fill('please answer with the fixture response')
+  await page.getByRole('button', { name: '发送' }).click()
+  await expect(page.getByText(/Completed: fixture response/)).toBeVisible()
+  const first = new URL(page.url()).searchParams.get('session')
+  expect(first).toBeTruthy()
+
+  // The settled first send leaves no composing identity behind, so the next
+  // new conversation in this project is its own session. Reusing the spent
+  // draft id and request id used to resolve the first session and then refuse
+  // the new words as "request ID conflicts with an existing input".
+  await page.getByRole('button', { name: '新建任务', exact: true }).first().click()
+  await expect(page.locator('[data-new-conversation]')).toBeVisible()
+  await page.getByLabel('输入消息').fill('a different first message')
+  await page.getByRole('button', { name: '发送' }).click()
+
+  await expect(page.locator('[class*="bubble"]', { hasText: 'a different first message' })).toBeVisible()
+  await expect(page.getByText(/request ID conflicts with an existing input/)).toHaveCount(0)
+  const second = new URL(page.url()).searchParams.get('session')
+  expect(second).toBeTruthy()
+  expect(second).not.toBe(first)
+})
+
 test('renders the fixture history and streams a fresh turn', async ({ page }) => {
   await openFixture(page)
   // History projects through the same reducer the served app runs.
