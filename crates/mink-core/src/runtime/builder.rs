@@ -287,5 +287,5 @@ async fn resolve_session(
 }
 
 #[cfg(test)]
-#[path = "builder_tests.rs"]
+#[path = "builder_tests/mod.rs"]
 mod tests;

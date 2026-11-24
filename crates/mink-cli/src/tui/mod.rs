@@ -685,5 +685,5 @@ fn committable_prefix_end(state: &TuiState) -> usize {
 }
 
 #[cfg(test)]
-#[path = "mod_tests.rs"]
+#[path = "tests/mod.rs"]
 mod tests;

@@ -1,7 +1,8 @@
-.PHONY: build check test clippy feature-matrix test-surface-exhaustive bench bench-quick regression-mock regression-client regression-api regression-all coverage coverage-core coverage-with-ignored clean \
+.PHONY: build check test clippy feature-matrix test-surface-exhaustive bench bench-quick regression-mock regression-client regression-api regression-all coverage coverage-core coverage-core-real coverage-with-ignored clean \
         pip-build pip-wheel pip-install pip-publish pip-clean
 
-CORE_COVERAGE_IGNORE := (main\.rs|tui/|ui/|tools/(web|search|runner|bash)\.rs|tools/file(\.rs|/.*)|llm/(client|transport)\.rs|sse/toolcall\.rs|session/compaction(\.rs|/.*)|config\.rs|prompt\.rs|assets\.rs|context\.rs|errors\.rs|events\.rs|session/(paths|init)\.rs|regression\.rs|agent/(orchestrator|prefix|compactor|sub_coordinator|sub_executor)\.rs|.*_tests\.rs)
+CORE_COVERAGE_IGNORE := (main\.rs|tui/|ui/|tools/(web|search|bash)\.rs|tools/runner(\.rs|/.*)|tools/file(\.rs|/.*)|llm/(client|transport)\.rs|sse/toolcall\.rs|session/compaction(\.rs|/.*)|config\.rs|prompt\.rs|assets\.rs|context\.rs|errors\.rs|events\.rs|session/(paths|init)\.rs|regression\.rs|agent/(orchestrator|prefix|compactor|sub_coordinator|sub_executor)\.rs|.*_tests(\.rs|/.*))
+CORE_COVERAGE_REAL_IGNORE := (.*_tests(\.rs|/.*)|crates/mink-cli/src/tui/tests/.*|crates/[^/]+/tests/.*|regression(\.rs|/.*)|build\.rs)
 
 build:
 	cargo build --release
@@ -68,6 +69,15 @@ coverage:
 coverage-core:
 	@if command -v cargo-llvm-cov >/dev/null 2>&1; then \
 		cargo llvm-cov --all-targets --all-features --ignore-filename-regex '$(CORE_COVERAGE_IGNORE)' --fail-under-lines 90; \
+	else \
+		echo "cargo-llvm-cov is not installed. Install with: cargo install cargo-llvm-cov"; \
+		exit 1; \
+	fi
+
+# Whole-core production coverage report (excludes only test files and build scripts).
+coverage-core-real:
+	@if command -v cargo-llvm-cov >/dev/null 2>&1; then \
+		cargo llvm-cov --all-targets --all-features --ignore-filename-regex '$(CORE_COVERAGE_REAL_IGNORE)'; \
 	else \
 		echo "cargo-llvm-cov is not installed. Install with: cargo install cargo-llvm-cov"; \
 		exit 1; \
