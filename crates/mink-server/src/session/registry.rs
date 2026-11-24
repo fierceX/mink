@@ -155,55 +155,37 @@ impl Registry {
     /// every project (workspace), not just the current cwd's project — the
     /// three-pane UI groups sessions by workspace directory.
     pub async fn list(&self) -> Result<Vec<SessionSummary>> {
-        let active_status = self
+        let active_runtimes = self
             .lock_active_state()?
             .iter()
-            .map(|(locator, session)| {
-                (
-                    locator.clone(),
-                    if session.runtime.running() {
-                        "running"
-                    } else {
-                        "active"
-                    },
-                )
-            })
+            .map(|(locator, session)| (locator.clone(), session.runtime.clone()))
             .collect::<HashMap<_, _>>();
-        let mut out = Vec::new();
         let home = self.home.clone();
-        let scanned = tokio::task::spawn_blocking(move || -> Result<Vec<_>> {
-            scan_all_sessions(&home)?
+        let mut out = tokio::task::spawn_blocking(move || -> Result<Vec<SessionSummary>> {
+            Ok(scan_all_sessions(&home)?
                 .into_iter()
                 .map(|(dir, metadata, modified)| {
                     let usage = summarize_usage(&dir);
-                    Ok((dir, metadata, modified, usage))
+                    summary_from_metadata(metadata, modified, &dir, usage)
                 })
-                .collect()
+                .collect())
         })
         .await??;
-        for (dir, metadata, modified, usage) in scanned {
-            let id = metadata.as_ref().map(|m| m.id.clone()).unwrap_or_else(|| {
-                dir.file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            });
-            let locator = locator_from_dir(&dir, &id);
-            let status = active_status.get(&locator).copied();
-            let mut summary = summary_from_metadata(metadata, modified, &dir, usage);
-            summary.status = status.unwrap_or("free");
-            if let Ok(Some(runtime)) = self.active_runtime(&summary.id, Some(&summary.project_key))
-            {
-                summary.last_final = runtime
-                    .detail()
-                    .get("last_final")
-                    .filter(|v| !v.is_null())
-                    .cloned();
-                summary.phase = runtime.detail()["phase"]
-                    .as_str()
-                    .unwrap_or("closed")
-                    .into();
+        for summary in &mut out {
+            let locator = SessionLocator {
+                project_key: summary.project_key.clone(),
+                id: summary.id.clone(),
+            };
+            if let Some(runtime) = active_runtimes.get(&locator) {
+                summary.status = if runtime.running() {
+                    "running"
+                } else {
+                    "active"
+                };
+                let detail = runtime.detail();
+                summary.last_final = detail.get("last_final").filter(|v| !v.is_null()).cloned();
+                summary.phase = detail["phase"].as_str().unwrap_or("closed").into();
             }
-            out.push(summary);
         }
         out.sort_by(|a, b| {
             b.modified_secs
@@ -523,18 +505,21 @@ impl Registry {
         request_id: Option<String>,
     ) -> RegistryResult<()> {
         let locator = self.required_active_locator(id, project)?;
-        let active = self.lock_active_state()?;
-        let session = active
-            .get(&locator)
-            .ok_or_else(|| RegistryError::NotFound(format!("session {id} is not open")))?;
-        if session.runtime.closed() {
+        let runtime = {
+            let active = self.lock_active_state()?;
+            active
+                .get(&locator)
+                .ok_or_else(|| RegistryError::NotFound(format!("session {id} is not open")))?
+                .runtime
+                .clone()
+        };
+        if runtime.closed() {
             return Err(RegistryError::NotFound(format!(
                 "session {id} runtime is closed; reopen it"
             )));
         }
         if let Some(request_id) = request_id.as_deref()
-            && session
-                .runtime
+            && runtime
                 .existing_turn_input(request_id, &input)
                 .map_err(|error| RegistryError::Busy(error.to_string()))?
                 .is_some()
@@ -546,8 +531,7 @@ impl Registry {
             .capacity
             .try_reserve(instance, CapacityOwner::OrdinaryTurn)
             .map_err(|error| self.capacity_error(id, error))?;
-        session
-            .runtime
+        runtime
             .start_turn_with_permit(input, request_id, Some(permit))
             .map_err(|error| RegistryError::Busy(error.to_string()))
     }
@@ -586,10 +570,13 @@ impl Registry {
         let locator = self.required_active_locator(id, project)?;
         let instance = self.instance_key(&locator);
         // A previous run of the same instance may still be exiting (a paused
-        // turn settles within milliseconds). Wait briefly for it to release
-        // its permit instead of refusing a replacement that is not concurrent.
-        let deadline = std::time::Instant::now() + Duration::from_millis(1_000);
+        // turn settles within milliseconds). Wait on Notify for release instead
+        // of sleeping in a polling loop.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(1_000);
         loop {
+            let notified = self.capacity.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             match self
                 .capacity
                 .try_reserve(instance.clone(), CapacityOwner::GoalDriver)
@@ -598,10 +585,11 @@ impl Registry {
                 Err(error @ ReserveError::Full { .. }) => {
                     return Err(self.capacity_error(id, error));
                 }
-                Err(ReserveError::Occupied) if std::time::Instant::now() < deadline => {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                Err(ReserveError::Occupied) => {
+                    if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                        return Err(self.capacity_error(id, ReserveError::Occupied));
+                    }
                 }
-                Err(occupied) => return Err(self.capacity_error(id, occupied)),
             }
         }
     }
@@ -650,13 +638,16 @@ impl Registry {
         resume: Option<(&str, u64)>,
     ) -> RegistryResult<mink::runtime::InputReceipt> {
         let locator = self.required_active_locator(id, project)?;
-        let active = self.lock_active_state()?;
-        let session = active
-            .get(&locator)
-            .ok_or_else(|| RegistryError::NotFound("session is not open".into()))?;
-        let existing = if resume.is_none() {
-            session
+        let runtime = {
+            let active = self.lock_active_state()?;
+            active
+                .get(&locator)
+                .ok_or_else(|| RegistryError::NotFound("session is not open".into()))?
                 .runtime
+                .clone()
+        };
+        let existing = if resume.is_none() {
+            runtime
                 .inbox()
                 .existing(&input)
                 .map_err(|e| RegistryError::Busy(e.to_string()))?
@@ -680,8 +671,7 @@ impl Registry {
         } else {
             None
         };
-        session
-            .runtime
+        runtime
             .submit(input, resume, permit)
             .map_err(|e| RegistryError::Busy(e.to_string()))
     }
@@ -838,6 +828,10 @@ impl Registry {
             .await
             .map_err(|error| RegistryError::Internal(error.into()))?
             .map_err(|error| RegistryError::Internal(error.into()))?;
+        self.generations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&locator);
         Ok(())
     }
 
@@ -895,12 +889,20 @@ impl Registry {
             .keys()
             .cloned()
             .collect::<Vec<_>>();
-        let mut errors = Vec::new();
-        for locator in ids {
-            if let Err(error) = self.close(&locator.id, Some(&locator.project_key)).await {
-                errors.push(format!("{}: {error:#}", locator.id));
-            }
-        }
+        let results = futures::future::join_all(
+            ids.iter()
+                .map(|locator| self.close(&locator.id, Some(&locator.project_key))),
+        )
+        .await;
+        let errors = ids
+            .into_iter()
+            .zip(results)
+            .filter_map(|(locator, result)| {
+                result
+                    .err()
+                    .map(|error| format!("{}: {error:#}", locator.id))
+            })
+            .collect::<Vec<_>>();
         if errors.is_empty() {
             Ok(())
         } else {
@@ -917,8 +919,39 @@ impl Registry {
         Ok(Some(metadata.cwd))
     }
 
-    /// Find the disk path of a session (full-home scan).
+    /// Find the disk path of a session.
+    /// Uses direct O(1) lookup when a safe `project` key is supplied, falling
+    /// back to a full-home scan otherwise.
     pub async fn session_dir(&self, id: &str, project: Option<&str>) -> RegistryResult<PathBuf> {
+        let home = self.home.clone();
+        let id_owned = id.to_string();
+        let project_owned = project.map(str::to_string);
+        let direct = tokio::task::spawn_blocking(move || -> Option<PathBuf> {
+            let proj = project_owned.as_deref()?;
+            if !is_safe_path_segment(proj)
+                || !is_safe_path_segment(&id_owned)
+                || id_owned.starts_with("sub_")
+                || id_owned.starts_with("replan_")
+            {
+                return None;
+            }
+            let dir = home
+                .join(".mink")
+                .join("projects")
+                .join(proj)
+                .join(&id_owned);
+            if !dir.is_dir() {
+                return None;
+            }
+            let metadata = read_session_metadata(&dir).ok()?;
+            (metadata.id == id_owned && metadata.parent.is_none()).then_some(dir)
+        })
+        .await
+        .map_err(|error| RegistryError::Internal(error.into()))?;
+        if let Some(dir) = direct {
+            return Ok(dir);
+        }
+
         let home = self.home.clone();
         let scanned = tokio::task::spawn_blocking(move || scan_all_sessions(&home))
             .await
@@ -1072,6 +1105,15 @@ fn summary_first_prompt(prompt: Option<&str>) -> Option<String> {
         end -= 1;
     }
     Some(format!("{}…", &prompt[..end]))
+}
+
+fn is_safe_path_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && !value.contains('/')
+        && !value.contains('\\')
+        && !value.contains('\0')
 }
 
 fn project_key_from_dir(dir: &Path) -> String {

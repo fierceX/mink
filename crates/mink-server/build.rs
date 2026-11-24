@@ -218,12 +218,17 @@ fn main() {
 
     // ── 版本溯源：嵌入 git commit hash（与 mink-cli/build.rs 同一协议）──
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let git_dir = manifest.join("../../.git");
-    println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
-    println!(
-        "cargo:rerun-if-changed={}",
-        git_dir.join("refs/heads/main").display()
-    );
+    let git_dir = resolve_git_dir(&manifest.join("../../.git"));
+    let head_path = git_dir.join("HEAD");
+    println!("cargo:rerun-if-changed={}", head_path.display());
+    if let Ok(head) = fs::read_to_string(&head_path)
+        && let Some(ref_rel) = head.trim().strip_prefix("ref: ")
+    {
+        println!(
+            "cargo:rerun-if-changed={}",
+            git_dir.join(ref_rel.trim()).display()
+        );
+    }
     println!(
         "cargo:rerun-if-changed={}",
         git_dir.join("packed-refs").display()
@@ -276,6 +281,21 @@ fn main() {
 
     write_manifest(&out_dir, &assets).unwrap_or_else(|error| panic!("[build.rs] {error}"));
     println!("[build.rs] embedded {} web assets", assets.len());
+}
+
+fn resolve_git_dir(dot_git: &Path) -> PathBuf {
+    if dot_git.is_file()
+        && let Ok(content) = fs::read_to_string(dot_git)
+        && let Some(raw) = content.trim().strip_prefix("gitdir:")
+    {
+        let path = PathBuf::from(raw.trim());
+        return if path.is_absolute() {
+            path
+        } else {
+            dot_git.parent().unwrap_or(dot_git).join(path)
+        };
+    }
+    dot_git.to_path_buf()
 }
 
 fn git_short_hash() -> Option<String> {

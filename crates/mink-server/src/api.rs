@@ -274,20 +274,35 @@ async fn list_sessions(State(state): State<Arc<ApiState>>) -> ApiResponse {
 /// loaded (a phone that refreshed into an older build then says so, instead of
 /// looking like a half-working UI).
 async fn api_version() -> ApiResponse {
-    let index = crate::web_assets::FILES
-        .iter()
-        .find(|(path, _)| *path == "index.html")
-        .map(|(_, bytes)| String::from_utf8_lossy(bytes).to_string());
-    let bundle = index
-        .as_deref()
-        .and_then(|html| {
-            let marker = "/assets/";
-            let at = html.find(marker)?;
-            let rest = &html[at + marker.len()..];
-            let end = rest.find('"')?;
-            Some(rest[..end].to_string())
-        })
-        .unwrap_or_default();
+    static BUNDLE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let bundle = BUNDLE.get_or_init(|| {
+        let index = crate::web_assets::FILES
+            .iter()
+            .find(|(path, _)| *path == "index.html")
+            .map(|(_, bytes)| String::from_utf8_lossy(bytes).to_string());
+        index
+            .as_deref()
+            .and_then(|html| {
+                let mut rest = html;
+                let mut first_match = None;
+                while let Some(at) = rest.find("/assets/") {
+                    let tail = &rest[at + "/assets/".len()..];
+                    let Some(end) = tail.find(['"', '\'']) else {
+                        break;
+                    };
+                    let candidate = &tail[..end];
+                    if first_match.is_none() {
+                        first_match = Some(candidate.to_string());
+                    }
+                    if candidate.ends_with(".js") || candidate.ends_with(".mjs") {
+                        return Some(candidate.to_string());
+                    }
+                    rest = &tail[end..];
+                }
+                first_match
+            })
+            .unwrap_or_default()
+    });
     ApiResponse::ok(json!({ "bundle": bundle }))
 }
 
@@ -522,28 +537,36 @@ async fn submit_input(
         return ApiResponse::err(400, "max 8 attachments");
     }
     if !input.attachment_ids.is_empty() {
-        let Some(limits) = runtime.image_input().limits() else {
+        let Some(limits) = runtime.image_input().limits().cloned() else {
             return ApiResponse::err(400, "image input unavailable for this session");
         };
-        let mut total = 0u64;
-        let mut paths = Vec::new();
-        for attachment in &input.attachment_ids {
-            match runtime
-                .attachments()
-                .read(attachment, limits.max_image_bytes)
-            {
-                Ok((path, bytes)) => {
-                    total += bytes.len() as u64;
-                    paths.push(path);
-                }
-                Err(e) => return ApiResponse::err(400, e.to_string()),
-            }
-        }
-        if input.attachment_ids.len() > limits.max_images_per_request
-            || total > limits.max_image_bytes_per_request.min(16 * 1024 * 1024)
-        {
+        if input.attachment_ids.len() > limits.max_images_per_request {
             return ApiResponse::err(413, "attachments exceed session limits");
         }
+        let store = runtime.attachments().clone();
+        let attachment_ids = input.attachment_ids.clone();
+        let read_res = tokio::task::spawn_blocking(move || {
+            let mut total = 0u64;
+            let mut paths = Vec::with_capacity(attachment_ids.len());
+            let max_total = limits.max_image_bytes_per_request.min(16 * 1024 * 1024);
+            for attachment in &attachment_ids {
+                let (path, bytes) = store
+                    .read(attachment, limits.max_image_bytes)
+                    .map_err(|e| (400u16, e.to_string()))?;
+                total += bytes.len() as u64;
+                if total > max_total {
+                    return Err((413u16, "attachments exceed session limits".to_string()));
+                }
+                paths.push(path);
+            }
+            Ok(paths)
+        })
+        .await;
+        let paths = match read_res {
+            Ok(Ok(paths)) => paths,
+            Ok(Err((code, msg))) => return ApiResponse::err(code, msg),
+            Err(error) => return ApiResponse::err(500, format!("attachment read failed: {error}")),
+        };
         if input.text.trim().is_empty() {
             input.text =
                 "Please use Read to inspect the attached images and respond to their contents."
@@ -787,6 +810,7 @@ async fn set_session_model(
     let Some(handle) = runtime.handle() else {
         return ApiResponse::err(409, "session runtime is shutting down");
     };
+    let _op = runtime.begin_operation();
     match handle.set_model_with_outcome(model.clone()).await {
         Ok(outcome) => ApiResponse::ok(json!({
             "model": model,
@@ -811,6 +835,7 @@ async fn compact_session(
     let Some(handle) = runtime.handle() else {
         return ApiResponse::err(409, "session runtime is shutting down");
     };
+    let _op = runtime.begin_operation();
     match handle.compact().await {
         Ok(outcome) => ApiResponse::ok(json!({ "compacted": true, "outcome": outcome })),
         Err(error) => ApiResponse::err(409, control_error(&error)),
@@ -934,11 +959,19 @@ async fn stream_events(
     };
     let mut shutdown = state.shutdown.subscribe();
     let stream = async_stream::stream! {
-        if let Some(snapshot)=snapshot {
-            yield Ok::<http_body::Frame<axum::body::Bytes>, std::convert::Infallible>(http_body::Frame::data(axum::body::Bytes::from(format!("data: {snapshot}\n\n"))));
-        }
+        let heartbeat_period = std::time::Duration::from_secs(30);
         // 心跳：30s 无事件时发 `: ping` 注释帧，防止中间代理按空闲超时断开
-        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut heartbeat = tokio::time::interval_at(
+            tokio::time::Instant::now() + heartbeat_period,
+            heartbeat_period,
+        );
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        if let Some(snapshot) = snapshot {
+            yield Ok::<http_body::Frame<axum::body::Bytes>, std::convert::Infallible>(
+                http_body::Frame::data(axum::body::Bytes::from(format!("data: {snapshot}\n\n"))),
+            );
+            heartbeat.reset();
+        }
         loop {
             // If shutdown was already signaled before this stream subscribed,
             // close immediately instead of waiting for another watch change.
@@ -953,12 +986,17 @@ async fn stream_events(
                 }
                 recv = rx.recv() => {
                     match recv {
-                        Ok(line) => {
-                            if !snapshot_mode && serde_json::from_str::<serde_json::Value>(&line).ok().is_some_and(|v| matches!(v["type"].as_str(), Some("inputs_updated" | "conversation_committed" | "phase_updated"))) { continue; }
-                            let sse = format!("data: {line}\n\n");
+                        Ok(event) => {
+                            if !snapshot_mode
+                                && event.kind == crate::session::runtime::BroadcastEventKind::Control
+                            {
+                                continue;
+                            }
+                            let sse = format!("data: {}\n\n", event.payload);
                             yield Ok::<http_body::Frame<axum::body::Bytes>, std::convert::Infallible>(
                                 http_body::Frame::data(axum::body::Bytes::from(sse)),
                             );
+                            heartbeat.reset();
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
                             let line = serde_json::json!({"type":"stream_gap","missed":missed}).to_string();
@@ -1259,22 +1297,25 @@ async fn create_goal(
         return ApiResponse::ok(json!({"goal":draft}));
     }
     drop(_command);
+    let _op = runtime.begin_operation();
     let task = tokio::spawn(async move {
         let _lease = lease;
         handle
             .generate_goal_draft_at(&draft.id, draft.revision, "")
             .await
     });
-    match task.await {
-        Ok(Ok(draft)) => ApiResponse::ok(json!({"goal":draft})),
-        Ok(Err(error)) => ApiResponse::err(
+    let timeout_secs = crate::session::runtime::draft_generation_timeout_secs();
+    match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), task).await {
+        Ok(Ok(Ok(draft))) => ApiResponse::ok(json!({"goal":draft})),
+        Ok(Ok(Err(error))) => ApiResponse::err(
             409,
             format!("draft generation failed; proposal preserved: {error}"),
         ),
-        Err(error) => ApiResponse::err(
+        Ok(Err(error)) => ApiResponse::err(
             409,
             format!("draft generation task failed; proposal preserved: {error}"),
         ),
+        Err(_) => ApiResponse::err(409, "draft generation timed out; proposal preserved"),
     }
 }
 
@@ -1393,6 +1434,18 @@ async fn goal_action(
     }
     let result = match action.as_str() {
         "refine" => {
+            let _command = match state
+                .registry
+                .lock_goal_commands(&id, query.project.as_deref())
+                .await
+            {
+                Ok(guard) => guard,
+                Err(error) => return registry_error(error),
+            };
+            let current = match handle.goal_snapshot() {
+                Some(goal) => goal,
+                None => return ApiResponse::err(404, "session has no goal"),
+            };
             if current.status != mink::runtime::GoalStatus::Draft || current.revision != revision {
                 return ApiResponse::err(409, "stale draft; reread before refining");
             }
@@ -1404,6 +1457,8 @@ async fn goal_action(
                 Ok(lease) => lease,
                 Err(error) => return registry_error(error),
             };
+            drop(_command);
+            let _op = runtime.begin_operation();
             let feedback = body.feedback.unwrap_or_default();
             let task = tokio::spawn(async move {
                 let _lease = lease;
@@ -1411,14 +1466,18 @@ async fn goal_action(
                     .generate_goal_draft_at(&current.id, revision, &feedback)
                     .await
             });
-            return match task.await {
-                Ok(Ok(goal)) => ApiResponse::ok(json!({"goal":goal})),
-                Ok(Err(error)) => {
+            let timeout_secs = crate::session::runtime::draft_generation_timeout_secs();
+            return match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), task)
+                .await
+            {
+                Ok(Ok(Ok(goal))) => ApiResponse::ok(json!({"goal":goal})),
+                Ok(Ok(Err(error))) => {
                     ApiResponse::err(409, format!("draft refinement failed: {error}"))
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     ApiResponse::err(409, format!("draft refinement task failed: {error}"))
                 }
+                Err(_) => ApiResponse::err(409, "draft refinement timed out"),
             };
         }
         "pause" => {

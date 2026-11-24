@@ -2,11 +2,54 @@ use anyhow::{Result, anyhow};
 use mink::runtime::{
     AgentEvent, AgentEventStream, AgentOptions, AgentRuntime, GoalSnapshot, SessionInfo,
 };
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
+
+const MAX_PROGRESS_ITEMS: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BroadcastEventKind {
+    Standard,
+    Control,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BroadcastEvent {
+    pub(crate) kind: BroadcastEventKind,
+    pub(crate) payload: Arc<str>,
+}
+
+fn make_broadcast_event(value: &serde_json::Value) -> Arc<BroadcastEvent> {
+    let kind = if matches!(
+        value.get("type").and_then(serde_json::Value::as_str),
+        Some("inputs_updated" | "conversation_committed" | "phase_updated")
+    ) {
+        BroadcastEventKind::Control
+    } else {
+        BroadcastEventKind::Standard
+    };
+    Arc::new(BroadcastEvent {
+        kind,
+        payload: Arc::from(value.to_string()),
+    })
+}
+
+pub(crate) struct ActiveOpGuard {
+    in_flight: Arc<AtomicUsize>,
+    state: Arc<Mutex<RuntimeState>>,
+}
+
+impl Drop for ActiveOpGuard {
+    fn drop(&mut self) {
+        if self.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.last_idle = Instant::now();
+        }
+    }
+}
 
 const TURN_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 const TURN_JOIN_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
@@ -96,7 +139,9 @@ impl Projection {
         if boundaries.len() > SNAPSHOT_RECENT_TURNS {
             let start = boundaries[boundaries.len() - SNAPSHOT_RECENT_TURNS];
             self.rows.drain(..start);
-            self.has_older = start > 0;
+            if start > 0 {
+                self.has_older = true;
+            }
         }
         self.row_bytes = self
             .rows
@@ -155,7 +200,8 @@ pub struct SessionRuntime {
     attachments: Arc<mink::runtime::AttachmentStore>,
     goal_dir: std::path::PathBuf,
     state: Arc<Mutex<RuntimeState>>,
-    event_tx: broadcast::Sender<String>,
+    in_flight_ops: Arc<AtomicUsize>,
+    event_tx: broadcast::Sender<Arc<BroadcastEvent>>,
     stream_sequence: Arc<AtomicU64>,
 }
 
@@ -182,9 +228,14 @@ impl SessionRuntime {
             .to_path_buf();
         let read_dir = directory.clone();
         let read_result = tokio::task::spawn_blocking(move || -> Result<_> {
-            let reader = mink::runtime::session::SessionReader::new(read_dir);
+            let reader = mink::runtime::session::SessionReader::new(read_dir.clone());
+            let rows = if read_dir.join("conversation.jsonl").exists() {
+                reader.conversation_turns_bounded(0, SNAPSHOT_RECENT_TURNS + 1, true, None, None)?
+            } else {
+                Vec::new()
+            };
             Ok((
-                reader.conversation()?,
+                rows,
                 serde_json::json!({"plan":reader.plan()?,"todo":reader.todo()?,"artifacts":reader.artifacts()?}),
             ))
         })
@@ -206,6 +257,11 @@ impl SessionRuntime {
         // cleared (hidden) goal is seeded as null, exactly like every later
         // publication normalizes it.
         let goal = runtime.handle().goal_snapshot().filter(|goal| !goal.hidden);
+        let has_older = rows
+            .first()
+            .and_then(|r| r.get("seq"))
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|seq| seq > 1);
         let mut projection = Projection {
             generation: format!(
                 "{}-{}",
@@ -217,7 +273,7 @@ impl SessionRuntime {
             watermark: 0,
             rows,
             row_bytes: vec![],
-            has_older: false,
+            has_older,
             progress: vec![],
             current_turn: None,
             phase: "idle",
@@ -253,6 +309,7 @@ impl SessionRuntime {
             attachments,
             goal_dir: directory,
             state: state.clone(),
+            in_flight_ops: Arc::new(AtomicUsize::new(0)),
             event_tx: event_tx.clone(),
             stream_sequence: stream_sequence.clone(),
         };
@@ -338,10 +395,20 @@ impl SessionRuntime {
         self.phase() == RuntimePhase::Closed
     }
     pub fn idle_for(&self) -> Option<std::time::Duration> {
+        if self.in_flight_ops.load(Ordering::Acquire) > 0 {
+            return None;
+        }
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         (state.phase == RuntimePhase::Idle).then(|| state.last_idle.elapsed())
     }
-    pub fn event_receiver(&self) -> broadcast::Receiver<String> {
+    pub(crate) fn begin_operation(&self) -> ActiveOpGuard {
+        self.in_flight_ops.fetch_add(1, Ordering::AcqRel);
+        ActiveOpGuard {
+            in_flight: Arc::clone(&self.in_flight_ops),
+            state: Arc::clone(&self.state),
+        }
+    }
+    pub(crate) fn event_receiver(&self) -> broadcast::Receiver<Arc<BroadcastEvent>> {
         self.event_tx.subscribe()
     }
 
@@ -419,7 +486,9 @@ impl SessionRuntime {
         };
         serde_json::json!({"generation":generation,"current_turn":current_turn,"phase":phase,"capabilities":{"image_input":self.image_input},"last_final":last_final,"goal":goal.as_ref().filter(|g| !g.hidden).map(goal_summary)})
     }
-    pub fn snapshot_subscription(&self) -> (serde_json::Value, broadcast::Receiver<String>) {
+    pub(crate) fn snapshot_subscription(
+        &self,
+    ) -> (serde_json::Value, broadcast::Receiver<Arc<BroadcastEvent>>) {
         // Clone the projection under its lock, then serialize outside it: a
         // multi-megabyte snapshot must not hold off the live publishers (and
         // the turn task) while serde walks every row.
@@ -780,7 +849,7 @@ impl SessionRuntime {
 
 fn finalize_shutdown(
     state: &Arc<Mutex<RuntimeState>>,
-    tx: &broadcast::Sender<String>,
+    tx: &broadcast::Sender<Arc<BroadcastEvent>>,
     stream_sequence: &AtomicU64,
     projection: Option<&Arc<Mutex<Projection>>>,
     shutdown_error: Option<&str>,
@@ -941,13 +1010,16 @@ pub(crate) fn goal_summary_value(goal: &serde_json::Value) -> serde_json::Value 
 }
 
 fn publish(
-    tx: &broadcast::Sender<String>,
+    tx: &broadcast::Sender<Arc<BroadcastEvent>>,
     sequence: &AtomicU64,
     projection: &Arc<Mutex<Projection>>,
     value: serde_json::Value,
 ) {
-    let mut p = projection.lock().unwrap_or_else(|e| e.into_inner());
-    publish_locked(tx, sequence, &mut p, value);
+    let event = {
+        let mut p = projection.lock().unwrap_or_else(|e| e.into_inner());
+        publish_locked(sequence, &mut p, value)
+    };
+    let _ = tx.send(make_broadcast_event(&event));
 }
 
 /// Publish a goal update and advance the mirrored goal in the same critical
@@ -958,28 +1030,36 @@ fn publish(
 /// session snapshot/detail projections and the `goal_updated` event must all
 /// agree that a cleared goal is gone, matching the REST read.
 fn publish_goal(
-    tx: &broadcast::Sender<String>,
+    tx: &broadcast::Sender<Arc<BroadcastEvent>>,
     sequence: &AtomicU64,
     projection: &Arc<Mutex<Projection>>,
     goal: Option<mink::runtime::GoalSnapshot>,
 ) {
     let goal = goal.filter(|goal| !goal.hidden);
-    let mut p = projection.lock().unwrap_or_else(|e| e.into_inner());
-    p.goal = goal.clone();
-    publish_locked(
-        tx,
-        sequence,
-        &mut p,
-        serde_json::json!({"type":"goal_updated","goal":goal.as_ref().map(goal_summary)}),
-    );
+    let event = {
+        let mut p = projection.lock().unwrap_or_else(|e| e.into_inner());
+        p.goal = goal.clone();
+        publish_locked(
+            sequence,
+            &mut p,
+            serde_json::json!({"type":"goal_updated","goal":goal.as_ref().map(goal_summary)}),
+        )
+    };
+    let _ = tx.send(make_broadcast_event(&event));
+}
+
+fn push_bounded_progress(progress: &mut Vec<serde_json::Value>, item: serde_json::Value) {
+    if progress.len() >= MAX_PROGRESS_ITEMS {
+        progress.remove(0);
+    }
+    progress.push(item);
 }
 
 fn publish_locked(
-    tx: &broadcast::Sender<String>,
     sequence: &AtomicU64,
     p: &mut Projection,
     mut value: serde_json::Value,
-) {
+) -> serde_json::Value {
     value["generation"] = p.generation.clone().into();
     let seq = sequence.fetch_add(1, Ordering::Relaxed);
     value["stream_sequence"] = seq.into();
@@ -1052,24 +1132,24 @@ fn publish_locked(
             p.last_final = Some(value.clone());
         }
         "text" | "thinking" => {
+            let delta = value["content"].as_str().unwrap_or_default();
             if let Some(last) = p.progress.last_mut().filter(|e| e["type"] == value["type"]) {
-                let text = format!(
-                    "{}{}",
-                    last["content"].as_str().unwrap_or_default(),
-                    value["content"].as_str().unwrap_or_default()
-                );
-                last["content"] = text.into();
+                if let Some(serde_json::Value::String(buf)) = last.get_mut("content") {
+                    buf.push_str(delta);
+                } else {
+                    last["content"] = delta.into();
+                }
             } else {
-                p.progress.push(value.clone());
+                push_bounded_progress(&mut p.progress, value.clone());
             }
         }
         "signal" | "error" | "sub_agent_status" | "sub_agent_output" | "retry"
         | "context_compact" => {
-            p.progress.push(value.clone());
+            push_bounded_progress(&mut p.progress, value.clone());
         }
         _ => {}
     }
-    let _ = tx.send(value.to_string());
+    value
 }
 
 fn update_activity(activity: &mut serde_json::Value, event: &serde_json::Value) {
@@ -1196,8 +1276,12 @@ fn turn_timeout_secs(value: Option<&str>) -> u64 {
         .unwrap_or(DEFAULT_TURN_TIMEOUT_SECS)
 }
 
+pub(crate) fn draft_generation_timeout_secs() -> u64 {
+    turn_timeout_secs(std::env::var("MINK_SERVER_TURN_TIMEOUT").ok().as_deref())
+}
+
 async fn run_turn_guarded(
-    tx: &broadcast::Sender<String>,
+    tx: &broadcast::Sender<Arc<BroadcastEvent>>,
     stream_sequence: &AtomicU64,
     projection: &Arc<Mutex<Projection>>,
     state: &Arc<Mutex<RuntimeState>>,
@@ -1275,7 +1359,7 @@ async fn run_turn_guarded(
 }
 
 fn publish_forced_timeout_final(
-    tx: &broadcast::Sender<String>,
+    tx: &broadcast::Sender<Arc<BroadcastEvent>>,
     stream_sequence: &AtomicU64,
     turn_id: &str,
     session: &SessionInfo,
@@ -1289,7 +1373,7 @@ fn publish_forced_timeout_final(
             publish(tx, stream_sequence, projection, value);
         } else {
             value["stream_sequence"] = stream_sequence.fetch_add(1, Ordering::Relaxed).into();
-            let _ = tx.send(value.to_string());
+            let _ = tx.send(make_broadcast_event(&value));
         }
     };
     if !saw_stop {
@@ -1342,7 +1426,7 @@ fn publish_forced_timeout_final(
 /// core goal-turn signal through the session's own `RuntimeState`, so a second
 /// source of truth cannot drift from execution control.
 struct GoalTurnSink {
-    tx: broadcast::Sender<String>,
+    tx: broadcast::Sender<Arc<BroadcastEvent>>,
     sequence: Arc<AtomicU64>,
     projection: Arc<OnceLock<Arc<Mutex<Projection>>>>,
 }
@@ -1350,17 +1434,13 @@ struct GoalTurnSink {
 #[async_trait::async_trait]
 impl mink::runtime::EventSink for GoalTurnSink {
     async fn on_event(&self, event: mink::runtime::AgentEvent) -> Result<(), String> {
-        let mut value = serde_json::to_value(&event)
-            .unwrap_or_else(|_| serde_json::json!({"type":"serialization_error"}));
-        if value["type"] == "final" {
-            value["type"] = "turn_final".into();
-        }
+        let value = agent_event_to_json(&event, 0);
         match self.projection.get() {
             Some(projection) => publish(&self.tx, &self.sequence, projection, value),
             None => {
                 let mut payload = value;
                 payload["stream_sequence"] = self.sequence.fetch_add(1, Ordering::SeqCst).into();
-                let _ = self.tx.send(payload.to_string());
+                let _ = self.tx.send(make_broadcast_event(&payload));
             }
         }
         Ok(())
@@ -1370,6 +1450,56 @@ impl mink::runtime::EventSink for GoalTurnSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn goal_turn_sink_strips_heavy_fields_and_bounds_subagent_output() {
+        use mink::runtime::EventSink;
+
+        let (tx, mut rx) = broadcast::channel(8);
+        let sink = GoalTurnSink {
+            tx,
+            sequence: Arc::new(AtomicU64::new(1)),
+            projection: Arc::new(OnceLock::new()),
+        };
+        let huge = "x".repeat(40 * 1024);
+        sink.on_event(AgentEvent {
+            turn_id: Some(mink::runtime::TurnId::new("t-1")),
+            sequence: 1,
+            kind: mink::runtime::AgentEventKind::SubAgentOutput {
+                session_id: "sub_1".into(),
+                status: "completed".into(),
+                label: None,
+                stop_reason: None,
+                thinking: huge.clone(),
+                text: huge,
+                in_tokens: 0,
+                out_tokens: 0,
+            },
+        })
+        .await
+        .unwrap();
+        let ev = rx.recv().await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&ev.payload).unwrap();
+        assert!(parsed["text"].as_str().unwrap().len() < 33 * 1024);
+        assert!(parsed["thinking"].as_str().unwrap().len() < 33 * 1024);
+    }
+
+    #[tokio::test]
+    async fn active_operation_guard_suspends_idle_until_dropped() {
+        let dir = std::env::temp_dir().join(format!("mink-op-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let runtime = SessionRuntime::open(AgentOptions::new(&dir, &dir).with_api_key("synthetic"))
+            .await
+            .unwrap();
+        assert!(runtime.idle_for().is_some());
+        let guard = runtime.begin_operation();
+        assert!(runtime.idle_for().is_none());
+        drop(guard);
+        assert!(runtime.idle_for().is_some());
+        runtime.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn turn_timeout_defaults_to_two_hours_and_accepts_overrides() {
@@ -1615,8 +1745,10 @@ mod tests {
 
         finalize_shutdown(&state, &tx, &sequence, None, Some("shutdown error"));
         assert_eq!(state.lock().unwrap().phase, RuntimePhase::Closed);
-        let stop: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
-        let final_event: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        let stop: serde_json::Value =
+            serde_json::from_str(&rx.try_recv().unwrap().payload).unwrap();
+        let final_event: serde_json::Value =
+            serde_json::from_str(&rx.try_recv().unwrap().payload).unwrap();
         assert_eq!(stop["type"], "stop");
         assert_eq!(final_event["type"], "turn_final");
         assert_eq!(final_event["outcome"]["status"], "failed");
@@ -1748,7 +1880,7 @@ mod tests {
         );
         let mut goal_event = None;
         while let Ok(message) = events.try_recv() {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&message)
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.payload)
                 && value["type"] == "goal_updated"
             {
                 goal_event = Some(value);

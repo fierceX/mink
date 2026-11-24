@@ -45,7 +45,7 @@ fn read_jsonl_page(
         }
         if let Some(before) = before_seq {
             if line_no >= before {
-                continue;
+                break;
             }
         } else if !tail && line_no <= from_seq {
             continue;
@@ -72,4 +72,26 @@ fn read_jsonl_page(
             v
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn before_seq_returns_closest_preceding_rows_without_overshoot() {
+        let dir = std::env::temp_dir().join(format!("mink-bridge-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        let lines = (1..=10)
+            .map(|i| serde_json::json!({ "type": "info", "idx": i }).to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, format!("{lines}\n")).unwrap();
+
+        let page = read_jsonl_page(&path, 0, 3, false, Some(6)).unwrap();
+        let seqs: Vec<u64> = page.iter().filter_map(|v| v["seq"].as_u64()).collect();
+        assert_eq!(seqs, vec![3, 4, 5]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

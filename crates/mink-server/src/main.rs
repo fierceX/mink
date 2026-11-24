@@ -114,7 +114,25 @@ async fn main() -> Result<()> {
         cfg.mink_home.display()
     );
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {
-        let _ = tokio::signal::ctrl_c().await;
+        #[cfg(unix)]
+        {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = async {
+                    if let Some(ref mut stream) = sigterm {
+                        stream.recv().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
         // Tell open SSE streams to close before waiting for in-flight requests
         // to drain. Without this, axum waits for every SSE connection to end,
         // but those streams only end after shutdown_all() drops the broadcast

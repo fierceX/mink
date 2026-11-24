@@ -38,16 +38,16 @@ pub(crate) enum EntryPhase {
 }
 
 struct Entry {
-    id: PermiId,
+    id: PermitId,
     #[cfg(test)]
     owner: CapacityOwner,
     phase: EntryPhase,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PermiId(u64);
+pub(crate) struct PermitId(u64);
 
-impl PermiId {
+impl PermitId {
     #[cfg(test)]
     pub(crate) fn get(self) -> u64 {
         self.0
@@ -73,6 +73,7 @@ struct CapacityState {
 /// The unique capacity ledger. Cloneable via `Arc` at the call site.
 pub(crate) struct CapacityPool {
     inner: Mutex<CapacityState>,
+    released: tokio::sync::Notify,
 }
 
 impl CapacityPool {
@@ -83,7 +84,12 @@ impl CapacityPool {
                 next_id: 1,
                 entries: HashMap::new(),
             }),
+            released: tokio::sync::Notify::new(),
         }
+    }
+
+    pub(crate) fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.released.notified()
     }
 
     /// Reserve one slot atomically. The check and the insert share one lock,
@@ -103,7 +109,7 @@ impl CapacityPool {
                 occupied: state.entries.len(),
             });
         }
-        let id = PermiId(state.next_id);
+        let id = PermitId(state.next_id);
         state.next_id = state.next_id.saturating_add(1);
         state.entries.insert(
             instance.clone(),
@@ -155,14 +161,21 @@ impl CapacityPool {
 
     /// Remove the entry only when the release names the current owner. A stale
     /// permit (closed instance, replaced execution) is a no-op.
-    pub(crate) fn release(&self, instance: &SessionInstanceKey, id: PermiId) {
-        let mut state = self.lock();
-        if state
-            .entries
-            .get(instance)
-            .is_some_and(|entry| entry.id == id)
-        {
-            state.entries.remove(instance);
+    pub(crate) fn release(&self, instance: &SessionInstanceKey, id: PermitId) {
+        let removed = {
+            let mut state = self.lock();
+            if state
+                .entries
+                .get(instance)
+                .is_some_and(|entry| entry.id == id)
+            {
+                state.entries.remove(instance).is_some()
+            } else {
+                false
+            }
+        };
+        if removed {
+            self.released.notify_waiters();
         }
     }
 
@@ -176,13 +189,13 @@ impl CapacityPool {
 pub(crate) struct ExecutionPermit {
     pool: Arc<CapacityPool>,
     instance: SessionInstanceKey,
-    id: PermiId,
+    id: PermitId,
     released: bool,
 }
 
 impl ExecutionPermit {
     #[cfg(test)]
-    pub(crate) fn id(&self) -> PermiId {
+    pub(crate) fn id(&self) -> PermitId {
         self.id
     }
 
@@ -360,7 +373,7 @@ mod tests {
         assert_eq!(pool.occupied(), 1);
         // And an old id can never remove the current entry of its own instance.
         let mut state = pool.lock();
-        state.entries.get_mut(&instance("a", 2)).unwrap().id = PermiId(stale_id.get() + 1);
+        state.entries.get_mut(&instance("a", 2)).unwrap().id = PermitId(stale_id.get() + 1);
         drop(state);
         pool.release(&instance("a", 2), stale_id);
         assert_eq!(
@@ -370,6 +383,25 @@ mod tests {
         );
         drop(reopened);
         assert_eq!(pool.occupied(), 0);
+    }
+
+    #[tokio::test]
+    async fn release_wakes_notify_waiters() {
+        let pool = Arc::new(CapacityPool::new(1));
+        let permit = pool
+            .try_reserve(instance("a", 1), CapacityOwner::OrdinaryTurn)
+            .unwrap();
+        let notified = pool.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        drop(permit);
+        tokio::time::timeout(std::time::Duration::from_millis(200), notified)
+            .await
+            .expect("release must wake notified waiters immediately");
+        assert!(
+            pool.try_reserve(instance("a", 1), CapacityOwner::GoalDriver)
+                .is_ok()
+        );
     }
 
     #[test]
