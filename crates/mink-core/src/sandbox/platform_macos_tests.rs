@@ -148,3 +148,50 @@ fn sandbox_profile_resolves_relative_mink_home_from_cwd() {
     );
     assert!(!profile.contains("/./"));
 }
+
+#[test]
+fn sandbox_profile_denies_writes_even_when_write_dirs_is_empty() {
+    let config = SandboxConfig {
+        enabled: true,
+        write_dirs: Vec::new(),
+        allow_network: true,
+        ..SandboxConfig::default()
+    };
+    let profile = build_sb_profile_with_env(&config, Path::new("/tmp/work"), "/Users/alice", None);
+    assert!(
+        profile.contains(r#"(deny file-write* (subpath "/"))"#),
+        "empty write_dirs must still deny global writes: {profile}"
+    );
+    assert!(
+        !profile.contains("(deny network*)"),
+        "allow_network=true must not deny network: {profile}"
+    );
+}
+
+#[test]
+fn sandbox_profile_denies_network_when_disallowed() {
+    let config = SandboxConfig {
+        enabled: true,
+        allow_network: false,
+        ..SandboxConfig::default()
+    };
+    let profile = build_sb_profile_with_env(&config, Path::new("/tmp/work"), "/Users/alice", None);
+    assert!(
+        profile.contains("(deny network*)"),
+        "allow_network=false must emit (deny network*): {profile}"
+    );
+}
+
+#[test]
+fn sandbox_profile_escapes_quotes_and_backslashes_in_paths() {
+    let config = SandboxConfig {
+        enabled: true,
+        write_dirs: vec![r#"/tmp/weird"dir\sub"#.into()],
+        ..SandboxConfig::default()
+    };
+    let profile = build_sb_profile_with_env(&config, Path::new("/tmp/work"), "/Users/alice", None);
+    assert!(
+        profile.contains(r#"(allow file-write* (subpath "/tmp/weird\"dir\\sub"))"#),
+        "SBPL special characters must be escaped: {profile}"
+    );
+}

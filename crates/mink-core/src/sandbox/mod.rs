@@ -35,14 +35,6 @@ pub fn reexec_in_sandbox(config: &SandboxConfig, exe: &Path, args: &[String]) {
         return;
     }
 
-    // Set the guard *before* exec — if exec fails, the env var remains
-    // but that's fine because the process continues and exits normally.
-    // Safety: setting environment variable before process replacement is safe
-    // in single-threaded context (we haven't spawned any threads yet).
-    unsafe {
-        std::env::set_var("MINK_SANDBOXED", "1");
-    }
-
     // Linux：父进程（宿主 / agent）死亡时让本进程立即收到 SIGKILL，避免沙箱监工
     // （bwrap / nsjail）成为孤儿；与 bwrap 的 `--die-with-parent` 配合可整棵树回收
     // （父死 → 监工死 → 命名空间 PID1 死 → 命名空间内全部进程死）。
@@ -149,12 +141,19 @@ fn try_reexec(config: &SandboxConfig, exe: &Path, args: &[String]) -> Result<(),
 
 /// Replace the current process with the given command.
 /// Does NOT return on success.
+///
+/// Passes `MINK_SANDBOXED=1` directly via the child `Command` environment
+/// instead of mutating the current process environment with `unsafe set_var`,
+/// keeping re-exec sound even when invoked from a multi-threaded runtime.
 #[allow(dead_code)] // FreeBSD 等无 sandbox 平台不调用
 fn exec_cmd(cmd: &[String]) -> Result<(), String> {
     let (prog, args) = cmd
         .split_first()
         .ok_or_else(|| "empty sandbox command".to_string())?;
-    let err = Command::new(prog).args(args).exec();
+    let err = Command::new(prog)
+        .args(args)
+        .env("MINK_SANDBOXED", "1")
+        .exec();
     Err(format!("exec({prog}) failed: {err}"))
 }
 
@@ -201,10 +200,23 @@ pub(crate) fn bwrap_argv(
             cmd.push(parent_str);
         }
     }
-    for d in ["/usr", "/lib", "/lib64", "/etc", "/run"] {
+    for d in ["/usr", "/lib", "/etc", "/run"] {
         cmd.push("--ro-bind".into());
         cmd.push(d.to_string());
         cmd.push(d.to_string());
+    }
+    // `/lib64` does not exist on all Linux targets (e.g. arm64 Debian/Alpine).
+    cmd.push("--ro-bind-try".into());
+    cmd.push("/lib64".into());
+    cmd.push("/lib64".into());
+
+    // ── HOME directory (read-only for config access) ─────────
+    // Mounted *before* user-configured read/write dirs so writable project
+    // directories located beneath `$HOME` are not shadowed back to read-only.
+    if let Some(home) = home.filter(|home| !home.is_empty()) {
+        cmd.push("--ro-bind".into());
+        cmd.push(home.to_string());
+        cmd.push(home.to_string());
     }
 
     // ── User-configured bind mounts ──────────────────────────
@@ -218,7 +230,11 @@ pub(crate) fn bwrap_argv(
         .collect();
     for d in &config.read_dirs {
         let resolved = resolve_dir_lexical(d, cwd);
-        if write_paths.iter().any(|w| resolved.starts_with(w)) {
+        let resolved_path = Path::new(&resolved);
+        if write_paths
+            .iter()
+            .any(|w| resolved_path.starts_with(Path::new(w)))
+        {
             continue;
         }
         cmd.push("--ro-bind".into());
@@ -230,13 +246,6 @@ pub(crate) fn bwrap_argv(
         cmd.push("--bind".into());
         cmd.push(resolved.clone());
         cmd.push(resolved);
-    }
-
-    // ── HOME directory (read-only for config access) ─────────
-    if let Some(home) = home.filter(|home| !home.is_empty()) {
-        cmd.push("--ro-bind".into());
-        cmd.push(home.to_string());
-        cmd.push(home.to_string());
     }
 
     // ── MINK_HOME / default ~/.mink (writable for session persistence) ──
@@ -268,6 +277,127 @@ pub(crate) fn bwrap_argv(
         .unwrap_or_else(|| cwd.display().to_string());
     cmd.push("--chdir".into());
     cmd.push(work_dir);
+
+    // ── Target binary ────────────────────────────────────────
+    cmd.push("--".into());
+    cmd.push(exe.display().to_string());
+    if args.len() > 1 {
+        cmd.extend(args[1..].iter().cloned());
+    }
+
+    cmd
+}
+
+/// 构造 nsjail 完整 argv（含 "nsjail"）。纯函数：环境值（cwd/HOME/MINK_HOME/TMPDIR）与
+/// `/lib64` 存在性由调用方传入，便于跨平台参数回归测试。
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn nsjail_argv(
+    config: &SandboxConfig,
+    exe: &Path,
+    args: &[String],
+    cwd: &Path,
+    home: Option<&str>,
+    mink_home: Option<&str>,
+    tmpdir: Option<&str>,
+    has_lib64: bool,
+) -> Vec<String> {
+    let mut cmd: Vec<String> = vec!["nsjail".into(), "--mode".into(), "execve".into()];
+
+    if let Some(parent) = exe.parent() {
+        let parent_str = parent.display().to_string();
+        if !parent_str.is_empty() {
+            cmd.push("--bindmount_ro".into());
+            cmd.push(format!("{0}:{0}", parent_str));
+        }
+    }
+    for d in ["/usr", "/lib", "/etc", "/run"] {
+        cmd.push("--bindmount_ro".into());
+        cmd.push(format!("{0}:{0}", d));
+    }
+    if has_lib64 {
+        cmd.push("--bindmount_ro".into());
+        cmd.push("/lib64:/lib64".into());
+    }
+
+    // ── Temp directory (tmpfs for Edit tool unified_diff_color, etc.) ──
+    cmd.push("--tmpfs".into());
+    cmd.push("/tmp".into());
+    if let Some(tmpdir) = tmpdir.filter(|t| !t.is_empty() && *t != "/tmp") {
+        cmd.push("--tmpfs".into());
+        cmd.push(tmpdir.to_string());
+    }
+
+    // ── HOME directory (read-only for config access) ─────────
+    // Mounted before user read/write dirs so write_dirs inside $HOME are not
+    // shadowed back to read-only.
+    if let Some(home) = home.filter(|home| !home.is_empty()) {
+        cmd.push("--bindmount_ro".into());
+        cmd.push(format!("{0}:{0}", home));
+    }
+
+    // ── User-configured bind mounts ──────────────────────────
+    let write_paths: Vec<String> = config
+        .write_dirs
+        .iter()
+        .map(|d| resolve_dir_lexical(d, cwd))
+        .collect();
+    for d in &config.read_dirs {
+        let resolved = resolve_dir_lexical(d, cwd);
+        let resolved_path = Path::new(&resolved);
+        if write_paths
+            .iter()
+            .any(|w| resolved_path.starts_with(Path::new(w)))
+        {
+            continue;
+        }
+        cmd.push("--bindmount_ro".into());
+        cmd.push(format!("{0}:{0}", resolved));
+    }
+    for d in &config.write_dirs {
+        let resolved = resolve_dir_lexical(d, cwd);
+        cmd.push("--bindmount".into());
+        cmd.push(format!("{0}:{0}", resolved));
+    }
+
+    // ── MINK_HOME / default ~/.mink (writable for session persistence) ──
+    if let Some(mink_home) = mink_home.filter(|m| !m.is_empty() && *m != "/") {
+        cmd.push("--bindmount".into());
+        cmd.push(format!("{0}:{0}", mink_home));
+    }
+
+    let work_dir = config
+        .write_dirs
+        .first()
+        .or(config.read_dirs.first())
+        .map(|d| resolve_dir_lexical(d, cwd))
+        .unwrap_or_else(|| cwd.display().to_string());
+    cmd.push("--cwd".into());
+    cmd.push(work_dir);
+
+    // ── Environment ──────────────────────────────────────────
+    // nsjail strips the process environment unless `--keep_env` is given;
+    // also forward MINK_SANDBOXED=1 explicitly to prevent re-exec loops.
+    cmd.push("--keep_env".into());
+    cmd.push("-E".into());
+    cmd.push("MINK_SANDBOXED=1".into());
+
+    // ── Resource limits ──────────────────────────────────────
+    cmd.push("--cgroup_mem_max".into());
+    cmd.push(config.max_memory_mb.saturating_mul(1024 * 1024).to_string());
+    cmd.push("--cgroup_pids_max".into());
+    cmd.push(config.max_pids.to_string());
+    cmd.push("--time_limit".into());
+    cmd.push(config.timeout_secs.to_string());
+
+    // ── Security hardening ───────────────────────────────────
+    cmd.push("--disable_proc".into());
+
+    if config.allow_network {
+        cmd.push("--disable_clone_newnet".into());
+    } else {
+        cmd.push("--iface_no_lo".into());
+    }
 
     // ── Target binary ────────────────────────────────────────
     cmd.push("--".into());
@@ -372,6 +502,84 @@ mod tests {
         assert!(
             argv.iter().any(|arg| arg == "--unshare-net"),
             "allow_network=false must unshare the network: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn bwrap_mounts_home_before_write_dirs_and_keeps_sibling_read_dirs() {
+        let cfg = SandboxConfig {
+            enabled: true,
+            backend: "bwrap".into(),
+            read_dirs: vec!["/home/u/repo2".into()],
+            write_dirs: vec!["/home/u/repo".into()],
+            ..Default::default()
+        };
+        let argv = bwrap_argv(
+            &cfg,
+            Path::new("/bin/mink"),
+            &["mink".into()],
+            Path::new("/home/u/repo"),
+            Some("/home/u"),
+            Some("/home/u/.mink"),
+        );
+        let triple_pos = |flag: &str, path: &str| {
+            argv.windows(3)
+                .position(|w| w[0] == flag && w[1] == path && w[2] == path)
+        };
+        let home_pos = triple_pos("--ro-bind", "/home/u").expect("$HOME mount");
+        let write_pos = triple_pos("--bind", "/home/u/repo").expect("write dir mount");
+        let sibling_pos = triple_pos("--ro-bind", "/home/u/repo2").expect("sibling read dir mount");
+        assert!(
+            home_pos < write_pos,
+            "$HOME --ro-bind must precede write_dirs beneath $HOME: {argv:?}"
+        );
+        assert!(
+            home_pos < sibling_pos,
+            "sibling read_dir with shared string prefix must not be skipped: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn nsjail_argv_orders_home_before_write_dirs_and_handles_network_and_env() {
+        let cfg = SandboxConfig {
+            enabled: true,
+            backend: "nsjail".into(),
+            read_dirs: vec!["/home/u/repo2".into()],
+            write_dirs: vec!["/home/u/repo".into()],
+            allow_network: true,
+            ..Default::default()
+        };
+        let argv = nsjail_argv(
+            &cfg,
+            Path::new("/bin/mink"),
+            &["mink".into(), "run".into()],
+            Path::new("/home/u/repo"),
+            Some("/home/u"),
+            Some("/home/u/.mink"),
+            None,
+            false,
+        );
+        let pair_pos =
+            |flag: &str, spec: &str| argv.windows(2).position(|w| w[0] == flag && w[1] == spec);
+        let home_pos = pair_pos("--bindmount_ro", "/home/u:/home/u").expect("$HOME mount");
+        let write_pos = pair_pos("--bindmount", "/home/u/repo:/home/u/repo").expect("write mount");
+        assert!(home_pos < write_pos, "{argv:?}");
+        assert!(
+            pair_pos("--bindmount_ro", "/home/u/repo2:/home/u/repo2").is_some(),
+            "sibling read dir must be preserved: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|arg| arg == "/lib64:/lib64"),
+            "missing /lib64 must not be mounted: {argv:?}"
+        );
+        assert!(argv.iter().any(|arg| arg == "--keep_env"), "{argv:?}");
+        assert!(
+            pair_pos("-E", "MINK_SANDBOXED=1").is_some(),
+            "MINK_SANDBOXED=1 must be forwarded to nsjail: {argv:?}"
+        );
+        assert!(
+            argv.iter().any(|arg| arg == "--disable_clone_newnet"),
+            "allow_network=true must disable network namespace cloning: {argv:?}"
         );
     }
 }

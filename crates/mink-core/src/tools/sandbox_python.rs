@@ -8,7 +8,8 @@
 //! - 无 C 扩展（WASI 不支持动态链接）
 //! - 完整 CPython 标准库
 
-use anyhow::Result;
+use super::process::ProcessTermination;
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -27,9 +28,83 @@ fn resolve_abs(dir: &str, cwd: &Path) -> PathBuf {
     }
 }
 
-/// 在 CPython WASI 沙箱中执行 Python 脚本。
+/// Format the CWD-switching preamble using a JSON-escaped Python string literal
+/// so quotes, backslashes, or newlines in `cwd` cannot break or inject code.
+fn build_chdir_script(cwd: &Path, script: &str) -> Result<String> {
+    let cwd_literal = serde_json::to_string(&*cwd.to_string_lossy())?;
+    Ok(format!("import os; os.chdir({cwd_literal})\n{script}"))
+}
+
+/// Resolve `script` or `script_file` for `PythonSandboxTool`.
+///
+/// Unlike host `PythonTool`, `script_file` must stay inside the directories
+/// authorized for the WASI sandbox (`cwd`, `read_dirs`, `write_dirs`) so
+/// specifying an arbitrary host path cannot read files outside the sandbox.
+fn resolve_sandbox_script(
+    args: &super::process::PythonScriptArgs,
+    cwd: &Path,
+    read_dirs: &[String],
+    write_dirs: &[String],
+) -> Result<String> {
+    match (&args.script, &args.script_file) {
+        (Some(script), None) => Ok(script.clone()),
+        (None, Some(path)) => {
+            let full_path = if Path::new(path).is_absolute() {
+                PathBuf::from(path)
+            } else {
+                cwd.join(path)
+            };
+            let canonical = full_path.canonicalize().with_context(|| {
+                format!("Failed to resolve script file {}", full_path.display())
+            })?;
+            let mut allowed_roots = Vec::with_capacity(1 + read_dirs.len() + write_dirs.len());
+            if let Ok(canon_cwd) = cwd.canonicalize() {
+                allowed_roots.push(canon_cwd);
+            } else {
+                allowed_roots.push(cwd.to_path_buf());
+            }
+            for dir in read_dirs.iter().chain(write_dirs.iter()) {
+                allowed_roots.push(resolve_abs(dir, cwd));
+            }
+            if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
+                bail!(
+                    "Error: script_file {} is outside allowed sandbox directories",
+                    full_path.display()
+                );
+            }
+            let meta = std::fs::metadata(&canonical).with_context(|| {
+                format!("Failed to inspect script file {}", canonical.display())
+            })?;
+            if !meta.is_file() {
+                bail!(
+                    "Error: script_file {} must be a regular file",
+                    full_path.display()
+                );
+            }
+            std::fs::read_to_string(&canonical).map_err(|error| {
+                anyhow::anyhow!(
+                    "Failed to read script file {}: {error}",
+                    full_path.display()
+                )
+            })
+        }
+        (Some(_), Some(_)) => {
+            bail!("Error: provide either 'script' or 'script_file', not both")
+        }
+        (None, None) => bail!("Error: provide either 'script' or 'script_file'"),
+    }
+}
+
+struct SandboxExecution {
+    stdout: String,
+    stderr: String,
+    exit_code: Option<i32>,
+    termination: ProcessTermination,
+}
+
+/// 在 CPython WASI 沙箱中执行 Python 脚本并返回结构化终态。
 #[allow(clippy::too_many_arguments)]
-fn execute_in_sandbox_at(
+fn execute_in_sandbox_detailed(
     script: &str,
     wasm_path: &Path,
     stdlib_dir: &Path,
@@ -40,7 +115,7 @@ fn execute_in_sandbox_at(
     max_output: usize,
     timeout_secs: u64,
     interrupt: Option<&AtomicBool>,
-) -> Result<(String, String, Option<i32>)> {
+) -> Result<SandboxExecution> {
     let wasm_bytes =
         std::fs::read(wasm_path).map_err(|e| anyhow::anyhow!("读取 python.wasm 失败: {e}"))?;
 
@@ -57,9 +132,8 @@ fn execute_in_sandbox_at(
         .stdout(stdout_pipe.clone())
         .stderr(stderr_pipe.clone());
 
-    // 注入 os.chdir，使 Python 相对路径解析指向项目根
-    let cwd_str = cwd.to_string_lossy();
-    let script = format!("import os; os.chdir(r\"{cwd}\")\n{script}", cwd = cwd_str);
+    // 注入 os.chdir，使 Python 相对路径解析指向项目根（使用 JSON 转义避免路径注入）
+    let script = build_chdir_script(cwd, script)?;
 
     // 通过 -c 传递代码
     let wasm_argv = [
@@ -181,7 +255,12 @@ fn execute_in_sandbox_at(
     let stderr = String::from_utf8_lossy(&stderr_pipe.contents()).to_string();
 
     match result {
-        Ok(Ok(())) => Ok((stdout, stderr, Some(0))),
+        Ok(Ok(())) => Ok(SandboxExecution {
+            stdout,
+            stderr,
+            exit_code: Some(0),
+            termination: ProcessTermination::Exited(0),
+        }),
         Ok(Err(trap)) => {
             let msg = trap.to_string();
             if msg.contains("proc_exit") {
@@ -190,52 +269,97 @@ fn execute_in_sandbox_at(
                     .nth(1)
                     .and_then(|s| s.split(')').next())
                     .and_then(|s| s.parse::<i32>().ok());
-                Ok((stdout, stderr, code))
+                Ok(SandboxExecution {
+                    stdout,
+                    stderr,
+                    exit_code: code,
+                    termination: ProcessTermination::Exited(code.unwrap_or(1)),
+                })
             } else if msg.contains("epoch") || msg.contains("interrupt") {
                 let timed_out_msg = format!(
                     "[... Python sandbox timed out after {} seconds ...]",
                     timeout_secs
                 );
-                Ok((
+                Ok(SandboxExecution {
                     stdout,
-                    if stderr.is_empty() {
+                    stderr: if stderr.is_empty() {
                         timed_out_msg
                     } else {
                         format!("{stderr}\n{timed_out_msg}")
                     },
-                    None,
-                ))
+                    exit_code: None,
+                    termination: ProcessTermination::TimedOut,
+                })
             } else {
-                Ok((stdout, stderr, Some(1)))
+                Ok(SandboxExecution {
+                    stdout,
+                    stderr,
+                    exit_code: Some(1),
+                    termination: ProcessTermination::Exited(1),
+                })
             }
         }
         Err(cause) => {
-            let (code, cancelled_msg) = match cause {
+            let (exit_code, termination, cancelled_msg) = match cause {
                 StopCause::Timeout => (
-                    0,
+                    None,
+                    ProcessTermination::TimedOut,
                     format!("[... Python sandbox timed out after {timeout_secs} seconds ...]"),
                 ),
-                StopCause::Cancelled => {
-                    (0, "[... Python sandbox cancelled by user ...]".to_string())
-                }
+                StopCause::Cancelled => (
+                    None,
+                    ProcessTermination::Interrupted,
+                    "[... Python sandbox cancelled by user ...]".to_string(),
+                ),
                 StopCause::Disconnected => (
-                    1,
+                    Some(1),
+                    ProcessTermination::Exited(1),
                     "[... Python sandbox execution channel disconnected ...]".to_string(),
                 ),
             };
-            Ok((
+            Ok(SandboxExecution {
                 stdout,
-                if stderr.is_empty() {
+                stderr: if stderr.is_empty() {
                     cancelled_msg
                 } else {
                     format!("{stderr}\n{cancelled_msg}")
                 },
                 // Timeout/cancel are structured causes, not process exit
                 // codes; only the disconnected path carries a real code.
-                (code != 0).then_some(code),
-            ))
+                exit_code,
+                termination,
+            })
         }
     }
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn execute_in_sandbox_at(
+    script: &str,
+    wasm_path: &Path,
+    stdlib_dir: &Path,
+    read_dirs: &[String],
+    write_dirs: &[String],
+    package_dirs: &[String],
+    cwd: &Path,
+    max_output: usize,
+    timeout_secs: u64,
+    interrupt: Option<&AtomicBool>,
+) -> Result<(String, String, Option<i32>)> {
+    let exec = execute_in_sandbox_detailed(
+        script,
+        wasm_path,
+        stdlib_dir,
+        read_dirs,
+        write_dirs,
+        package_dirs,
+        cwd,
+        max_output,
+        timeout_secs,
+        interrupt,
+    )?;
+    Ok((exec.stdout, exec.stderr, exec.exit_code))
 }
 
 #[cfg(test)]
@@ -301,9 +425,9 @@ impl super::runner::ToolExec for PythonSandboxTool {
         ctx: &crate::context::ToolContext,
     ) -> Result<super::runner::ToolOutcome> {
         let args = super::process::PythonScriptArgs::parse(input)?;
-        let script = args.resolve_script(&ctx.cwd)?;
-
         let sp_cfg = &ctx.tool_config.sandbox_python;
+        let script =
+            resolve_sandbox_script(&args, &ctx.cwd, &sp_cfg.read_dirs, &sp_cfg.write_dirs)?;
         let timeout = resolve_sandbox_timeout(args.timeout, sp_cfg.timeout)?;
 
         let wasm_path = Path::new(&sp_cfg.wasm_path);
@@ -316,7 +440,7 @@ impl super::runner::ToolExec for PythonSandboxTool {
 
         let stdlib_dir = Path::new(&sp_cfg.stdlib_dir);
 
-        let (stdout, stderr, exit_code) = execute_in_sandbox_at(
+        let exec = execute_in_sandbox_detailed(
             &script,
             wasm_path,
             stdlib_dir,
@@ -329,14 +453,14 @@ impl super::runner::ToolExec for PythonSandboxTool {
             Some(ctx.interrupt.as_ref()),
         )?;
 
-        let mut content = stdout;
-        if !stderr.is_empty() {
+        let mut content = exec.stdout;
+        if !exec.stderr.is_empty() {
             if !content.is_empty() {
                 content.push('\n');
             }
-            content.push_str(&stderr);
+            content.push_str(&exec.stderr);
         }
-        if let Some(code) = exit_code
+        if let Some(code) = exec.exit_code
             && code != 0
         {
             content.push_str(&format!(
@@ -348,15 +472,15 @@ impl super::runner::ToolExec for PythonSandboxTool {
             content,
             conversation_content: String::new(),
             is_bash: false,
-            exit_code,
-            success: exit_code.unwrap_or(0) == 0,
+            exit_code: exec.exit_code,
+            success: exec.exit_code == Some(0),
             no_mutation: false,
             memo_candidate: None,
             diagnostics: Vec::new(),
             plan_command: None,
             state_metadata: None,
             presentation: None,
-            termination: None,
+            termination: Some(exec.termination),
         })
     }
 }

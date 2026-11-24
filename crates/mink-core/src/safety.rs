@@ -4,19 +4,24 @@ use std::path::{Path, PathBuf};
 
 static RE_FIND_DELETE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)(^|[;&|])\s*find\b.*\bdelete\b").expect("regex"));
-static RE_FORK_BOMB: Lazy<Regex> = Lazy::new(|| Regex::new(r":\(\)\{:\|:&\};:").expect("regex"));
+static RE_FORK_BOMB: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:").expect("regex"));
+static RE_DANGEROUS_CMD: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)(?:^|[;&|\n])\s*(?:(?:env|command)\s+)*(sudo|shutdown|reboot|halt|poweroff|mkfs[^\s;&|]*|fdisk)(?:\s|$|[;&|])",
+    )
+    .expect("regex")
+});
 static RE_BLOCK_DEVICE_WRITE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(^|\s)(of=|>|1>|>>|1>>)\s*/dev/(sd[a-z][0-9]*|disk[0-9]+|rdisk[0-9]+|nvme[0-9]+n[0-9]+(p[0-9]+)?|vd[a-z][0-9]*|xvd[a-z][0-9]*|hd[a-z][0-9]*)(\s|$)")
         .expect("regex")
 });
-/// `rm -rf` / `rm -fr` 风格调用的目标段（到 shell 分隔符为止）。
-/// 判定链：受限 POSIX 词法解析（转义/引号）→ symlink 感知的真实路径解析
-/// （`realpath(strict=False)` 语义）→ 临时目录白名单；任何无法静态确定
-/// 的目标（命令替换/变量/字符类/花括号/重定向/未闭合引号）保守拦截。
-static RE_RM_RECURSIVE_FORCE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\brm\s+-[a-z]*r[a-z]*f[a-z]*\s+([^\n;&|]+)").expect("regex"));
-static RE_RM_FORCE_RECURSIVE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\brm\s+-[a-z]*f[a-z]*r[a-z]*\s+([^\n;&|]+)").expect("regex"));
+/// 匹配 `rm` 命令调用的参数段（到 shell 分隔符为止），随后通过词法扫描识别
+/// 合并或拆分的递归+强制选项（`-rf` / `-fr` / `-r -f` / `--recursive --force` 等）
+/// 并将原始大小写目标路径交由 symlink 感知解析器校验。
+static RE_RM_INVOCATION: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:^|[;&|\n])\s*(?:(?:env|command)\s+)*rm\s+([^\n;&|]+)").expect("regex")
+});
 
 /// 删除属于日常清理的临时目录；其余绝对路径保持原有拦截力。
 const TEMP_DELETE_PREFIXES: [&str; 4] = [
@@ -156,27 +161,65 @@ fn is_temp_delete_target(word: &str) -> bool {
         .any(|prefix| Path::new(&lowered).starts_with(prefix))
 }
 
+/// 从 `rm` 参数段头部扫描选项（兼容 `-rf`、`-fr`、`-r -f`、`--recursive --force` 与 `--`），
+/// 返回 `(has_recursive, has_force, remaining_targets_slice)`。
+fn parse_rm_leading_flags(segment: &str) -> (bool, bool, &str) {
+    let mut has_recursive = false;
+    let mut has_force = false;
+    let mut rest = segment.trim_start();
+    while !rest.is_empty() {
+        let token_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let token = &rest[..token_end];
+        if token == "--" {
+            rest = rest[token_end..].trim_start();
+            break;
+        }
+        if !token.starts_with('-') || token.len() == 1 {
+            break;
+        }
+        if let Some(long) = token.strip_prefix("--") {
+            match long.to_ascii_lowercase().as_str() {
+                "recursive" => has_recursive = true,
+                "force" => has_force = true,
+                _ => {}
+            }
+        } else {
+            for ch in token[1..].chars() {
+                match ch {
+                    'r' | 'R' => has_recursive = true,
+                    'f' | 'F' => has_force = true,
+                    _ => {}
+                }
+            }
+        }
+        rest = rest[token_end..].trim_start();
+    }
+    (has_recursive, has_force, rest)
+}
+
 /// 返回第一个应被拦截的目标（绝对路径且真实形态不在临时白名单内）；
-/// `None` 表示该命令的所有 `rm -rf` 目标都可放行。词法不可确定的段返回
+/// `None` 表示该命令的所有递归强制 `rm` 目标都可放行。词法不可确定的段返回
 /// 占位标记，保证调用方 fail closed。
 fn destructive_rm_verdict(command: &str) -> Option<String> {
-    for pattern in [&*RE_RM_RECURSIVE_FORCE, &*RE_RM_FORCE_RECURSIVE] {
-        for capture in pattern.captures_iter(command) {
-            let Some(segment) = capture.get(1) else {
+    for capture in RE_RM_INVOCATION.captures_iter(command) {
+        let Some(segment) = capture.get(1) else {
+            continue;
+        };
+        let (has_recursive, has_force, targets) = parse_rm_leading_flags(segment.as_str());
+        if !(has_recursive && has_force) {
+            continue;
+        }
+        let Some(words) = split_shell_words(targets) else {
+            return Some("<unresolvable shell target>".to_string());
+        };
+        for word in words {
+            if !word.starts_with('/') {
+                // 相对路径、`~` 与裸变量目标维持既有放行行为（旧规则
+                // 同样不识别它们）。
                 continue;
-            };
-            let Some(words) = split_shell_words(segment.as_str()) else {
-                return Some("<unresolvable shell target>".to_string());
-            };
-            for word in words {
-                if !word.starts_with('/') {
-                    // 相对路径、`~` 与裸变量目标维持既有放行行为（旧规则
-                    // 同样不识别它们）。
-                    continue;
-                }
-                if !is_temp_delete_target(&word) {
-                    return Some(word);
-                }
+            }
+            if !is_temp_delete_target(&word) {
+                return Some(word);
             }
         }
     }
@@ -189,15 +232,12 @@ pub fn deny_bash_command_reason(command: &str) -> Option<&'static str> {
         return Some("empty command");
     }
 
-    let lower = trimmed.to_lowercase();
-    for p in [
-        "sudo ", "shutdown", "reboot", "halt", "poweroff", "mkfs", "fdisk",
-    ] {
-        if lower.starts_with(p) {
-            return Some("dangerous command prefix");
-        }
+    if RE_DANGEROUS_CMD.is_match(trimmed) {
+        return Some("dangerous command prefix");
     }
-    if destructive_rm_verdict(&lower).is_some() {
+    // 必须传原大小写 `trimmed`：大小写敏感文件系统（Linux）上小写化会令
+    // `symlink_metadata` 找不到大写 symlink（如 `/tmp/Escape`）而跳过解析。
+    if destructive_rm_verdict(trimmed).is_some() {
         return Some("destructive root delete pattern");
     }
     if RE_FIND_DELETE.is_match(trimmed) {

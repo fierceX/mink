@@ -756,3 +756,102 @@ fn sandbox_timeout_over_ceiling_fails_closed() {
     assert_eq!(resolve_sandbox_timeout(Some(0), 30).unwrap(), 30);
     assert_eq!(resolve_sandbox_timeout(None, 9_999).unwrap(), 300);
 }
+
+#[test]
+fn build_chdir_script_escapes_quotes_and_backslashes() {
+    let cwd = Path::new(r#"/tmp/a"b\c"#);
+    let script = build_chdir_script(cwd, "print(1)").unwrap();
+    assert_eq!(
+        script,
+        "import os; os.chdir(\"/tmp/a\\\"b\\\\c\")\nprint(1)"
+    );
+}
+
+#[test]
+fn resolve_sandbox_script_rejects_paths_outside_allowed_dirs() {
+    let root = std::env::temp_dir().join(format!("mink-py-script-scope-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let work = root.join("work");
+    let allowed_read = root.join("extra-read");
+    let outside = root.join("secret");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(&allowed_read).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+
+    let in_work = work.join("ok.py");
+    let in_read = allowed_read.join("r.py");
+    let in_outside = outside.join("leak.py");
+    std::fs::write(&in_work, "print('work')").unwrap();
+    std::fs::write(&in_read, "print('read')").unwrap();
+    std::fs::write(&in_outside, "secret_token = 1").unwrap();
+
+    let read_dirs = [allowed_read.to_string_lossy().into_owned()];
+    let ok_args = super::super::process::PythonScriptArgs::parse(&serde_json::json!({
+        "script_file": "ok.py"
+    }))
+    .unwrap();
+    assert_eq!(
+        resolve_sandbox_script(&ok_args, &work, &read_dirs, &[]).unwrap(),
+        "print('work')"
+    );
+
+    let read_args = super::super::process::PythonScriptArgs::parse(&serde_json::json!({
+        "script_file": in_read.to_string_lossy()
+    }))
+    .unwrap();
+    assert_eq!(
+        resolve_sandbox_script(&read_args, &work, &read_dirs, &[]).unwrap(),
+        "print('read')"
+    );
+
+    for bad_path in [
+        in_outside.to_string_lossy().into_owned(),
+        "../secret/leak.py".to_string(),
+    ] {
+        let bad_args = super::super::process::PythonScriptArgs::parse(&serde_json::json!({
+            "script_file": bad_path
+        }))
+        .unwrap();
+        let err = resolve_sandbox_script(&bad_args, &work, &read_dirs, &[]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("outside allowed sandbox directories"),
+            "outside script_file must fail closed: {err}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn detailed_sandbox_execution_reports_non_success_termination_on_timeout_and_cancel() {
+    let dir = std::env::temp_dir().join(format!("mink-sandbox-term-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let wasm = dir.join("loop.wasm");
+    synthetic_infinite_loop_wasm(&wasm);
+
+    let timed_out =
+        execute_in_sandbox_detailed("", &wasm, &dir, &[], &[], &[], &dir, 1024, 1, None).unwrap();
+    assert_eq!(timed_out.exit_code, None);
+    assert_eq!(timed_out.termination, ProcessTermination::TimedOut);
+
+    let interrupt = AtomicBool::new(true);
+    let cancelled = execute_in_sandbox_detailed(
+        "",
+        &wasm,
+        &dir,
+        &[],
+        &[],
+        &[],
+        &dir,
+        1024,
+        10,
+        Some(&interrupt),
+    )
+    .unwrap();
+    assert_eq!(cancelled.exit_code, None);
+    assert_eq!(cancelled.termination, ProcessTermination::Interrupted);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

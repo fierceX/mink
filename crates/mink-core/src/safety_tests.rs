@@ -200,3 +200,37 @@ fn shell_word_split_matches_posix_sh_oracle() {
         assert_eq!(words, oracle, "scanner vs sh mismatch for case: {case}");
     }
 }
+
+#[test]
+fn blocks_chained_dangerous_commands_and_split_rm_flags_and_spaced_fork_bomb() {
+    assert!(deny_bash_command_reason("true && sudo rm /tmp/foo").is_some());
+    assert!(deny_bash_command_reason("echo ok; shutdown now").is_some());
+    assert!(deny_bash_command_reason("echo ok && mkfs.ext4 /dev/sda").is_some());
+    assert!(deny_bash_command_reason("env sudo id").is_some());
+    assert!(deny_bash_command_reason("rm -r -f /").is_some());
+    assert!(deny_bash_command_reason("rm -f -r /etc").is_some());
+    assert!(deny_bash_command_reason("rm --recursive --force /etc").is_some());
+    assert!(deny_bash_command_reason("rm -r --force -- /usr/local").is_some());
+    assert!(deny_bash_command_reason(":(){ :|:& };:").is_some());
+    // Benign mentions as arguments or temp targets stay allowed.
+    assert!(deny_bash_command_reason("echo sudo shutdown").is_none());
+    assert!(deny_bash_command_reason("rm -r -f /tmp/safe_clean").is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn blocks_mixed_case_symlink_escape() {
+    let dir = std::env::temp_dir().join(format!("mink-safety-case-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let escape = dir.join("EscapeUpper");
+    std::os::unix::fs::symlink("/etc", &escape).unwrap();
+    let command = format!("rm -rf {}", escape.display());
+    assert!(
+        deny_bash_command_reason(&command).is_some(),
+        "mixed-case symlink escape must be blocked without lowercasing path: {command}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

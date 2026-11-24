@@ -1,9 +1,11 @@
 //! macOS sandbox backend: sandbox-exec (built-in).
 //!
-//! File-system write restrictions work via sandbox-exec: deny-all + allow holes.
-//! Read restrictions are handled at the application level (path checks in tools/*)
-//! because a blanket ``(deny file-read* (subpath "/"))`` blocks critical system
-//! paths that TUI mode requires for initialization but cannot be enumerated.
+//! File-system write restrictions and optional network isolation work via
+//! `sandbox-exec` (deny-all + explicit allow holes).
+//! Note: macOS `sandbox-exec` does NOT enforce `read_dirs` at the kernel level
+//! because a blanket `(deny file-read* (subpath "/"))` blocks critical system
+//! paths required by dyld/TUI initialization that cannot be portably enumerated.
+//! Callers requiring strict read-path isolation should run on Linux (`nsjail`/`bwrap`).
 
 use crate::config::SandboxConfig;
 use std::path::{Component, Path, PathBuf};
@@ -60,50 +62,68 @@ fn build_sb_profile_with_env(
     // ═══ Step 1: Allow default — let the process initialize ═══
     lines.push("(allow default)".into());
 
-    // ═══ Step 2: Write restrictions ═════════════════════════════
-    if !config.write_dirs.is_empty() {
-        // Deny all writes first (deny overrides allow regardless of order)
-        lines.push("(deny file-write* (subpath \"/\"))".into());
+    // ═══ Step 2: Write restrictions (always enforced when sandboxed) ═══
+    // Deny all writes unconditionally so an empty `write_dirs` produces a
+    // read-only workspace rather than failing open to `(allow default)`.
+    lines.push("(deny file-write* (subpath \"/\"))".into());
 
-        // Punch holes for user-specified write dirs
-        for d in &config.write_dirs {
-            let resolved = resolve_dir(d, cwd);
-            for variant in sandbox_path_variants(Path::new(&resolved)) {
-                lines.push(format!("(allow file-write* (subpath \"{variant}\"))"));
-            }
-        }
-
-        // Always allow system temp directory (TMPDIR for Edit's unified_diff_color).
-        // Emit both the lexical and the resolved path: on macOS TMPDIR is often
-        // `/var/folders/...`, a symlink to `/private/var/folders/...`, and
-        // sandbox-exec matches the canonical path only.
-        for variant in sandbox_path_variants(&std::env::temp_dir()) {
-            lines.push(format!("(allow file-write* (subpath \"{variant}\"))"));
-        }
-        // Also allow /tmp and /private/tmp (common temp locations)
-        lines.push("(allow file-write* (subpath \"/tmp\"))".into());
-        lines.push("(allow file-write* (subpath \"/private/tmp\"))".into());
-
-        // Always allow mink session storage. When MINK_HOME is a dedicated
-        // service root, allow that root so Direct layout can write
-        // MINK_HOME/<session_id>. If MINK_HOME is unset or equals HOME, keep
-        // the narrower historical HOME/.mink permission.
-        for dir in session_storage_write_dirs(home, mink_home, cwd) {
-            for variant in sandbox_path_variants(Path::new(&dir)) {
-                lines.push(format!("(allow file-write* (subpath \"{variant}\"))"));
-            }
+    // Punch holes for user-specified write dirs
+    for d in &config.write_dirs {
+        let resolved = resolve_dir(d, cwd);
+        for variant in sandbox_path_variants(Path::new(&resolved)) {
+            let escaped = escape_sbpl_string(&variant);
+            lines.push(format!("(allow file-write* (subpath \"{escaped}\"))"));
         }
     }
 
-    // ═══ Read restrictions are NOT done here ═════════════════════
-    // A blanket (deny file-read* (subpath "/")) would break TUI
-    // initialization because macOS system paths are too numerous to
-    // enumerate explicitly.
-    //
-    // Read restrictions are enforced at the application level via
-    // path canonicalization + prefix checks in tools/file.rs.
+    // Always allow system temp directory (TMPDIR for Edit's unified_diff_color).
+    // Emit both the lexical and the resolved path: on macOS TMPDIR is often
+    // `/var/folders/...`, a symlink to `/private/var/folders/...`, and
+    // sandbox-exec matches the canonical path only.
+    for variant in sandbox_path_variants(&std::env::temp_dir()) {
+        let escaped = escape_sbpl_string(&variant);
+        lines.push(format!("(allow file-write* (subpath \"{escaped}\"))"));
+    }
+    // Also allow /tmp and /private/tmp (common temp locations)
+    lines.push("(allow file-write* (subpath \"/tmp\"))".into());
+    lines.push("(allow file-write* (subpath \"/private/tmp\"))".into());
+
+    // Always allow mink session storage. When MINK_HOME is a dedicated
+    // service root, allow that root so Direct layout can write
+    // MINK_HOME/<session_id>. If MINK_HOME is unset or equals HOME, keep
+    // the narrower historical HOME/.mink permission.
+    for dir in session_storage_write_dirs(home, mink_home, cwd) {
+        for variant in sandbox_path_variants(Path::new(&dir)) {
+            let escaped = escape_sbpl_string(&variant);
+            lines.push(format!("(allow file-write* (subpath \"{escaped}\"))"));
+        }
+    }
+
+    // ═══ Step 3: Network restrictions ════════════════════════════
+    if !config.allow_network {
+        lines.push("(deny network*)".into());
+    }
+
+    // ═══ Read restrictions are NOT enforced by sandbox-exec ══════
+    // A blanket (deny file-read* (subpath "/")) breaks dyld/TUI initialization
+    // on macOS because required system paths cannot be portably enumerated.
+    // `read_dirs` is therefore not enforced at the OS level on macOS.
 
     lines.join("\n")
+}
+
+fn escape_sbpl_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn session_storage_write_dirs(home: &str, mink_home: Option<&str>, cwd: &Path) -> Vec<String> {
