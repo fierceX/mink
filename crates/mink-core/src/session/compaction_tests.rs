@@ -3081,3 +3081,70 @@ async fn goal_contract_checkpoint_is_byte_stable_across_rounds() -> anyhow::Resu
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn second_compaction_summary_input_includes_goal_contract_checkpoint() -> anyhow::Result<()> {
+    let backend = Arc::new(CapturingSummaryBackend::default());
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "goal-summary-prefix-align",
+        |config| {
+            config.max_context_tokens = 64_000;
+            config.context_reserve_tokens = 8_000;
+            config.context_compact_tail_tokens = 1;
+        },
+        backend.clone(),
+    )
+    .await?;
+    ctx.goal_store.create(
+        crate::runtime::GoalSpec::new("GOAL-CACHE-ALIGN-MARKER"),
+        "env".into(),
+    )?;
+    add_tool_history(&ctx).await?;
+    add_follow_up_turn(&ctx).await?;
+    let (first_ok, first_detail) = compact(&ctx, "manual", 40_000).await?;
+    assert!(first_ok, "{first_detail}");
+
+    // Add more turns, record the agent request that would have been sent with
+    // `active_messages()` (which carries summary + goal contract checkpoint),
+    // and compact a second time: the cache-aligned summary input must match the
+    // prefix including the goal contract checkpoint instead of diverging at index 1.
+    add_tool_history(&ctx).await?;
+    add_follow_up_turn(&ctx).await?;
+    let active = ctx.compaction.active_messages().await?;
+    let resolved = crate::config::model_resolver(&ctx.config).resolve(&ctx.config.model);
+    ctx.compaction.record_agent_request(
+        &resolved.actual,
+        "prefix",
+        10_000,
+        backend.name().into(),
+        "system".into(),
+        arc_values(vec![]),
+        Some(LlmCacheProjection {
+            model: resolved.actual.clone(),
+            system_prompt: arc_str("system"),
+            tools: arc_values(vec![]),
+            messages: arc_values(active),
+        }),
+    );
+    let (second_ok, second_detail) = compact(&ctx, "manual", 40_000).await?;
+    assert!(second_ok, "{second_detail}");
+
+    let requests = backend.requests.lock().unwrap();
+    let second_req = requests.last().expect("second summary request");
+    let has_goal_checkpoint = second_req.messages.iter().any(|msg| {
+        msg["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("GOAL-CACHE-ALIGN-MARKER"))
+    });
+    assert!(
+        has_goal_checkpoint,
+        "second compaction summary input must include the goal contract checkpoint for prefix alignment: {:?}",
+        second_req.messages
+    );
+    assert!(
+        second_req.messages.len() >= 4,
+        "aligned summary request must reuse the multi-message prefix beyond just the summary: len={}",
+        second_req.messages.len()
+    );
+    Ok(())
+}

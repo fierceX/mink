@@ -177,6 +177,9 @@ impl EventLogWriter {
     ///
     /// Enqueue failures are counted here (the writer may not exist), and
     /// surface on the next flush as unreported loss.
+    /// Production async paths use `send_best_effort` or `append_critical`;
+    /// this blocking helper is retained for synchronous backpressure tests.
+    #[cfg(test)]
     pub(crate) fn send(&self, line: String) -> bool {
         match self.tx.send(EventLogCmd::Append(line)) {
             Ok(()) => true,

@@ -69,12 +69,16 @@ impl ConversationStore {
         Ok(())
     }
     pub async fn ensure(&self) -> Result<()> {
-        if !self.path.exists() {
-            if let Some(parent) = self.path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            tokio::fs::File::create(&self.path).await?;
+        if let Some(parent) = self.path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
         }
+        // Open with create + append (never `File::create` / O_TRUNC) so
+        // concurrent callers can never truncate an existing conversation log.
+        tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .await?;
         Ok(())
     }
 

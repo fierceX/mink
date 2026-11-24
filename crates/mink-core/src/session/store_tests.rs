@@ -22,6 +22,17 @@ async fn add_user_and_read_back() {
 }
 
 #[tokio::test]
+async fn ensure_does_not_truncate_existing_conversation() {
+    let store = temp_store();
+    store.ensure().await.unwrap();
+    store.add_user("keep-me").await.unwrap();
+    store.ensure().await.unwrap();
+    let lines = store.lines().await.unwrap();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["content"], "keep-me");
+}
+
+#[tokio::test]
 async fn last_assistant_with_text_skips_blank_final_messages() {
     let store = temp_store();
     store.ensure().await.unwrap();

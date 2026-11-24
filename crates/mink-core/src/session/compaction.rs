@@ -1589,18 +1589,18 @@ impl CompactionEngine {
         target: LlmModelTarget<'_>,
     ) -> Result<SummaryRequestInput> {
         let dropped = &active[..cut];
-        let mut source_messages = Vec::new();
-        if let Some(summary) = previous_summary.filter(|summary| !summary.trim().is_empty()) {
-            source_messages.push(compacted_summary_message(summary));
-        }
-        if history_already_compacted
-            && let Some(plan) = read_active_plan_checkpoint(
-                &self.summary_path,
-                derived_display_tokens(&self.config),
-            )?
-        {
-            source_messages.push(plan);
-        }
+        let mut source_messages = if history_already_compacted {
+            // Reuse `checkpoint_prefix` so the summary request prefix matches
+            // `active_messages()` verbatim (summary + active plan + goal checkpoint)
+            // and preserves provider prefix-cache alignment across 2nd+ compactions.
+            self.checkpoint_prefix(previous_summary.unwrap_or_default())?
+        } else {
+            let mut messages = Vec::new();
+            if let Some(summary) = previous_summary.filter(|summary| !summary.trim().is_empty()) {
+                messages.push(compacted_summary_message(summary));
+            }
+            messages
+        };
         // Startup boundary repair removed these messages from the projection;
         // include them in every summary attempt until one actually commits.
         // Taking them here would re-lose them when the request fails.
@@ -1846,7 +1846,7 @@ impl CompactionEngine {
         let Ok(line) = serde_json::to_string(&event) else {
             return;
         };
-        writer.send(line);
+        writer.send_best_effort(line);
     }
 
     fn log_compact_event(&self, usage: &UsageEvent) {

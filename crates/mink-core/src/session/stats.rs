@@ -62,9 +62,14 @@ impl StatsTracker {
     pub async fn flush(&self) -> Result<()> {
         // Telemetry stats: best-effort. A publish failure is returned to the
         // caller but must not latch session state (no `publish_state` here).
+        // Drop the read guard before awaiting blocking disk I/O so concurrent
+        // `record_*` writers are never stalled on fsync and the optimistic
+        // `version` check below remains effective.
         let version = self.version.load(Ordering::Acquire);
-        let stats = self.stats.read().await;
-        let data = serde_json::to_string(&*stats)?;
+        let data = {
+            let stats = self.stats.read().await;
+            serde_json::to_string(&*stats)?
+        };
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             crate::session::atomic_file::atomic_replace(&path, format!("{data}\n").as_bytes())

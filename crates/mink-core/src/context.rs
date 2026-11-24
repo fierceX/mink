@@ -655,7 +655,7 @@ impl AgentSharedContext {
         };
         if self.config.log_events {
             if let Some(writer) = &self.event_log_writer {
-                writer.send(line.clone());
+                writer.send_best_effort(line.clone());
             } else {
                 self.warn_event_log_once("event log writer is not configured; event discarded");
             }

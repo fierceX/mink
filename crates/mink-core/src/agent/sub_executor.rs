@@ -274,16 +274,15 @@ impl SubAgentExecutor {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         config.model = active.alias.unwrap_or(active.actual);
-        config.enabled_tools = Some(
-            ["Read", "Glob", "Grep", "GoalRead"]
-                .into_iter()
-                .filter(|name| parent_ctx.tool_surface.has(name))
-                .map(str::to_string)
-                .collect(),
-        );
+        let allowed: Vec<String> = ["Read", "Glob", "Grep", "GoalRead"]
+            .into_iter()
+            .filter(|name| parent_ctx.tool_surface.has(name))
+            .map(str::to_string)
+            .collect();
         config
             .tool_approval
-            .retain(|name, _| config.enabled_tools.as_ref().unwrap().contains(name));
+            .retain(|name, _| allowed.contains(name));
+        config.enabled_tools = Some(allowed);
         config.sub_agent_timeout_secs = crate::runtime::goal::GOAL_REVIEW_TIMEOUT_SECS as i32;
         Self::new_inner(
             parent_ctx,
@@ -335,13 +334,11 @@ impl SubAgentExecutor {
             .ok_or_else(|| anyhow::anyhow!("parent conversation has no session directory"))?;
         let child_home = parent_session_dir.join("subagents").join(&session_id);
         let home_created = Arc::new(AtomicBool::new(false));
-        let clone_running = Arc::new(AtomicBool::new(false));
-        let abandoned = Arc::new(AtomicBool::new(false));
+        let clone_state = Arc::new(std::sync::atomic::AtomicU8::new(CLONE_IDLE));
         let mut home_guard = ChildHomeGuard {
             path: child_home.clone(),
             created: home_created.clone(),
-            clone_running: clone_running.clone(),
-            abandoned: abandoned.clone(),
+            clone_state: clone_state.clone(),
             armed: true,
         };
         prepare_child_home_with_cancel(
@@ -350,8 +347,7 @@ impl SubAgentExecutor {
             fork,
             Some(cancel.clone()),
             Some(&home_created),
-            Some(clone_running.clone()),
-            Some(abandoned),
+            Some(clone_state),
         )
         .await?;
         let parent_lease = parent_ctx
@@ -735,8 +731,12 @@ fn bounded_display(text: &str) -> String {
 
 #[cfg(test)]
 async fn prepare_child_home(parent: &Path, child: &Path, fork: bool) -> Result<()> {
-    prepare_child_home_with_cancel(parent, child, fork, None, None, None, None).await
+    prepare_child_home_with_cancel(parent, child, fork, None, None, None).await
 }
+
+const CLONE_IDLE: u8 = 0;
+const CLONE_RUNNING: u8 = 1;
+const CLONE_ABANDONED: u8 = 2;
 
 async fn prepare_child_home_with_cancel(
     parent: &Path,
@@ -744,8 +744,7 @@ async fn prepare_child_home_with_cancel(
     fork: bool,
     cancel: Option<crate::cancel::CancellationToken>,
     created: Option<&AtomicBool>,
-    clone_running: Option<Arc<AtomicBool>>,
-    abandoned: Option<Arc<AtomicBool>>,
+    clone_state: Option<Arc<std::sync::atomic::AtomicU8>>,
 ) -> Result<()> {
     if child.exists() {
         bail!("sub-agent home already exists: {}", child.display());
@@ -758,24 +757,30 @@ async fn prepare_child_home_with_cancel(
         if let Some(created) = created {
             created.store(true, Ordering::SeqCst);
         }
-        if let Some(running) = &clone_running {
-            running.store(true, Ordering::SeqCst);
+        if let Some(state) = &clone_state {
+            state.store(CLONE_RUNNING, Ordering::Release);
         }
         let parent = parent.to_path_buf();
         let destination = child.to_path_buf();
         let copy_destination = destination.clone();
         let copy_cancel = cancel.clone();
-        let running_flag = clone_running.clone();
-        let abandoned_flag = abandoned.clone();
+        let state_flag = clone_state.clone();
         tokio::task::spawn_blocking(move || {
             let mut result = clone_session_dir(&parent, &copy_destination, copy_cancel.as_ref());
-            if let Some(running) = running_flag {
-                running.store(false, Ordering::SeqCst);
-            }
-            if result.is_ok()
-                && abandoned_flag
-                    .as_ref()
-                    .is_some_and(|abandoned| abandoned.load(Ordering::SeqCst))
+            // Single-atomic handshake with `ChildHomeGuard::drop`:
+            // - Running -> Idle: guard has not abandoned yet; guard owns future cleanup.
+            // - Running -> Abandoned (already switched by Drop): blocking thread owns
+            //   cleanup and removes the copied directory before returning.
+            if let Some(state) = state_flag
+                && state
+                    .compare_exchange(
+                        CLONE_RUNNING,
+                        CLONE_IDLE,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_err()
+                && result.is_ok()
             {
                 let _ = std::fs::remove_dir_all(&copy_destination);
                 result = Err(anyhow::anyhow!("sub-agent fork setup abandoned"));
@@ -815,12 +820,11 @@ async fn prepare_child_home_with_cancel(
 struct ChildHomeGuard {
     path: std::path::PathBuf,
     created: Arc<AtomicBool>,
-    /// Fork clone owns the directory while this is true; deleting it here would
-    /// race with the blocking copy. The clone's own guard removes partials.
-    clone_running: Arc<AtomicBool>,
-    /// Set when setup is dropped while the blocker is still copying; the clone
-    /// closure removes the destination before returning.
-    abandoned: Arc<AtomicBool>,
+    /// Single atomic ownership state shared with the blocking fork copy:
+    /// `CLONE_RUNNING` hands off deletion to the copy closure via CAS to
+    /// `CLONE_ABANDONED`; otherwise `Drop` cleans up (via `spawn_blocking`
+    /// when inside a Tokio runtime).
+    clone_state: Arc<std::sync::atomic::AtomicU8>,
     armed: bool,
 }
 
@@ -833,11 +837,21 @@ impl ChildHomeGuard {
 impl Drop for ChildHomeGuard {
     fn drop(&mut self) {
         if self.armed && self.created.load(Ordering::SeqCst) {
-            if self.clone_running.load(Ordering::SeqCst) {
-                self.abandoned.store(true, Ordering::SeqCst);
-            } else {
-                let _ = std::fs::remove_dir_all(&self.path);
+            if self
+                .clone_state
+                .compare_exchange(
+                    CLONE_RUNNING,
+                    CLONE_ABANDONED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return;
             }
+            // Perform removal synchronously so callers/timeouts observe the
+            // partial directory already gone the moment setup is dropped.
+            let _ = std::fs::remove_dir_all(&self.path);
         }
     }
 }
