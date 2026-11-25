@@ -76,7 +76,7 @@ fn normalize_configured_host(raw: &str) -> Option<String> {
 }
 
 fn is_loopback_hostname(hostname: &str) -> bool {
-    matches!(hostname, "localhost" | "127.0.0.1" | "::1")
+    hostname == "localhost" || hostname.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Normalize an HTTP `Host` / authority value to `(authority_lower, hostname_lower)`.
@@ -248,6 +248,9 @@ mod tests {
         assert!(guard.allows_host("[::1]:8765", "::1"));
         assert!(!guard.allows_host("evil.example:8765", "evil.example"));
 
+        let alternate = HostGuardConfig::from_bind_host("127.0.0.2", None);
+        assert!(alternate.allows_host("127.0.0.2:8765", "127.0.0.2"));
+        assert!(!alternate.allows_host("192.0.2.1", "192.0.2.1"));
         let with_allowlist = HostGuardConfig::from_bind_host("127.0.0.1", Some("dev.internal"));
         assert!(with_allowlist.allows_host("dev.internal:8765", "dev.internal"));
         assert!(with_allowlist.allows_host("localhost:8765", "localhost"));
