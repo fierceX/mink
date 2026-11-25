@@ -81,11 +81,6 @@ pub(super) fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState, mo
                     });
         }
     }
-    state.viewport.click_map = if interactive {
-        build_visible_click_map(state, start, scroll, viewport)
-    } else {
-        Vec::new()
-    };
     let mut visible = Vec::with_capacity(viewport);
     let first_visible = state.cache.heights.locate(scroll);
     let mut index = first_visible;
@@ -117,6 +112,11 @@ pub(super) fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState, mo
         }
         index += 1;
     }
+    state.viewport.click_map = if interactive {
+        build_visible_click_map(state, start, scroll, viewport)
+    } else {
+        Vec::new()
+    };
     let last_visible = index;
     // Bound Full TUI rendered-line cache memory on long transcripts by evicting
     // `cached_lines` far outside the viewport while preserving `heights` and

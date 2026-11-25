@@ -692,6 +692,11 @@ fn full_tui_restores_mouse_toggle_for_collapsible_cards() {
         .draw(|frame| render(frame, &mut state, TuiMode::Full))
         .unwrap();
     assert!(state.transcript.lines[0].collapsed);
+    // Scrolling back into an evicted region must be clickable on its first frame.
+    state.transcript.lines[0].cached_lines = None;
+    terminal
+        .draw(|frame| render(frame, &mut state, TuiMode::Full))
+        .unwrap();
     assert!(!state.viewport.click_map.is_empty());
     let row = state.viewport.content_y + state.viewport.click_map[0].start_row as u16;
 
