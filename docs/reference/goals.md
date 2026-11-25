@@ -61,7 +61,7 @@ continue 将缺口与下一步写入下一执行轮尾部。blocked 需要客观
 
 文件证据限工作目录内的规范路径，artifact://ID 限会话产物。审核者新生成并实际读取的 artifact 经宿主 ArtifactManager 导入父会话并重绑定引用，字节必须与读取时的 SHA-256 一致；继承产物保留身份，不能以子会话副本掩盖父证据变化或缺失。保存每份实际读取证据的 SHA-256；完成提交核对 run、目标身份、契约版本、conversation 序号、取消状态与期限。审核期间保持 turn gate 与宿主容量，任务实际退出前不释放。迟到结果不能改变停止或替换后的目标。
 
-检查器开始前持久保存 pending marker；已知结果先与 checker_records 同次发布，再关闭 marker。即使返回后证据读取失败，已知结果也保持已知并关闭 marker，另以证据错误阻塞，不能伪装成未知副作用。异常或未知结果保留 marker，恢复后必须人工调查并 `reconcile_goal_effects`，不能自动重放未知副作用或合成成功。一般有副作用工具也保留既有 marker 协议，Bash/远端操作不承诺 exactly-once。
+检查器开始前持久保存 pending marker；已知结果先与 checker_records 同次发布，再关闭 marker。即使返回后证据读取失败，已知结果也保持已知并关闭 marker，另以证据错误阻塞，不能伪装成未知副作用。异常或未知结果保留 marker，恢复后必须人工调查并 `reconcile_goal_effects`，不能自动重放未知副作用或合成成功。运行时放弃等待已派发的扩展工具（超时、取消或中断）会终止该 Goal 批次，并在历史与重开后的目标中保留未知副作用。一般有副作用工具也保留既有 marker 协议，Bash/远端操作不承诺 exactly-once。
 
 ## 读取、缓存与恢复
 
@@ -81,6 +81,6 @@ Rust：draft_goal、request_goal_draft、goal_draft_snapshot、generate_goal_dra
 
 Web：GET `/api/sessions/{id}/goal` 优先读活运行时快照，关闭时回退落盘 current；hidden 归一为 null。POST 同路径要求 `protocol_version:2`，objective、acceptance（agent_reviewed/human/verifier）、max_turns、max_minutes、acceptance_criteria、constraints；默认形成模型草案，宿主准备结构化 `draft_spec` 时可设 `generate:false`。成功返回 draft，尚未启动执行。
 
-POST `.../goal/{action}` 必须携带 goal_id/revision；新增 confirm、refine（feedback），保留 pause/resume/cancel/clear/budget/approve/reconcile。确认预约容量并由 core 激活；refine 的模型讨论也占同一宿主容量。`budget` 的 `soft_token_limit` 为三态：省略保留、数字设置、显式 `null` 清除；`0` 与非法值由 core 校验拒绝，拒绝不改变快照。SSE goal_updated 与镜像水位保持同一发布边界；事件、快照与动作响应只携带状态/额度/最新审核摘要，完整契约用 `GET .../goal?full=true` 按需读取。已清除（hidden）的目标在事件、镜像与快照中同样归一为 null，草案和审核详情只呈现 core 快照。
+POST `.../goal/{action}` 必须携带 goal_id/revision；新增 confirm、refine（feedback），保留 pause/resume/cancel/clear/budget/approve/reconcile。确认预约容量并由 core 激活；refine 的模型讨论也占同一宿主容量。创建和细化草案共用 `MINK_SERVER_TURN_TIMEOUT`；超时时中断该草案的 turn，等待实际退出后释放容量并返回 409。`budget` 的 `soft_token_limit` 为三态：省略保留、数字设置、显式 `null` 清除；`0` 与非法值由 core 校验拒绝，拒绝不改变快照。SSE goal_updated 与镜像水位保持同一发布边界；事件、快照与动作响应只携带状态/额度/最新审核摘要，完整契约用 `GET .../goal?full=true` 按需读取。已清除（hidden）的目标在事件、镜像与快照中同样归一为 null，草案和审核详情只呈现 core 快照。
 
 CLI/TUI：`/goal <请求>`、`/goal refine <意见>`、`/goal confirm <ID> <REVISION>`；/goals 与可点击状态标记显示只读详情；`/goal` help 与解析分支列出同一组子命令（含 reconcile），`/goal confrim`、`/goal refne` 等误拼在三个解析器一致拒绝并给出建议。草案讨论通过类型化内部消息持久化，携带原始请求与修改意见，不注册为人类 Inbox 请求。Web 显示待确认草案卡片，控制指令只进入模型上下文。界面区分执行轮 Final 与 GoalFinished，呈现待确认、执行中、审核中、待人工验收及逐项审核证据；子目标进度仅由同一契约版本的最新审核派生；当前候选存在时必须匹配该候选。Python SDK 没有 Goal 产品入口。

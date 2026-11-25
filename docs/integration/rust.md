@@ -282,7 +282,7 @@ failed 停止当前 run，宿主可显式 `resume_goal(id, revision)` / `resume_
 
 Rust 默认不自动驱动。先订阅 Goal 与接入事件；宿主提交完整契约使用 `draft_goal(spec, duration_secs)`，需要模型形成契约则先 `request_goal_draft(spec, duration_secs)`，再 `generate_goal_draft(feedback).await`。后者从创建时就不可确认，模型保存有效 proposal 后才变为可确认。向用户展示 ID/revision 与完整契约后，明确调用 `confirm_goal(id, revision)`；未确认草案不会执行。
 
-`generate_goal_draft_at(id, revision, feedback)` 对展示过的精确版本修改；陈旧版本在写入或模型请求之前拒绝。`start_goal_driver()` 只启用调度。宿主管理容量时使用 `confirm_and_start_goal` / `resume_and_start_goal` 传入 GoalRunLease；无容量账本的生命周期宿主可用 `start_goal_driver_and_run()` 接起恢复出的已确认 active。旧 create_goal/create_and_start_goal 返回升级错误，不能跳过确认。
+`generate_goal_draft_at(id, revision, feedback)` 对展示过的精确版本修改；陈旧版本在写入或模型请求之前拒绝。`generate_goal_draft_at_with_timeout(id, revision, feedback, Some(duration))` 允许宿主限定讨论时间，到期后中断所属 turn 并等待退出再返回。`start_goal_driver()` 只启用调度。宿主管理容量时使用 `confirm_and_start_goal` / `resume_and_start_goal` 传入 GoalRunLease；无容量账本的生命周期宿主可用 `start_goal_driver_and_run()` 接起恢复出的已确认 active。旧 create_goal/create_and_start_goal 返回升级错误，不能跳过确认。
 
 每轮正常结束后 runtime 自动运行只读分流或证据审核，并将描述性报告交给原会话的宿主 agent 调用 GoalReview 提交结论；显式工具白名单须包含 GoalReview。两步共用验收期限和 Goal usage，提交校验拒绝由宿主在同轮纠正重试，默认 completion basis 为 agent_reviewed。with_goal_verifier 注册宿主检查器，配置的检查器也必须通过；Human 再等待宿主 approve_goal，过期批准拒绝。检查器修改证据时以新 generation 在同一执行轮重新审核；已知通过结果只在返回时记录的证据版本仍匹配时复用，恢复不重放已知检查器。所有停止、验收、恢复和 lease 约束见 [Goal 契约](../reference/goals.md)，完整例子在 crates/mink-core/examples/goal.rs。不可恢复故障需要关闭并重开 runtime；未知副作用仍须明确对账。
 

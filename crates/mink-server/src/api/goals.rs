@@ -220,25 +220,38 @@ pub(super) async fn create_goal(
         return ApiResponse::ok(json!({"goal":draft}));
     }
     drop(_command);
-    let _op = runtime.begin_operation();
+    generate_draft(
+        handle,
+        draft.id,
+        draft.revision,
+        String::new(),
+        runtime.begin_operation(),
+        lease,
+    )
+    .await
+}
+
+async fn generate_draft(
+    handle: mink::runtime::AgentRuntimeHandle,
+    id: String,
+    revision: u64,
+    feedback: String,
+    operation: crate::session::runtime::ActiveOpGuard,
+    lease: crate::session::admission::PermitLease,
+) -> ApiResponse {
+    let timeout =
+        std::time::Duration::from_secs(crate::session::runtime::draft_generation_timeout_secs());
     let task = tokio::spawn(async move {
-        let _lease = lease;
+        // Keep both guards with the worker even if the HTTP client disconnects.
+        let _guards = (operation, lease);
         handle
-            .generate_goal_draft_at(&draft.id, draft.revision, "")
+            .generate_goal_draft_at_with_timeout(&id, revision, &feedback, Some(timeout))
             .await
     });
-    let timeout_secs = crate::session::runtime::draft_generation_timeout_secs();
-    match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), task).await {
-        Ok(Ok(Ok(draft))) => ApiResponse::ok(json!({"goal":draft})),
-        Ok(Ok(Err(error))) => ApiResponse::err(
-            409,
-            format!("draft generation failed; proposal preserved: {error}"),
-        ),
-        Ok(Err(error)) => ApiResponse::err(
-            409,
-            format!("draft generation task failed; proposal preserved: {error}"),
-        ),
-        Err(_) => ApiResponse::err(409, "draft generation timed out; proposal preserved"),
+    match task.await {
+        Ok(Ok(draft)) => ApiResponse::ok(json!({"goal":draft})),
+        Ok(Err(error)) => ApiResponse::err(409, format!("draft generation failed: {error}")),
+        Err(error) => ApiResponse::err(409, format!("draft generation task failed: {error}")),
     }
 }
 
@@ -383,27 +396,15 @@ pub(super) async fn goal_action(
                 Err(error) => return registry_error(error),
             };
             drop(_command);
-            let _op = runtime.begin_operation();
-            let feedback = body.feedback.unwrap_or_default();
-            let task = tokio::spawn(async move {
-                let _lease = lease;
-                handle
-                    .generate_goal_draft_at(&current.id, revision, &feedback)
-                    .await
-            });
-            let timeout_secs = crate::session::runtime::draft_generation_timeout_secs();
-            return match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), task)
-                .await
-            {
-                Ok(Ok(Ok(goal))) => ApiResponse::ok(json!({"goal":goal})),
-                Ok(Ok(Err(error))) => {
-                    ApiResponse::err(409, format!("draft refinement failed: {error}"))
-                }
-                Ok(Err(error)) => {
-                    ApiResponse::err(409, format!("draft refinement task failed: {error}"))
-                }
-                Err(_) => ApiResponse::err(409, "draft refinement timed out"),
-            };
+            return generate_draft(
+                handle,
+                current.id,
+                revision,
+                body.feedback.unwrap_or_default(),
+                runtime.begin_operation(),
+                lease,
+            )
+            .await;
         }
         "pause" => {
             state

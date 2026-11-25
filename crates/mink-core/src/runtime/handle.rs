@@ -163,7 +163,7 @@ impl TurnGate {
         }
     }
 
-    fn interrupt_if_owner(&self, turn_id: &TurnId) {
+    pub(super) fn interrupt_if_owner(&self, turn_id: &TurnId) {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.active.as_ref() == Some(turn_id) {
             self.interrupt.trigger();

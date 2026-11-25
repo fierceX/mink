@@ -1578,3 +1578,42 @@ async fn goal_review_rejects_unread_forged_or_changed_evidence() {
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
 }
+
+#[tokio::test]
+async fn draft_deadline_returns_after_the_owned_turn_exits() {
+    use crate::runtime::{AgentOptions, AgentRuntime, GoalSpec};
+    let home = unique_temp_dir("draft-deadline-home");
+    let cwd = unique_temp_dir("draft-deadline-cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let backend = Arc::new(PendingEstablishBackend {
+        calls: Default::default(),
+        entered: Default::default(),
+    });
+    let runtime =
+        AgentRuntime::start(AgentOptions::new(&home, &cwd).with_llm_backend(backend.clone()))
+            .await
+            .unwrap();
+    let handle = runtime.handle();
+    let draft = handle
+        .request_goal_draft(GoalSpec::new("draft only"), 3600)
+        .unwrap();
+    let error = handle
+        .generate_goal_draft_at_with_timeout(
+            &draft.id,
+            draft.revision,
+            "",
+            Some(std::time::Duration::from_millis(250)),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("timed out"), "{error}");
+    assert_eq!(*backend.calls.lock().unwrap(), 1);
+    assert!(
+        handle.active_turn_id().is_none(),
+        "timed-out draft still owns the turn"
+    );
+    assert!(!handle.goal_draft_snapshot().unwrap().draft_ready);
+    runtime.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+    std::fs::remove_dir_all(cwd).unwrap();
+}

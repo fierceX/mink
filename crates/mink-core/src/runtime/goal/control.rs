@@ -175,6 +175,18 @@ impl AgentRuntimeHandle {
         revision: u64,
         feedback: &str,
     ) -> RuntimeResult<GoalDraftSnapshot> {
+        self.generate_goal_draft_at_with_timeout(id, revision, feedback, None)
+            .await
+    }
+
+    /// Cancel this draft's turn at the host deadline and await its exit before returning.
+    pub async fn generate_goal_draft_at_with_timeout(
+        &self,
+        id: &str,
+        revision: u64,
+        feedback: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> RuntimeResult<GoalDraftSnapshot> {
         if !self.goal_ctx.tools.tool_surface.has("GoalDraft") {
             return Err(RuntimeError::Configuration(
                 "draft generation requires GoalDraft in the resolved tool surface".into(),
@@ -221,14 +233,32 @@ impl AgentRuntimeHandle {
                 feedback: feedback.into(),
             },
         )?;
-        while let Some(event) = stream.recv().await {
-            if let Some(sink) = &self.goal_driver.sink {
-                sink.on_event(event)
-                    .await
-                    .map_err(|e| RuntimeError::Command(e.to_string()))?;
+        let turn_id = stream.turn_id().clone();
+        let discussion = async {
+            while let Some(event) = stream.recv().await {
+                if let Some(sink) = &self.goal_driver.sink
+                    && let Err(error) = sink.on_event(event).await
+                {
+                    stream.cancel();
+                    stream.outcome().await?;
+                    return Err(RuntimeError::Command(error.to_string()));
+                }
             }
-        }
-        let outcome = stream.outcome().await?;
+            stream.outcome().await
+        };
+        tokio::pin!(discussion);
+        let outcome = if let Some(timeout) = timeout {
+            match tokio::time::timeout(timeout, &mut discussion).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    self.turn_gate.interrupt_if_owner(&turn_id);
+                    discussion.await?;
+                    return Err(RuntimeError::Command("draft generation timed out".into()));
+                }
+            }
+        } else {
+            discussion.await?
+        };
         if outcome.status != crate::runtime::TurnStatus::Ok {
             return Err(RuntimeError::Command(format!(
                 "draft generation stopped: {:?}",
