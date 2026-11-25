@@ -303,6 +303,10 @@ class SandboxConfig:
     request_max_retries: Optional[int] = None
     request_timeout_secs: Optional[int] = None
 
+    # Programmatic Tool Calling (PTC)
+    ptc_mode: str = "off"
+    ptc_config: Optional[dict[str, Any]] = None
+
     # Working directory
     cwd: Optional[str] = None
 
@@ -931,6 +935,15 @@ class AgentSession:
             recovery["request_timeout_secs"] = self._config.request_timeout_secs
         if recovery:
             options["recovery"] = recovery
+        ptc: dict[str, Any] = {}
+        if self._config.ptc_config:
+            if not isinstance(self._config.ptc_config, dict):
+                raise ValueError("ptc_config must be a dict")
+            ptc.update(self._config.ptc_config)
+        if self._config.ptc_mode != "off" and "mode" not in ptc:
+            ptc["mode"] = self._config.ptc_mode
+        if ptc:
+            options["ptc"] = ptc
         if extra_options:
             options = _deep_merge(options, extra_options)
         signal = options.get("signal")
@@ -1034,6 +1047,8 @@ class AgentSession:
             if value > 2**64 - 1:
                 raise ValueError("provider_http_timeout_secs must fit in u64")
         self._validate_recovery_config(cfg)
+        if cfg.ptc_mode not in ("off", "tool", "exclusive"):
+            raise ValueError("ptc_mode must be 'off', 'tool', or 'exclusive'")
 
     @staticmethod
     def _validate_recovery_config(cfg: "SandboxConfig") -> None:

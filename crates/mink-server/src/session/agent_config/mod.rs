@@ -8,17 +8,18 @@
 use mink::runtime::ImageDetail;
 use mink::runtime::{
     AgentOptions, ContextPolicy, EditMode, GenerationOptions, ImageInputCapability,
-    ImageLimitsOverrides, ProviderOptions, SandboxConfig, SandboxPythonConfig, SignalPolicy,
-    TokenParamKind, ToolApprovalMode, ToolApprovalPolicy, ToolOptions,
+    ImageLimitsOverrides, ProviderOptions, PtcBackendKind, PtcConfig, PtcMode, SandboxConfig,
+    SandboxPythonConfig, SignalPolicy, TokenParamKind, ToolApprovalMode, ToolApprovalPolicy,
+    ToolOptions,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use mink::config_file::{
-    MIN_TOOL_TIMEOUT_MAX_SECS, MinkConfigFile, RecoveryConfigFile, SandboxConfigFile,
-    SandboxPythonConfigFile, normalize_openai_reasoning_effort, parse_image_input,
-    parse_image_limits, parse_size_bytes,
+    MIN_TOOL_TIMEOUT_MAX_SECS, MinkConfigFile, PtcConfigFile, RecoveryConfigFile,
+    SandboxConfigFile, SandboxPythonConfigFile, normalize_openai_reasoning_effort,
+    parse_image_input, parse_image_limits, parse_size_bytes,
 };
 
 /// Merge two recovery sections per field (higher layer wins).
@@ -79,6 +80,7 @@ pub(crate) struct AgentConfig {
     pub recovery: RecoveryConfigFile,
     pub sandbox: SandboxConfigFile,
     pub sandbox_python: SandboxPythonConfigFile,
+    pub ptc: PtcConfigFile,
 }
 
 mod apply;
@@ -180,6 +182,29 @@ pub(crate) fn merge(base: AgentConfig, over: AgentConfig) -> AgentConfig {
         recovery: merge_recovery(base.recovery, over.recovery),
         sandbox: merge_sandbox(base.sandbox, over.sandbox),
         sandbox_python: merge_sandbox_python(base.sandbox_python, over.sandbox_python),
+        ptc: merge_ptc(base.ptc, over.ptc),
+    }
+}
+
+fn merge_ptc(base: PtcConfigFile, over: PtcConfigFile) -> PtcConfigFile {
+    fn pick<T>(base: Option<T>, over: Option<T>) -> Option<T> {
+        over.or(base)
+    }
+    PtcConfigFile {
+        mode: pick(base.mode, over.mode),
+        backend: pick(base.backend, over.backend),
+        python_executable: pick(base.python_executable, over.python_executable),
+        timeout_secs: pick(base.timeout_secs, over.timeout_secs),
+        max_timeout_secs: pick(base.max_timeout_secs, over.max_timeout_secs),
+        max_parallel_sub_calls: pick(base.max_parallel_sub_calls, over.max_parallel_sub_calls),
+        max_sub_calls_per_minute: pick(
+            base.max_sub_calls_per_minute,
+            over.max_sub_calls_per_minute,
+        ),
+        max_output_bytes: pick(base.max_output_bytes, over.max_output_bytes),
+        max_message_bytes: pick(base.max_message_bytes, over.max_message_bytes),
+        max_pending_calls: pick(base.max_pending_calls, over.max_pending_calls),
+        stop_grace_ms: pick(base.stop_grace_ms, over.stop_grace_ms),
     }
 }
 

@@ -86,6 +86,14 @@ pub(crate) fn apply_env_overrides(cfg: &mut AgentConfig) {
     {
         cfg.edit_enforce_seen_lines = Some(enabled);
     }
+    if let Ok(value) = std::env::var("MINK_PTC_MODE") {
+        match mink::runtime::PtcMode::parse(&value) {
+            Ok(_) => cfg.ptc.mode = Some(value),
+            Err(error) => {
+                eprintln!("[mink-server] Warning: ignoring MINK_PTC_MODE={value:?}: {error}")
+            }
+        }
+    }
 }
 
 pub(super) fn parse_bool_env(value: &str) -> Result<bool, ()> {

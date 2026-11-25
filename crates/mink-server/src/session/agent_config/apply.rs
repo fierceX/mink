@@ -153,6 +153,7 @@ pub(crate) fn apply_to(mut options: AgentOptions, cfg: &AgentConfig) -> AgentOpt
     }
     options = apply_sandbox(options, &cfg.sandbox);
     options = apply_sandbox_python(options, &cfg.sandbox_python);
+    options = apply_ptc(options, &cfg.ptc);
     // Image capability wiring (v7 §3.1), mirroring the CLI's
     // `assemble_runtime_options`: an explicit override beats the backend
     // declaration; an explicit vision-model list replaces the built-in
@@ -224,4 +225,52 @@ pub(super) fn apply_sandbox_python(
         sandbox_python.package_dirs = v.clone();
     }
     options.with_sandbox_python(sandbox_python)
+}
+
+pub(super) fn apply_ptc(options: AgentOptions, file: &PtcConfigFile) -> AgentOptions {
+    let mut ptc = PtcConfig::default();
+    if let Some(ref v) = file.mode {
+        match PtcMode::parse(v) {
+            Ok(mode) => ptc.mode = mode,
+            Err(error) => {
+                eprintln!("[mink-server] Warning: ignoring [ptc].mode={v:?}: {error}")
+            }
+        }
+    }
+    if let Some(ref v) = file.backend {
+        match PtcBackendKind::parse(v) {
+            Ok(backend) => ptc.backend = backend,
+            Err(error) => {
+                eprintln!("[mink-server] Warning: ignoring [ptc].backend={v:?}: {error}")
+            }
+        }
+    }
+    if let Some(ref v) = file.python_executable {
+        ptc.python_executable = Some(v.clone());
+    }
+    if let Some(v) = file.timeout_secs {
+        ptc.timeout_secs = v;
+    }
+    if let Some(v) = file.max_timeout_secs {
+        ptc.max_timeout_secs = v;
+    }
+    if let Some(v) = file.max_parallel_sub_calls {
+        ptc.max_parallel_sub_calls = v;
+    }
+    if let Some(v) = file.max_sub_calls_per_minute {
+        ptc.max_sub_calls_per_minute = v;
+    }
+    if let Some(v) = file.max_output_bytes {
+        ptc.max_output_bytes = v;
+    }
+    if let Some(v) = file.max_message_bytes {
+        ptc.max_message_bytes = v;
+    }
+    if let Some(v) = file.max_pending_calls {
+        ptc.max_pending_calls = v;
+    }
+    if let Some(v) = file.stop_grace_ms {
+        ptc.stop_grace_ms = v;
+    }
+    options.with_ptc(ptc)
 }

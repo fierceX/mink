@@ -419,4 +419,20 @@ max_pixels = "4M"
         let error = toml::from_str::<MinkConfigFile>("[recovery]\nbogus = 1\n").unwrap_err();
         assert!(error.to_string().contains("bogus"));
     }
+
+    #[test]
+    fn ptc_section_parses_merges_per_field_and_applies() {
+        let user = parse_layer(
+            "[ptc]\nmode = \"tool\"\nmax_parallel_sub_calls = 4\n",
+            "user",
+        );
+        let project = parse_layer("[ptc]\nmode = \"exclusive\"\n", "project");
+        let merged = merge(user, project);
+        assert_eq!(merged.ptc.mode.as_deref(), Some("exclusive"));
+        assert_eq!(merged.ptc.max_parallel_sub_calls, Some(4));
+
+        let opts = apply_to(AgentOptions::new("/tmp/mink-test-home", "/tmp"), &merged);
+        assert_eq!(opts.ptc().mode, PtcMode::Exclusive);
+        assert_eq!(opts.ptc().max_parallel_sub_calls, 4);
+    }
 }
