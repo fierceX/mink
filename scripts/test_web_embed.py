@@ -61,6 +61,7 @@ class EmbedProject:
         self.bin = root / "bin"
         self.web = root / "apps" / "web"
         self.crate = root / "crates" / "mink-server"
+        self._last_out_dir: Path | None = None
 
     @classmethod
     def create(cls) -> "EmbedProject":
@@ -116,21 +117,40 @@ class EmbedProject:
         return env
 
     def build(self, **overrides: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["cargo", "build", "--offline", "-p", "webembed-fixture"],
+        result = subprocess.run(
+            [
+                "cargo",
+                "build",
+                "--offline",
+                "-p",
+                "webembed-fixture",
+                "--message-format=json",
+            ],
             cwd=self.root,
             env=self.env(**overrides),
             capture_output=True,
             text=True,
             timeout=300,
         )
+        for line in result.stdout.splitlines():
+            if not line.startswith("{"):
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if msg.get("reason") == "build-script-executed" and "out_dir" in msg:
+                self._last_out_dir = Path(msg["out_dir"])
+        return result
 
     def npm_runs(self) -> int:
         path = self.state / "runs"
         return int(path.read_text()) if path.exists() else 0
 
     def out_dir(self) -> Path:
-        dirs = sorted((self.root / "target" / "debug" / "build").glob("webembed-fixture-*/out"))
+        if self._last_out_dir is not None and (self._last_out_dir / "assets.rs").exists():
+            return self._last_out_dir
+        dirs = sorted((self.root / "target").rglob("webembed-fixture-*/out"))
         self_ = [d for d in dirs if (d / "assets.rs").exists()]
         assert self_, f"no build output under {self.root / 'target'}"
         return self_[-1]
