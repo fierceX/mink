@@ -106,6 +106,44 @@ fn synthetic_wasm_timeout_and_cancel_terminate_execution() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn unrelated_epoch_ticks_do_not_stop_an_active_sandbox() {
+    let root = std::env::temp_dir().join(format!("sandbox-shared-epoch-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let wasm = root.join("loop.wasm");
+    synthetic_infinite_loop_wasm(&wasm);
+    let (engine, _) = load_compiled_wasm(&wasm).unwrap();
+    let cancel = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let task = scope.spawn(|| {
+            execute_in_sandbox_detailed(
+                "",
+                &wasm,
+                &root,
+                &[],
+                &[],
+                &[],
+                &root,
+                1024,
+                10,
+                Some(&cancel),
+            )
+            .unwrap()
+            .termination
+        });
+        for _ in 0..50 {
+            engine.increment_epoch();
+            std::thread::sleep(Duration::from_millis(10));
+            if task.is_finished() {
+                break;
+            }
+        }
+        cancel.store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(task.join().unwrap(), ProcessTermination::Interrupted);
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg_attr(not(feature = "slow-tests"), ignore)]
 #[test]
 fn sandbox_hello_world() {

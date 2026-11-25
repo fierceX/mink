@@ -246,6 +246,17 @@ fn execute_in_sandbox_detailed(
     // ── 执行 ──
     let wasi = builder.build_p1();
     let mut store = Store::new(&engine, wasi);
+    // Other stores may tick this cached engine. Only this execution's
+    // supervisor can ask this store to trap.
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let store_stop = stop.clone();
+    store.epoch_deadline_callback(move |_| {
+        Ok(if store_stop.load(std::sync::atomic::Ordering::Acquire) {
+            wasmtime::UpdateDeadline::Interrupt
+        } else {
+            wasmtime::UpdateDeadline::Continue(1)
+        })
+    });
     store.set_epoch_deadline(1);
     let mut linker: Linker<WasiP1Ctx> = Linker::new(&engine);
     p1::add_to_linker_sync(&mut linker, |ctx| ctx)?;
@@ -286,7 +297,18 @@ fn execute_in_sandbox_detailed(
     };
 
     if result.is_err() {
-        engine.increment_epoch();
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        // A concurrent callback may already be renewing its deadline.
+        // Keep waking this store until it acknowledges cancellation.
+        loop {
+            engine.increment_epoch();
+            if !matches!(
+                rx.recv_timeout(Duration::from_millis(20)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                break;
+            }
+        }
     }
     handle
         .join()

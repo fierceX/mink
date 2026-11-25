@@ -196,6 +196,8 @@ Server 生命周期：Ctrl+C → axum serve 停止 → idle reaper abort → `re
 | `tools/todo.rs` | `TodoReadTool`、`TodoWriteTool`、`TodoAdvanceTool` 与追加式事件格式化 |
 | `assets/tools.json` | 提供给模型的工具 schema |
 
+PythonSandbox 缓存已编译模块及其 Wasmtime Engine。每次执行创建独立 Store，超时或取消时由监督线程设置本次执行的停止标记，再推进共享 Engine 的 epoch。其他 Store 收到同一 epoch 通知时续期并继续执行。
+
 新增工具时需要同时实现 `ToolExec::metadata()`、注册 `TOOL_REGISTRY`、更新 `assets/tools.json`，并在 metadata 中声明 approval tier、result kind、副作用、`storm_exempt`、`spawns_sub_agent`。若工具参与跨工具工作流，还必须在 `semantic_capabilities.rs` 显式声明受支持的语义能力和调用 scope；schema 只描述该工具自身合同，不得静态推荐其他工具。
 
 模型可见工具只有一条构造链：
