@@ -42,6 +42,9 @@ pub(super) fn print_usage() {
     println!("  --print                 Stream JSON events to stdout");
     println!("  --agent-jsonl           Agent JSONL protocol");
     println!("  --enabled-tools <list>  Comma-separated tools to enable, or 'none'");
+    println!(
+        "  --ptc MODE              Programmatic tool calling: off (default) | tool | exclusive"
+    );
     println!("  --edit-mode MODE        Edit protocol: hashline (default) or replace");
     println!("  --edit-fuzzy-match BOOL Enable Replace progressive/fuzzy matching");
     println!("  --edit-fuzzy-threshold N Replace fuzzy threshold, 0.0..=1.0 (default: 0.95)");
@@ -55,7 +58,7 @@ pub(super) fn print_usage() {
     println!("                          [provider] image_input: \"on\" | \"off\" (explicit");
     println!("                          multi-modal override; vision_models: model id list;");
     println!("                          [provider.image]: max_images_per_request etc.)");
-    println!("                          [tools.edit] [signal] [sandbox] [sandbox_python]");
+    println!("                          [tools.edit] [signal] [sandbox] [sandbox_python] [ptc]");
     println!("  -h, --help              Show this help");
     println!();
     println!("Config via TOML (--config or .minkrc):");
@@ -76,6 +79,7 @@ pub(super) fn print_usage() {
     println!(
         "  MINK_SIGNAL_POLICY      Signal policy: off | evidence | state_ops | restart | full"
     );
+    println!("  MINK_PTC_MODE           Programmatic tool calling: off | tool | exclusive");
     println!("  MINK_EDIT_MODE          Edit protocol: hashline | replace");
     println!("  MINK_EDIT_FUZZY_MATCH   Replace fuzzy matching: true | false");
     println!("  MINK_EDIT_FUZZY_THRESHOLD Replace fuzzy threshold, 0.0..=1.0");

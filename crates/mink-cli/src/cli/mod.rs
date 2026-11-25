@@ -407,6 +407,7 @@ fn assemble_runtime_options(
         .with_selected_skills(cfg.skills.clone())
         .with_sandbox(cfg.sandbox.clone())
         .with_sandbox_python(cfg.sandbox_python.clone())
+        .with_ptc(cfg.ptc.clone())
         .with_interactive(cfg.interactive);
     if !cfg.prompt.trim().is_empty() {
         options = options.with_first_prompt(cfg.prompt.clone());

@@ -319,7 +319,7 @@ impl TuiState {
                         self.mirrors.plan = Some(plan.clone());
                     }
                     Some(ToolPresentation::Todo(todos)) => self.apply_todo_presentation(todos),
-                    None => {}
+                    Some(ToolPresentation::PtcRun(_)) | None => {}
                 }
                 self.invalidate_item(idx);
             }

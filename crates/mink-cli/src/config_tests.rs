@@ -1150,3 +1150,18 @@ fn resolve_model_label_honors_configured_aliases() {
     assert_eq!(resolve_model_label(" fast ", &aliases), "fast");
     assert_eq!(resolve_model_label("", &aliases), "flash");
 }
+
+#[test]
+fn ptc_cli_flag_beats_file_and_sdk_options_merge() {
+    let defaults = CliConfig::default();
+    let user: MinkConfigFile =
+        toml::from_str("[ptc]\nmode = \"tool\"\ntimeout_secs = 45\n").unwrap();
+    let mut cfg = parse_args(vec!["--ptc=exclusive".into(), "hi".into()]).unwrap();
+    apply_config_sources(&mut cfg, &defaults, Some(&user), None, None);
+    assert_eq!(cfg.ptc.mode, PtcMode::Exclusive);
+    assert_eq!(cfg.ptc.timeout_secs, 45);
+
+    let mut from_file = CliConfig::default();
+    apply_config_sources(&mut from_file, &defaults, Some(&user), None, None);
+    assert_eq!(from_file.ptc.mode, PtcMode::Tool);
+}

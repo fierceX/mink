@@ -490,7 +490,7 @@ fn tool_kind_style(item: &TranscriptItem) -> Style {
             "Glob" | "Grep" => ToolResultKind::Search,
             "Write" => ToolResultKind::FileWrite,
             "Edit" => ToolResultKind::Edit,
-            "Bash" | "Python" | "PythonSandbox" => ToolResultKind::Command,
+            "Bash" | "Python" | "PythonSandbox" | "RunCode" => ToolResultKind::Command,
             "PlanDraft" | "PlanConfirm" | "PlanClear" | "TodoWrite" | "TodoRead"
             | "TodoAdvance" => ToolResultKind::Control,
             "SubAgent" => ToolResultKind::SubAgent,
@@ -558,6 +558,28 @@ fn tool_body_text(item: &TranscriptItem) -> String {
                 ));
             }
         }
+        Some(ToolPresentation::PtcRun(ptc)) => {
+            out.push_str(&format!(
+                "{} · {} sub-call(s){}",
+                ptc.description,
+                ptc.sub_calls.len(),
+                if ptc.output_truncated {
+                    " · output truncated"
+                } else {
+                    ""
+                }
+            ));
+            for sub in &ptc.sub_calls {
+                out.push_str(&format!(
+                    "\n  {} ({}) · {:?} · {}ms",
+                    sub.tool_name, sub.sub_call_id, sub.status, sub.duration_ms
+                ));
+            }
+            if !item.text.is_empty() {
+                out.push_str("\n\n");
+                out.push_str(&item.text);
+            }
+        }
         None => out.push_str(&item.text),
     }
     for artifact in &item.artifacts {
@@ -580,7 +602,7 @@ fn click_action_for_message(
     match item.presentation.as_ref() {
         Some(ToolPresentation::Plan(_)) => return Some(ClickAction::OpenPlan),
         Some(ToolPresentation::Todo(_)) => return Some(ClickAction::OpenTodos),
-        None => {}
+        Some(ToolPresentation::PtcRun(_)) | None => {}
     }
     // A goal boundary card opens the read-only goal view, the same one the
     // status-bar marker and `/goals` open.

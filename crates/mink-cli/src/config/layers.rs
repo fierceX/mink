@@ -105,6 +105,11 @@ pub(super) fn apply_env_defaults(cfg: &mut CliConfig, defaults: &CliConfig) -> R
         cfg.tools.edit_enforce_seen_lines =
             parse_bool_value("MINK_EDIT_ENFORCE_SEEN_LINES", &value)?;
     }
+    if !cfg.cli_overrides.ptc_mode
+        && let Ok(value) = std::env::var("MINK_PTC_MODE")
+    {
+        cfg.ptc.mode = PtcMode::parse(&value)?;
+    }
     Ok(())
 }
 
@@ -386,6 +391,55 @@ pub(super) fn apply_config_sources(
         if let Some(policy) = toml_cfg.signal.policy {
             cfg.signal_policy = policy;
         }
+        apply_ptc_file(&mut cfg.ptc, &toml_cfg.ptc, cli.ptc_mode);
+    }
+}
+
+fn apply_ptc_file(
+    ptc: &mut PtcConfig,
+    file: &mink::config_file::PtcConfigFile,
+    cli_mode_override: bool,
+) {
+    if !cli_mode_override && let Some(ref mode_str) = file.mode {
+        match PtcMode::parse(mode_str) {
+            Ok(mode) => ptc.mode = mode,
+            Err(error) => eprintln!("[mink] Warning: ignoring [ptc].mode={mode_str:?}: {error}"),
+        }
+    }
+    if let Some(ref backend_str) = file.backend {
+        match PtcBackendKind::parse(backend_str) {
+            Ok(backend) => ptc.backend = backend,
+            Err(error) => {
+                eprintln!("[mink] Warning: ignoring [ptc].backend={backend_str:?}: {error}")
+            }
+        }
+    }
+    if let Some(ref executable) = file.python_executable {
+        ptc.python_executable = Some(executable.clone());
+    }
+    if let Some(v) = file.timeout_secs {
+        ptc.timeout_secs = v;
+    }
+    if let Some(v) = file.max_timeout_secs {
+        ptc.max_timeout_secs = v;
+    }
+    if let Some(v) = file.max_parallel_sub_calls {
+        ptc.max_parallel_sub_calls = v;
+    }
+    if let Some(v) = file.max_sub_calls_per_minute {
+        ptc.max_sub_calls_per_minute = v;
+    }
+    if let Some(v) = file.max_output_bytes {
+        ptc.max_output_bytes = v;
+    }
+    if let Some(v) = file.max_message_bytes {
+        ptc.max_message_bytes = v;
+    }
+    if let Some(v) = file.max_pending_calls {
+        ptc.max_pending_calls = v;
+    }
+    if let Some(v) = file.stop_grace_ms {
+        ptc.stop_grace_ms = v;
     }
 }
 
@@ -625,5 +679,41 @@ pub(crate) fn apply_sdk_request_options(
     }
     if let Some(value) = recovery.request_timeout_secs {
         cfg.llm_recovery.request_timeout_secs = Some(value);
+    }
+    let ptc = &options.ptc;
+    if !cfg.cli_overrides.ptc_mode
+        && let Some(mode) = ptc.mode
+    {
+        cfg.ptc.mode = mode;
+    }
+    if let Some(backend) = ptc.backend {
+        cfg.ptc.backend = backend;
+    }
+    if let Some(ref exe) = ptc.python_executable {
+        cfg.ptc.python_executable = Some(exe.clone());
+    }
+    if let Some(v) = ptc.timeout_secs {
+        cfg.ptc.timeout_secs = v;
+    }
+    if let Some(v) = ptc.max_timeout_secs {
+        cfg.ptc.max_timeout_secs = v;
+    }
+    if let Some(v) = ptc.max_parallel_sub_calls {
+        cfg.ptc.max_parallel_sub_calls = v;
+    }
+    if let Some(v) = ptc.max_sub_calls_per_minute {
+        cfg.ptc.max_sub_calls_per_minute = v;
+    }
+    if let Some(v) = ptc.max_output_bytes {
+        cfg.ptc.max_output_bytes = v;
+    }
+    if let Some(v) = ptc.max_message_bytes {
+        cfg.ptc.max_message_bytes = v;
+    }
+    if let Some(v) = ptc.max_pending_calls {
+        cfg.ptc.max_pending_calls = v;
+    }
+    if let Some(v) = ptc.stop_grace_ms {
+        cfg.ptc.stop_grace_ms = v;
     }
 }

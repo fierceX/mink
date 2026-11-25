@@ -148,6 +148,12 @@ pub fn parse_args(args: Vec<String>) -> Result<CliConfig> {
                 cfg.cli_overrides.edit_mode = true;
                 i += step;
             }
+            "--ptc" => {
+                let (val, step) = take_value(&args, i, inline_val)?;
+                cfg.ptc.mode = PtcMode::parse(&val)?;
+                cfg.cli_overrides.ptc_mode = true;
+                i += step;
+            }
             "--edit-fuzzy-match" => {
                 let (val, step) = take_value(&args, i, inline_val)?;
                 cfg.tools.edit_fuzzy_match = parse_bool_value("--edit-fuzzy-match", &val)?;

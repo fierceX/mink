@@ -2,8 +2,9 @@ use anyhow::{Result, anyhow, bail};
 use std::path::PathBuf;
 
 pub use mink::runtime::{
-    ContextPolicy, EditMode, GenerationOptions, OutputFormat, ProviderOptions, SandboxConfig,
-    SandboxPythonConfig, SignalPolicy, TokenParamKind, ToolOptions,
+    ContextPolicy, EditMode, GenerationOptions, OutputFormat, ProviderOptions, PtcBackendKind,
+    PtcConfig, PtcMode, SandboxConfig, SandboxPythonConfig, SignalPolicy, TokenParamKind,
+    ToolOptions,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -81,6 +82,8 @@ pub struct CliConfig {
     pub signal_policy: SignalPolicy,
     /// Bounded LLM recovery policy ([recovery] / SDK options.recovery).
     pub llm_recovery: mink::runtime::LlmRecoveryPolicy,
+    /// Python-hosted Programmatic Tool Calling ([ptc] / --ptc / SDK options.ptc).
+    pub ptc: PtcConfig,
 }
 
 /// Fields explicitly provided by CLI flags. Only these inputs outrank the
@@ -97,6 +100,7 @@ pub struct CliOverrides {
     pub edit_fuzzy_match: bool,
     pub edit_fuzzy_threshold: bool,
     pub edit_enforce_seen_lines: bool,
+    pub ptc_mode: bool,
 }
 
 impl Default for CliConfig {
@@ -129,6 +133,7 @@ impl Default for CliConfig {
             cli_config: None,
             signal_policy: SignalPolicy::Full,
             llm_recovery: mink::runtime::LlmRecoveryPolicy::default(),
+            ptc: PtcConfig::default(),
         }
     }
 }
