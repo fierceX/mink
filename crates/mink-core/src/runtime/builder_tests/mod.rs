@@ -1045,7 +1045,7 @@ impl AgentTool for PanicTool {
             "Always panics (test fixture)",
             serde_json::json!({
                 "type": "object",
-                "properties": {"release":{"type":"boolean"},"mark":{"type":"boolean"}},
+                "properties": {"release":{"type":"boolean"},"mark":{"type":"boolean"},"stall":{"type":"boolean"}},
                 "additionalProperties": false
             }),
         );
@@ -1064,6 +1064,9 @@ impl AgentTool for PanicTool {
         }
         if input["mark"] == true {
             std::fs::write(ctx.cwd().join("attempted"), "once").unwrap();
+            if input["stall"] == true {
+                return futures::future::pending().await;
+            }
         } else {
             self.0.notified().await;
         }

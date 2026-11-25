@@ -572,6 +572,15 @@ async fn partial_tool_results_survive_join_failure() {
 
 #[tokio::test]
 async fn goal_retains_dispatched_effect_after_tool_panics_and_session_reopens() {
+    assert_unknown_goal_effect(false).await;
+}
+
+#[tokio::test]
+async fn goal_retains_dispatched_effect_after_extension_timeout_and_reopen() {
+    assert_unknown_goal_effect(true).await;
+}
+
+async fn assert_unknown_goal_effect(timeout: bool) {
     use crate::protocol::{Event, StopEvent};
     use crate::runtime::{AgentOptions, AgentRuntime, GoalSpec, SessionPolicy};
     let home = unique_temp_dir("unknown-goal-home");
@@ -583,7 +592,7 @@ async fn goal_retains_dispatched_effect_after_tool_panics_and_session_reopens() 
             Ok(Event::ToolCall(tool_call_event(
                 "PanicTool",
                 "effect",
-                serde_json::json!({"mark":true}),
+                serde_json::json!({"mark":true, "stall":timeout}),
             ))),
             Ok(Event::ToolCall(tool_call_event(
                 "Write",
@@ -598,6 +607,7 @@ async fn goal_retains_dispatched_effect_after_tool_panics_and_session_reopens() 
     let options = || {
         AgentOptions::new(&home, &cwd)
             .with_llm_backend(backend.clone())
+            .with_tool_timeout_secs(1)
             .with_tool(Arc::new(PanicTool(tokio::sync::Notify::new())))
     };
     let runtime = AgentRuntime::start(options()).await.unwrap();

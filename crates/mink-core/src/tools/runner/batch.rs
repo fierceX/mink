@@ -636,24 +636,25 @@ async fn execute_custom(
     let deadline = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs));
     tokio::pin!(deadline);
     let result = tokio::select! {
-        result = &mut execution => result,
-        _ = ctx.cancel.cancelled() => {
-            Err(crate::tools::extension::ToolError::new(format!(
-                "custom tool {} cancelled",
-                definition.name
-            )))
-        }
-        _ = &mut deadline => {
-            Err(crate::tools::extension::ToolError::new(format!(
-                "custom tool {} timed out after {timeout_secs}s",
-                definition.name
-            )))
-        }
-        _ = ctx.interrupt.notified() => {
-            Err(crate::tools::extension::ToolError::new(format!(
-                "custom tool {} interrupted",
-                definition.name
-            )))
+        result = &mut execution => Ok(result),
+        _ = ctx.cancel.cancelled() => Err(format!("custom tool {} cancelled", definition.name)),
+        _ = &mut deadline => Err(format!("custom tool {} timed out after {timeout_secs}s", definition.name)),
+        _ = ctx.interrupt.notified() => Err(format!("custom tool {} interrupted", definition.name)),
+    };
+    let result = match result {
+        Ok(returned) => returned,
+        Err(reason) => {
+            // Goal journals every extension before dispatch, including those
+            // declared read-only. An abandoned future cannot confirm its effect.
+            if definition.mutating
+                || ctx
+                    .goal_store
+                    .snapshot()
+                    .is_some_and(|goal| goal.pending_effects.contains(&call.id))
+            {
+                anyhow::bail!("{reason}");
+            }
+            Err(crate::tools::extension::ToolError::new(reason))
         }
     };
     let raw = match result {
