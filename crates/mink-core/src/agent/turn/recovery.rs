@@ -83,116 +83,50 @@ impl super::TurnExecutor {
         (allowed, Vec::new())
     }
 
-    /// 回滚循环窗口内（最近 SignalConfig.seq_window 步）被编辑过的路径。
-    /// - 回滚目标是 read 基线而非 record_edit 的编辑后内容（否则恒等 no-op）；
-    /// - 只回滚窗口内路径，窗口之前的合法编辑保持不动；
-    /// - 写回经 `publish_state_with_permissions`：权限在临时文件上先设置再
-    ///   发布（保留原 mode），发布后同步失败按 F8 语义校验/重同步或
-    ///   闩锁 session；普通发布前失败只记录不中断 turn。
-    async fn apply_rollback(&mut self) -> Result<()> {
-        let rollback_window_steps = self.ctx.config.signal.seq_window;
+    /// A shared worktree has no portable compare-and-replace operation against
+    /// external editors. Return the relevant edit evidence and let the next
+    /// read/inspect step establish which changes are still appropriate.
+    async fn suggest_edit_recovery(&self) -> Result<()> {
         let paths = self
             .signal_processor
             .evidence()
-            .edited_paths_since(rollback_window_steps);
+            .edited_paths_since(self.ctx.config.signal.seq_window);
         if paths.is_empty() {
             return Ok(());
         }
-        let mut rolled_back: Vec<serde_json::Value> = Vec::new();
-        for raw in paths {
-            let path = std::path::PathBuf::from(&raw);
-            let full = if path.is_absolute() {
-                path.clone()
-            } else {
-                self.ctx.paths.cwd.join(&path)
-            };
-            let candidate = {
-                let snapshots = self
-                    .ctx
-                    .tools
-                    .snapshots
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                snapshots.latest_read_snapshot(&full)
-            };
-            let Some(snapshot) = candidate else {
-                continue;
-            };
-            let Ok(current) = tokio::fs::read_to_string(&full).await else {
-                continue;
-            };
-            let normalized = crate::tools::snapshot::normalize_snapshot_text(&current);
-            if normalized == snapshot.text {
-                continue; // 幂等：磁盘内容已与基线一致。
+        let mut note = String::from(
+            "[edit-recovery] Workspace preserved. Re-read the following paths and compare their recent Edit diffs before deciding whether to revert individual changes:",
+        );
+        let budget = self.ctx.config.signal.evidence_max_chars;
+        for path in paths {
+            if note.len() >= budget {
+                break;
             }
-            let restored = crate::tools::snapshot::TextShape {
-                bom: snapshot.bom,
-                crlf: snapshot.crlf,
-            }
-            .restore(&snapshot.text);
-            // 权限必须在发布前设置到临时文件上（发布后再 chmod 会留下
-            // 错误权限窗口，chmod 失败还会被忽略）。读取失败则拒绝发布。
-            let permissions = match tokio::fs::metadata(&full).await {
-                Ok(meta) => meta.permissions(),
-                Err(error) => {
-                    self.ctx
-                        .log_critical_event(crate::events::EventLog::SignalRollbackError {
-                            path: full.display().to_string(),
-                            error: format!(
-                                "cannot read permissions; refusing to publish rollback: {error}"
-                            ),
-                        })
-                        .await?;
-                    continue;
-                }
-            };
-            let publish_path = full.clone();
-            let publish_bytes = restored.into_bytes();
-            let publish_fault = self.ctx.stores.persistence_fault.clone();
-            let publish_result = tokio::task::spawn_blocking(move || {
-                crate::session::persistence::publish_state_with_permissions(
-                    &publish_path,
-                    &publish_bytes,
-                    permissions,
-                    &publish_fault,
-                )
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("rollback publish task failed: {e}"))?;
-            if let Err(error) = publish_result {
-                self.ctx
-                    .log_critical_event(crate::events::EventLog::SignalRollbackError {
-                        path: full.display().to_string(),
-                        error: error.to_string(),
-                    })
-                    .await?;
-                if self.ctx.stores.persistence_fault.info().is_some() {
-                    // Published-but-unsynced without successful recovery:
-                    // fail closed instead of continuing on unknown state.
-                    return Err(error);
-                }
-                continue;
-            }
-            self.ctx
+            let full = self.ctx.paths.cwd.join(&path);
+            let hint = self
+                .ctx
                 .tools
-                .memo_mutation
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            rolled_back.push(serde_json::json!({
-                "path": full.display().to_string(),
-                "to_tag": snapshot.tag,
-            }));
+                .snapshots
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .recovery_hint(&full, budget.saturating_sub(note.len()));
+            note.push_str(&format!("\n- {path:?}"));
+            if let Some(hint) = hint {
+                note.push_str(&hint);
+            }
         }
-        if !rolled_back.is_empty() {
-            self.ctx
-                .log_critical_event(crate::events::EventLog::SignalRollback {
-                    files: rolled_back.clone(),
-                })
-                .await?;
-            self.ctx.io.display.render_info(&format!(
-                "Signal rollback: restored {} file(s) to their last read snapshot",
-                rolled_back.len()
-            ));
-        }
+        self.ctx
+            .stores
+            .store
+            .add_runtime_user(&truncate_str(
+                &note,
+                self.ctx.config.signal.evidence_max_chars,
+            ))
+            .await?;
+        self.ctx
+            .io
+            .display
+            .render_info("Workspace preserved; recent edits queued for review.");
         Ok(())
     }
 
@@ -403,11 +337,11 @@ impl super::TurnExecutor {
                         .render_info(&format!("Injecting trajectory evidence (belief {b:.2})"));
                     self.ctx.stores.store.add_runtime_user(&text).await?;
                     let policy = self.ctx.config.signal_policy;
-                    // Warning 级在 state-ops 及以上策略先回滚窗口内编辑。
+                    // Warning 级在 state-ops 及以上策略提示核对近期编辑。
                     if directive.severity == crate::agent::decision::RecoverySeverity::Warning
                         && policy.allows_state_ops()
                     {
-                        self.apply_rollback().await?;
+                        self.suggest_edit_recovery().await?;
                     }
                     // 同一输入内连续第二次 Warning 时用 fresh 子代理重新规划；
                     // 成功后注入新计划并跳过守卫。

@@ -753,7 +753,7 @@ fn rollback_script_after_edit(tag: &str) -> Vec<Vec<anyhow::Result<Event>>> {
 }
 
 #[tokio::test]
-async fn hashline_rollback_restores_last_read_baseline() -> anyhow::Result<()> {
+async fn hashline_warning_preserves_successful_edit() -> anyhow::Result<()> {
     // 最后一次 Read 记录的基线（而不是 record_edit 记录的编辑后内容）。
     let original = "line1\nline2\nline3\n";
     let tag = crate::tools::snapshot::compute_file_tag(original);
@@ -772,8 +772,8 @@ async fn hashline_rollback_restores_last_read_baseline() -> anyhow::Result<()> {
     assert_eq!(decision, TurnDecision::Stop);
     let on_disk = tokio::fs::read_to_string(h.cwd.join("a.rs")).await?;
     assert_eq!(
-        on_disk, original,
-        "hashline rollback must restore the last READ baseline"
+        on_disk, "lineX\nline2\nline3\n",
+        "unrelated failures must preserve the accepted edit"
     );
     Ok(())
 }
@@ -839,7 +839,7 @@ async fn rollback_preserves_private_permissions() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn replace_mode_rollback_restores_last_read_baseline() -> anyhow::Result<()> {
+async fn replace_warning_preserves_successful_edit() -> anyhow::Result<()> {
     let original = "line1\nline2\nline3\n";
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
@@ -896,8 +896,8 @@ async fn replace_mode_rollback_restores_last_read_baseline() -> anyhow::Result<(
     assert_eq!(decision, TurnDecision::Stop);
     let on_disk = tokio::fs::read_to_string(h.cwd.join("a.rs")).await?;
     assert_eq!(
-        on_disk, original,
-        "replace rollback must restore the read baseline"
+        on_disk, "lineX\nline2\nline3\n",
+        "unrelated failures must preserve the accepted edit"
     );
     Ok(())
 }
@@ -1248,8 +1248,9 @@ async fn replace_rollback_preserves_bom_and_crlf_shape() -> anyhow::Result<()> {
     assert_eq!(decision, TurnDecision::Stop);
     let on_disk = tokio::fs::read_to_string(h.cwd.join("a.rs")).await?;
     assert_eq!(
-        on_disk, original,
-        "rollback must restore the BOM/CRLF read baseline"
+        on_disk,
+        original.replace("line1", "lineX"),
+        "warning must preserve the edited bytes including BOM/CRLF"
     );
     Ok(())
 }

@@ -111,10 +111,8 @@ async fn replace_mode_write_records_rollback_baseline() {
         )
         .unwrap();
     assert!(result.content.contains("wrote"));
-    let baseline = ctx
-        .snapshots
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    let snapshots = ctx.snapshots.lock().unwrap_or_else(|e| e.into_inner());
+    let baseline = snapshots
         .latest_read_snapshot(&path)
         .expect("Replace-mode Write must update the rollback baseline");
     assert_eq!(baseline.text, "new content\n");

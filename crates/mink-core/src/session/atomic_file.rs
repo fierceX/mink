@@ -65,6 +65,7 @@ pub(crate) fn atomic_replace_status(path: &Path, content: &[u8]) -> Result<(), P
 
 /// Publish `content` after setting `permissions` on the temporary file, so
 /// the published inode never carries the default creation mode.
+#[cfg(test)]
 pub(crate) fn atomic_replace_status_with_permissions(
     path: &Path,
     content: &[u8],

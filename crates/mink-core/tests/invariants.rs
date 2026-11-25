@@ -73,7 +73,10 @@ impl LlmBackend for ScriptedBackend {
 }
 
 fn read_tool_call(id: &str, path: &str) -> LlmEvent {
-    let input = serde_json::json!({"path": path});
+    tool_call("Read", id, serde_json::json!({"path": path}))
+}
+
+fn tool_call(name: &str, id: &str, input: Value) -> LlmEvent {
     let fields: BTreeMap<String, String> = input
         .as_object()
         .map(|obj| {
@@ -83,7 +86,7 @@ fn read_tool_call(id: &str, path: &str) -> LlmEvent {
         })
         .unwrap_or_default();
     LlmEvent::ToolCall(LlmToolCallEvent {
-        name: "Read".to_string(),
+        name: name.into(),
         id: id.to_string(),
         input_json: input,
         fields,
@@ -297,5 +300,88 @@ async fn goal_contract_revision_is_a_cas_and_survives_a_reopen() -> Result<()> {
         .await
         .map_err(|e| anyhow!("shutdown: {e}"))?;
     let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    Ok(())
+}
+
+#[tokio::test]
+async fn warning_preserves_external_save_after_accepted_edit() -> Result<()> {
+    use mink::runtime::EditMode;
+    struct ExternalEditor {
+        backend: ScriptedBackend,
+        file: PathBuf,
+    }
+    #[async_trait::async_trait]
+    impl LlmBackend for ExternalEditor {
+        fn name(&self) -> &str {
+            "external-editor"
+        }
+
+        async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream> {
+            // Third request is strictly after the real Edit result was committed.
+            if self.backend.captured.lock().unwrap().len() == 2 {
+                assert_eq!(std::fs::read_to_string(&self.file)?, "lineX\nline2\n");
+                let replacement = self.file.with_extension("new");
+                std::fs::write(&replacement, "lineX \r\nexternal\r\n")?;
+                std::fs::rename(replacement, &self.file)?;
+            }
+            self.backend.stream(request).await
+        }
+    }
+    let original = "line1\nline2\n";
+    for mode in [EditMode::Hashline, EditMode::Replace] {
+        let (home, cwd) = temp_pair(&format!("concurrent-save-{mode:?}"));
+        let file = cwd.join("a.rs");
+        std::fs::write(&file, original)?;
+        let input = match mode {
+            EditMode::Hashline => {
+                let tag = xxhash_rust::xxh32::xxh32(original.as_bytes(), 0) & 0xffff;
+                serde_json::json!({"input":format!("[a.rs#{tag:04X}]\nPUT 1.=1:\n+lineX\n")})
+            }
+            EditMode::Replace => {
+                serde_json::json!({"path":"a.rs","edits":[{"old_text":"line1","new_text":"lineX"}]})
+            }
+        };
+        let stop = || {
+            LlmEvent::Stop(LlmStopEvent {
+                reason: "tool_use".into(),
+            })
+        };
+        let mut failures: Vec<_> = (0..5)
+            .map(|i| {
+                tool_call(
+                    "Bash",
+                    &format!("f{i}"),
+                    serde_json::json!({"command":format!("false check {i}")}),
+                )
+            })
+            .collect();
+        failures.push(stop());
+        let backend = Arc::new(ExternalEditor {
+            file: file.clone(),
+            backend: ScriptedBackend::new(vec![
+                vec![read_tool_call("read", "a.rs:1-10"), stop()],
+                vec![tool_call("Edit", "edit", input), stop()],
+                failures,
+                text_stop("done", "end_turn"),
+            ]),
+        });
+        let runtime = AgentRuntime::start(
+            AgentOptions::new(&home, &cwd)
+                .with_edit_mode(mode)
+                .with_llm_backend(backend.clone()),
+        )
+        .await?;
+        runtime.run_turn("edit then check").await?;
+        assert_eq!(std::fs::read(&file)?, b"lineX \r\nexternal\r\n");
+        let requests = backend.backend.captured();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[3].messages.iter().any(|m| {
+            m["content"]
+                .as_str()
+                .is_some_and(|v| v.contains("[edit-recovery]") && v.contains("a.rs"))
+        }));
+        runtime.shutdown().await?;
+        std::fs::remove_dir_all(home.parent().unwrap())?;
+    }
     Ok(())
 }

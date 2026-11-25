@@ -109,30 +109,6 @@ pub(crate) fn publish_state(
     )
 }
 
-/// Publish `content` while preserving `permissions` on the published inode
-/// (set on the temporary file before the rename), with the same
-/// published-but-unsynced recovery/latch semantics as [`publish_state`].
-pub(crate) fn publish_state_with_permissions(
-    path: &Path,
-    content: &[u8],
-    permissions: std::fs::Permissions,
-    fault: &PersistenceFault,
-) -> anyhow::Result<()> {
-    publish_state_with(
-        path,
-        content,
-        fault,
-        || {
-            crate::session::atomic_file::atomic_replace_status_with_permissions(
-                path,
-                content,
-                permissions,
-            )
-        },
-        sync_parent,
-    )
-}
-
 fn publish_state_with(
     path: &Path,
     content: &[u8],

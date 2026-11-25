@@ -166,12 +166,30 @@ impl FileSnapshotStore {
             .collect()
     }
 
-    /// Read/Write 完整内容基线。**不含** record_edit 的编辑后内容——回滚目标是
-    /// 循环起点（模型最后一次亲自读到的完整文件），不是最近一次编辑结果。
-    /// 返回完整快照（含文本 shape），调用方负责原子写回与 mutation bump。
-    pub fn latest_read_snapshot(&self, path: &Path) -> Option<FileSnapshot> {
-        let path = canonical_snapshot_path(path);
-        self.read_latest.get(&path).cloned()
+    /// The last read/write baseline survives later edits. It is advisory
+    /// evidence for reviewing an edit, never authority to replace a file.
+    pub fn latest_read_snapshot(&self, path: &Path) -> Option<&FileSnapshot> {
+        self.read_latest.get(&canonical_snapshot_path(path))
+    }
+
+    /// Preview only the cached edit and its baseline. Never interpret bytes
+    /// observed later on disk as part of the agent's change.
+    pub(crate) fn recovery_hint(&self, path: &Path, budget: usize) -> Option<String> {
+        let baseline = self.latest_read_snapshot(path)?;
+        let mut hint = format!(" (read baseline #{})", baseline.tag);
+        let edited = self
+            .by_path
+            .get(&baseline.path)
+            .and_then(|versions| versions.front());
+        if let Some(edited) = edited
+            && edited.text != baseline.text
+            && edited.text.len().saturating_add(baseline.text.len()) <= budget
+        {
+            let diff = similar::TextDiff::from_lines(&edited.text, &baseline.text);
+            hint.push_str("\nCached inverse diff for review:\n");
+            hint.push_str(&diff.unified_diff().context_radius(0).to_string());
+        }
+        Some(hint)
     }
 
     /// 更新回滚基线并按 MAX_PATHS 做 LRU 淘汰，防止长会话无界增长。

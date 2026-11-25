@@ -92,12 +92,12 @@ StormDecision::Suppress(reason) => {
 - 信念计算：Beta-Binomial 拉普拉斯平滑，先验 `α=3, β=1`（无观测时 `B=0.75`），
   滑动窗口 W=16，跨输入按 `Config.signal.decay_per_input`（默认 0.6）衰减替代硬重置
 - 分层响应：`B ≥ remind` 不干预（单次软信号只记录）；提醒区注入轨迹证据；警告区叠加
-  快照回滚与恢复首步守卫（拦截喂回信念）；`B < abort` 用户接管；档位由 `SignalPolicy`
+  近期编辑复核与恢复首步守卫（拦截喂回信念）；`B < abort` 用户接管；档位由 `SignalPolicy`
   配置，阈值/超参为内部策略常量
 - 注入协议：以独立 User 消息（`[trajectory]`/`[detector]` 事实帧）写入 conversation，
   不污染 system prefix；`RecoveryPolicy` 按 resolved capabilities 校验恢复首步
 - `MINK_SIGNAL_POLICY=off`：不生成 `<belief-awareness>` prompt 段，不采集、不注入、
-  不回滚、不接管、不启用恢复守卫
+  不提示编辑复核、不接管、不启用恢复守卫
 - 错误分类（`errors.rs` 的 `ErrorCategory`：Network/Auth/RateLimit/Parse/Tool/Internal）
   仅用于日志与用户提示，不驱动任何决策
 
@@ -171,14 +171,14 @@ EvidenceTracker（guard/evidence.rs）
 DecisionEngine.decide_with_signals(B, errors, hard_signals)
        ├── 单次软失败且 B ≥ warn_threshold → None（记录不干预；累计 ≥ 2 次软失败参与决策）
        ├── B 在提醒区 → 轨迹证据注入（[trajectory]/[detector]，无命令）
-       ├── B 在警告区 → 证据注入 + 快照回滚 + 恢复首步守卫（拦截喂回信念）
+       ├── B 在警告区 → 证据注入 + 近期编辑复核 + 恢复首步守卫（拦截喂回信念）
        ├── 守卫连续拦截 ≥ guard_max_blocks → 绕过守卫并强制证据注入
        └── B < abort_threshold → 用户接管（signal_handover 事件）
 ```
 
 **为什么注入形态从命令改为证据**：模板注入的内容全部可从模型已有上下文推导，信息增益
 约等于零；运行时相对模型的唯一信息优势是完整结构化轨迹，因此响应改为注入**模型算不出来
-的行为统计**（重复调用、失败聚类、预算消耗），并在警告区叠加**状态操作**（快照回滚）与
+的行为统计**（重复调用、失败聚类、预算消耗），并在警告区叠加**状态操作**（近期编辑复核）与
 拦截反馈。
 
 三个组件职责清晰、零外部依赖（仅 BeliefTracker 引用 Signal 类型），可独立修改和替换。
@@ -208,7 +208,7 @@ DecisionEngine.decide_with_signals(B, errors, hard_signals)
 |:----------:|---------|------|
 | ≥ remind（默认 0.70） | 无操作，自由运行（软信号单独出现亦然） | 稳态，无需干预 |
 | warn~remind（默认 0.50~0.70） | 轨迹证据注入（提醒级） | 预警区，注入事实不注入命令 |
-| abort~warn（默认 0.30~0.50） | 证据注入 + 快照回滚 + 恢复首步守卫 | 保护区，状态操作 + 拦截反馈 |
+| abort~warn（默认 0.30~0.50） | 证据注入 + 近期编辑复核 + 恢复首步守卫 | 保护区，状态操作 + 拦截反馈 |
 | < abort（默认 0.30） | 用户接管（HandOver 事件，交互重锚定） | 极限区，请求外部信息 |
 
 ### 2.2 贝叶斯统计：信念的量化
@@ -364,7 +364,7 @@ BeliefTracker 维护 `VecDeque<Observation>`，窗口 W=16。每次 `observe()`�
 ```
 B ≥ remind（0.70）            ─→ 无操作；单次软信号只记录不干预
 warn ≤ B < remind（0.50）     ─→ 轨迹证据注入（提醒级）
-abort ≤ B < warn（0.30）      ─→ 证据注入 + 快照回滚 + 恢复首步守卫
+abort ≤ B < warn（0.30）      ─→ 证据注入 + 近期编辑复核 + 恢复首步守卫
 B < abort（0.30）             ─→ 用户接管（结构化接管报告）
 ```
 
@@ -392,7 +392,7 @@ stop = "tool_use"
   ├─ engine.decide_with_signals(belief, hard_failures, soft_failures)
   │   ├─ 引擎内部检查冷却 → 跳过
   │   ├─ 提醒级 → store.add_runtime_user([trajectory] 事实) + 冷却
-  │   ├─ 警告级 → 证据注入 + 快照回滚 + 恢复首步守卫
+  │   ├─ 警告级 → 证据注入 + 近期编辑复核 + 恢复首步守卫
   │   └─ 接管级 → signal_handover 事件后返回 Failed
   └─ messages = compaction.active_messages() → 下一轮 LLM
 ```
@@ -517,7 +517,7 @@ Recovery 首步资格与普通 Bash 安全/误用策略是两套合同。前者�
 │ engine.decide_with_signals(belief, hard, soft)              │
 │   ├─ 引擎内部检查冷却 → 跳过                                 │
 │   ├─ 提醒级 → store.add_runtime_user([trajectory] 事实) + 冷却│
-│   ├─ 警告级 → 证据注入 + 快照回滚 + 恢复首步守卫              │
+│   ├─ 警告级 → 证据注入 + 近期编辑复核 + 恢复首步守卫              │
 │   └─ 接管级 → signal_handover 事件 → return Failed          │
 │ messages = compaction.active_messages()（含注入消息）         │
 └──────────────────────┬───────────────────────────────────────┘
@@ -595,7 +595,7 @@ decision_engine: DecisionEngine,
 | `crates/mink-core/src/guard/evidence.rs` | 轨迹证据构造与渲染（重复调用/失败聚类/预算截断/新鲜度去重） |
 | `crates/mink-core/src/agent/tool_signals.rs` | 工具信号处理、证据记录与信念更新 |
 | `crates/mink-core/src/agent/recovery_policy.rs` | 从已解析能力校验恢复首个调用 |
-| `crates/mink-core/src/agent/turn.rs` | 证据注入、快照回滚、策略重启与用户接管 |
+| `crates/mink-core/src/agent/turn.rs` | 证据注入、近期编辑复核、策略重启与用户接管 |
 | `crates/mink-core/src/config.rs` | 解析 `SignalPolicy`；数值策略保持内部固定 |
 | `crates/mink-core/src/prompt/core.rs` | policy 非 `off` 时生成不含具体工具名的 `<belief-awareness>` core |
 
