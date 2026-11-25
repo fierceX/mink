@@ -1,6 +1,6 @@
 # 工具参考
 
-> 更新日期：2026-10-27
+> 更新日期：2026-11-25
 
 内置工具 schema、结果和资源协议。
 
@@ -386,6 +386,25 @@ runtime 启动时 fail closed。
 - 子代理失败/超时仍映射为 `ToolStatus`（`TimedOut` → `Failed(Timeout)`）；`sub_agent_timeout_secs` 从获得名额后起算并覆盖 setup+run，不含排队。
 - `_mink.sub_agent` 携带 session_id/label/mode/depth/status/stop_reason/usage/elapsed_ms；`elapsed_ms` 同为 setup+run，不含排队；未测量时带 `usage_known/elapsed_known=false`。
 - 父 display 的 `SubAgentOutput` 只发送展示侧有界的 thinking/text，完整内容仍保留在子会话与 tool result/artifact 路径。
+
+## `RunCode`（Python PTC）
+
+通过一段 Python 3 程序（支持顶层 `await`）在代码内编排运行时工具，启用方式由 `PtcMode` 控制：
+
+- `off`（默认）：隐藏 `RunCode` 与 `<ptc-sdk>`，所有行为与未引入 PTC 前字节级一致。
+- `tool`：`RunCode` 与普通工具共同出现在 wire `tools` 中，`<ptc-sdk>` 声明可编程工具签名；适合简单调用走直调、批量/循环走 `RunCode`。
+- `exclusive`：wire `tools` 只保留 `RunCode` 与直调控制工具（`PlanDraft`/`PlanConfirm`/`PlanClear`/`GoalDraft`/`GoalReview`/`SubAgent`），数据/文件/搜索/命令/Todo/`GoalRead` 迁移到 `<ptc-sdk>`，由 `RunCode` 内通过 `await tools.<Name>(...)` 统一调度。
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `code` | string | Python 3 程序源码（支持顶层 `await`），必需 |
+| `description` | string | 5–10 词程序摘要，必需 |
+| `timeout` | integer | 单次运行超时秒数，可选 |
+
+- 运行时内提供 `tools.<Name>(...)`、`tools["name"](...)`、`await gather(*aws)`、`inspect(*values)`、`ToolCallError` 与不可变 `Image` 句柄。
+- 只读工具可按 `max_parallel_sub_calls` 滚动并发执行；写类、命令与自定义顺序工具自动在读锁/写锁屏障上串行化。
+- `inspect(*values)` 与有界 stdout/stderr 进入 `RunCode` 最终结果（超限走 `artifact://` 落盘，嵌套工具不单独截断）；多张 `Image` 句柄仅在 `inspect(img)` 时计入 `ImageBatchBudget`。
+- 禁止递归调用 `RunCode`、禁止从 PTC 内调用 `Python`/`PythonSandbox` 及直调控制工具；`GoalReviewer` 固定降为 `PtcMode::Off`。
 
 ## 工具事实权威表（Q11）
 

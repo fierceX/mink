@@ -1,6 +1,6 @@
 # 配置参考
 
-> 更新日期：2026-10-29
+> 更新日期：2026-11-25
 
 参数、默认值、优先级与校验。
 
@@ -26,6 +26,7 @@
 | `--api-key KEY` | env | 覆盖 API Key |
 | `--base-url URL` | 默认端点 | 覆盖 API 端点 |
 | `--enabled-tools <list>` | 默认集合 | 逗号分隔的精确工具列表；`none` 禁用全部 |
+| `--ptc <mode>` | `off` | Python 宿主 PTC 模式：`off` / `tool` / `exclusive` |
 | `--edit-mode <mode>` | `hashline` | `hashline` / `replace`；runtime 启动后固定 |
 | `--edit-fuzzy-match <bool>` | `true` | Replace 行窗口模糊匹配开关 |
 | `--edit-fuzzy-threshold <n>` | `0.95` | Replace 阈值，有限数且在 `0.0..=1.0` |
@@ -110,6 +111,13 @@ request_timeout_secs = 30 # 可选：单个逻辑请求的总期限（含全部�
 [sandbox_python]
 wasm_path = "/path/to/python.wasm"
 read_dirs = ["./data"]
+
+[ptc]
+mode = "off"                          # off | tool | exclusive（也可用 MINK_PTC_MODE 或 --ptc）
+backend = "subprocess-python"         # subprocess-python | wasi-python（需 python-sandbox feature）
+timeout_secs = 120
+max_parallel_sub_calls = 8
+max_sub_calls_per_minute = 240
 ```
 
 旧的顶层扁平字段不再接受；解析器会报告 unknown field。算法阈值、先验、衰减、证据长度、冷却和恢复限制是内部策略，不属于配置协议。
@@ -697,6 +705,8 @@ macOS `write_dirs`、临时目录和会话存储的写入规则包含字面路�
 | `format_max_errors` | `Optional[int]` | `None` |
 | `request_max_retries` | `Optional[int]` | `None` |
 | `request_timeout_secs` | `Optional[int]` | `None` |
+| `ptc_mode` | `str` | `'off'` |
+| `ptc_config` | `Optional[dict[str, Any]]` | `None` |
 | `cwd` | `Optional[str]` | `None` |
 
 `mink-server.toml` 的服务监听字段在 `[server]`，默认模型和 Mink home 在 `[agent]`；它与 CLI `--config` 的分组字符串是不同入口。

@@ -1,6 +1,6 @@
 # 架构与模块
 
-> 更新日期：2026-10-19
+> 更新日期：2026-11-25
 
 分层、职责与关键不变式。
 
@@ -59,6 +59,7 @@ TurnExecutor (agent/turn.rs)
 │ tools/bash.rs         │ Bash 执行、超时、ANSI 过滤、安全检查、误用提示
 │ tools/python.rs       │ 宿主 Python 执行
 │ tools/sandbox_python.rs│ WASI CPython 沙箱执行（python-sandbox feature）
+│ ptc/{mod,runtime,protocol,bridge,sdk,tool,subprocess_py,wasi_py}.rs │ Python 宿主 PTC 运行时、`RunCode`、FD3/WASI 控制面与 `PtcDispatchBridge`
 │ tools/plan.rs         │ PlanDraft / PlanConfirm / PlanClear 类型化命令
 │ tools/todo.rs         │ TodoRead / TodoWrite / TodoAdvance、revision 事件协议
 └───────────────────────┘

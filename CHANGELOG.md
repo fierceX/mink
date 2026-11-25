@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Python 宿主 Programmatic Tool Calling（PTC / `RunCode`）**：新增 `PtcMode`（`off` 默认 / `tool` / `exclusive`）与 `RunCode` 工具。模型可通过一段顶层 `await` Python 3 程序经 `await tools.<Name>(...)`、`gather(...)`、`inspect(*values)`、`ToolCallError` 与 `Image` 句柄编排工具流水线；默认由受控 `python3` 子进程经独立 FD 3 NDJSON 通道与可选 OS 沙箱运行，开启 `python-sandbox` feature 时支持 WASI CPython 后端；调度桥维护只读滚动并发池与写入/命令串行屏障、子调用配额与 `<parent>:ptc:<n>` 事件，保留 Hashline snapshot、ReadMemo、`TodoAdvance`、多图预算与 `artifact://` 落盘保护；支持 `--ptc`、`MINK_PTC_MODE`、`.minkrc` `[ptc]`、JSONL `options.ptc`、`mink-server` 与 Python `SandboxConfig.ptc_mode` / `ptc_config`。
+
 ## v0.9.1 (2026-11-25)
 
 本版重点围绕运行安全、热路径性能、架构模块化拆分以及 Web 工作台体验进行了全面加固：修复沙箱/进程/持久化边界与并发竞态，加固 `mink-server` HTTP 安全中间件与 SSE 广播保序，优化 Web 工作台流式渲染、快捷键与按需分包，并收敛公共 API 边界与测试体系。
