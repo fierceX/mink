@@ -1,6 +1,4 @@
-use regex::Regex;
 use serde_json::Value;
-use std::sync::LazyLock;
 
 /// A recovered tool call.
 #[derive(Debug, Clone)]
@@ -13,103 +11,40 @@ pub struct ToolCallInfo {
     /// parsed; the round layer turns this into a model-format failure instead
     /// of silently executing a different (empty) call.
     pub parse_error: Option<String>,
-    /// True only for the bare-JSON fallback (no explicit wrapper). Those have
-    /// the broadest false-positive surface, so only known surface tool names
-    /// are allowed to become candidates. Explicit `<tool_call>`/DSML wrappers
-    /// are a deliberate model attempt and keep their format-feedback path even
-    /// when the name is empty/damaged.
-    pub bare_json: bool,
 }
 
-/// Bounds for regex input — DSML regex can be O(n²) on adversarial input.
+/// Bound the text examined by the compatibility parser.
 const MAX_SCAVENGE_INPUT: usize = 100 * 1024;
 
-// ---- Regex patterns ----
-
-static XML_TOOL_CALL_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?s)<tool_call>\s*(.*?)\s*</tool_call>").unwrap());
-
-static BRACKET_TOOL_CALL_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?s)\[TOOL_CALL\]\s*(.*?)\s*\[/TOOL_CALL\]").unwrap());
-
-// ---- Main API ----
-
-/// Scavenge tool calls from text content (reasoning or response text).
-/// Tries multiple container formats while still routing through the current tool registry/schema.
-///
-/// A recognized wrapper whose inner JSON does not parse yields a degraded
-/// `ToolCallInfo` (empty name + `parse_error`) instead of being dropped: an
-/// explicit candidate must reach the correction branch.
+/// Parse a channel containing only protocol envelopes. A prose prefix,
+/// suffix, or fenced example leaves the entire channel as ordinary text.
 pub fn scavenge_tool_calls(text: &str) -> Option<Vec<ToolCallInfo>> {
     if text.len() > MAX_SCAVENGE_INPUT {
         return None;
     }
-
-    let mut results = Vec::new();
-
-    // 1. Try DSML invoke format (DeepSeek-specific markup in reasoning_content).
-    // The parser only reports complete invokes (or degraded ones when the
-    // markup is truncated / a JSON parameter is invalid): never a panic, never
-    // partially parsed arguments presented as complete.
-    if let Some(dsml_calls) = scavenge_dsml(text) {
-        results.extend(dsml_calls);
-        if !results.is_empty() {
-            return Some(results);
+    let mut rest = text.trim();
+    if rest.starts_with(DSML_OPEN) {
+        return scavenge_dsml(rest);
+    }
+    let mut calls = Vec::new();
+    while !rest.is_empty() {
+        let (body, closer) = rest
+            .strip_prefix("<tool_call>")
+            .map(|body| (body, "</tool_call>"))
+            .or_else(|| {
+                rest.strip_prefix("[TOOL_CALL]")
+                    .map(|body| (body, "[/TOOL_CALL]"))
+            })?;
+        let closed = body.split_once(closer);
+        let (payload, tail) = closed.unwrap_or((body, ""));
+        let mut call = classify_wrapper_payload(payload.trim()).unwrap_or_else(|damaged| damaged);
+        if closed.is_none() && call.parse_error.is_none() {
+            call.parse_error = Some("tool call wrapper is not terminated".into());
         }
+        calls.push(call);
+        rest = tail.trim_start();
     }
-
-    // 2. Try wrapper formats. The wrapper tag itself is the candidate marker:
-    // the inner text is parsed afterwards, so damaged payloads (truncated
-    // braces, wrong types, unusable identity) are surfaced as degraded
-    // candidates instead of falling through to the bare-text path.
-    for re in [&*XML_TOOL_CALL_RE, &*BRACKET_TOOL_CALL_RE] {
-        let caps: Vec<_> = re.captures_iter(text).collect();
-        if !caps.is_empty() {
-            for cap in &caps {
-                let Some(m) = cap.get(1) else { continue };
-                match classify_wrapper_payload(m.as_str()) {
-                    Ok(call) => results.push(call),
-                    Err(degraded) => results.push(degraded),
-                }
-            }
-            if !results.is_empty() {
-                return Some(results);
-            }
-        }
-    }
-
-    // 2b. A wrapper whose closing tag never arrived is still an explicit
-    // candidate marker: the same closed/unclosed classification applies.
-    if results.is_empty()
-        && let Some((open, close, start)) = [
-            ("<tool_call>", "</tool_call>"),
-            ("[TOOL_CALL]", "[/TOOL_CALL]"),
-        ]
-        .iter()
-        .filter_map(|(open, close)| text.find(open).map(|start| (*open, *close, start)))
-        .min_by_key(|(_, _, start)| *start)
-    {
-        let after = &text[start + open.len()..];
-        let body = after.split(close).next().unwrap_or(after).trim();
-        if !body.is_empty() {
-            match classify_wrapper_payload(body) {
-                Ok(_usable) => {}
-                Err(degraded) => {
-                    results.push(degraded);
-                    return Some(results);
-                }
-            }
-        }
-    }
-
-    // 3. Bare JSON fallback. This is intentionally last because it has the
-    // broadest match surface.
-    if let Some(call) = scavenge_bare_json(text) {
-        results.push(call);
-        return Some(results);
-    }
-
-    None
+    (!calls.is_empty()).then_some(calls)
 }
 
 /// Scavenge from both reasoning_content and content channels.
@@ -125,7 +60,7 @@ pub fn scavenge_combined(
 
     for (source, text) in [("reasoning", reasoning), ("content", content)] {
         let Some(text) = text else { continue };
-        if text.is_empty() {
+        if text.is_empty() || (source == "reasoning" && !text.trim_start().starts_with(DSML_OPEN)) {
             continue;
         }
 
@@ -168,14 +103,12 @@ fn classify_wrapper_payload(content: &str) -> std::result::Result<ToolCallInfo, 
                     .to_string(),
                 arguments: content.to_string(),
                 parse_error: Some("tool call JSON does not contain a usable tool name".to_string()),
-                bare_json: false,
             }),
         },
         Err(error) => Err(ToolCallInfo {
             name: String::new(),
             arguments: content.to_string(),
             parse_error: Some(format!("parse tool call JSON: {error}")),
-            bare_json: false,
         }),
     }
 }
@@ -195,7 +128,6 @@ fn dsml_degraded(name: &str, raw: &str, error: String) -> ToolCallInfo {
         name: name.to_string(),
         arguments: raw.to_string(),
         parse_error: Some(error),
-        bare_json: false,
     }
 }
 
@@ -208,10 +140,14 @@ fn scavenge_dsml(text: &str) -> Option<Vec<ToolCallInfo>> {
     let mut pos = 0;
 
     while pos < text.len() {
-        let Some(invoke_start) = text[pos..].find(DSML_OPEN) else {
+        let rest = text[pos..].trim_start();
+        if rest.is_empty() {
             break;
-        };
-        let marker_at = pos + invoke_start;
+        }
+        if !rest.starts_with(DSML_OPEN) {
+            return None;
+        }
+        let marker_at = text.len() - rest.len();
         let name_begin = marker_at + DSML_OPEN.len();
         let Some(name_end) = text[name_begin..].find('"') else {
             results.push(dsml_degraded(
@@ -312,7 +248,6 @@ fn scavenge_dsml(text: &str) -> Option<Vec<ToolCallInfo>> {
                 name,
                 arguments: serde_json::to_string(&args).unwrap_or_default(),
                 parse_error: None,
-                bare_json: false,
             }),
             Some(error) => results.push(dsml_degraded(&name, &text[marker_at..], error)),
         }
@@ -324,48 +259,6 @@ fn scavenge_dsml(text: &str) -> Option<Vec<ToolCallInfo>> {
     } else {
         Some(results)
     }
-}
-
-// ---- Bare JSON scanning ----
-
-fn scavenge_bare_json(text: &str) -> Option<ToolCallInfo> {
-    let start = text.find('{')?;
-    let slice = &text[start..];
-    let mut depth = 0i32;
-    let mut end = 0;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for (i, ch) in slice.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match ch {
-            '"' => in_string = !in_string,
-            '\\' if in_string => escaped = true,
-            '{' if !in_string => depth += 1,
-            '}' if !in_string => {
-                depth -= 1;
-                if depth == 0 {
-                    end = i + 1;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if end == 0 {
-        return None;
-    }
-
-    let json_str = &slice[..end];
-    let v: Value = serde_json::from_str(json_str).ok()?;
-
-    let mut call = coerce_to_tool_call(&v)?;
-    call.bare_json = true;
-    Some(call)
 }
 
 /// Try supported JSON shapes for tool call representation. This keeps
@@ -399,7 +292,6 @@ fn coerce_to_tool_call(v: &Value) -> Option<ToolCallInfo> {
                     name: name.to_string(),
                     arguments: raw.clone(),
                     parse_error: Some(format!("parse function arguments: {error}")),
-                    bare_json: false,
                 },
             },
             // Field present with the wrong type: a type error, never `{}`.
@@ -410,7 +302,6 @@ fn coerce_to_tool_call(v: &Value) -> Option<ToolCallInfo> {
                     "function arguments must be a JSON string (got {})",
                     json_type_name(other)
                 )),
-                bare_json: false,
             },
         });
     }
@@ -436,7 +327,6 @@ fn json_arguments_info(name: &str, args: Value) -> ToolCallInfo {
         name: name.to_string(),
         arguments: serde_json::to_string(&args).unwrap_or_default(),
         parse_error: None,
-        bare_json: false,
     }
 }
 

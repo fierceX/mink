@@ -171,6 +171,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 - 软信号（ToolError/EditLoop/ArgumentError）单次且信念 ≥ warn 不干预；累计 ≥2 次软失败，或出现硬信号（ToolFailed/SafetyBlocked/CompileError/TestFailure）与结构化错误码（Timeout/ProcessFailed/SafetyBlocked/Aborted）才参与决策。
 - 注入的是轨迹事实帧（`[trajectory]`/`[detector]`），禁止祈使句与“进入恢复模式”命令；去重哈希只覆盖证据事实文本，同一证据批不重复注入；响应事件携带证据文本（可回溯 conversation.jsonl）。
 - 警告级状态操作保留共享工作区；为窗口内编辑路径注入 `[edit-recovery]`，提示重读、对照已提交的 Edit 差异与可用的读取基线。外部编辑器不共享运行时锁，因此不自动整文件恢复。
+- 正文兼容协议由 backend 显式开启；正文仅接受独立 XML、bracket 或 DSML 包装序列，reasoning 仅接受独立 DSML 序列。裸 JSON 和解释示例保留为文本。
 - 恢复守卫拦截必须生成真实信号喂回信念；连续拦截达 `guard_max_blocks` 必须绕过守卫并强制注入，禁止无限拦截；信念跌破 abort 时，非交互且策略允许 restart 则先尝试 replan，成功重置信念并继续；未成功时 full 策略记录 `signal_handover` 后 Failed，较低策略直接 Failed。禁止静默丢弃证据；策略重启子代理初始化失败必须降级（`signal_replan_error` 后返回 None），不得升级为整轮 Err。
 - Recovery 首步资格来自 resolved semantic capabilities；Bash 的 `FocusedVerificationExec` classifier 与普通 Bash 安全/误用提示相互独立。
 

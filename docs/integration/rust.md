@@ -287,3 +287,7 @@ Rust 默认不自动驱动。先订阅 Goal 与接入事件；宿主提交完整
 每轮正常结束后 runtime 自动运行只读分流或证据审核，并将描述性报告交给原会话的宿主 agent 调用 GoalReview 提交结论；显式工具白名单须包含 GoalReview。两步共用验收期限和 Goal usage，提交校验拒绝由宿主在同轮纠正重试，默认 completion basis 为 agent_reviewed。with_goal_verifier 注册宿主检查器，配置的检查器也必须通过；Human 再等待宿主 approve_goal，过期批准拒绝。检查器修改证据时以新 generation 在同一执行轮重新审核；已知通过结果只在返回时记录的证据版本仍匹配时复用，恢复不重放已知检查器。所有停止、验收、恢复和 lease 约束见 [Goal 契约](../reference/goals.md)，完整例子在 crates/mink-core/examples/goal.rs。不可恢复故障需要关闭并重开 runtime；未知副作用仍须明确对账。
 
 GoalSnapshot 增加 review_failure_stage，保留 review_stage、review_requires_full、review_escalation_reason、review_report、continuations 和轻量计数。SDK 通过 GoalReviewSubmission、GoalContinueProposal/Record、GoalRoundDecision、GoalReviewStage 读取协议类型，requirement_ids() 和 latest_round_decision() 派生当前要求及最近轮次决策。新的宿主工具输入为 GoalHostConclusion（decision/summary/next_step 及可选剩余要求和阻断描述），runtime 绑定候选与报告；旧完整提交保留解码。reviews 中的新结论携带 report、无 original_request 和逐项 findings；旧审核保留原义，不制造逐项通过或未知状态。
+
+## 文本工具协议
+
+自定义 `LlmBackend` 默认只派发结构化调用。实现 `supports_wrapped_tool_calls() -> bool` 并返回 true 可启用与内置 backend 相同的包装协议。普通正文支持独立的 XML、bracket 或 DSML 调用序列，reasoning 仅支持 DSML。

@@ -22,7 +22,7 @@ SSE 按 index 合并 name、id 和 arguments。`build_tool_call_event()` 只接�
 
 ### 步骤 2：Scavenge（回收）
 
-LLM 流式响应结束后，`crates/mink-core/src/agent/turn.rs` 从 `thinking`
+开启 `supports_wrapped_tool_calls()` 的 backend 在流式响应结束后，`crates/mink-core/src/agent/turn.rs` 从 `thinking`
 （reasoning_content）和 `text`（普通文本）两个渠道回收遗漏的工具调用，补充到标准
 tool-call 列表中。每个候选调用都通过 `build_tool_call_event()` 转为结构化事件；解析失败的
 候选保留为降级候选进入同一有界纠错分支。去重使用 `(tool name, input_json)`，因此同名但参数不同的调用可以保留。
@@ -32,9 +32,8 @@ tool-call 列表中。每个候选调用都通过 `build_tool_call_event()` 转�
 1. **DSML invoke** — `<|DSML|invoke name="Read">` DeepSeek 专用标记语言，不经过标准 tool_calls 字段
 2. **XML 包装** — `<tool_call>{...}</tool_call>`
 3. **Bracket 包装** — `[TOOL_CALL]{...}[/TOOL_CALL]`
-4. **裸 JSON** — 扫描自由文本中的 `{name, arguments}` 形状
-5. **OpenAI style** — `{"type":"function","function":{"name","arguments"}}`
-6. **R1 variant** — `{"tool_name":"Bash","tool_args":{...}}`
+
+普通正文仅在整个渠道由包装序列组成时回收；推理渠道仅接受 DSML。裸 JSON、带说明的示例和代码围栏保留为文本。包装内仍支持 OpenAI function 与 R1 tool_name 形状。
 
 这些格式是“容器协议”兼容层，不代表旧参数重新成为模型协议。回收层只把内容规整成
 `{name, arguments}`，之后仍由当前 `tools.json` schema、`ToolExec` 参数反序列化和工具实现校验。

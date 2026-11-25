@@ -8,7 +8,9 @@ impl super::TurnExecutor {
         text: &str,
         mut calls: Vec<ToolCallEvent>,
     ) -> (Vec<ToolCallEvent>, bool) {
-        if thinking.is_empty() && text.is_empty() {
+        if !self.ctx.llm_backend.supports_wrapped_tool_calls()
+            || (thinking.is_empty() && text.is_empty())
+        {
             return (calls, false);
         }
         let (scavenged, notes) = crate::repair::scavenge_combined(
@@ -23,14 +25,6 @@ impl super::TurnExecutor {
         self.local.scavenge_seq += 1;
         let mut recovered = false;
         for sc in &scavenged {
-            // A bare JSON object in prose is only a tool call when its name is
-            // actually on this round's surface. Package manifests, JSON-RPC
-            // samples and documentation examples must stay ordinary text.
-            // Explicit wrappers keep their format-feedback path even when the
-            // name is empty/damaged (the model made a deliberate attempt).
-            if sc.bare_json && !self.ctx.tools.tool_surface.has(&sc.name) {
-                continue;
-            }
             let cid = format!("scavenged_{}_{}", self.local.scavenge_seq, calls.len());
             // A candidate whose arguments were declared but could not be parsed
             // (wrapper JSON damage or a `function.arguments` string) is already

@@ -115,6 +115,12 @@ pub struct LlmRequest {
 pub trait LlmBackend: Send + Sync {
     fn name(&self) -> &str;
 
+    /// Opt into the legacy text protocol (standalone XML/bracket/DSML
+    /// envelopes in content, DSML in reasoning). Bare JSON stays prose.
+    fn supports_wrapped_tool_calls(&self) -> bool {
+        false
+    }
+
     /// Open one streaming request.
     ///
     /// Cancellation contract: implementations should observe `request.cancel`
@@ -415,6 +421,10 @@ impl OpenAiCompatibleBackend {
 
 #[async_trait::async_trait]
 impl LlmBackend for OpenAiCompatibleBackend {
+    fn supports_wrapped_tool_calls(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "openai-compatible"
     }

@@ -9,7 +9,7 @@ fn args_of(info: &ToolCallInfo) -> Value {
 
 #[test]
 fn scavenge_xml_style() {
-    let text = r#"I'll update it <tool_call>{"name":"Edit","arguments":{"path":"src/a.rs","patch":"@src/a.rs#0A3B\nreplace 2:\n+new()"}}</tool_call> now"#;
+    let text = r#"<tool_call>{"name":"Edit","arguments":{"path":"src/a.rs","patch":"@src/a.rs#0A3B\nreplace 2:\n+new()"}}</tool_call>"#;
     let result = scavenge_tool_calls(text).unwrap();
     assert_eq!(result[0].name, "Edit");
     assert_eq!(
@@ -20,7 +20,7 @@ fn scavenge_xml_style() {
 
 #[test]
 fn scavenge_bracket_style() {
-    let text = r#"Let me check [TOOL_CALL]{"name":"Read","arguments":{"path":"/tmp/x:10-20"}}[/TOOL_CALL]"#;
+    let text = r#"[TOOL_CALL]{"name":"Read","arguments":{"path":"/tmp/x:10-20"}}[/TOOL_CALL]"#;
     let result = scavenge_tool_calls(text).unwrap();
     assert_eq!(result[0].name, "Read");
     assert_eq!(args_of(&result[0])["path"], "/tmp/x:10-20");
@@ -29,9 +29,7 @@ fn scavenge_bracket_style() {
 #[test]
 fn scavenge_bare_json() {
     let text = r#"Here: {"name":"Read","arguments":{"path":"artifact://bash-0001:1-20"}}"#;
-    let result = scavenge_tool_calls(text).unwrap();
-    assert_eq!(result[0].name, "Read");
-    assert_eq!(args_of(&result[0])["path"], "artifact://bash-0001:1-20");
+    assert!(scavenge_tool_calls(text).is_none());
 }
 
 #[test]
@@ -44,7 +42,7 @@ fn no_tool_call_returns_none() {
 fn escape_hatches_fallback() {
     let text = r#"some text and then {"name": "Read", "arguments": {"path": "skill://debugging"}} trailing"#;
     let result = scavenge_tool_calls(text);
-    assert!(result.is_some());
+    assert!(result.is_none());
 }
 
 // ---- New: DSML ----
@@ -201,7 +199,7 @@ fn missing_brace_wrapper_is_surfaced() {
 
 #[test]
 fn unclosed_wrapper_with_unparsable_body_is_surfaced() {
-    let text = r#"Trying <tool_call>{"name":"TodoRead","arguments":false"#;
+    let text = r#"<tool_call>{"name":"TodoRead","arguments":false"#;
     let (calls, _) = scavenge_combined(None, Some(text), 4);
     assert_eq!(calls.len(), 1, "{calls:?}");
     let error = calls[0].parse_error.as_deref().unwrap_or_default();
@@ -241,8 +239,8 @@ fn closed_wrapper_matrix_is_covered() {
         ),
         (
             r#"<tool_call>{"name":"Read","arguments":{"path":"/x"}}"#,
-            true,
             false,
+            true,
         ),
         (r#"<tool_call>{"name":"","arguments":{}}"#, false, true),
         (
@@ -376,8 +374,8 @@ fn dsml_truncated_parameter_is_degraded() {
 #[test]
 fn scavenge_combined_dedup() {
     let text1 = r#"<tool_call>{"name":"Read","arguments":{"path":"/x:1-4"}}</tool_call>"#;
-    let text2 = r#"{"name":"Read","arguments":{"path":"/x:1-4"}}"#;
-    let (calls, _) = scavenge_combined(Some(text1), Some(text2), 10);
+    let text2 = format!("{text1}\n{text1}");
+    let (calls, _) = scavenge_combined(Some(text1), Some(&text2), 10);
     assert_eq!(calls.len(), 1);
 }
 
@@ -386,7 +384,7 @@ fn scavenge_combined_respects_max() {
     let text = r#"<tool_call>{"name":"Read","arguments":{"path":"/a"}}</tool_call>
 <tool_call>{"name":"Read","arguments":{"path":"/b"}}</tool_call>
 <tool_call>{"name":"Read","arguments":{"path":"/c"}}</tool_call>"#;
-    let (calls, notes) = scavenge_combined(Some(text), None, 2);
+    let (calls, notes) = scavenge_combined(None, Some(text), 2);
     assert_eq!(calls.len(), 2);
     assert!(notes.iter().any(|n| n.contains("reached max")));
 }
@@ -400,4 +398,17 @@ fn scavenge_dsml_param_without_string_attribute_strips_separator() {
     let result = scavenge_tool_calls(text).unwrap();
     assert_eq!(result[0].name, "Read");
     assert_eq!(args_of(&result[0])["path"], "/tmp/no-attr.txt");
+}
+
+#[test]
+fn examples_and_reasoning_discussions_do_not_dispatch() {
+    let wrapper = r#"<tool_call>{"name":"Read","arguments":{"path":"demo"}}</tool_call>"#;
+    for example in [
+        format!("Example: {wrapper}"),
+        format!("```xml\n{wrapper}\n```"),
+        format!("{wrapper} is an example"),
+    ] {
+        assert!(scavenge_combined(None, Some(&example), 4).0.is_empty());
+    }
+    assert!(scavenge_combined(Some(wrapper), None, 4).0.is_empty());
 }

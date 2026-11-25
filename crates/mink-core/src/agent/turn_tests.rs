@@ -471,6 +471,10 @@ impl ScriptedBackend {
 
 #[async_trait::async_trait]
 impl LlmBackend for ScriptedBackend {
+    fn supports_wrapped_tool_calls(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "scripted"
     }
@@ -2402,8 +2406,8 @@ async fn write_argument_error_consumes_the_format_budget() -> anyhow::Result<()>
 /// Regression: a plain JSON example in the body is not a tool call unless its
 /// name is on the resolved surface (a package.json-like object must stay text).
 #[tokio::test]
-async fn scavenged_plain_json_without_a_surface_tool_is_ignored() -> anyhow::Result<()> {
-    let body = r#"Example config: {"name":"package","version":"1.0.0"}"#;
+async fn scavenged_plain_json_for_a_surface_tool_is_ignored() -> anyhow::Result<()> {
+    let body = r#"Example only: {"name":"Read","arguments":{"path":"sample.txt"}}"#;
     let backend = ScriptedBackend::new(vec![ScriptedAttempt::Events(vec![
         Ok(Event::Text(crate::protocol::TextEvent {
             content: body.into(),
@@ -2437,7 +2441,7 @@ async fn scavenged_plain_json_without_a_surface_tool_is_ignored() -> anyhow::Res
 async fn scavenged_unparsable_call_is_surfaced_not_dropped() -> anyhow::Result<()> {
     // `arguments` is a JSON string rather than an object: scavenge recognizes
     // the call shape, but the payload is unusable.
-    let body = r#"Let me run it: {"name":"Bash","arguments":"{\"command\":\"echo hi\"}"}"#;
+    let body = r#"<tool_call>{"name":"Bash","arguments":"{\"command\":\"echo hi\"}"}</tool_call>"#;
     let backend = ScriptedBackend::new(vec![
         ScriptedAttempt::Events(vec![
             Ok(Event::Text(crate::protocol::TextEvent {
@@ -2552,8 +2556,7 @@ async fn injected_signal_evidence_reaches_the_next_request() -> anyhow::Result<(
 /// executed; it must consume the format budget.
 #[tokio::test]
 async fn unparsable_nested_function_arguments_are_format_feedback() -> anyhow::Result<()> {
-    let body =
-        r#"Calling now: {"type":"function","function":{"name":"TodoRead","arguments":"not-json"}}"#;
+    let body = r#"<tool_call>{"type":"function","function":{"name":"TodoRead","arguments":"not-json"}}</tool_call>"#;
     let backend = ScriptedBackend::new(vec![ScriptedAttempt::Events(vec![
         Ok(Event::Text(crate::protocol::TextEvent {
             content: body.into(),
@@ -2595,7 +2598,7 @@ async fn unparsable_nested_function_arguments_are_format_feedback() -> anyhow::R
 /// feedback (one format error) instead of completing silently.
 #[tokio::test]
 async fn damaged_wrapper_json_is_format_feedback_not_a_silent_stop() -> anyhow::Result<()> {
-    let body = r#"Trying: <tool_call>{"name":"Read","arguments":[/tmp/x"}</tool_call>"#;
+    let body = r#"<tool_call>{"name":"Read","arguments":[/tmp/x"}</tool_call>"#;
     let backend = ScriptedBackend::new(vec![
         ScriptedAttempt::Events(vec![
             Ok(Event::Text(crate::protocol::TextEvent {
@@ -2632,8 +2635,7 @@ async fn damaged_wrapper_json_is_format_feedback_not_a_silent_stop() -> anyhow::
 /// with fabricated empty arguments.
 #[tokio::test]
 async fn non_string_nested_arguments_are_format_feedback() -> anyhow::Result<()> {
-    let body =
-        r#"Calling now: {"type":"function","function":{"name":"TodoRead","arguments":false}}"#;
+    let body = r#"<tool_call>{"type":"function","function":{"name":"TodoRead","arguments":false}}</tool_call>"#;
     let backend = ScriptedBackend::new(vec![ScriptedAttempt::Events(vec![
         Ok(Event::Text(crate::protocol::TextEvent {
             content: body.into(),
@@ -2670,7 +2672,7 @@ async fn non_string_nested_arguments_are_format_feedback() -> anyhow::Result<()>
 /// plain-text success.
 #[tokio::test]
 async fn missing_brace_wrapper_is_format_feedback() -> anyhow::Result<()> {
-    let body = r#"Trying: <tool_call>{"name":"TodoRead","arguments":false</tool_call>"#;
+    let body = r#"<tool_call>{"name":"TodoRead","arguments":false</tool_call>"#;
     let backend = ScriptedBackend::new(vec![
         ScriptedAttempt::Events(vec![
             Ok(Event::Text(crate::protocol::TextEvent {
@@ -2706,7 +2708,7 @@ async fn missing_brace_wrapper_is_format_feedback() -> anyhow::Result<()> {
 /// feedback path instead of completing silently.
 #[tokio::test]
 async fn wrapper_without_identity_is_format_feedback() -> anyhow::Result<()> {
-    let body = r#"Trying: <tool_call>{"name":"","arguments":{}}</tool_call>"#;
+    let body = r#"<tool_call>{"name":"","arguments":{}}</tool_call>"#;
     let backend = ScriptedBackend::new(vec![
         ScriptedAttempt::Events(vec![
             Ok(Event::Text(crate::protocol::TextEvent {
@@ -2811,7 +2813,7 @@ async fn retry_notifications_do_not_extend_idle() -> anyhow::Result<()> {
 /// invalid must consume the format budget and never execute the tool.
 #[tokio::test]
 async fn dsml_invalid_json_parameter_is_format_feedback() -> anyhow::Result<()> {
-    let body = "Trying <|DSML|invoke name=\"Bash\"><|DSML|parameter name=\"command\" string=\"false\">echo audit<|DSML|parameter></|DSML|invoke>";
+    let body = "<|DSML|invoke name=\"Bash\"><|DSML|parameter name=\"command\" string=\"false\">echo audit<|DSML|parameter></|DSML|invoke>";
     let backend = ScriptedBackend::new(vec![ScriptedAttempt::Events(vec![
         Ok(Event::Text(crate::protocol::TextEvent {
             content: body.into(),

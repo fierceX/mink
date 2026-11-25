@@ -385,3 +385,34 @@ async fn warning_preserves_external_save_after_accepted_edit() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn plain_examples_remain_one_request_on_the_public_runtime() -> Result<()> {
+    let (home, cwd) = temp_pair("example-only");
+    let example = r#"{"name":"Read","arguments":{"path":"sample.txt"}}"#;
+    std::fs::write(cwd.join("sample.txt"), "external marker")?;
+    for body in [
+        format!("Example: {example}"),
+        format!("<tool_call>{example}</tool_call>"),
+    ] {
+        let backend = Arc::new(ScriptedBackend::new(vec![text_stop(&body, "end_turn")]));
+        let runtime =
+            AgentRuntime::start(AgentOptions::new(&home, &cwd).with_llm_backend(backend.clone()))
+                .await?;
+        runtime
+            .run_turn("Show the call as an example only.")
+            .await?;
+        assert_eq!(backend.captured().len(), 1);
+        let rows = conversation_rows(&runtime.session_info().conversation_path)?;
+        assert!(
+            !rows
+                .iter()
+                .filter_map(|row| row["content"].as_array())
+                .flatten()
+                .any(|b| b["type"] == "tool_use" || b["type"] == "tool_result")
+        );
+        runtime.shutdown().await?;
+    }
+    std::fs::remove_dir_all(home.parent().unwrap())?;
+    Ok(())
+}

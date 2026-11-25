@@ -20,6 +20,10 @@ impl MockLlmBackend {
 
 #[async_trait::async_trait]
 impl LlmBackend for MockLlmBackend {
+    fn supports_wrapped_tool_calls(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "mock"
     }
