@@ -63,3 +63,7 @@ tools 与历史消息前缀字节级稳定。计划确认/清除通过 append-on
 ## 下一步
 
 查看[配置参考](../reference/configuration.md)、[工具参考](../reference/tools.md)或返回[文档总览](../start/overview.md)。
+
+## 编辑恢复与未知工具结果
+
+看到 `[edit-recovery]` 时，重读列出的文件，对照本轮 Edit 差异决定下一步。看到 `execution outcome unknown` 时，先核对工具目标端或工作区的实际状态，再决定是否重试。有未决副作用的 Goal 需要按目标对账流程处理。

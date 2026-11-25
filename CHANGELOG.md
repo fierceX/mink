@@ -10,6 +10,7 @@
 
 - 信号警告保留工作区并提示复核近期编辑，保护其他编辑器同时保存的内容。
 - 正文工具调用兼容仅接受 backend 声明的包装协议；JSON 示例与推理中的普通讨论保留为文本。
+- 批内致命错误保留已取得的同批结果，明确记录未知执行结果，Goal 在重开后继续保留未决副作用。
 
 - **`mink-server` 安全边界、热路径性能与配置/架构收敛**：增加 `Host` / `Origin` / `Sec-Fetch-Site` 中间件（支持 `MINK_SERVER_ALLOWED_HOSTS`）、响应安全头、API `Cache-Control: no-store`、`/api/*` 404 JSON 兜底、请求体上限（默认 2 MiB / 附件 16 MiB）、`IpAddr` 启动校验与非 loopback 告警；文件与 artifact 读取改用 `O_NONBLOCK | O_NOFOLLOW` 并限制 `MAX_DIR_ENTRIES = 2000`（返回 `truncated`）及受限错误消息；广播事件改用 `Arc<str>` 零拷贝与类型化分类、增量 delta 追加并把序列化与广播移出投影锁、开放大历史仅读有界尾部、`reserve_goal_run` 改用 `Notify` 消除 10ms 轮询、`session_dir` 在 `?project=` 时直接 O(1) 定位并把扫描与附件读取卸载到 `spawn_blocking`、`ActiveOpGuard` 保护在途控制操作不被 reaper 误杀；统一 `.minkrc` 解析辅助函数至 `mink::config_file` 消除 CLI/server 漂移，并把 `api`、`registry`、`runtime`、`agent_config` 拆分为子模块。
 - **Web 工作台交互、稳定性与性能优化**：转录区新增 `ResizeObserver` 流式自动跟底与 `useLayoutEffect` 前插翻页锚定；输入区支持自动增高、稳定命令面板并在 `Escape` 后保持收起直到编辑斜杠草稿，空白会话 Hero 输入框补齐模型切换，`NewConversation` 展示创建进度并同步页面 `document.title`；分离 `openError` 与可关闭的 `actionError` 并消除渲染期存储副作用；`useAttachments` 移出状态更新器副作用并跟踪回收 `blob:` 预览 URL；`DetailPanel` 目标审批/对账改用内联输入取代 `window.prompt`，`GoalBar` 图标按钮补全 `Tooltip`，修正 `ChangedFiles` Hook 顺序，新增 `Cmd/Ctrl+B` 切换侧栏与 `Cmd/Ctrl+.` 中断快捷键，断网恢复时立即重连 SSE 并校验服务端资源版本；拆分核心视图与数据模块、`Transcript` 按轮次 memo 化减少流式重绘、`workbenchReducer` 对顺序 `conversation_committed` 走增量折叠、`reducer` 用 `WeakMap<..., Set>` 加速事件去重；动态按需加载 KaTeX（仅保留 `.woff2` 字体）、空闲延迟预热 Shiki 并配置 `manualChunks`，主入口 JS 从 `1,349.25 kB` 降至 `785.24 kB`。

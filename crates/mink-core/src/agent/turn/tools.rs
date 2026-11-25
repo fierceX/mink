@@ -144,6 +144,13 @@ impl super::TurnExecutor {
         effects: &mut Vec<TurnEffect>,
     ) -> Result<bool> {
         self.local.tool_call_count += calls.len() as u32;
+        let order = self.local.signal_recovery_guard.then(|| {
+            calls
+                .iter()
+                .enumerate()
+                .map(|(index, call)| (call.id.clone(), index))
+                .collect::<std::collections::HashMap<_, _>>()
+        });
         let (calls_to_execute, mut guarded_results) = self.apply_signal_recovery_guard(calls);
         let executed = if calls_to_execute.is_empty() {
             Ok(Vec::new())
@@ -160,18 +167,29 @@ impl super::TurnExecutor {
                 (completed, Some(error))
             }
         };
-        let executed_count = executed_results.len();
         if let Some(error) = &fatal {
-            for call in calls_to_execute.iter().skip(executed_count) {
-                executed_results.push(crate::tools::runner::failed_tool_result(
-                    call.id.clone(),
-                    call.name.clone(),
-                    call.fields.clone(),
-                    format!("not executed: {error:#}"),
-                ));
-            }
+            let mut by_id: std::collections::HashMap<_, _> = executed_results
+                .into_iter()
+                .map(|result| (result.tool_use_id.clone(), result))
+                .collect();
+            executed_results = calls_to_execute
+                .into_iter()
+                .map(|call| {
+                    by_id.remove(&call.id).unwrap_or_else(|| {
+                        crate::tools::runner::failed_tool_result(
+                            call.id,
+                            call.name,
+                            call.fields,
+                            format!("not executed: {error:#}"),
+                        )
+                    })
+                })
+                .collect();
         }
         guarded_results.append(&mut executed_results);
+        if let Some(order) = order {
+            guarded_results.sort_by_key(|result| order[&result.tool_use_id]);
+        }
         let results = guarded_results;
 
         // Plan hand-off happens in place on the executed results: the tool
@@ -225,6 +243,9 @@ impl super::TurnExecutor {
             self.ctx.stores.goal_store.close_effects(
                 &processed_results
                     .iter()
+                    .filter(|r| {
+                        crate::session::goal::effect_outcome_known(r.state_metadata.as_ref())
+                    })
                     .map(|r| r.tool_use_id.clone())
                     .collect::<Vec<_>>(),
             )?;

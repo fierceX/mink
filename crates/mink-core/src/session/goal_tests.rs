@@ -374,7 +374,7 @@ fn journal_recovers_snapshot_failure_and_fault_latches() {
 
 #[test]
 fn formal_result_resolves_effect_but_synthetic_repair_does_not() {
-    for (kind, paused) in (0..3).flat_map(|kind| [false, true].map(|paused| (kind, paused))) {
+    for (kind, paused) in (0..4).flat_map(|kind| [false, true].map(|paused| (kind, paused))) {
         let formal = kind == 1;
         let (dir, store) = store();
         let goal = store.create(GoalSpec::new("build"), "env".into()).unwrap();
@@ -396,6 +396,9 @@ fn formal_result_resolves_effect_but_synthetic_repair_does_not() {
         let mut block = serde_json::json!({"type":"tool_result","tool_use_id":"write","content":"result unavailable"});
         if formal {
             block["_mink"] = serde_json::json!({"status":{"state":"succeeded"}});
+        }
+        if kind == 3 {
+            block["_mink"] = serde_json::json!({"status":{"state":"failed","reason":"unknown"},"execution_outcome":"unknown"});
         }
         if kind == 2 {
             block["_mink"] = serde_json::json!({"status":{"state":"unknown"}});

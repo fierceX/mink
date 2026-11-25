@@ -303,6 +303,8 @@ impl ToolRunner {
     }
 }
 
+use policy::unknown_tool_result;
+
 mod batch;
 mod format;
 mod policy;

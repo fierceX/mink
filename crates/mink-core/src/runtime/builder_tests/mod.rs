@@ -1035,7 +1035,7 @@ impl crate::llm::client::LlmBackend for HighFrequencyRetryBackend {
 
 /// Custom tool that panics inside its spawned task: this is the deterministic
 /// infrastructure failure for the partial-results contract.
-struct PanicTool;
+struct PanicTool(tokio::sync::Notify);
 
 #[async_trait::async_trait]
 impl AgentTool for PanicTool {
@@ -1045,7 +1045,7 @@ impl AgentTool for PanicTool {
             "Always panics (test fixture)",
             serde_json::json!({
                 "type": "object",
-                "properties": {},
+                "properties": {"release":{"type":"boolean"},"mark":{"type":"boolean"}},
                 "additionalProperties": false
             }),
         );
@@ -1055,9 +1055,18 @@ impl AgentTool for PanicTool {
 
     async fn execute(
         &self,
-        _input: serde_json::Value,
-        _ctx: ToolExecutionContext,
+        input: serde_json::Value,
+        ctx: ToolExecutionContext,
     ) -> Result<ToolOutput, ToolError> {
+        if input["release"] == true {
+            self.0.notify_one();
+            return Ok(ToolOutput::text("later sibling finished"));
+        }
+        if input["mark"] == true {
+            std::fs::write(ctx.cwd().join("attempted"), "once").unwrap();
+        } else {
+            self.0.notified().await;
+        }
         panic!("panic tool fixture");
     }
 }

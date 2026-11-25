@@ -30,3 +30,8 @@ use types::State;
 #[cfg(test)]
 #[path = "../goal_tests.rs"]
 mod tests;
+
+/// Old records predate the optional outcome marker and retain their existing semantics.
+pub(crate) fn effect_outcome_known(metadata: Option<&serde_json::Value>) -> bool {
+    metadata.and_then(|m| m.get("execution_outcome")).is_none()
+}

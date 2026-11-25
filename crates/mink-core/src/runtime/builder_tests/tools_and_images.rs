@@ -483,6 +483,11 @@ async fn partial_tool_results_survive_join_failure() {
                     "call_panic",
                     json!({}),
                 ))),
+                Ok(Event::ToolCall(tool_call_event(
+                    "PanicTool",
+                    "call_later",
+                    json!({"release":true}),
+                ))),
                 Ok(Event::Stop(StopEvent {
                     reason: "tool_use".into(),
                 })),
@@ -498,7 +503,9 @@ async fn partial_tool_results_survive_join_failure() {
         ],
     );
     let mut config = runtime_config_with_mock(&home, &cwd, mock);
-    config.custom_tools.push(Arc::new(PanicTool));
+    config
+        .custom_tools
+        .push(Arc::new(PanicTool(tokio::sync::Notify::new())));
     let runtime = build_runtime(config).await.unwrap();
 
     let outcome = runtime.run_turn("read then panic").await.unwrap();
@@ -532,11 +539,117 @@ async fn partial_tool_results_survive_join_failure() {
         "no synthetic failure may replace the successful Read: {conversation}"
     );
     assert!(
-        conversation.contains("not executed"),
-        "the panicked call must be marked as not executed: {conversation}"
+        conversation.contains("execution outcome unknown"),
+        "the panicked call must have an unknown outcome: {conversation}"
+    );
+
+    let blocks: Vec<serde_json::Value> = conversation
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter_map(|row| row["content"].as_array().cloned())
+        .flatten()
+        .filter(|block| block["type"] == "tool_result")
+        .collect();
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|b| b["tool_use_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["call_read", "call_panic", "call_later"]
+    );
+    assert_eq!(blocks[1]["_mink"]["execution_outcome"], "unknown");
+    assert!(
+        blocks[2]["content"]
+            .as_str()
+            .unwrap()
+            .contains("later sibling finished")
     );
 
     runtime.shutdown().await.unwrap();
     let _ = tokio::fs::remove_dir_all(home).await;
     let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+#[tokio::test]
+async fn goal_retains_dispatched_effect_after_tool_panics_and_session_reopens() {
+    use crate::protocol::{Event, StopEvent};
+    use crate::runtime::{AgentOptions, AgentRuntime, GoalSpec, SessionPolicy};
+    let home = unique_temp_dir("unknown-goal-home");
+    let cwd = unique_temp_dir("unknown-goal-cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let backend = Arc::new(crate::llm::mock::MockLlmBackend::new(
+        "flash",
+        vec![vec![
+            Ok(Event::ToolCall(tool_call_event(
+                "PanicTool",
+                "effect",
+                serde_json::json!({"mark":true}),
+            ))),
+            Ok(Event::ToolCall(tool_call_event(
+                "Write",
+                "never",
+                serde_json::json!({"path":"later","content":"bad"}),
+            ))),
+            Ok(Event::Stop(StopEvent {
+                reason: "tool_use".into(),
+            })),
+        ]],
+    ));
+    let options = || {
+        AgentOptions::new(&home, &cwd)
+            .with_llm_backend(backend.clone())
+            .with_tool(Arc::new(PanicTool(tokio::sync::Notify::new())))
+    };
+    let runtime = AgentRuntime::start(options()).await.unwrap();
+    runtime
+        .handle()
+        .confirmed_test_goal(GoalSpec::new("record result"))
+        .unwrap();
+    runtime
+        .ctx
+        .stores
+        .goal_store
+        .begin_iteration("test-turn", 0)
+        .unwrap();
+    let mut executor = crate::agent::turn::TurnExecutor::new(runtime.ctx.clone());
+    assert!(executor.execute("record result", None).await.is_err());
+    assert_eq!(std::fs::read(cwd.join("attempted")).unwrap(), b"once");
+    assert!(!cwd.join("later").exists());
+    assert_eq!(
+        runtime
+            .ctx
+            .stores
+            .goal_store
+            .snapshot()
+            .unwrap()
+            .pending_effects,
+        ["effect"]
+    );
+    let rows = runtime.ctx.stores.store.lines().await.unwrap();
+    let results = rows
+        .iter()
+        .filter_map(|row| row["content"].as_array())
+        .flatten()
+        .filter(|block| block["type"] == "tool_result")
+        .collect::<Vec<_>>();
+    assert_eq!(results[0]["_mink"]["execution_outcome"], "unknown");
+    assert_eq!(results[1]["tool_use_id"], "never");
+    assert!(
+        results[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("not executed")
+    );
+    let id = runtime.session_info().session_id.clone();
+    drop(executor);
+    runtime.shutdown().await.unwrap();
+    let resumed = AgentRuntime::start(options().with_session(SessionPolicy::Resume(id)))
+        .await
+        .unwrap();
+    let goal = resumed.ctx.stores.goal_store.snapshot().unwrap();
+    assert_eq!(goal.pending_effects, ["effect"]);
+    assert_eq!(goal.status, crate::runtime::GoalStatus::Blocked);
+    resumed.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+    std::fs::remove_dir_all(cwd).unwrap();
 }

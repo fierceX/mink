@@ -43,7 +43,7 @@ impl ToolRunner {
                     .snapshot()
                     .is_some_and(|g| g.phase == crate::session::goal::GoalPhase::Executing)
                     && self.find_custom_tool(&call.name).is_some())
-                || requires_sequential_execution(metadata)
+                || requires_sequential_execution(metadata.as_ref())
             {
                 match self
                     .execute_read_batch(std::mem::take(&mut read_batch), &mut image_budget)
@@ -58,9 +58,32 @@ impl ToolRunner {
                         });
                     }
                 }
-                match self.execute_prepared_call(call).await {
+                let call = match self.prepare_call(call) {
+                    PreparedCall::Immediate(result) => {
+                        results.push(result);
+                        continue;
+                    }
+                    PreparedCall::Execute(call) => call,
+                };
+                if records_goal_effect(
+                    &call.name,
+                    metadata.as_ref(),
+                    self.find_custom_tool(&call.name).is_some(),
+                ) && let Err(error) = self.ctx.goal_store.mark_effect(&call.id)
+                {
+                    results.push(not_executed_tool_result(
+                        call,
+                        &format!("not executed: {error:#}"),
+                    ));
+                    return Err(FatalBatchError {
+                        error,
+                        completed: results,
+                    });
+                }
+                match self.dispatch_sequential(call.clone()).await {
                     Ok(result) => results.push(result),
                     Err(error) => {
+                        results.push(unknown_tool_result(call, &error));
                         return Err(FatalBatchError {
                             error,
                             completed: results,
@@ -225,46 +248,30 @@ impl ToolRunner {
                 }
             }
         }
-        let mut text_results: Vec<ToolExecution> = Vec::with_capacity(text_handles.len());
-        // Preserve already-produced results when a later call fails: map the
-        // ordered slots onto the finished prefix instead of dropping them.
-        let ordered_prefix =
-            |slots: Vec<PreparedSlot>, text_results: Vec<ToolExecution>| -> Vec<ToolExecution> {
-                let mut completed = Vec::new();
-                let mut texts = text_results.into_iter();
-                for slot in slots {
-                    match slot {
-                        PreparedSlot::Immediate(result) => completed.push(result),
-                        PreparedSlot::Text(_) => match texts.next() {
-                            Some(result) => completed.push(result),
-                            None => break,
-                        },
-                        PreparedSlot::Image { .. } | PreparedSlot::ClassifyError { .. } => break,
-                    }
-                }
-                completed
+        // Join each dispatched slot, including siblings that finished before
+        // the failure was observed. An aborted handle proves no outcome.
+        let mut text_results = Vec::with_capacity(text_handles.len());
+        let mut handles = text_handles.into_iter();
+        let mut fatal = None;
+        for slot in &slots {
+            let PreparedSlot::Text(call) = slot else {
+                continue;
             };
-        let mut remaining_handles = std::collections::VecDeque::from(text_handles);
-        while let Some(handle) = remaining_handles.pop_front() {
-            match handle.await {
-                Ok(Ok(result)) => text_results.push(result),
-                Ok(Err(error)) => {
-                    for pending in remaining_handles {
-                        pending.abort();
+            let handle = handles.next().expect("one handle per dispatched text slot");
+            match handle
+                .await
+                .map_err(|e| anyhow::anyhow!("tool task join failed: {e}"))
+                .and_then(|r| r)
+            {
+                Ok(result) => text_results.push(result),
+                Err(error) => {
+                    text_results.push(unknown_tool_result(call.clone(), &error));
+                    if fatal.is_none() {
+                        fatal = Some(error);
+                        for pending in handles.as_slice() {
+                            pending.abort();
+                        }
                     }
-                    return Err(FatalBatchError {
-                        error,
-                        completed: ordered_prefix(slots, text_results),
-                    });
-                }
-                Err(join_error) => {
-                    for pending in remaining_handles {
-                        pending.abort();
-                    }
-                    return Err(FatalBatchError {
-                        error: anyhow::anyhow!("tool task join failed: {join_error}"),
-                        completed: ordered_prefix(slots, text_results),
-                    });
                 }
             }
         }
@@ -280,6 +287,13 @@ impl ToolRunner {
                 PreparedSlot::Immediate(result) => results.push(result),
                 PreparedSlot::Text(_) => results.push(text_iter.next().expect("text slot")),
                 PreparedSlot::Image { call, kind } => {
+                    if let Some(error) = &fatal {
+                        results.push(not_executed_tool_result(
+                            call,
+                            &format!("not executed: {error:#}"),
+                        ));
+                        continue;
+                    }
                     let ctx = self.ctx.clone();
                     match kind {
                         crate::tools::file::ImageReadKind::VfsCandidate {
@@ -341,6 +355,12 @@ impl ToolRunner {
                     results.push(failed_tool_result(call.id, call.name, call.fields, error))
                 }
             }
+        }
+        if let Some(error) = fatal {
+            return Err(FatalBatchError {
+                error,
+                completed: results,
+            });
         }
         Ok(results)
     }
@@ -479,38 +499,30 @@ impl ToolRunner {
         }
     }
 
-    async fn execute_prepared_call(&self, call: ToolCallEvent) -> Result<ToolExecution> {
-        match self.prepare_call(call) {
-            PreparedCall::Immediate(result) => Ok(result),
-            PreparedCall::Execute(call) => {
-                if records_goal_effect(
-                    &call.name,
-                    self.metadata_for(&call.name).as_ref(),
-                    self.find_custom_tool(&call.name).is_some(),
-                ) {
-                    self.ctx.goal_store.mark_effect(&call.id)?;
-                }
-                if let Some(tool) = self.find_custom_tool(&call.name).cloned() {
-                    let result = execute_custom(&self.ctx, &call, tool).await?;
-                    mark_format_confirmed(&self.storm, &call.name, &call.storm_identity(), &result);
-                    return Ok(result);
-                }
-                let ctx = self.ctx.clone();
-                let tool_name = call.name.clone();
-                let name = call.name.clone();
-                let identity = call.storm_identity();
-                let storm = self.storm.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    let tool = tool_registry()
-                        .iter()
-                        .find(|t| t.metadata().name == tool_name);
-                    Self::execute_one_sync(&ctx, &call, tool.map(|t| t.as_ref()))
-                })
-                .await??;
-                mark_format_confirmed(&storm, &name, &identity, &result);
-                Ok(result)
-            }
+    async fn dispatch_sequential(&self, call: ToolCallEvent) -> Result<ToolExecution> {
+        if let Some(tool) = self.find_custom_tool(&call.name).cloned() {
+            let result = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                execute_custom(&self.ctx, &call, tool),
+            ))
+            .await
+            .map_err(|_| anyhow::anyhow!("sequential tool task panicked"))??;
+            mark_format_confirmed(&self.storm, &call.name, &call.storm_identity(), &result);
+            return Ok(result);
         }
+        let ctx = self.ctx.clone();
+        let tool_name = call.name.clone();
+        let name = call.name.clone();
+        let identity = call.storm_identity();
+        let storm = self.storm.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let tool = tool_registry()
+                .iter()
+                .find(|t| t.metadata().name == tool_name);
+            Self::execute_one_sync(&ctx, &call, tool.map(|t| t.as_ref()))
+        })
+        .await??;
+        mark_format_confirmed(&storm, &name, &identity, &result);
+        Ok(result)
     }
 
     fn execute_one_sync(

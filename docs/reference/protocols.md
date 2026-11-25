@@ -207,6 +207,8 @@ Web 文件详情的加载、返回目录与上一级属于只读预览交互，�
 
 SubAgent 的执行记录仍在父会话工具结果中展示；其独立 session（含恢复子代理）不进入 Web 用户会话目录。
 
+批处理发生致命错误时，正式历史按调用 ID 配对并保持声明顺序。已派发但结果未知的调用保留失败状态及 `_mink.execution_outcome="unknown"`。Goal 遇到此标记保留未决副作用，旧记录沿用既有状态判定。
+
 正式工具结果 `_mink` 保留 `status`、`tool_name`、`result_kind`、`exit_code`、`presentation`、`artifacts` 及既有状态元数据，供 Web 历史与实时展示统一。正式用户消息 `_mink` 包含 input_id / turn_id / guidance / attachment_ids。所有 `_mink` 在模型请求转换时剥离；`format_tool_result()` 与 conversation 的 conv_content 优先规则保持不变。旧历史缺少 ToolStatus 时界面显示“状态未记录”，不从正文推测成功。
 
 ## Agent JSONL 字段索引

@@ -762,6 +762,7 @@ impl GoalStore {
                 .flatten()
                 .filter(|b| {
                     b["type"] == "tool_result"
+                        && super::effect_outcome_known(b.get("_mink"))
                         && serde_json::from_value::<crate::tools::metadata::ToolStatus>(
                             b["_mink"]["status"].clone(),
                         )

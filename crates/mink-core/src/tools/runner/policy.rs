@@ -243,7 +243,7 @@ impl ToolPolicyGate<'_> {
     }
 }
 
-pub(super) fn requires_sequential_execution(metadata: Option<ToolMetadata>) -> bool {
+pub(super) fn requires_sequential_execution(metadata: Option<&ToolMetadata>) -> bool {
     let Some(metadata) = metadata else {
         return false;
     };
@@ -332,4 +332,15 @@ pub(super) fn mark_format_confirmed(
 /// session halts a tool batch mid-way.
 pub(super) fn not_executed_tool_result(call: ToolCallEvent, reason: &str) -> ToolExecution {
     failed_tool_result(call.id, call.name, call.fields, reason.to_string())
+}
+
+pub(super) fn unknown_tool_result(call: ToolCallEvent, error: &anyhow::Error) -> ToolExecution {
+    let mut result = failed_tool_result(
+        call.id,
+        call.name,
+        call.fields,
+        format!("execution outcome unknown: {error:#}"),
+    );
+    result.state_metadata = Some(serde_json::json!({"execution_outcome": "unknown"}));
+    result
 }
