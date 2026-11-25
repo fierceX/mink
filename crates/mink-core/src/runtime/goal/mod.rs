@@ -247,7 +247,7 @@ impl GoalVerifier for CommandGoalVerifier {
     }
     async fn verify(&self, context: GoalVerificationContext) -> Result<GoalVerification> {
         ensure!(
-            context.tools.tool_surface.has("Bash"),
+            context.tools.tool_surface.has_any_reachable("Bash"),
             "checker requires Bash in the resolved tool surface"
         );
         let call = crate::protocol::ToolCallEvent {
@@ -261,10 +261,9 @@ impl GoalVerifier for CommandGoalVerifier {
             parse_error: None,
             raw_arguments_digest: None,
         };
-        let results = crate::tools::runner::ToolRunner::new(context.tools)
-            .execute_all(vec![call])
+        let result = crate::tools::runner::ToolRunner::new(context.tools)
+            .execute_verifier_call(call)
             .await?;
-        let result = &results[0];
         Ok(GoalVerification {
             status: if result.succeeded() {
                 GoalVerificationStatus::Pass

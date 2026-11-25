@@ -212,6 +212,23 @@ pub enum EventLog {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         phase: Option<String>,
     },
+    PtcDispatchStart {
+        parent_tool_use_id: String,
+        sub_call_id: String,
+        tool_name: String,
+        input: Value,
+    },
+    PtcDispatchEnd {
+        parent_tool_use_id: String,
+        sub_call_id: String,
+        tool_name: String,
+        status: ToolStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        duration_ms: u64,
+        summary: String,
+        result_kind: ToolResultKind,
+    },
     Scavenge {
         note: String,
     },

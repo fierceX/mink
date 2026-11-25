@@ -29,6 +29,8 @@ pub struct MinkConfigFile {
     pub sandbox: SandboxConfigFile,
     #[serde(default)]
     pub sandbox_python: SandboxPythonConfigFile,
+    #[serde(default)]
+    pub ptc: PtcConfigFile,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -151,6 +153,22 @@ pub struct SandboxPythonConfigFile {
     pub read_dirs: Option<Vec<String>>,
     pub write_dirs: Option<Vec<String>>,
     pub package_dirs: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PtcConfigFile {
+    pub mode: Option<String>,
+    pub backend: Option<String>,
+    pub python_executable: Option<String>,
+    pub timeout_secs: Option<u64>,
+    pub max_timeout_secs: Option<u64>,
+    pub max_parallel_sub_calls: Option<usize>,
+    pub max_sub_calls_per_minute: Option<usize>,
+    pub max_output_bytes: Option<usize>,
+    pub max_message_bytes: Option<usize>,
+    pub max_pending_calls: Option<usize>,
+    pub stop_grace_ms: Option<u64>,
 }
 
 pub const MIN_TOOL_TIMEOUT_MAX_SECS: i32 = 5;

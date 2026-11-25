@@ -26,6 +26,7 @@ pub struct ToolResolutionContext {
     edit_mode: crate::config::EditMode,
     /// Whether this agent may start another delegation at its current depth.
     delegation_allowed: bool,
+    ptc_mode: crate::ptc::PtcMode,
 }
 
 impl ToolResolutionContext {
@@ -55,6 +56,11 @@ impl ToolResolutionContext {
             },
             edit_mode: config.edit_mode,
             delegation_allowed,
+            ptc_mode: if role == AgentRole::GoalReviewer {
+                crate::ptc::PtcMode::Off
+            } else {
+                config.ptc.mode
+            },
         }
     }
 
@@ -72,6 +78,10 @@ impl ToolResolutionContext {
 
     pub fn delegation_allowed(&self) -> bool {
         self.delegation_allowed
+    }
+
+    pub fn ptc_mode(&self) -> crate::ptc::PtcMode {
+        self.ptc_mode
     }
 }
 
@@ -96,8 +106,26 @@ pub struct ModelTool {
 pub struct ModelToolSurface {
     ordered: Vec<ModelTool>,
     by_name: BTreeMap<String, usize>,
+    programmatic_ordered: Vec<ModelTool>,
+    programmatic_by_name: BTreeMap<String, usize>,
+    ptc_mode: crate::ptc::PtcMode,
     hidden: BTreeMap<String, ToolHiddenReason>,
     fingerprint: String,
+}
+
+fn is_programmatic_eligible(name: &str) -> bool {
+    !matches!(
+        name,
+        "RunCode"
+            | "Python"
+            | "PythonSandbox"
+            | "PlanDraft"
+            | "PlanConfirm"
+            | "PlanClear"
+            | "GoalDraft"
+            | "GoalReview"
+            | "SubAgent"
+    )
 }
 
 struct ToolHardDependencySpec {
@@ -138,7 +166,8 @@ impl ModelToolSurface {
         builtin_config
             .tool_approval
             .retain(|name, _| !custom_names.contains(name));
-        let mut surface = Self::resolve(catalog, &builtin_config, context)?;
+        let (mut all_tools, mut hidden) =
+            Self::resolve_unpartitioned(catalog, &builtin_config, context)?;
         let whitelist = config.enabled_tools.as_ref();
         for tool in custom_tools {
             let definition = &tool.definition;
@@ -171,15 +200,13 @@ impl ModelToolSurface {
                 ToolAuthorization::Denied {
                     reason: ToolAuthorizationDeniedReason::ExplicitDeny,
                 } => {
-                    surface
-                        .hidden
-                        .insert(definition.name.clone(), ToolHiddenReason::DeniedByApproval);
+                    hidden.insert(definition.name.clone(), ToolHiddenReason::DeniedByApproval);
                     continue;
                 }
                 ToolAuthorization::Denied {
                     reason: ToolAuthorizationDeniedReason::PromptUnavailable,
                 } => {
-                    surface.hidden.insert(
+                    hidden.insert(
                         definition.name.clone(),
                         ToolHiddenReason::ApprovalPromptUnavailable,
                     );
@@ -187,17 +214,18 @@ impl ModelToolSurface {
                 }
             }
             let schema = serde_json::json!({"name": definition.name, "description": definition.summary, "input_schema": definition.input_schema});
-            surface
-                .by_name
-                .insert(definition.name.clone(), surface.ordered.len());
-            surface.ordered.push(ModelTool { metadata, schema });
+            all_tools.push(ModelTool { metadata, schema });
         }
+        let active_names: BTreeSet<String> = all_tools
+            .iter()
+            .map(|t| t.metadata.name.to_string())
+            .collect();
         for tool in custom_tools {
             let definition = &tool.definition;
-            if surface.has(&definition.name) {
+            if active_names.contains(&definition.name) {
                 for dependency in &definition.hard_dependencies {
                     ensure!(
-                        surface.has(dependency),
+                        active_names.contains(dependency),
                         "tool '{}' requires active tool '{}'",
                         definition.name,
                         dependency
@@ -205,8 +233,7 @@ impl ModelToolSurface {
                 }
             }
         }
-        surface.fingerprint = surface_fingerprint(&surface.ordered);
-        Ok(surface)
+        Ok(Self::finalize(all_tools, hidden, context.ptc_mode))
     }
 
     pub fn resolve(
@@ -214,6 +241,15 @@ impl ModelToolSurface {
         config: &ToolConfig,
         context: &ToolResolutionContext,
     ) -> Result<Self> {
+        let (all_tools, hidden) = Self::resolve_unpartitioned(catalog, config, context)?;
+        Ok(Self::finalize(all_tools, hidden, context.ptc_mode))
+    }
+
+    fn resolve_unpartitioned(
+        catalog: &ToolCatalog,
+        config: &ToolConfig,
+        context: &ToolResolutionContext,
+    ) -> Result<(Vec<ModelTool>, BTreeMap<String, ToolHiddenReason>)> {
         catalog.validate_configured_names(config)?;
         validate_dependency_graph(catalog)?;
         let whitelist = config
@@ -233,17 +269,38 @@ impl ModelToolSurface {
                     continue;
                 }
             };
-            if whitelist
-                .as_ref()
-                .is_some_and(|names| !names.contains(tool.name.as_str()))
-            {
-                hidden.insert(tool.name.clone(), ToolHiddenReason::NotWhitelisted);
-                continue;
-            }
-            if whitelist.is_none() && tool.default_activation == ToolDefaultActivation::ExplicitOnly
-            {
-                hidden.insert(tool.name.clone(), ToolHiddenReason::ExplicitOptInRequired);
-                continue;
+            if tool.name == "RunCode" {
+                if context.ptc_mode == crate::ptc::PtcMode::Off {
+                    if explicitly_selected("RunCode") {
+                        bail!("tool 'RunCode' requires PTC mode ('tool' or 'exclusive')");
+                    }
+                    hidden.insert(tool.name.clone(), ToolHiddenReason::FeatureUnavailable);
+                    continue;
+                }
+                if whitelist.as_ref().is_some_and(|names| names.is_empty()) {
+                    hidden.insert(tool.name.clone(), ToolHiddenReason::NotWhitelisted);
+                    continue;
+                }
+            } else {
+                if context.ptc_mode == crate::ptc::PtcMode::Exclusive
+                    && matches!(tool.name.as_str(), "Python" | "PythonSandbox")
+                {
+                    hidden.insert(tool.name.clone(), ToolHiddenReason::UnavailableForRole);
+                    continue;
+                }
+                if whitelist
+                    .as_ref()
+                    .is_some_and(|names| !names.contains(tool.name.as_str()))
+                {
+                    hidden.insert(tool.name.clone(), ToolHiddenReason::NotWhitelisted);
+                    continue;
+                }
+                if whitelist.is_none()
+                    && tool.default_activation == ToolDefaultActivation::ExplicitOnly
+                {
+                    hidden.insert(tool.name.clone(), ToolHiddenReason::ExplicitOptInRequired);
+                    continue;
+                }
             }
             match authorize_tool(&metadata, config) {
                 ToolAuthorization::Allowed => {}
@@ -317,22 +374,88 @@ impl ModelToolSurface {
                 ModelTool { metadata, schema }
             })
             .collect();
+        Ok((ordered, hidden))
+    }
+
+    fn finalize(
+        all_tools: Vec<ModelTool>,
+        hidden: BTreeMap<String, ToolHiddenReason>,
+        ptc_mode: crate::ptc::PtcMode,
+    ) -> Self {
+        let has_run_code = all_tools.iter().any(|t| t.metadata.name == "RunCode");
+        let (ordered, programmatic_ordered) = match ptc_mode {
+            crate::ptc::PtcMode::Off => (all_tools, Vec::new()),
+            crate::ptc::PtcMode::Tool => {
+                let programmatic = if has_run_code {
+                    all_tools
+                        .iter()
+                        .filter(|t| is_programmatic_eligible(t.metadata.name.as_ref()))
+                        .cloned()
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                (all_tools, programmatic)
+            }
+            crate::ptc::PtcMode::Exclusive => {
+                let mut wire = Vec::new();
+                let mut programmatic = Vec::new();
+                for tool in all_tools {
+                    if is_programmatic_eligible(tool.metadata.name.as_ref()) {
+                        if has_run_code {
+                            programmatic.push(tool);
+                        }
+                    } else {
+                        wire.push(tool);
+                    }
+                }
+                (wire, programmatic)
+            }
+        };
         let by_name = ordered
             .iter()
             .enumerate()
             .map(|(index, tool)| (tool.metadata.name.to_string(), index))
             .collect();
-        let fingerprint = surface_fingerprint(&ordered);
-        Ok(Self {
+        let programmatic_by_name = programmatic_ordered
+            .iter()
+            .enumerate()
+            .map(|(index, tool)| (tool.metadata.name.to_string(), index))
+            .collect();
+        let fingerprint = if ptc_mode == crate::ptc::PtcMode::Off {
+            surface_fingerprint(&ordered)
+        } else {
+            surface_fingerprint_with_ptc(&ordered, &programmatic_ordered, ptc_mode)
+        };
+        Self {
             ordered,
             by_name,
+            programmatic_ordered,
+            programmatic_by_name,
+            ptc_mode,
             hidden,
             fingerprint,
-        })
+        }
+    }
+
+    pub fn ptc_mode(&self) -> crate::ptc::PtcMode {
+        self.ptc_mode
     }
 
     pub fn has(&self, name: &str) -> bool {
         self.by_name.contains_key(name)
+    }
+
+    pub fn has_wire(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
+    }
+
+    pub fn has_programmatic(&self, name: &str) -> bool {
+        self.programmatic_by_name.contains_key(name)
+    }
+
+    pub fn has_any_reachable(&self, name: &str) -> bool {
+        self.has(name) || self.has_programmatic(name)
     }
 
     pub fn has_all(&self, names: &[&str]) -> bool {
@@ -341,6 +464,26 @@ impl ModelToolSurface {
 
     pub fn get(&self, name: &str) -> Option<&ModelTool> {
         self.by_name.get(name).map(|index| &self.ordered[*index])
+    }
+
+    pub fn programmatic_get(&self, name: &str) -> Option<&ModelTool> {
+        self.programmatic_by_name
+            .get(name)
+            .map(|index| &self.programmatic_ordered[*index])
+    }
+
+    pub fn wire_tools(&self) -> &[ModelTool] {
+        &self.ordered
+    }
+
+    pub fn programmatic_tools(&self) -> &[ModelTool] {
+        &self.programmatic_ordered
+    }
+
+    pub fn programmatic_names(&self) -> impl Iterator<Item = &str> + '_ {
+        self.programmatic_ordered
+            .iter()
+            .map(|tool| tool.metadata.name.as_ref())
     }
 
     pub fn schemas(&self) -> Vec<serde_json::Value> {
@@ -634,6 +777,31 @@ fn surface_fingerprint(tools: &[ModelTool]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"mink-tool-surface-v1\0");
     for tool in tools {
+        hasher.update(tool.metadata.name.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(serde_json::to_vec(&tool.schema).unwrap_or_default());
+        hasher.update(b"\0");
+    }
+    crate::capabilities::fingerprint::hex_lower(hasher.finalize())
+}
+
+fn surface_fingerprint_with_ptc(
+    wire: &[ModelTool],
+    programmatic: &[ModelTool],
+    mode: crate::ptc::PtcMode,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mink-tool-surface-ptc-v1\0");
+    hasher.update(mode.as_str().as_bytes());
+    hasher.update(b"\0wire\0");
+    for tool in wire {
+        hasher.update(tool.metadata.name.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(serde_json::to_vec(&tool.schema).unwrap_or_default());
+        hasher.update(b"\0");
+    }
+    hasher.update(b"programmatic\0");
+    for tool in programmatic {
         hasher.update(tool.metadata.name.as_bytes());
         hasher.update(b"\0");
         hasher.update(serde_json::to_vec(&tool.schema).unwrap_or_default());

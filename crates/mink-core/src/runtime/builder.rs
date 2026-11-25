@@ -34,6 +34,7 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         post_init_hook,
         goal_verifiers,
         goal_event_sink,
+        ptc_runtime,
     } = config;
 
     crate::config::validate_runtime_config(&config)?;
@@ -99,6 +100,7 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         capability_snapshot: None,
         custom_tools,
         prefix_source,
+        ptc_runtime,
     })
     .await?;
     let ctx = built.ctx;

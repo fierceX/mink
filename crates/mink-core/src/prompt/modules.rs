@@ -22,7 +22,7 @@ pub(super) fn append_tool_sections(
     surface: &ModelToolSurface,
 ) -> Result<()> {
     for spec in TOOL_PROMPTS {
-        if !surface.has(spec.tool) {
+        if !surface.has_any_reachable(spec.tool) {
             continue;
         }
         let referenced_tools = [spec.tool.to_string()].into_iter().collect();
@@ -47,6 +47,8 @@ pub(super) fn reserved_section_ids() -> BTreeSet<&'static str> {
         .chain([
             "runtime-capabilities",
             "tool-inventory",
+            "ptc-mode",
+            "ptc-sdk",
             "system-conventions",
             "runtime-checkpoints",
             "rules",

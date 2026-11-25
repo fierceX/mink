@@ -30,6 +30,8 @@ use std::time::{Duration, Instant};
 
 use crate::config::SandboxPythonConfig;
 
+pub(crate) type PtcEventSink = Arc<dyn Fn(crate::events::EventLog) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct ToolConfig {
     pub tool_timeout_secs: i32,
@@ -52,6 +54,10 @@ pub struct ToolConfig {
     pub tool_approval: BTreeMap<String, ToolApprovalPolicy>,
     /// CPython WASI 沙箱工具配置
     pub sandbox_python: SandboxPythonConfig,
+    /// 进程沙箱策略（用于嵌套 PTC 子进程约束）
+    pub sandbox: crate::config::SandboxConfig,
+    /// PTC 配置
+    pub ptc: crate::ptc::PtcConfig,
 }
 
 impl ToolConfig {
@@ -73,6 +79,8 @@ impl ToolConfig {
             tool_approval_mode: cfg.tool_approval_mode,
             tool_approval: cfg.tool_approval.clone(),
             sandbox_python: cfg.sandbox_python.clone(),
+            sandbox: cfg.sandbox.clone(),
+            ptc: cfg.ptc.clone(),
         }
     }
 }
@@ -150,6 +158,8 @@ pub struct ToolContext {
     /// Image ids captured during the current user input (v7 §9.5). Reset per
     /// input; fresh-attachment materialization failures fail the request.
     pub(crate) this_turn_image_ids: Arc<Mutex<std::collections::HashSet<String>>>,
+    pub(crate) ptc_runtime: Option<Arc<dyn crate::ptc::PtcRuntime>>,
+    pub(crate) ptc_event_sink: Option<PtcEventSink>,
 }
 
 /// The session state and options that the file editing implementations need.
@@ -214,11 +224,19 @@ impl From<&AgentSharedContext> for ToolContext {
             model_capabilities: ctx.tools.model_capabilities.clone(),
             image_cache: ctx.media.image_cache.clone(),
             this_turn_image_ids: ctx.media.this_turn_image_ids.clone(),
+            ptc_runtime: ctx.tools.ptc_runtime.clone(),
+            ptc_event_sink: None,
         }
     }
 }
 
 impl ToolContext {
+    pub(crate) fn from_shared(ctx: &Arc<AgentSharedContext>) -> Self {
+        let mut tool_ctx = Self::from(ctx.as_ref());
+        let shared = ctx.clone();
+        tool_ctx.ptc_event_sink = Some(Arc::new(move |event| shared.log_event(event)));
+        tool_ctx
+    }
     pub(crate) fn file_edit_context(&self) -> FileEditContext<'_> {
         FileEditContext {
             cwd: &self.cwd,
@@ -418,6 +436,7 @@ pub struct ToolRuntimeContext {
     pub(crate) prefix_source: Option<Arc<dyn crate::runtime::PrefixSource>>,
     pub(crate) model_capabilities:
         Arc<crate::capabilities::model_capabilities::SessionModelCapabilities>,
+    pub(crate) ptc_runtime: Option<Arc<dyn crate::ptc::PtcRuntime>>,
 }
 
 /// Image capture and per-turn materialization deduplication state.
@@ -527,6 +546,7 @@ impl AgentSharedContext {
             edit_fuzzy_threshold: self.tools.tool_config.edit_fuzzy_threshold,
             edit_enforce_seen_lines: self.tools.tool_config.edit_enforce_seen_lines,
             signal_policy: self.config.signal_policy,
+            image_capable: self.tools.model_capabilities.image_input.limits().is_some(),
             skill_index_budget_chars: crate::prompt::skill_index_budget_chars(
                 self.config.max_context_tokens,
             ),

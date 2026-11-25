@@ -564,5 +564,31 @@
       ],
       "additionalProperties": false
     }
+  },
+  {
+    "name": "RunCode",
+    "description": "Execute a Python 3 program that orchestrates runtime tools programmatically via the `tools` module and returns `inspect(...)` output plus bounded stdout/stderr.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Python 3 source code to run (top-level await supported)"
+        },
+        "description": {
+          "type": "string",
+          "description": "Concise 5-10 word summary of what this program does"
+        },
+        "timeout": {
+          "type": "integer",
+          "description": "Optional execution timeout in seconds"
+        }
+      },
+      "required": [
+        "code",
+        "description"
+      ],
+      "additionalProperties": false
+    }
   }
 ]

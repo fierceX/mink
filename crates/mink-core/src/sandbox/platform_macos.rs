@@ -17,7 +17,17 @@ pub fn try_sandbox_exec(
     args: &[String],
 ) -> Result<Vec<String>, String> {
     let cwd = std::env::current_dir().unwrap_or_default();
-    let sb_profile = build_sb_profile(config, exe, &cwd);
+    try_sandbox_exec_in_dir(config, exe, args, &cwd)
+}
+
+/// Build a sandbox-exec command line rooted at an explicit `cwd`.
+pub fn try_sandbox_exec_in_dir(
+    config: &SandboxConfig,
+    exe: &Path,
+    args: &[String],
+    cwd: &Path,
+) -> Result<Vec<String>, String> {
+    let sb_profile = build_sb_profile(config, exe, cwd);
 
     let mut cmd: Vec<String> = vec![
         "sandbox-exec".into(),

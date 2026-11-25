@@ -354,6 +354,8 @@ pub struct ResolvedConfig {
     pub sandbox: SandboxConfig,
     /// CPython WASI 沙箱工具配置
     pub sandbox_python: SandboxPythonConfig,
+    /// Programmatic Tool Calling (PTC) 配置
+    pub ptc: crate::ptc::PtcConfig,
     /// 自定义系统提示词文件（MISSION.md）
     pub mission_file: Option<PathBuf>,
     /// 内联 mission 内容（通过 SDK 协议传入，不写临时文件）
@@ -435,6 +437,7 @@ impl Default for ResolvedConfig {
             log_events: true,
             sandbox: SandboxConfig::default(),
             sandbox_python: SandboxPythonConfig::default(),
+            ptc: crate::ptc::PtcConfig::default(),
             mission_file: None,
             mission_content: None,
             enabled_tools: None,
@@ -488,6 +491,7 @@ pub fn validate_runtime_config(cfg: &ResolvedConfig) -> Result<()> {
         bail!("sub_agent_max_depth must be between 0 and 3");
     }
     cfg.llm_recovery.validate()?;
+    cfg.ptc.validate(&cfg.sandbox_python)?;
     Ok(())
 }
 

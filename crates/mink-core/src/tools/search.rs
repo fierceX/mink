@@ -369,9 +369,8 @@ impl super::runner::ToolExec for GlobTool {
             };
             crate::tools::vfs::validate_virtual_glob_request(&request)?;
             let result = vfs.glob(&ctx.vfs_scope, &request)?;
-            return Ok(super::runner::ToolOutcome::text(
-                crate::tools::vfs::format_virtual_glob(&result, &request),
-            ));
+            let text = crate::tools::vfs::format_virtual_glob(&result, &request);
+            return Ok(glob_outcome(text));
         }
         let root = resolve_search_root(&ctx.cwd, args.path.as_deref().unwrap_or("."));
         glob(
@@ -379,7 +378,7 @@ impl super::runner::ToolExec for GlobTool {
             &root.display().to_string(),
             ctx.tool_config.max_search_files,
         )
-        .map(super::runner::ToolOutcome::text)
+        .map(glob_outcome)
     }
 }
 
@@ -439,7 +438,7 @@ impl super::runner::ToolExec for GrepTool {
                 args.context,
                 ctx.tool_config.max_search_results,
             )
-            .map(super::runner::ToolOutcome::text);
+            .map(grep_outcome);
         }
         if let Some(vfs) = &ctx.read_only_fs {
             let request = crate::tools::vfs::VfsGrepRequest {
@@ -452,9 +451,9 @@ impl super::runner::ToolExec for GrepTool {
             };
             crate::tools::vfs::validate_virtual_grep_request(&request)?;
             let result = vfs.grep(&ctx.vfs_scope, &request)?;
-            return Ok(super::runner::ToolOutcome::text(
-                crate::tools::vfs::format_virtual_grep(&result, &request),
-            ));
+            return Ok(grep_outcome(crate::tools::vfs::format_virtual_grep(
+                &result, &request,
+            )));
         }
         let root = resolve_search_root(&ctx.cwd, &path);
         if ctx.tool_config.edit_mode == crate::config::EditMode::Hashline {
@@ -465,7 +464,7 @@ impl super::runner::ToolExec for GrepTool {
                 args.context,
                 ctx,
             )
-            .map(super::runner::ToolOutcome::text);
+            .map(grep_outcome);
         }
         grep(
             &args.pattern,
@@ -475,8 +474,87 @@ impl super::runner::ToolExec for GrepTool {
             ctx.tool_config.max_search_files,
             ctx.tool_config.max_search_results,
         )
-        .map(super::runner::ToolOutcome::text)
+        .map(grep_outcome)
     }
+}
+
+fn glob_outcome(text: String) -> super::runner::ToolOutcome {
+    let mut files = Vec::new();
+    let mut truncated = false;
+    for line in text.lines() {
+        if line.starts_with("... ") {
+            if line.contains("truncated") {
+                truncated = true;
+            }
+            continue;
+        }
+        if !line.trim().is_empty() {
+            files.push(line.to_string());
+        }
+    }
+    let mut outcome = super::runner::ToolOutcome::text(text);
+    outcome.structured_value = Some(serde_json::json!({
+        "files": files,
+        "truncated": truncated,
+    }));
+    outcome
+}
+
+fn grep_outcome(text: String) -> super::runner::ToolOutcome {
+    let mut matches = Vec::new();
+    let mut truncated = false;
+    let mut current_path: Option<String> = None;
+    let mut current_tag: Option<String> = None;
+
+    for line in text.lines() {
+        if line.starts_with("... truncated") {
+            truncated = true;
+            continue;
+        }
+        if line == "--" {
+            continue;
+        }
+        if let Some(inner) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+            && let Some((path, tag)) = inner.rsplit_once('#')
+            && !tag.is_empty()
+            && tag.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            current_path = Some(path.to_string());
+            current_tag = Some(tag.to_string());
+            continue;
+        }
+        if let (Some(path), Some((num_str, rest))) = (&current_path, line.split_once(':'))
+            && let Ok(line_num) = num_str.parse::<usize>()
+        {
+            matches.push(serde_json::json!({
+                "path": path,
+                "tag": current_tag,
+                "line": line_num,
+                "text": rest,
+                "is_context": false,
+            }));
+            continue;
+        }
+        if let Some((path_part, after)) = line.split_once(':')
+            && let Some((num_str, rest)) = after.split_once(':')
+            && let Ok(line_num) = num_str.parse::<usize>()
+        {
+            matches.push(serde_json::json!({
+                "path": path_part,
+                "tag": serde_json::Value::Null,
+                "line": line_num,
+                "text": rest,
+                "is_context": false,
+            }));
+        }
+    }
+
+    let mut outcome = super::runner::ToolOutcome::text(text);
+    outcome.structured_value = Some(serde_json::json!({
+        "matches": matches,
+        "truncated": truncated,
+    }));
+    outcome
 }
 
 fn grep_hashline(

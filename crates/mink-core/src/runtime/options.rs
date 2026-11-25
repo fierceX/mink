@@ -167,6 +167,7 @@ pub struct AgentOptions {
     post_init_hook: Option<Arc<dyn PostInitHook>>,
     goal_verifiers: Vec<Arc<dyn crate::runtime::GoalVerifier>>,
     goal_event_sink: Option<Arc<dyn EventSink>>,
+    ptc_runtime: Option<Arc<dyn crate::ptc::PtcRuntime>>,
 }
 
 impl AgentOptions {
@@ -209,6 +210,7 @@ impl AgentOptions {
             post_init_hook: None,
             goal_verifiers: Vec::new(),
             goal_event_sink: None,
+            ptc_runtime: None,
         }
     }
 
@@ -710,6 +712,25 @@ impl AgentOptions {
         self
     }
 
+    pub fn with_ptc(mut self, ptc: crate::ptc::PtcConfig) -> Self {
+        self.config.ptc = ptc;
+        self
+    }
+
+    pub fn with_ptc_mode(mut self, mode: crate::ptc::PtcMode) -> Self {
+        self.config.ptc.mode = mode;
+        self
+    }
+
+    pub fn with_ptc_runtime(mut self, runtime: Arc<dyn crate::ptc::PtcRuntime>) -> Self {
+        self.ptc_runtime = Some(runtime);
+        self
+    }
+
+    pub fn ptc(&self) -> &crate::ptc::PtcConfig {
+        &self.config.ptc
+    }
+
     /// Restrict execution to exactly the provided tools.
     ///
     /// Passing an empty list disables all tools. `None` uses the catalog's
@@ -753,6 +774,7 @@ impl AgentOptions {
             post_init_hook: self.post_init_hook,
             goal_verifiers: self.goal_verifiers,
             goal_event_sink: self.goal_event_sink,
+            ptc_runtime: self.ptc_runtime,
         }
     }
 }

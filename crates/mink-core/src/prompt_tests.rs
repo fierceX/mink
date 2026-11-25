@@ -37,6 +37,7 @@ fn builder_for_config(names: &[&str], base: Config) -> Builder {
         edit_fuzzy_threshold: config.edit_fuzzy_threshold,
         edit_enforce_seen_lines: config.edit_enforce_seen_lines,
         signal_policy: base.signal_policy,
+        image_capable: false,
         skill_index_budget_chars: crate::prompt::DEFAULT_SKILL_INDEX_BUDGET_CHARS,
     }
 }
@@ -218,6 +219,7 @@ fn rendered_prompt_stays_within_budget() {
     let names: Vec<_> = ToolCatalog::builtin()
         .unwrap()
         .iter_compiled()
+        .filter(|(_, metadata)| metadata.name != "RunCode")
         .map(|(_, metadata)| metadata.name.to_string())
         .collect();
     let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
@@ -569,6 +571,7 @@ fn generated_sections_declare_every_embedded_tool_name() {
     let names: Vec<_> = ToolCatalog::builtin()
         .unwrap()
         .iter_compiled()
+        .filter(|(_, metadata)| metadata.name != "RunCode")
         .map(|(_, metadata)| metadata.name.to_string())
         .collect();
     let refs = names.iter().map(String::as_str).collect::<Vec<_>>();

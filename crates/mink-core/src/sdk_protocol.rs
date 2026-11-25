@@ -41,6 +41,7 @@ pub struct SdkOptions {
     pub output: SdkOutputOptions,
     pub signal: SdkSignalOptions,
     pub recovery: SdkRecoveryOptions,
+    pub ptc: SdkPtcOptions,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -119,6 +120,23 @@ pub struct SdkRecoveryOptions {
     pub format_max_errors: Option<usize>,
     pub request_max_retries: Option<u32>,
     pub request_timeout_secs: Option<u64>,
+}
+
+/// `options.ptc`: Programmatic Tool Calling settings.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SdkPtcOptions {
+    pub mode: Option<crate::ptc::PtcMode>,
+    pub backend: Option<crate::ptc::PtcBackendKind>,
+    pub python_executable: Option<String>,
+    pub timeout_secs: Option<u64>,
+    pub max_timeout_secs: Option<u64>,
+    pub max_parallel_sub_calls: Option<usize>,
+    pub max_sub_calls_per_minute: Option<usize>,
+    pub max_output_bytes: Option<usize>,
+    pub max_message_bytes: Option<usize>,
+    pub max_pending_calls: Option<usize>,
+    pub stop_grace_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -314,6 +332,47 @@ pub fn validate_sdk_request(req: &SdkRequest) -> Result<(), String> {
         return Err(
             "invalid SDK request: recovery.request_timeout_secs must be greater than 0".to_string(),
         );
+    }
+    let ptc = &opts.ptc;
+    if let Some(secs) = ptc.timeout_secs
+        && secs < 5
+    {
+        return Err("invalid SDK request: ptc.timeout_secs must be at least 5".to_string());
+    }
+    if let Some(max_secs) = ptc.max_timeout_secs
+        && max_secs < ptc.timeout_secs.unwrap_or(5)
+    {
+        return Err(
+            "invalid SDK request: ptc.max_timeout_secs must be >= ptc.timeout_secs".to_string(),
+        );
+    }
+    if ptc.max_parallel_sub_calls == Some(0) {
+        return Err(
+            "invalid SDK request: ptc.max_parallel_sub_calls must be at least 1".to_string(),
+        );
+    }
+    if ptc.max_sub_calls_per_minute == Some(0) {
+        return Err(
+            "invalid SDK request: ptc.max_sub_calls_per_minute must be at least 1".to_string(),
+        );
+    }
+    if let Some(bytes) = ptc.max_output_bytes
+        && bytes < 1024
+    {
+        return Err("invalid SDK request: ptc.max_output_bytes must be at least 1024".to_string());
+    }
+    if let Some(bytes) = ptc.max_message_bytes
+        && bytes < 4096
+    {
+        return Err("invalid SDK request: ptc.max_message_bytes must be at least 4096".to_string());
+    }
+    if ptc.max_pending_calls == Some(0) {
+        return Err("invalid SDK request: ptc.max_pending_calls must be at least 1".to_string());
+    }
+    if let Some(exe) = ptc.python_executable.as_deref()
+        && exe.trim().is_empty()
+    {
+        return Err("invalid SDK request: ptc.python_executable must not be empty".to_string());
     }
     if let Some(tool_timeout) = tools.tool_timeout
         && tool_timeout <= 0

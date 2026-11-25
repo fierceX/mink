@@ -337,6 +337,11 @@ pub(crate) fn execute_hashline_edit(
                             authored.path
                         ));
                         outcome.no_mutation = true;
+                        outcome.structured_value = Some(serde_json::json!({
+                            "applied": false,
+                            "files": [{"path": authored.path, "tag": serde_json::Value::Null}],
+                            "summary": "already applied (idempotent)",
+                        }));
                         return Ok(outcome);
                     }
                     let count = store.note_noop(&canonical, &args.input);
@@ -353,6 +358,11 @@ pub(crate) fn execute_hashline_edit(
                         authored.path
                     ));
                     outcome.no_mutation = true;
+                    outcome.structured_value = Some(serde_json::json!({
+                        "applied": false,
+                        "files": [{"path": authored.path, "tag": serde_json::Value::Null}],
+                        "summary": format!("no changes (soft no-op {count}/2)"),
+                    }));
                     return Ok(outcome);
                 }
                 let final_text = shape.restore(&updated);
@@ -510,7 +520,30 @@ pub(crate) fn execute_hashline_edit(
         }
     }
     let content = rendered.join("\n\n");
-    Ok(tool_outcome(content))
+    let files: Vec<serde_json::Value> = committed
+        .iter()
+        .zip(rendered.iter())
+        .map(|(path, section)| {
+            let tag = section
+                .lines()
+                .nth(1)
+                .and_then(|line| line.strip_prefix('['))
+                .and_then(|rest| rest.strip_suffix(']'))
+                .and_then(|inner| inner.rsplit_once('#').map(|(_, tag)| tag.to_string()));
+            serde_json::json!({
+                "path": path,
+                "tag": tag,
+            })
+        })
+        .collect();
+    let summary = format!("committed {} file(s)", committed.len());
+    let mut outcome = tool_outcome(content);
+    outcome.structured_value = Some(serde_json::json!({
+        "applied": true,
+        "files": files,
+        "summary": summary,
+    }));
+    Ok(outcome)
 }
 
 fn hash_equivalent_snapshot_text(left: &str, right: &str) -> bool {

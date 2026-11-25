@@ -33,6 +33,11 @@ pub use crate::llm::client::{
     OpenAiCompatibleOptions, TokenParamKind,
 };
 pub use crate::llm::recovery::{LlmUpstreamError, UpstreamFailureKind};
+pub use crate::ptc::{
+    PtcBackendKind, PtcBindingDispatcher, PtcBindingError, PtcBindingSuccess, PtcConfig,
+    PtcFailureKind, PtcImageDescriptor, PtcMode, PtcOutputItem, PtcRunFailure, PtcRunRequest,
+    PtcRunResult, PtcRunSpec, PtcRuntime,
+};
 pub use crate::resources::ResourceHandler;
 pub use crate::runtime::extensions::{PostInitContext, PostInitHook, PrefixSource};
 /// 同目录临时文件 + rename 的原子替换（session 状态文件共用实现）。
@@ -59,9 +64,10 @@ pub use crate::tools::vfs::{
 };
 pub use crate::ui::{
     ArtifactDisplay, GoalDisplay, PlanDisplay, PlanTransitionDisplay, PresentedToolResultDisplay,
-    StatsSnapshot, SubAgentStreamKind, SubAgentStreamSink, TodoChangeDisplay, TodoCountsDisplay,
-    TodoDisplay, TodoItemDisplay, TodoStatusDisplay, ToolCallDisplay, ToolPresentation,
-    ToolResultDisplay, llm_wait_heartbeat_message, parse_llm_wait_heartbeat_elapsed,
+    PtcRunDisplay, PtcSubCallDisplay, StatsSnapshot, SubAgentStreamKind, SubAgentStreamSink,
+    TodoChangeDisplay, TodoCountsDisplay, TodoDisplay, TodoItemDisplay, TodoStatusDisplay,
+    ToolCallDisplay, ToolPresentation, ToolResultDisplay, llm_wait_heartbeat_message,
+    parse_llm_wait_heartbeat_elapsed,
 };
 pub(crate) use builder::build_runtime;
 pub use config::{SessionInfo, SessionPolicy};

@@ -157,10 +157,26 @@ impl From<&crate::session::goal::GoalSnapshot> for GoalDisplay {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PtcSubCallDisplay {
+    pub sub_call_id: String,
+    pub tool_name: String,
+    pub status: ToolStatus,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PtcRunDisplay {
+    pub description: String,
+    pub sub_calls: Vec<PtcSubCallDisplay>,
+    pub output_truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum ToolPresentation {
     Plan(PlanDisplay),
     Todo(TodoDisplay),
+    PtcRun(PtcRunDisplay),
 }
 
 pub struct ToolCallDisplay<'a> {

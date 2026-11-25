@@ -63,7 +63,9 @@ pub(super) fn append_core_sections(builder: &Builder, document: &mut PromptDocum
              or inspect the failing commands before further edits.",
         )?;
     }
-    if builder.tool_surface.names().next().is_none() {
+    if builder.tool_surface.names().next().is_none()
+        && builder.tool_surface.programmatic_tools().is_empty()
+    {
         push_core(
             document,
             "runtime-capabilities",
@@ -84,6 +86,46 @@ pub(super) fn append_core_sections(builder: &Builder, document: &mut PromptDocum
             referenced_tools: names.iter().cloned().collect(),
             consumed_facts: BTreeSet::new(),
         })?;
+        let ptc_mode = builder.tool_surface.ptc_mode();
+        if ptc_mode == crate::ptc::PtcMode::Exclusive {
+            let wire = builder.tool_surface.wire_tools();
+            let referenced_tools: BTreeSet<String> = wire
+                .iter()
+                .map(|tool| tool.metadata.name.to_string())
+                .collect();
+            document.push(PromptSection {
+                id: "ptc-mode".into(),
+                tag: "ptc-mode".into(),
+                origin: PromptSectionOrigin::Workflow,
+                content: crate::ptc::sdk::render_ptc_mode_section(wire),
+                name: None,
+                referenced_tools,
+                consumed_facts: BTreeSet::new(),
+            })?;
+        }
+        if ptc_mode != crate::ptc::PtcMode::Off {
+            let programmatic = builder.tool_surface.programmatic_tools();
+            if !programmatic.is_empty() {
+                let mut referenced_tools: BTreeSet<String> = programmatic
+                    .iter()
+                    .map(|tool| tool.metadata.name.to_string())
+                    .collect();
+                referenced_tools.insert("RunCode".to_string());
+                document.push(PromptSection {
+                    id: "ptc-sdk".into(),
+                    tag: "ptc-sdk".into(),
+                    origin: PromptSectionOrigin::Workflow,
+                    content: crate::ptc::sdk::render_python_sdk(
+                        programmatic,
+                        ptc_mode,
+                        builder.image_capable,
+                    ),
+                    name: None,
+                    referenced_tools,
+                    consumed_facts: BTreeSet::new(),
+                })?;
+            }
+        }
     }
     let output_language =
         format!("Use \"{locale}\" for all Reply. Code, commands, and file content remain as-is.");

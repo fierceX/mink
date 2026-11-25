@@ -79,6 +79,49 @@ pub fn reexec_in_sandbox(config: &SandboxConfig, exe: &Path, args: &[String]) {
     std::process::exit(1);
 }
 
+/// Wrap a child command invocation in the configured OS sandbox backend without
+/// modifying `reexec_in_sandbox` startup behavior.
+#[allow(unused_variables, dead_code)]
+pub(crate) fn wrap_child_argv(
+    config: &SandboxConfig,
+    exe: &Path,
+    args: &[String],
+    cwd: &Path,
+    pass_fd: Option<i32>,
+) -> Result<Vec<String>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        if config.backend == "nsjail" || config.backend == "auto" {
+            match platform_linux::try_nsjail_in_dir(config, exe, args, cwd, pass_fd) {
+                Ok(cmd) => return Ok(cmd),
+                Err(e) if config.backend == "nsjail" => return Err(e),
+                Err(_) => {}
+            }
+        }
+        if config.backend == "bwrap" || config.backend == "auto" {
+            return platform_linux::try_bwrap_in_dir(config, exe, args, cwd)
+                .map_err(|e| format!("bwrap: {e}"));
+        }
+        Err("no Linux sandbox backend available (tried nsjail, bwrap)".into())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = pass_fd;
+        if config.backend != "auto" && config.backend != "sandbox-exec" {
+            return Err(format!(
+                "sandbox backend '{}' is not available on macOS (only sandbox-exec)",
+                config.backend
+            ));
+        }
+        platform_macos::try_sandbox_exec_in_dir(config, exe, args, cwd)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (config, exe, args, cwd, pass_fd);
+        Err("sandbox not supported on this platform".into())
+    }
+}
+
 #[allow(unused_variables, dead_code)] // 非 Linux/macOS 平台（如 FreeBSD）无 sandbox 实现
 fn try_reexec(config: &SandboxConfig, exe: &Path, args: &[String]) -> Result<(), String> {
     #[cfg(target_os = "linux")]

@@ -276,7 +276,7 @@ impl SubAgentExecutor {
         config.model = active.alias.unwrap_or(active.actual);
         let allowed: Vec<String> = ["Read", "Glob", "Grep", "GoalRead"]
             .into_iter()
-            .filter(|name| parent_ctx.tools.tool_surface.has(name))
+            .filter(|name| parent_ctx.tools.tool_surface.has_any_reachable(name))
             .map(str::to_string)
             .collect();
         config
@@ -406,6 +406,11 @@ impl SubAgentExecutor {
                 None
             } else {
                 parent_ctx.tools.prefix_source.clone()
+            },
+            ptc_runtime: if review.is_some() {
+                None
+            } else {
+                parent_ctx.tools.ptc_runtime.clone()
             },
         })
         .await?;

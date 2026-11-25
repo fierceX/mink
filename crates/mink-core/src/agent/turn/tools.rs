@@ -333,13 +333,22 @@ impl super::TurnExecutor {
             if !result.succeeded() {
                 continue;
             }
-            if result.tool_name == "TodoAdvance" {
+            if result.tool_name == "TodoAdvance"
+                || (result.tool_name == "RunCode" && result.todo_advanced)
+            {
                 self.local.successful_work_calls_since_todo_advance = 0;
                 continue;
             }
             if matches!(
                 result.tool_name.as_str(),
-                "Bash" | "Python" | "PythonSandbox" | "Write" | "Edit" | "TodoWrite" | "SubAgent"
+                "Bash"
+                    | "Python"
+                    | "PythonSandbox"
+                    | "RunCode"
+                    | "Write"
+                    | "Edit"
+                    | "TodoWrite"
+                    | "SubAgent"
             ) {
                 self.local.successful_work_calls_since_todo_advance = self
                     .local

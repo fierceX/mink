@@ -39,6 +39,7 @@ pub(crate) struct AgentRuntimeConfig {
     pub post_init_hook: Option<Arc<dyn PostInitHook>>,
     pub goal_verifiers: Vec<Arc<dyn crate::runtime::GoalVerifier>>,
     pub goal_event_sink: Option<Arc<dyn EventSink>>,
+    pub ptc_runtime: Option<Arc<dyn crate::ptc::PtcRuntime>>,
 }
 
 #[cfg(test)]
@@ -75,6 +76,7 @@ impl AgentRuntimeConfig {
             post_init_hook: None,
             goal_verifiers: Vec::new(),
             goal_event_sink: None,
+            ptc_runtime: None,
         }
     }
 

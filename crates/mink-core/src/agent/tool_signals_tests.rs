@@ -35,6 +35,9 @@ fn tool_result(content: &str) -> ToolExecution {
         needs_finalization: false,
         state_metadata: None,
         image_attachment: None,
+        extra_image_attachments: Vec::new(),
+        todo_advanced: false,
+        edited_paths: Vec::new(),
     }
 }
 
@@ -144,7 +147,7 @@ fn edited_paths_uses_authoritative_hashline_header_grammar() {
         "[\"dir/a.rs\"#A1B2]\n[*Update File: quoted.rs#BEEF]\nPUT 1.=1:\n+x\n".to_string(),
     );
     assert_eq!(
-        edited_paths("Edit", &args),
+        crate::tools::runner::extract_edited_paths("Edit", &args),
         vec!["dir/a.rs".to_string(), "quoted.rs".to_string()]
     );
 }

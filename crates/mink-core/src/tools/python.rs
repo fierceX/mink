@@ -178,6 +178,7 @@ impl super::runner::ToolExec for PythonTool {
             plan_command: None,
             state_metadata: None,
             presentation: None,
+            structured_value: None,
             termination: Some(termination),
         })
     }

@@ -109,6 +109,7 @@ fn schemas_declare_exactly_the_runtime_accepted_fields() {
             "PythonSandbox",
             &["script", "script_file", "timeout", "command", "code"],
         ),
+        ("RunCode", &["code", "description", "timeout"]),
     ];
     let catalog = ToolCatalog::builtin().unwrap();
     let mut covered = BTreeSet::new();
@@ -258,8 +259,17 @@ fn explicit_only_activation_comes_from_declaration_not_tool_name() {
         ToolDefaultActivation::ExplicitOnly,
         "PythonSandbox must stay explicit-only whether or not its feature is compiled"
     );
+    let run_code = catalog.get("RunCode").expect("RunCode declared");
+    assert_eq!(
+        run_code.default_activation,
+        ToolDefaultActivation::ExplicitOnly,
+        "RunCode must stay explicit-only so PtcMode::Off hides it by default"
+    );
     // Every other built-in tool keeps the default-enabled activation.
-    for tool in catalog.iter().filter(|tool| tool.name != "PythonSandbox") {
+    for tool in catalog
+        .iter()
+        .filter(|tool| !matches!(tool.name.as_str(), "PythonSandbox" | "RunCode"))
+    {
         assert_eq!(
             tool.default_activation,
             ToolDefaultActivation::Enabled,

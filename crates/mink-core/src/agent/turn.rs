@@ -158,7 +158,7 @@ impl TurnExecutor {
         resolved: crate::config::ResolvedModel,
     ) -> Self {
         let tools = Arc::new(ToolRunner::new(Arc::new(
-            crate::context::ToolContext::from(ctx.as_ref()),
+            crate::context::ToolContext::from_shared(&ctx),
         )));
         let prefix = crate::agent::prefix::PrefixManager::new(ctx.clone());
         let mut sub_agent_config = ctx.config.clone();
@@ -207,7 +207,7 @@ impl TurnExecutor {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let mut executor = Self::new_for_model(ctx.clone(), active);
-        let mut tools = crate::context::ToolContext::from(ctx.as_ref());
+        let mut tools = crate::context::ToolContext::from_shared(&ctx);
         tools.goal_adjudication = Some(session.clone());
         executor.tools = Arc::new(ToolRunner::new(Arc::new(tools)));
         executor.goal_adjudication = Some(session);
@@ -1030,6 +1030,9 @@ fn blocked_by_signal_recovery(
         needs_finalization: false,
         state_metadata: None,
         image_attachment: None,
+        extra_image_attachments: Vec::new(),
+        todo_advanced: false,
+        edited_paths: Vec::new(),
     }
 }
 

@@ -40,6 +40,7 @@ pub(super) struct ToolExecOutput {
     pub(super) state_metadata: Option<serde_json::Value>,
     pub(super) result_kind: ToolResultKind,
     pub(super) presentation: Option<ToolPresentation>,
+    pub(super) structured_value: Option<serde_json::Value>,
     pub(super) failure_source: Option<ToolFailureSource>,
 }
 
@@ -67,6 +68,7 @@ impl ToolExecOutput {
             state_metadata: None,
             result_kind,
             presentation: None,
+            structured_value: None,
             failure_source: None,
         }
     }
@@ -191,6 +193,18 @@ impl ToolPolicyGate<'_> {
             ));
         };
         if !self.surface.has(&call.name) {
+            if self.surface.has_programmatic(&call.name) {
+                return Some(blocked_tool_result(
+                    call.id.clone(),
+                    call.name.clone(),
+                    call.fields.clone(),
+                    format!(
+                        "Tool '{}' is only callable inside RunCode (via await tools.{}(...)) in the current PTC mode.",
+                        call.name, call.name
+                    ),
+                    ToolBlocker::ToolSurface,
+                ));
+            }
             let reason = self
                 .surface
                 .hidden()
@@ -243,7 +257,7 @@ impl ToolPolicyGate<'_> {
     }
 }
 
-pub(super) fn requires_sequential_execution(metadata: Option<&ToolMetadata>) -> bool {
+pub(crate) fn requires_sequential_execution(metadata: Option<&ToolMetadata>) -> bool {
     let Some(metadata) = metadata else {
         return false;
     };
@@ -289,6 +303,9 @@ pub(crate) fn blocked_tool_result(
         needs_finalization: false,
         state_metadata: None,
         image_attachment: None,
+        extra_image_attachments: Vec::new(),
+        todo_advanced: false,
+        edited_paths: Vec::new(),
     }
 }
 

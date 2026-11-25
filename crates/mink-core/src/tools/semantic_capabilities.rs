@@ -350,7 +350,7 @@ impl ToolCapabilityRegistry {
         let mut grouped: BTreeMap<ToolSemanticCapability, Vec<CapabilityProvider>> =
             BTreeMap::new();
         for offer in self.offers {
-            if !surface.has(offer.provider_tool)
+            if !surface.has_any_reachable(offer.provider_tool)
                 || !availability_matches(offer.available_if, context)
                 || (offer.capability == EditableSnapshotRead
                     && context.edit_mode() != crate::config::EditMode::Hashline)
@@ -377,7 +377,7 @@ impl ToolCapabilityRegistry {
         }
         for tool in custom_tools {
             let definition = &tool.definition;
-            if !surface.has(&definition.name) {
+            if !surface.has_any_reachable(&definition.name) {
                 continue;
             }
             let provider_tool = definition.name.to_string();

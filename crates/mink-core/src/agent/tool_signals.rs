@@ -157,7 +157,11 @@ impl ToolSignalProcessor {
                     })
             })
             .unwrap_or_default();
-        let paths = edited_paths(&result.tool_name, &result.tool_args);
+        let mut paths =
+            crate::tools::runner::extract_edited_paths(&result.tool_name, &result.tool_args);
+        if paths.is_empty() && !result.edited_paths.is_empty() {
+            paths = result.edited_paths.clone();
+        }
         self.evidence.record(
             &result.tool_name,
             &result.tool_args,
@@ -210,32 +214,6 @@ impl Default for ToolSignalProcessor {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// 提取一次写类调用涉及的路径，供窗口化回滚定位。
-fn edited_paths(tool_name: &str, args: &std::collections::BTreeMap<String, String>) -> Vec<String> {
-    let mut paths = Vec::new();
-    match tool_name {
-        "Write" => {
-            if let Some(path) = args.get("path") {
-                paths.push(path.clone());
-            }
-        }
-        "Edit" => {
-            if let Some(path) = args.get("path") {
-                paths.push(path.clone());
-            } else if let Some(input) = args.get("input") {
-                // Hashline 形态：通过权威 header 解析器取每个 section 的路径。
-                for line in input.lines() {
-                    if let Some(path) = crate::tools::hashline::section_header_path(line) {
-                        paths.push(path);
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    paths
 }
 
 #[cfg(test)]

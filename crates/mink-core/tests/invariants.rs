@@ -416,3 +416,125 @@ async fn plain_examples_remain_one_request_on_the_public_runtime() -> Result<()>
     std::fs::remove_dir_all(home.parent().unwrap())?;
     Ok(())
 }
+
+#[tokio::test]
+async fn ptc_exclusive_end_to_end_pipeline_and_off_mode_invariants() -> Result<()> {
+    // 1. Off mode leaves wire schemas and system prompt completely untouched.
+    let (home_off, cwd_off) = temp_pair("ptc-off");
+    let backend_off = Arc::new(ScriptedBackend::new(vec![text_stop("ok", "end_turn")]));
+    let runtime_off = AgentRuntime::start(
+        AgentOptions::new(&home_off, &cwd_off).with_llm_backend(backend_off.clone()),
+    )
+    .await?;
+    runtime_off.run_turn("hello").await?;
+    let cap_off = backend_off.captured();
+    assert_eq!(cap_off.len(), 1);
+    assert!(!cap_off[0].system_prompt.contains("<ptc-sdk>"));
+    assert!(
+        !cap_off[0]
+            .tools
+            .iter()
+            .any(|t| t["name"].as_str() == Some("RunCode"))
+    );
+    assert!(
+        cap_off[0]
+            .tools
+            .iter()
+            .any(|t| t["name"].as_str() == Some("Read"))
+    );
+    runtime_off.shutdown().await?;
+    std::fs::remove_dir_all(home_off.parent().unwrap())?;
+
+    // 2. Exclusive mode: wire exposes RunCode (no Read/Edit/Bash), prompt has <ptc-mode> + <ptc-sdk>,
+    //    direct Read call fails with PTC hint, RunCode runs Glob -> gather(Read) -> Edit + Todo + large inspect spill.
+    let (home, cwd) = temp_pair("ptc-exclusive");
+    std::fs::write(cwd.join("one.txt"), "alpha one\n")?;
+    std::fs::write(cwd.join("two.txt"), "alpha two\n")?;
+
+    let py_program = r#"
+files = (await tools.Glob(pattern="*.txt"))["files"]
+reads = await gather(*(tools.Read(path=p) for p in sorted(files)))
+t = await tools.TodoWrite(base_revision=0, add=[{"content": "Patch one.txt"}])
+t = await tools.TodoAdvance(base_revision=t["revision"], activate=[t["items"][0]["id"]])
+target = reads[0]
+patch = f"[{target['path']}#{target['tag']}]\nPUT 1.=1:\n+beta one\n"
+ed = await tools.Edit(input=patch)
+adv = await tools.TodoAdvance(base_revision=t["revision"], complete=[t["items"][0]["id"]])
+inspect({"count": len(reads), "applied": ed["applied"], "todo_rev": adv["revision"], "pad": "x" * 16000})
+"#;
+
+    let stop = || {
+        LlmEvent::Stop(LlmStopEvent {
+            reason: "tool_use".into(),
+        })
+    };
+    let backend = Arc::new(ScriptedBackend::new(vec![
+        // Round 1: model mistakenly calls Read directly -> rejected with PTC hint
+        vec![read_tool_call("direct_read", "one.txt"), stop()],
+        // Round 2: model invokes RunCode orchestration
+        vec![
+            tool_call(
+                "RunCode",
+                "ptc_1",
+                serde_json::json!({"code": py_program, "description": "Read files, edit one.txt, and update todos"}),
+            ),
+            stop(),
+        ],
+        // Round 3: finish
+        text_stop("completed via RunCode", "end_turn"),
+    ]));
+
+    let ptc_cfg = mink::runtime::PtcConfig {
+        mode: mink::runtime::PtcMode::Exclusive,
+        ..Default::default()
+    };
+    let runtime = AgentRuntime::start(
+        AgentOptions::new(&home, &cwd)
+            .with_ptc(ptc_cfg)
+            .with_tool_options(mink::runtime::ToolOptions {
+                result_max_bytes: 2_048,
+                ..Default::default()
+            })
+            .with_llm_backend(backend.clone()),
+    )
+    .await?;
+
+    let turn_outcome = runtime.run_turn("orchestrate edits").await?;
+    assert!(
+        turn_outcome.error.is_none(),
+        "turn failed: {:?}",
+        turn_outcome.error
+    );
+    let requests = backend.captured();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].system_prompt.contains("<ptc-mode>"));
+    assert!(requests[0].system_prompt.contains("<ptc-sdk>"));
+    assert!(
+        requests[0]
+            .tools
+            .iter()
+            .any(|t| t["name"].as_str() == Some("RunCode"))
+    );
+    assert!(!requests[0].tools.iter().any(|t| matches!(
+        t["name"].as_str(),
+        Some("Read" | "Edit" | "Bash" | "Python")
+    )));
+
+    // Direct Read rejection explains await tools.Read(...)
+    let direct_rejection = serde_json::to_string(&requests[1].messages)?;
+    assert!(
+        direct_rejection.contains("only callable inside RunCode"),
+        "{direct_rejection}"
+    );
+
+    // RunCode updated file on disk, updated todo snapshot, and spilled large inspect output to artifact://
+    let ptc_reply = serde_json::to_string(&requests[2].messages)?;
+    assert!(!ptc_reply.contains("RunCode failed"), "{ptc_reply}");
+    assert_eq!(std::fs::read_to_string(cwd.join("one.txt"))?, "beta one\n");
+    assert!(ptc_reply.contains("artifact://"), "{ptc_reply}");
+    assert!(ptc_reply.contains("<current-todos"), "{ptc_reply}");
+
+    runtime.shutdown().await?;
+    std::fs::remove_dir_all(home.parent().unwrap())?;
+    Ok(())
+}

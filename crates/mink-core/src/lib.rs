@@ -27,16 +27,18 @@ pub mod prelude {
         LlmRequest, LlmRequestFailure, LlmResponseStream, LlmRetryEvent, LlmStopEvent,
         LlmTextEvent, LlmThinkingEvent, LlmToolCallEvent, LlmUpstreamError, LlmUsageEvent,
         LoadedSkill, ModelResolver, OpenAiCompatibleBackend, OpenAiCompatibleOptions, OutputFormat,
-        PostInitContext, PostInitHook, PrefixSource, ProviderOptions, ReadOnlyFileSystem,
-        ResolvedModel, ResourceHandler, RuntimeError, RuntimeSkill, SandboxConfig,
-        SandboxPythonConfig, SessionEvent, SessionEventBatch, SessionEventSink, SessionInfo,
-        SessionLayout, SessionPolicy, SignalPolicy, SkillCapability, SkillDiscoveryPolicy,
-        SkillLoadContext, SkillProvider, SourceLevel, SourceMeta, TokenParamKind, ToolActivation,
-        ToolApprovalMode, ToolApprovalPolicy, ToolCapabilityOffer, ToolDefinition, ToolError,
-        ToolExecutionContext, ToolExecutionMode, ToolOptions, ToolOutput, ToolSemanticCapability,
-        TurnFailureReason, TurnId, TurnOutcome, TurnStatus, UpstreamFailureKind, VfsGlobRequest,
-        VfsGlobResult, VfsGrepEntry, VfsGrepRequest, VfsGrepResult, VfsReadRequest, VfsReadResult,
-        VfsScope,
+        PostInitContext, PostInitHook, PrefixSource, ProviderOptions, PtcBackendKind,
+        PtcBindingDispatcher, PtcBindingError, PtcBindingSuccess, PtcConfig, PtcFailureKind,
+        PtcImageDescriptor, PtcMode, PtcOutputItem, PtcRunDisplay, PtcRunFailure, PtcRunRequest,
+        PtcRunResult, PtcRunSpec, PtcRuntime, PtcSubCallDisplay, ReadOnlyFileSystem, ResolvedModel,
+        ResourceHandler, RuntimeError, RuntimeSkill, SandboxConfig, SandboxPythonConfig,
+        SessionEvent, SessionEventBatch, SessionEventSink, SessionInfo, SessionLayout,
+        SessionPolicy, SignalPolicy, SkillCapability, SkillDiscoveryPolicy, SkillLoadContext,
+        SkillProvider, SourceLevel, SourceMeta, TokenParamKind, ToolActivation, ToolApprovalMode,
+        ToolApprovalPolicy, ToolCapabilityOffer, ToolDefinition, ToolError, ToolExecutionContext,
+        ToolExecutionMode, ToolOptions, ToolOutput, ToolSemanticCapability, TurnFailureReason,
+        TurnId, TurnOutcome, TurnStatus, UpstreamFailureKind, VfsGlobRequest, VfsGlobResult,
+        VfsGrepEntry, VfsGrepRequest, VfsGrepResult, VfsReadRequest, VfsReadResult, VfsScope,
     };
 }
 
@@ -53,6 +55,7 @@ mod guard;
 mod llm;
 mod prompt;
 mod protocol;
+mod ptc;
 mod repair;
 mod resources;
 mod safety;

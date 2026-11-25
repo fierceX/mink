@@ -307,3 +307,75 @@ fn delegation_depth_controls_the_sub_agent_surface() {
     assert!(surface.has("SubAgent"));
     assert!(!surface.has("GoalDraft"));
 }
+
+#[test]
+fn ptc_modes_partition_wire_and_programmatic_surfaces() {
+    // Off: RunCode hidden and explicitly requesting it errors.
+    let off_cfg = ToolConfig::from_config(&Config::default());
+    let off_surface = resolve(&off_cfg, AgentRole::Primary, false).unwrap();
+    assert_eq!(off_surface.ptc_mode(), crate::ptc::PtcMode::Off);
+    assert!(!off_surface.has("RunCode"));
+    assert!(off_surface.programmatic_tools().is_empty());
+
+    let mut explicit_run_code = off_cfg.clone();
+    explicit_run_code.enabled_tools = Some(vec!["RunCode".into()]);
+    assert!(
+        resolve(&explicit_run_code, AgentRole::Primary, false)
+            .unwrap_err()
+            .to_string()
+            .contains("RunCode")
+    );
+
+    // Tool: additive RunCode on wire + programmatic SDK excludes control tools & Python.
+    let mut tool_cfg = ToolConfig::from_config(&Config::default());
+    tool_cfg.ptc.mode = crate::ptc::PtcMode::Tool;
+    let tool_surface = resolve(&tool_cfg, AgentRole::Primary, false).unwrap();
+    assert_eq!(tool_surface.ptc_mode(), crate::ptc::PtcMode::Tool);
+    assert!(tool_surface.has_all(&["RunCode", "Read", "Edit", "GoalDraft", "SubAgent"]));
+    assert!(tool_surface.has_programmatic("Read"));
+    assert!(tool_surface.has_programmatic("GoalRead"));
+    assert!(!tool_surface.has_programmatic("RunCode"));
+    assert!(!tool_surface.has_programmatic("Python"));
+    assert!(!tool_surface.has_programmatic("PlanDraft"));
+    assert!(!tool_surface.has_programmatic("GoalDraft"));
+    assert!(!tool_surface.has_programmatic("SubAgent"));
+    assert_ne!(off_surface.fingerprint(), tool_surface.fingerprint());
+
+    // Exclusive: wire has RunCode + control tools only; programmatic has core/custom tools;
+    // Python/PythonSandbox hidden; GoalReviewer forced back to Off.
+    let mut exc_cfg = ToolConfig::from_config(&Config::default());
+    exc_cfg.ptc.mode = crate::ptc::PtcMode::Exclusive;
+    let exc_surface = resolve(&exc_cfg, AgentRole::Primary, false).unwrap();
+    assert!(exc_surface.has_all(&[
+        "RunCode",
+        "PlanDraft",
+        "GoalDraft",
+        "GoalReview",
+        "SubAgent"
+    ]));
+    assert!(!exc_surface.has("Read"));
+    assert!(!exc_surface.has("Bash"));
+    assert!(!exc_surface.has("Python"));
+    assert!(!exc_surface.has("PythonSandbox"));
+    assert!(exc_surface.has_programmatic("Read"));
+    assert!(exc_surface.has_programmatic("Edit"));
+    assert!(exc_surface.has_programmatic("Bash"));
+    assert!(exc_surface.has_programmatic("GoalRead"));
+    assert!(exc_surface.has_any_reachable("Read"));
+    assert!(exc_surface.has_any_reachable("Bash"));
+    assert!(!exc_surface.has_any_reachable("Python"));
+
+    let reviewer = resolve(&exc_cfg, AgentRole::GoalReviewer, false).unwrap();
+    assert_eq!(reviewer.ptc_mode(), crate::ptc::PtcMode::Off);
+    assert!(!reviewer.has("RunCode"));
+    assert!(reviewer.has_all(&["Read", "GoalRead"]));
+
+    // Narrow enabled_tools + Exclusive keeps RunCode reachable on wire.
+    let mut narrowed = exc_cfg.clone();
+    narrowed.enabled_tools = Some(vec!["Read".into(), "Grep".into()]);
+    let narrowed_surface = resolve(&narrowed, AgentRole::Primary, false).unwrap();
+    assert!(narrowed_surface.has("RunCode"));
+    assert!(!narrowed_surface.has("Read"));
+    assert!(narrowed_surface.has_programmatic("Read"));
+    assert!(narrowed_surface.has_programmatic("Grep"));
+}

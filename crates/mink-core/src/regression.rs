@@ -447,6 +447,7 @@ async fn harness_inner(
             capability_snapshot: None,
             custom_tools: Vec::new(),
             prefix_source: None,
+            ptc_runtime: None,
         },
     );
     let built = match event_log_writer {
@@ -550,6 +551,9 @@ fn internal_result(name: &str) -> ToolExecution {
         needs_finalization: false,
         state_metadata: None,
         image_attachment: None,
+        extra_image_attachments: Vec::new(),
+        todo_advanced: false,
+        edited_paths: Vec::new(),
     }
 }
 

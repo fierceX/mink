@@ -58,6 +58,7 @@ pub struct AgentContextBuild {
     pub capability_snapshot: Option<Arc<CapabilitySnapshot>>,
     pub custom_tools: Vec<crate::runtime::RegisteredCustomTool>,
     pub prefix_source: Option<Arc<dyn crate::runtime::PrefixSource>>,
+    pub ptc_runtime: Option<Arc<dyn crate::ptc::PtcRuntime>>,
 }
 
 pub(crate) struct BuiltAgentContext {
@@ -71,6 +72,30 @@ tokio::task_local! {
     /// Internal test injection: use this writer instead of opening the
     /// session's own events.jsonl (no production API change).
     pub(crate) static TEST_EVENT_LOG_WRITER: Option<crate::session::event_log::EventLogWriter>;
+}
+
+fn default_ptc_runtime(config: &Config) -> Option<Arc<dyn crate::ptc::PtcRuntime>> {
+    if config.ptc.mode == crate::ptc::PtcMode::Off {
+        return None;
+    }
+    match config.ptc.backend {
+        crate::ptc::PtcBackendKind::SubprocessPython => Some(Arc::new(
+            crate::ptc::subprocess_py::SubprocessPythonPtcRuntime::new(config.ptc.clone()),
+        )),
+        crate::ptc::PtcBackendKind::WasiPython => {
+            #[cfg(feature = "python-sandbox")]
+            {
+                Some(Arc::new(crate::ptc::wasi_py::WasiPythonPtcRuntime::new(
+                    config.ptc.clone(),
+                    config.sandbox_python.clone(),
+                )))
+            }
+            #[cfg(not(feature = "python-sandbox"))]
+            {
+                None
+            }
+        }
+    }
 }
 
 pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<BuiltAgentContext> {
@@ -261,6 +286,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
             custom_tools: Arc::new(params.custom_tools),
             prefix_source: params.prefix_source,
             model_capabilities,
+            ptc_runtime: params.ptc_runtime.or_else(|| default_ptc_runtime(&config)),
         },
         media: TurnMediaState {
             image_cache,

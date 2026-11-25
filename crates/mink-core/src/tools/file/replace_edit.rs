@@ -91,6 +91,11 @@ pub(crate) fn execute_replace_edit(
     }
     let mut outcome = tool_outcome(output.join("\n\n"));
     outcome.no_mutation = !changed;
+    outcome.structured_value = Some(serde_json::json!({
+        "applied": changed,
+        "files": [{"path": display_path, "tag": serde_json::Value::Null}],
+        "summary": if changed { "applied" } else { "no changes" },
+    }));
     Ok(outcome)
 }
 

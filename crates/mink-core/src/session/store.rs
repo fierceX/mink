@@ -155,11 +155,20 @@ impl ConversationStore {
                 // block so the model can associate each image with its call
                 // (v7 §8.1). The block carries budget metadata but never a
                 // path.
-                if let Some(image) = &r.image_attachment {
+                for (idx, image) in std::iter::once(&r.image_attachment)
+                    .flatten()
+                    .chain(r.extra_image_attachments.iter())
+                    .enumerate()
+                {
                     if !image.name.is_empty() {
+                        let label = if r.extra_image_attachments.is_empty() && idx == 0 {
+                            format!("Image for {}: {}", r.tool_use_id, image.name)
+                        } else {
+                            format!("Image #{} for {}: {}", idx + 1, r.tool_use_id, image.name)
+                        };
                         blocks.push(json!({
                             "type": "text",
-                            "text": format!("Image for {}: {}", r.tool_use_id, image.name),
+                            "text": label,
                         }));
                     }
                     blocks.push(json!({

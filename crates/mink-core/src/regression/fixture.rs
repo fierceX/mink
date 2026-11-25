@@ -223,6 +223,7 @@ async fn tools_reject_unknown_fields_at_runtime() -> anyhow::Result<()> {
                 .map(|(_, metadata)| metadata.name.to_string())
                 .collect();
             cfg.enabled_tools = Some(names);
+            cfg.ptc.mode = crate::ptc::PtcMode::Tool;
         },
         None,
     )

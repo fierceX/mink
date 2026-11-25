@@ -1,29 +1,32 @@
 use super::batch::{json_validity_note, resolve_summary_path};
 use super::*;
 
-pub(super) fn format_dispatched_result(
+struct DispatchTextInput {
+    output: String,
+    is_bash: bool,
+    exit_code: Option<i32>,
+    wall_ms: Option<u128>,
+    no_mutation: bool,
+    memo_candidate: Option<MemoCandidate>,
+    diagnostics: Vec<String>,
+    success: bool,
+}
+
+fn compose_dispatched_text(
     ctx: &ToolContext,
     call: &ToolCallEvent,
-    raw: ToolExecOutput,
-) -> ToolExecution {
-    let ToolExecOutput {
-        content: mut output,
+    input: DispatchTextInput,
+) -> String {
+    let DispatchTextInput {
+        mut output,
         is_bash,
-        mut conv_content,
         exit_code,
         wall_ms,
         no_mutation,
         memo_candidate,
-        spawns_sub_agent,
-        status,
         diagnostics,
-        plan_command,
-        state_metadata,
-        result_kind,
-        presentation,
-        failure_source,
-    } = raw;
-    let success = status.is_success();
+        success,
+    } = input;
     if !success && exit_code.is_none() {
         output = format!("Error: {output}");
     }
@@ -41,10 +44,6 @@ pub(super) fn format_dispatched_result(
         }
         output = format!("{header}{output}");
     }
-    // Compose the complete pre-truncation output first: exec header (already
-    // in `output`), Read/Write summary line, and the JSON validity note. The
-    // whole thing then goes through the unified formatter so truncation and
-    // artifact spill can never be bypassed by later appends.
     let summary = if (call.name == "Read" || call.name == "Write") && !is_bash {
         let path_str = call.fields.get("path").map(|s| s.as_str()).unwrap_or("");
         let kind = call.name.as_str();
@@ -57,7 +56,6 @@ pub(super) fn format_dispatched_result(
     } else {
         None
     };
-    // notices immediately when an edit or write broke JSON syntax.
     let json_note = if success && (call.name == "Edit" || call.name == "Write") {
         json_validity_note(ctx, call)
     } else {
@@ -70,9 +68,6 @@ pub(super) fn format_dispatched_result(
     if let Some(note) = json_note {
         composed.push_str(&note);
     }
-    // Record the read memo only when the *final* composed output (content +
-    // summary line + JSON note) fits the budget, so a later hit can never ask
-    // the model to reuse content that was truncated or spilled.
     if let Some(candidate) = memo_candidate
         && composed.len() <= ctx.tool_config.tool_result_max_bytes
     {
@@ -83,6 +78,54 @@ pub(super) fn format_dispatched_result(
             candidate.end_line,
         );
     }
+    let mutating = crate::tools::runner::tool_registry()
+        .iter()
+        .find(|tool| tool.metadata().name == call.name)
+        .is_some_and(|tool| tool.metadata().mutating);
+    if mutating && success && !no_mutation {
+        ctx.bump_mutation();
+    }
+    composed
+}
+
+pub(super) fn format_dispatched_result(
+    ctx: &ToolContext,
+    call: &ToolCallEvent,
+    raw: ToolExecOutput,
+) -> ToolExecution {
+    let ToolExecOutput {
+        content: output,
+        is_bash,
+        mut conv_content,
+        exit_code,
+        wall_ms,
+        no_mutation,
+        memo_candidate,
+        spawns_sub_agent,
+        status,
+        diagnostics,
+        plan_command,
+        state_metadata,
+        result_kind,
+        presentation,
+        structured_value: _,
+        failure_source,
+    } = raw;
+    let success = status.is_success();
+    let composed = compose_dispatched_text(
+        ctx,
+        call,
+        DispatchTextInput {
+            output,
+            is_bash,
+            exit_code,
+            wall_ms,
+            no_mutation,
+            memo_candidate,
+            diagnostics,
+            success,
+        },
+    );
     let needs_finalization = plan_command.is_some() || spawns_sub_agent;
     let formatted = if needs_finalization {
         FormattedToolOutput {
@@ -110,15 +153,6 @@ pub(super) fn format_dispatched_result(
     // and failure so conversation and UI cannot diverge or bypass the limit.
     if call.name == "Edit" {
         conv_content = final_output.clone();
-    }
-    // A successful Write/Edit invalidates read memos: changed files must be
-    // re-read before they are used again (engine-internal; no prompt impact).
-    let mutating = crate::tools::runner::tool_registry()
-        .iter()
-        .find(|tool| tool.metadata().name == call.name)
-        .is_some_and(|tool| tool.metadata().mutating);
-    if mutating && success && !no_mutation {
-        ctx.bump_mutation();
     }
 
     // Signals collected later by TurnExecutor (needs shared SignalCollector for EditLoop)
@@ -170,6 +204,80 @@ pub(super) fn format_dispatched_result(
         needs_finalization,
         state_metadata,
         image_attachment: None,
+        extra_image_attachments: Vec::new(),
+        todo_advanced: false,
+        edited_paths: Vec::new(),
+    }
+}
+
+pub(super) fn format_nested_dispatched_result(
+    ctx: &ToolContext,
+    call: &ToolCallEvent,
+    raw: ToolExecOutput,
+    is_mutating: bool,
+) -> NestedToolOutcome {
+    let ToolExecOutput {
+        content: output,
+        is_bash,
+        conv_content: _,
+        exit_code,
+        wall_ms,
+        no_mutation,
+        memo_candidate,
+        spawns_sub_agent: _,
+        status,
+        diagnostics,
+        plan_command: _,
+        state_metadata: _,
+        result_kind,
+        presentation: _,
+        structured_value,
+        failure_source: _,
+    } = raw;
+    let success = status.is_success();
+    let composed = compose_dispatched_text(
+        ctx,
+        call,
+        DispatchTextInput {
+            output,
+            is_bash,
+            exit_code,
+            wall_ms,
+            no_mutation,
+            memo_candidate,
+            diagnostics,
+            success,
+        },
+    );
+    let rendered_text = if is_bash {
+        filter_bash_noise(&composed)
+    } else {
+        composed
+    };
+    let unknown_effect = is_mutating
+        && matches!(
+            status,
+            ToolStatus::Interrupted
+                | ToolStatus::Failed(
+                    ToolFailureKind::Timeout | ToolFailureKind::Aborted | ToolFailureKind::Unknown
+                )
+        );
+    let todo_advanced = call.name == "TodoAdvance" && success;
+    let edited_paths = if success && !no_mutation {
+        crate::tools::runner::extract_edited_paths(&call.name, &call.fields)
+    } else {
+        Vec::new()
+    };
+    NestedToolOutcome {
+        rendered_text,
+        structured_value,
+        status,
+        exit_code,
+        result_kind,
+        unknown_effect,
+        todo_advanced,
+        edited_paths,
+        image: None,
     }
 }
 
@@ -295,12 +403,12 @@ fn tail_within_budget(s: &str, max_bytes: usize) -> &str {
     &s[start..]
 }
 
-pub(super) struct FormattedToolOutput {
-    pub(super) content: String,
-    pub(super) artifacts: Vec<ArtifactDisplay>,
+pub(crate) struct FormattedToolOutput {
+    pub(crate) content: String,
+    pub(crate) artifacts: Vec<ArtifactDisplay>,
 }
 
-pub(super) fn format_tool_result_with_artifact(
+pub(crate) fn format_tool_result_with_artifact(
     tool_name: &str,
     output: &str,
     max: usize,

@@ -90,6 +90,7 @@ pub struct ToolOutput {
     pub conversation_content: Option<String>,
     pub success: bool,
     pub exit_code: Option<i32>,
+    pub structured_value: Option<serde_json::Value>,
 }
 
 impl ToolOutput {
@@ -99,7 +100,13 @@ impl ToolOutput {
             conversation_content: None,
             success: true,
             exit_code: None,
+            structured_value: None,
         }
+    }
+
+    pub fn with_structured_value(mut self, value: serde_json::Value) -> Self {
+        self.structured_value = Some(value);
+        self
     }
 }
 

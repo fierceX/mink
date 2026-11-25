@@ -1,4 +1,6 @@
-use super::format::{format_dispatched_result, format_tool_result_with_artifact};
+use super::format::{
+    format_dispatched_result, format_nested_dispatched_result, format_tool_result_with_artifact,
+};
 use super::*;
 
 impl ToolRunner {
@@ -80,7 +82,10 @@ impl ToolRunner {
                         completed: results,
                     });
                 }
-                match self.dispatch_sequential(call.clone()).await {
+                match self
+                    .dispatch_sequential(call.clone(), &mut image_budget)
+                    .await
+                {
                     Ok(result) => results.push(result),
                     Err(error) => {
                         results.push(unknown_tool_result(call, &error));
@@ -496,10 +501,66 @@ impl ToolRunner {
             needs_finalization: false,
             state_metadata: None,
             image_attachment: Some(attachment),
+            extra_image_attachments: Vec::new(),
+            todo_advanced: false,
+            edited_paths: Vec::new(),
         }
     }
 
-    async fn dispatch_sequential(&self, call: ToolCallEvent) -> Result<ToolExecution> {
+    /// Execute an internal verification call (e.g. `CommandGoalVerifier` running
+    /// `Bash`) as long as the tool is reachable via either wire or PTC SDK.
+    pub(crate) async fn execute_verifier_call(&self, call: ToolCallEvent) -> Result<ToolExecution> {
+        anyhow::ensure!(
+            self.ctx.tool_surface.has_any_reachable(&call.name),
+            "checker tool '{}' is unavailable in resolved surface",
+            call.name
+        );
+        let ctx = self.ctx.clone();
+        let tool_name = call.name.clone();
+        tokio::task::spawn_blocking(move || {
+            let tool = tool_registry()
+                .iter()
+                .find(|t| t.metadata().name == tool_name);
+            Self::execute_one_sync(&ctx, &call, tool.map(|t| t.as_ref()))
+        })
+        .await?
+    }
+
+    async fn dispatch_sequential(
+        &self,
+        call: ToolCallEvent,
+        image_budget: &mut ImageBatchBudget,
+    ) -> Result<ToolExecution> {
+        if call.name == "RunCode" {
+            let budget_window = match crate::tools::file::image_limits(&self.ctx) {
+                Some(limits) => crate::ptc::tool::PtcImageBudgetWindow {
+                    remaining_slots: limits
+                        .max_images_per_request
+                        .saturating_sub(image_budget.used_images),
+                    remaining_bytes: limits
+                        .max_image_bytes_per_request
+                        .saturating_sub(image_budget.used_bytes),
+                    max_images: limits.max_images_per_request,
+                    max_bytes: limits.max_image_bytes_per_request,
+                    used_images: image_budget.used_images,
+                    used_bytes: image_budget.used_bytes,
+                },
+                None => crate::ptc::tool::PtcImageBudgetWindow {
+                    remaining_slots: 0,
+                    remaining_bytes: 0,
+                    max_images: 0,
+                    max_bytes: 0,
+                    used_images: 0,
+                    used_bytes: 0,
+                },
+            };
+            let (exec, added_images, added_bytes) =
+                crate::ptc::tool::execute_run_code(&self.ctx, call.clone(), budget_window).await;
+            image_budget.used_images = image_budget.used_images.saturating_add(added_images);
+            image_budget.used_bytes = image_budget.used_bytes.saturating_add(added_bytes);
+            mark_format_confirmed(&self.storm, &call.name, &call.storm_identity(), &exec);
+            return Ok(exec);
+        }
         if let Some(tool) = self.find_custom_tool(&call.name).cloned() {
             let result = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
                 execute_custom(&self.ctx, &call, tool),
@@ -612,11 +673,12 @@ impl ToolRunner {
     }
 }
 
-async fn execute_custom(
+async fn execute_custom_raw(
     ctx: &ToolContext,
     call: &ToolCallEvent,
     tool: crate::tools::extension::RegisteredCustomTool,
-) -> Result<ToolExecution> {
+    unknown_effect_bail: bool,
+) -> Result<(ToolExecOutput, bool, bool)> {
     let definition = &tool.definition;
     let started = std::time::Instant::now();
     let timeout = crate::tools::process::resolve_tool_timeout(
@@ -646,11 +708,12 @@ async fn execute_custom(
         Err(reason) => {
             // Goal journals every extension before dispatch, including those
             // declared read-only. An abandoned future cannot confirm its effect.
-            if definition.mutating
-                || ctx
-                    .goal_store
-                    .snapshot()
-                    .is_some_and(|goal| goal.pending_effects.contains(&call.id))
+            if unknown_effect_bail
+                && (definition.mutating
+                    || ctx
+                        .goal_store
+                        .snapshot()
+                        .is_some_and(|goal| goal.pending_effects.contains(&call.id)))
             {
                 anyhow::bail!("{reason}");
             }
@@ -679,6 +742,7 @@ async fn execute_custom(
                 state_metadata: None,
                 result_kind: definition.result_kind,
                 presentation: None,
+                structured_value: output.structured_value,
                 failure_source: None,
             }
         }
@@ -701,11 +765,150 @@ async fn execute_custom(
             failed
         }
     };
+    let succeeded = raw.status.is_success();
+    Ok((raw, definition.mutating, succeeded))
+}
+
+async fn execute_custom(
+    ctx: &ToolContext,
+    call: &ToolCallEvent,
+    tool: crate::tools::extension::RegisteredCustomTool,
+) -> Result<ToolExecution> {
+    let (raw, mutating, succeeded) = execute_custom_raw(ctx, call, tool, true).await?;
     let formatted = format_dispatched_result(ctx, call, raw);
-    if definition.mutating && formatted.succeeded() {
+    if mutating && succeeded {
         ctx.bump_mutation();
     }
     Ok(formatted)
+}
+
+/// Nested programmatic dispatch for `PtcDispatchBridge`. Preserves snapshots,
+/// read memos, image cache storage, and JSON validity notes, while deferring
+/// `ImageBatchBudget` admission and outer artifact spill to `RunCode`.
+pub(crate) async fn execute_nested_tool_call(
+    ctx: &Arc<ToolContext>,
+    call: ToolCallEvent,
+) -> Result<NestedToolOutcome> {
+    anyhow::ensure!(
+        call.name != "RunCode" && ctx.tool_surface.has_programmatic(&call.name),
+        "tool '{}' is not callable inside RunCode",
+        call.name
+    );
+    ctx.persistence_fault.check()?;
+
+    if call.name == "Read" {
+        let path_str = call
+            .input_json
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let ctx_cls = ctx.clone();
+        let classified = tokio::task::spawn_blocking(move || {
+            let selection = match crate::resources::selector::split_read_path_selection(&path_str) {
+                Ok(selection) => selection,
+                Err(_) => return Ok(crate::tools::file::ImageReadKind::NotImage),
+            };
+            crate::tools::file::classify_image_read(&ctx_cls, &path_str, &selection)
+        })
+        .await??;
+
+        if !matches!(classified, crate::tools::file::ImageReadKind::NotImage) {
+            let prepared = match classified {
+                crate::tools::file::ImageReadKind::VfsCandidate {
+                    display_path,
+                    has_selector,
+                } => {
+                    let ctx_prep = ctx.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        crate::tools::file::prepare_vfs_candidate(
+                            &ctx_prep,
+                            display_path,
+                            has_selector,
+                        )
+                    })
+                    .await??
+                    {
+                        crate::tools::file::VfsImageOutcome::Image(prepared) => Some(prepared),
+                        crate::tools::file::VfsImageOutcome::NotImage => None,
+                    }
+                }
+                other => {
+                    let ctx_prep = ctx.clone();
+                    let prepared = tokio::task::spawn_blocking(move || {
+                        crate::tools::file::prepare_image_read(&ctx_prep, other)
+                    })
+                    .await??;
+                    Some(prepared)
+                }
+            };
+            if let Some(prepared) = prepared {
+                let bytes = prepared.bytes.len() as u64;
+                let image_id = match &prepared.existing_id {
+                    Some(id) => id.clone(),
+                    None => {
+                        let cache = ctx.image_cache.clone();
+                        let raw_bytes = prepared.bytes.clone();
+                        tokio::task::spawn_blocking(move || cache.commit(&raw_bytes)).await??
+                    }
+                };
+                let attachment = crate::tools::image::ImageAttachment {
+                    image_id,
+                    format: prepared.info.format,
+                    width: prepared.info.width,
+                    height: prepared.info.height,
+                    bytes,
+                    name: prepared.name,
+                };
+                let summary = attachment.summary(&prepared.display_path);
+                return Ok(NestedToolOutcome {
+                    rendered_text: summary,
+                    structured_value: None,
+                    status: ToolStatus::Succeeded,
+                    exit_code: None,
+                    result_kind: ToolResultKind::FileRead,
+                    unknown_effect: false,
+                    todo_advanced: false,
+                    edited_paths: Vec::new(),
+                    image: Some((attachment, prepared.display_path)),
+                });
+            }
+        }
+    }
+
+    if let Some(tool) = ctx
+        .custom_tools
+        .iter()
+        .find(|t| t.definition.name == call.name)
+        .cloned()
+    {
+        let (raw, mutating, succeeded) = futures::FutureExt::catch_unwind(
+            std::panic::AssertUnwindSafe(execute_custom_raw(ctx, &call, tool, false)),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("nested custom tool task panicked"))??;
+        if mutating && succeeded {
+            ctx.bump_mutation();
+        }
+        return Ok(format_nested_dispatched_result(ctx, &call, raw, mutating));
+    }
+
+    let ctx_sync = ctx.clone();
+    tokio::task::spawn_blocking(move || {
+        let tool_fn = tool_registry()
+            .iter()
+            .find(|t| t.metadata().name == call.name)
+            .map(|t| t.as_ref());
+        let is_mutating = tool_fn.is_some_and(|t| t.metadata().mutating);
+        let raw = dispatch_tool(&ctx_sync, &call, tool_fn);
+        Ok(format_nested_dispatched_result(
+            &ctx_sync,
+            &call,
+            raw,
+            is_mutating,
+        ))
+    })
+    .await?
 }
 
 fn failed_status(
@@ -770,6 +973,7 @@ fn dispatch_tool(
                     state_metadata: outcome.state_metadata,
                     result_kind: metadata.result_kind,
                     presentation: outcome.presentation,
+                    structured_value: outcome.structured_value,
                     failure_source: None,
                 }
             }

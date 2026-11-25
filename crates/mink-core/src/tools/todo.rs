@@ -86,6 +86,7 @@ impl ToolExec for TodoReadTool {
         let snapshot = ctx.todo_store.snapshot();
         let mut outcome = ToolOutcome::text(render_snapshot(&snapshot, args.include_completed));
         outcome.state_metadata = Some(todo_state_metadata(snapshot.revision, "snapshot"));
+        outcome.structured_value = Some(todo_structured_value(&snapshot));
         outcome.presentation = Some(ToolPresentation::Todo(todo_display(
             &snapshot,
             snapshot.items.iter().map(todo_item_display).collect(),
@@ -330,7 +331,21 @@ fn state_change_outcome(
         )
     };
     outcome.state_metadata = Some(todo_state_metadata(snapshot.revision, kind));
+    outcome.structured_value = Some(todo_structured_value(snapshot));
     outcome
+}
+
+fn todo_structured_value(snapshot: &TodoSnapshot) -> serde_json::Value {
+    let (pending, in_progress, completed) = status_counts(snapshot);
+    serde_json::json!({
+        "revision": snapshot.revision,
+        "items": snapshot.items,
+        "counts": {
+            "pending": pending,
+            "in_progress": in_progress,
+            "completed": completed,
+        },
+    })
 }
 
 fn todo_read_provider(ctx: &ToolContext) -> &str {

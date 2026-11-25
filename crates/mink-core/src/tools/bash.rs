@@ -285,22 +285,34 @@ impl BashTool {
         )
         .map(|(s, code, termination)| {
             // 提示走结果尾部：统一截断保护保留尾部预算，不改变状态与退出码。
+            let stdout_text = s.clone();
             let content = match hint {
                 Some(hint) if !hint.is_empty() => format!("{s}\n{hint}"),
                 _ => s,
             };
+            let success = code == Some(0);
+            let timed_out = matches!(
+                termination,
+                crate::tools::process::ProcessTermination::TimedOut
+            );
             super::runner::ToolOutcome {
                 content,
                 conversation_content: String::new(),
                 is_bash: true,
                 exit_code: code,
-                success: code == Some(0),
+                success,
                 no_mutation: false,
                 memo_candidate: None,
                 diagnostics: Vec::new(),
                 plan_command: None,
                 state_metadata: None,
                 presentation: None,
+                structured_value: Some(serde_json::json!({
+                    "exit_code": code,
+                    "stdout": stdout_text,
+                    "stderr": "",
+                    "timed_out": timed_out,
+                })),
                 termination: Some(termination),
             }
         })

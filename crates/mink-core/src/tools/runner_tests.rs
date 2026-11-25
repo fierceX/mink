@@ -35,6 +35,7 @@ async fn successful_display_text_may_start_with_error_prefix() {
             state_metadata: None,
             result_kind: ToolResultKind::Search,
             presentation: None,
+            structured_value: None,
             failure_source: None,
         },
     );
@@ -406,7 +407,9 @@ fn approval_test_config<const N: usize>(
         enabled_tools: None,
         tool_approval_mode: mode,
         tool_approval: overrides.into_iter().collect(),
+        sandbox: crate::config::SandboxConfig::default(),
         sandbox_python: crate::config::SandboxPythonConfig::default(),
+        ptc: crate::ptc::PtcConfig::default(),
     }
 }
 

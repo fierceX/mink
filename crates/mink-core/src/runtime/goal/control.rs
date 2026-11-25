@@ -63,7 +63,12 @@ impl AgentRuntimeHandle {
         if let Some(active_turn_id) = self.active_turn_id() {
             return Err(RuntimeError::Busy { active_turn_id });
         }
-        if !self.goal_ctx.tools.tool_surface.has("GoalRead") {
+        if !self
+            .goal_ctx
+            .tools
+            .tool_surface
+            .has_any_reachable("GoalRead")
+        {
             return Err(RuntimeError::Configuration(
                 "goal requires GoalRead in the resolved tool surface".into(),
             ));
@@ -138,7 +143,12 @@ impl AgentRuntimeHandle {
             if let Some(active_turn_id) = self.active_turn_id() {
                 return Err(RuntimeError::Busy { active_turn_id });
             }
-            if !self.goal_ctx.tools.tool_surface.has("GoalRead") {
+            if !self
+                .goal_ctx
+                .tools
+                .tool_surface
+                .has_any_reachable("GoalRead")
+            {
                 return Err(RuntimeError::Configuration(
                     "goal requires GoalRead in the resolved tool surface".into(),
                 ));

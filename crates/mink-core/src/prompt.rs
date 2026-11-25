@@ -32,6 +32,8 @@ pub struct Builder {
     pub edit_fuzzy_threshold: f64,
     pub edit_enforce_seen_lines: bool,
     pub signal_policy: crate::config::SignalPolicy,
+    /// Whether the active session supports image attachments via Read.
+    pub image_capable: bool,
     /// Character budget for the model-visible skill index (see
     /// [`skill_index_budget_chars`]).
     pub skill_index_budget_chars: usize,
@@ -136,7 +138,7 @@ fn validate_pack(
 ) -> Result<()> {
     for name in &rendered.referenced_tools {
         ensure!(
-            surface.has(name),
+            surface.has_any_reachable(name),
             "workflow '{}' referenced inactive tool '{}'",
             spec.id,
             name

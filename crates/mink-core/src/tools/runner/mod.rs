@@ -50,6 +50,8 @@ pub struct ToolOutcome {
     pub plan_command: Option<PlanCommand>,
     pub state_metadata: Option<serde_json::Value>,
     pub presentation: Option<ToolPresentation>,
+    /// Optional structured JSON result for PTC Python bindings.
+    pub structured_value: Option<serde_json::Value>,
     /// Structured process termination, set by command tools (Bash/Python).
     /// Runner failure classification prefers this over output text.
     pub(crate) termination: Option<crate::tools::process::ProcessTermination>,
@@ -69,6 +71,7 @@ impl ToolOutcome {
             plan_command: None,
             state_metadata: None,
             presentation: None,
+            structured_value: None,
             termination: None,
         }
     }
@@ -110,6 +113,7 @@ static TOOL_REGISTRY: LazyLock<Vec<Box<dyn ToolExec>>> = LazyLock::new(|| {
         Box::new(python::PythonTool),
         #[cfg(feature = "python-sandbox")]
         Box::new(sandbox_python::PythonSandboxTool),
+        Box::new(crate::ptc::tool::RunCodeTool),
         Box::new(SubAgentTool),
     ]
 });
@@ -153,6 +157,10 @@ pub struct ToolExecution {
     pub(crate) needs_finalization: bool,
     pub(crate) state_metadata: Option<serde_json::Value>,
     pub image_attachment: Option<crate::tools::image::ImageAttachment>,
+    /// Additional images returned from a single execution (e.g. multiple `inspect(img)` in `RunCode`).
+    pub extra_image_attachments: Vec<crate::tools::image::ImageAttachment>,
+    pub(crate) todo_advanced: bool,
+    pub(crate) edited_paths: Vec<String>,
 }
 
 pub struct SubAgentRequest {
@@ -208,8 +216,23 @@ impl ToolExecution {
             needs_finalization: false,
             state_metadata: None,
             image_attachment: None,
+            extra_image_attachments: Vec::new(),
+            todo_advanced: false,
+            edited_paths: Vec::new(),
         }
     }
+}
+
+pub(crate) struct NestedToolOutcome {
+    pub rendered_text: String,
+    pub structured_value: Option<serde_json::Value>,
+    pub status: ToolStatus,
+    pub exit_code: Option<i32>,
+    pub result_kind: ToolResultKind,
+    pub unknown_effect: bool,
+    pub todo_advanced: bool,
+    pub edited_paths: Vec<String>,
+    pub image: Option<(crate::tools::image::ImageAttachment, String)>,
 }
 
 /// Infrastructure failure while executing a tool batch.
@@ -314,12 +337,43 @@ mod sub_agent;
 pub use format::{
     TruncationPolicy, approx_token_count, format_tool_result, format_tool_result_policy,
 };
+/// Shared helper for extracting edited/written file paths from a tool call's arguments.
+pub(crate) fn extract_edited_paths(
+    tool_name: &str,
+    args: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut paths = Vec::new();
+    match tool_name {
+        "Write" => {
+            if let Some(path) = args.get("path") {
+                paths.push(path.clone());
+            }
+        }
+        "Edit" => {
+            if let Some(path) = args.get("path") {
+                paths.push(path.clone());
+            } else if let Some(input) = args.get("input") {
+                for line in input.lines() {
+                    if let Some(path) = crate::tools::hashline::section_header_path(line) {
+                        paths.push(path);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    paths
+}
+
+pub(crate) use batch::execute_nested_tool_call;
+pub(crate) use format::format_tool_result_with_artifact as format_tool_result_with_artifact_pub;
 #[cfg(test)]
 use format::{filter_bash_noise, format_dispatched_result, format_tool_result_with_artifact};
+pub(crate) use policy::requires_sequential_execution;
 #[cfg_attr(not(test), allow(unused_imports))]
 use policy::{
     ImageBatchBudget, PreparedCall, ToolExecOutput, ToolPolicyGate, mark_format_confirmed,
-    not_executed_tool_result, requires_sequential_execution,
+    not_executed_tool_result,
 };
 #[allow(unused_imports)]
 pub(crate) use policy::{blocked_tool_result, failed_tool_result, model_format_failed_result};

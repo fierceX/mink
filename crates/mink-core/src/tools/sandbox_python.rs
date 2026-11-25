@@ -109,7 +109,7 @@ struct WasmModuleCacheKey {
     modified: Option<std::time::SystemTime>,
 }
 
-fn load_compiled_wasm(wasm_path: &Path) -> Result<(Engine, Module)> {
+pub(crate) fn load_compiled_wasm(wasm_path: &Path) -> Result<(Engine, Module)> {
     use std::collections::HashMap;
     use std::sync::{LazyLock, Mutex};
 
@@ -544,6 +544,7 @@ impl super::runner::ToolExec for PythonSandboxTool {
             plan_command: None,
             state_metadata: None,
             presentation: None,
+            structured_value: None,
             termination: Some(exec.termination),
         })
     }

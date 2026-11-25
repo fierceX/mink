@@ -114,7 +114,7 @@ impl PromptDocument {
         for section in self.generated_sections() {
             for name in &section.referenced_tools {
                 ensure!(
-                    surface.has(name),
+                    surface.has_any_reachable(name),
                     "prompt section '{}' referenced inactive tool '{}'",
                     section.id,
                     name

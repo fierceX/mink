@@ -572,7 +572,22 @@ impl super::runner::ToolExec for ReadTool {
                 .zip(selection.limit)
                 .map(|(start, count)| start.saturating_add(count.saturating_sub(1))),
         ) {
-            return Ok(super::runner::ToolOutcome::text(cached));
+            let mut outcome = super::runner::ToolOutcome::text(cached.clone());
+            let start_line = selection.offset.unwrap_or(1);
+            outcome.structured_value = Some(serde_json::json!({
+                "path": selection.path,
+                "tag": serde_json::Value::Null,
+                "start_line": start_line,
+                "end_line": selection
+                    .limit
+                    .map(|count| start_line.saturating_add(count.saturating_sub(1)))
+                    .unwrap_or(start_line),
+                "total_lines": start_line,
+                "content": cached,
+                "raw": selection.raw,
+                "memo_hit": true,
+            }));
+            return Ok(outcome);
         }
         let start_line = selection.offset.unwrap_or(1);
         let editable_limit = 4 * 1024 * 1024usize;
@@ -615,17 +630,31 @@ impl super::runner::ToolExec for ReadTool {
             // the budget, so a later hit can never ask the model to "reuse"
             // truncated content. Raw reads stay under the raw flag and never
             // satisfy non-raw requests.
-            let mut outcome = super::runner::ToolOutcome::text(content);
+            let mut outcome = super::runner::ToolOutcome::text(content.clone());
             outcome.memo_candidate = Some(super::runner::MemoCandidate {
                 path: path.clone(),
                 raw: true,
                 start_line: selection.offset,
                 end_line: memo_end_line(selection.offset, selection.limit, visible_count),
             });
+            let end_line = start_line.saturating_add(visible_count.saturating_sub(1));
+            outcome.structured_value = Some(serde_json::json!({
+                "path": selection.path,
+                "tag": serde_json::Value::Null,
+                "start_line": start_line,
+                "end_line": end_line,
+                "total_lines": end_line,
+                "content": content,
+                "raw": true,
+                "memo_hit": false,
+            }));
             return Ok(outcome);
         }
+        let mut structured_tag: Option<String> = None;
+        let mut total_lines_count = start_line.saturating_add(visible_count.saturating_sub(1));
         let rendered = match full_text {
             Some(full_text) => {
+                total_lines_count = crate::tools::snapshot::split_content_lines(&full_text).len();
                 let tag = crate::tools::snapshot::compute_file_tag(&full_text);
                 let rendered = format_hashline_read(&selection.path, &tag, start_line, &content);
                 ensure!(
@@ -640,6 +669,7 @@ impl super::runner::ToolExec for ReadTool {
                     .unwrap_or_else(|error| error.into_inner())
                     .record(&path, &full_text, start_line..start_line + visible_count);
                 debug_assert_eq!(snapshot.tag, tag);
+                structured_tag = Some(tag);
                 rendered
             }
             None => {
@@ -649,6 +679,7 @@ impl super::runner::ToolExec for ReadTool {
                         <= editable_limit.min(ctx.tool_config.file_write_max_bytes) as u128
                     && let Ok(full) = std::fs::read_to_string(&path)
                 {
+                    total_lines_count = crate::tools::snapshot::split_content_lines(&full).len();
                     ctx.snapshots
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
@@ -661,6 +692,7 @@ impl super::runner::ToolExec for ReadTool {
         // composed output (rendered content plus its summary line) fits the
         // budget, so a later hit can never ask the model to "reuse" content
         // that was truncated or spilled at the runner layer.
+        let end_line = start_line.saturating_add(visible_count.saturating_sub(1));
         let mut outcome = super::runner::ToolOutcome::text(rendered);
         outcome.memo_candidate = Some(super::runner::MemoCandidate {
             path: path.clone(),
@@ -668,6 +700,16 @@ impl super::runner::ToolExec for ReadTool {
             start_line: selection.offset,
             end_line: memo_end_line(selection.offset, selection.limit, visible_count),
         });
+        outcome.structured_value = Some(serde_json::json!({
+            "path": selection.path,
+            "tag": structured_tag,
+            "start_line": start_line,
+            "end_line": end_line,
+            "total_lines": total_lines_count,
+            "content": content,
+            "raw": false,
+            "memo_hit": false,
+        }));
         Ok(outcome)
     }
 }
@@ -720,13 +762,25 @@ impl super::runner::ToolExec for WriteTool {
                 .unwrap_or_else(|e| e.into_inner())
                 .record(&path, &args.content, 1..=line_count);
             if ctx.tool_config.edit_mode == crate::config::EditMode::Hashline {
-                return Ok(super::runner::ToolOutcome::text(format!(
+                let mut outcome = super::runner::ToolOutcome::text(format!(
                     "{result}\n[{}#{}]",
                     args.path, snapshot.tag
-                )));
+                ));
+                outcome.structured_value = Some(serde_json::json!({
+                    "path": args.path,
+                    "bytes_written": args.content.len(),
+                    "tag": snapshot.tag,
+                }));
+                return Ok(outcome);
             }
         }
-        Ok(super::runner::ToolOutcome::text(result))
+        let mut outcome = super::runner::ToolOutcome::text(result);
+        outcome.structured_value = Some(serde_json::json!({
+            "path": args.path,
+            "bytes_written": args.content.len(),
+            "tag": serde_json::Value::Null,
+        }));
+        Ok(outcome)
     }
 }
 
@@ -952,6 +1006,7 @@ fn tool_outcome(content: String) -> super::runner::ToolOutcome {
         plan_command: None,
         state_metadata: None,
         presentation: None,
+        structured_value: None,
         termination: None,
     }
 }
