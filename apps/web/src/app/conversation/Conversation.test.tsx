@@ -1,11 +1,12 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { emptySession } from '../../data/types.ts'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SessionSummary } from '../../data/api.ts'
 import type { SessionConnection } from '../../data/useSessionView.ts'
 import { ChangedFiles } from './ChangedFiles.tsx'
 import { Conversation } from './Conversation.tsx'
 
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
 /** The session the open failed for. */
 const SESSION: SessionSummary = {
@@ -206,4 +207,59 @@ describe('open failure', () => {
     )
     expect(screen.getByText('已编辑 src/app.ts')).toBeDefined()
   })
+})
+
+it('keeps the visible turn anchored when a live append precedes a history page', async () => {
+  vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }))
+  let finish!: (added: boolean) => void
+  const page = new Promise<boolean>(resolve => { finish = resolve })
+  const view = (keys: string[]) => (
+    <Conversation state={{ ...emptySession(SESSION.id, 'title'),
+      items: keys.map(key => ({ kind: 'user', text: key, key: `input:${key}` })) }}
+        session={SESSION}
+        title="fixture session"
+        open
+        error={undefined}
+        detailsOpen
+        processDisplay="standard"
+        notice={undefined}
+        hasOlder
+        onLoadOlder={() => page}
+        onGoalAction={async () => undefined}
+        onOpenFile={() => {}}
+        onOpenArtifact={() => {}}
+        onRetryOpen={() => {}}
+        draft=""
+        onDraftChange={() => {}}
+        modelChoices={[]}
+        onModelChange={() => {}}
+        onSend={async () => undefined}
+        onGuide={async () => undefined}
+        onReceiptChanged={() => {}}
+        onCommand={async () => ({ message: '', ok: true })}
+        followTick={0}
+        onToggleDetails={() => {}}
+        onStop={() => {}}
+    />
+  )
+  const { rerender } = render(view(['current']))
+  const box = document.querySelector<HTMLElement>('[data-conversation-scroll]')!
+  const current = document.querySelector<HTMLElement>('[data-turn-key="input:current"]')!
+  let height = 500
+  let currentTop = 10
+  Object.defineProperty(box, 'scrollHeight', { get: () => height })
+  current.getBoundingClientRect = () => ({ top: currentTop, bottom: currentTop + 50 } as DOMRect)
+  box.scrollTop = 100
+  fireEvent.scroll(box)
+  fireEvent.click(screen.getByRole('button', { name: '加载更早的轮次' }))
+  height += 30
+  rerender(view(['current', 'live']))
+  expect(box.scrollTop).toBe(100)
+  height += 60
+  currentTop += 60
+  await act(async () => {
+    rerender(view(['older', 'current', 'live']))
+    finish(true)
+  })
+  expect(box.scrollTop).toBe(160)
 })

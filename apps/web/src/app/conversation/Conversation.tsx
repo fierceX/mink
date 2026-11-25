@@ -224,14 +224,19 @@ export function Conversation({
   const imageLimits = state?.imageLimits ?? null
   const attachments = useAttachments(session, imageLimits)
   const items = state?.items ?? []
-  const firstItemKey = items[0]?.key
+  const generation = state?.generation
   useLayoutEffect(() => {
-    const pendingAnchor = anchorRestore.current
+    const anchor = anchorRestore.current
     const box = scroller.current
-    if (pendingAnchor === null || box === null) return
+    if (loadingOlder || anchor === null || box === null) return
     anchorRestore.current = null
-    box.scrollTop = pendingAnchor.topBefore + (box.scrollHeight - pendingAnchor.heightBefore)
-  }, [items.length, firstItemKey])
+    if (anchor.generation !== generation) return
+    if (anchor.row && box.contains(anchor.row)) {
+      box.scrollTop += anchor.row.getBoundingClientRect().top - box.getBoundingClientRect().top - anchor.rowTop
+    } else {
+      box.scrollTop = anchor.topBefore + box.scrollHeight - anchor.heightBefore
+    }
+  }, [loadingOlder, generation])
   const running = state?.running === true
   const blank = items.length === 0
   const effectiveOpenError = openError !== undefined ? openError : (actionError === undefined ? error : undefined)
@@ -482,13 +487,22 @@ export function Conversation({
                         const box = scroller.current
                         // Prepending rows shifts everything down: hold the
                         // reader's viewport on the turn they were reading.
+                        const top = box?.getBoundingClientRect().top ?? 0
+                        const row = box && Array.from(box.querySelectorAll<HTMLElement>('[data-turn-key]'))
+                          .find(turn => turn.getBoundingClientRect().bottom > top)
                         anchorRestore.current = box === null
                           ? null
-                          : { heightBefore: box.scrollHeight, topBefore: box.scrollTop }
+                          : {
+                              row: row ?? undefined,
+                              rowTop: (row?.getBoundingClientRect().top ?? top) - top,
+                              generation,
+                              heightBefore: box.scrollHeight,
+                              topBefore: box.scrollTop,
+                            }
                         setLoadingOlder(true)
                         void onLoadOlder().then((added) => {
                           if (!added) anchorRestore.current = null
-                        }).finally(() => {
+                        }, () => { anchorRestore.current = null }).finally(() => {
                           setLoadingOlder(false)
                         })
                       }}

@@ -6,6 +6,9 @@ export const TAIL_SLACK = 24
 
 /** A pending scroll-anchor measurement across prepending older history rows. */
 export interface ScrollAnchor {
+  row: HTMLElement | undefined
+  rowTop: number
+  generation: string | undefined
   heightBefore: number
   topBefore: number
 }
