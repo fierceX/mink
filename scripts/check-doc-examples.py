@@ -15,8 +15,11 @@ files += [ROOT / p for p in ['README.md', 'crates/mink-core/README.md', 'mink_ag
 sdk = ast.parse((ROOT / 'mink_agent/__init__.py').read_text())
 config = next(n for n in sdk.body if isinstance(n, ast.ClassDef) and n.name == 'SandboxConfig')
 fields = {n.target.id for n in config.body if isinstance(n, ast.AnnAssign)}
-cli = (ROOT / 'crates/mink-cli/src/cli.rs').read_text()
-cli += (ROOT / 'crates/mink-cli/src/config.rs').read_text()
+cli = ''.join(
+    p.read_text()
+    for folder in ('crates/mink-cli/src/cli', 'crates/mink-cli/src/config')
+    for p in sorted((ROOT / folder).glob('*.rs'))
+)
 config_source = (ROOT / 'crates/mink-core/src/config_file.rs').read_text()
 struct_names = {
     'provider': 'ProviderConfigFile', 'provider.image': 'ImageConfigFile',
