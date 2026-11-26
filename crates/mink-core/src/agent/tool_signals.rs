@@ -111,10 +111,13 @@ impl ToolSignalProcessor {
         }
 
         // 编译与测试诊断只扫描命令输出；执行状态已经由 ToolStatus 给出。
+        // 成功的 RunCode 会通过 inspect() 回显读到的代码文本，不能把源码里的
+        // `"error[E..."` / `"timeout"` 误判成编译失败或工具故障信号。
         let scan_error_patterns = matches!(
             result.result_kind,
             crate::tools::metadata::ToolResultKind::Command
-        );
+        ) && !(result.tool_name == "RunCode"
+            && result.status.is_success());
         let new_signals = self.collector.collect(
             &result.tool_name,
             result.status,

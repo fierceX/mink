@@ -65,3 +65,49 @@ fn no_inspection_surface_blocks_every_tool_call_without_references() {
         }
     }
 }
+
+#[test]
+fn exclusive_ptc_allows_run_code_and_validates_wire_guidance() {
+    let mut config = ToolConfig::from_config(&Config::default());
+    config.ptc.mode = crate::ptc::PtcMode::Exclusive;
+    let context = ToolResolutionContext::from_runtime(AgentRole::Primary, &config, false);
+    let surface =
+        ModelToolSurface::resolve(ToolCatalog::builtin().unwrap(), &config, &context).unwrap();
+    let capabilities = ToolCapabilityRegistry::builtin()
+        .resolve(&surface, &context)
+        .unwrap();
+    let policy = RecoveryPolicy::from_resolved_for_surface(
+        &capabilities,
+        ToolCatalog::builtin().unwrap(),
+        &surface,
+    );
+    let router = ResourceRouter::with_builtin_handlers();
+
+    let run_code_call = CapabilityCallContext {
+        tool_name: "RunCode",
+        input: &json!({"code": "inspect(await tools.Read(path='Cargo.toml'))", "description": "inspect"}),
+        resource_router: &router,
+        filesystem_backend: FilesystemBackend::Local,
+    };
+    assert!(matches!(
+        policy.classify_first_call(&run_code_call),
+        RecoveryFirstCallDecision::Allowed
+    ));
+
+    let blocked_call = CapabilityCallContext {
+        tool_name: "PlanClear",
+        input: &json!({}),
+        resource_router: &router,
+        filesystem_backend: FilesystemBackend::Local,
+    };
+    match policy.classify_first_call(&blocked_call) {
+        RecoveryFirstCallDecision::Allowed => panic!("PlanClear is not inspection"),
+        RecoveryFirstCallDecision::Blocked(guidance) => {
+            guidance
+                .validate(&surface)
+                .expect("guidance referenced_tools must only cite active wire tools");
+            assert!(guidance.referenced_tools.contains("RunCode"));
+            assert!(!guidance.referenced_tools.contains("Read"));
+        }
+    }
+}

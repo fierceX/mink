@@ -445,8 +445,9 @@ async fn ptc_exclusive_end_to_end_pipeline_and_off_mode_invariants() -> Result<(
     runtime_off.shutdown().await?;
     std::fs::remove_dir_all(home_off.parent().unwrap())?;
 
-    // 2. Exclusive mode: wire exposes RunCode (no Read/Edit/Bash), prompt has <ptc-mode> + <ptc-sdk>,
-    //    direct Read call fails with PTC hint, RunCode runs Glob -> gather(Read) -> Edit + Todo + large inspect spill.
+    // 2. Exclusive mode: wire exposes RunCode + planning/control tools (Todo*, Plan*, Goal*, SubAgent),
+    //    prompt has <ptc-mode> + <ptc-sdk>, direct Read fails with PTC hint, direct TodoWrite +
+    //    RunCode (Glob -> gather(Read) -> Edit + large inspect spill) execute cleanly.
     let (home, cwd) = temp_pair("ptc-exclusive");
     std::fs::write(cwd.join("one.txt"), "alpha one\n")?;
     std::fs::write(cwd.join("two.txt"), "alpha two\n")?;
@@ -454,13 +455,10 @@ async fn ptc_exclusive_end_to_end_pipeline_and_off_mode_invariants() -> Result<(
     let py_program = r#"
 files = (await tools.Glob(pattern="*.txt"))["files"]
 reads = await gather(*(tools.Read(path=p) for p in sorted(files)))
-t = await tools.TodoWrite(base_revision=0, add=[{"content": "Patch one.txt"}])
-t = await tools.TodoAdvance(base_revision=t["revision"], activate=[t["items"][0]["id"]])
 target = reads[0]
 patch = f"[{target['path']}#{target['tag']}]\nPUT 1.=1:\n+beta one\n"
 ed = await tools.Edit(input=patch)
-adv = await tools.TodoAdvance(base_revision=t["revision"], complete=[t["items"][0]["id"]])
-inspect({"count": len(reads), "applied": ed["applied"], "todo_rev": adv["revision"], "pad": "x" * 16000})
+inspect({"count": len(reads), "applied": ed["applied"], "pad": "x" * 16000})
 "#;
 
     let stop = || {
@@ -471,12 +469,17 @@ inspect({"count": len(reads), "applied": ed["applied"], "todo_rev": adv["revisio
     let backend = Arc::new(ScriptedBackend::new(vec![
         // Round 1: model mistakenly calls Read directly -> rejected with PTC hint
         vec![read_tool_call("direct_read", "one.txt"), stop()],
-        // Round 2: model invokes RunCode orchestration
+        // Round 2: model calls direct TodoWrite on wire alongside RunCode orchestration
         vec![
+            tool_call(
+                "TodoWrite",
+                "todo_1",
+                serde_json::json!({"base_revision": 0, "add": [{"content": "Patch one.txt"}]}),
+            ),
             tool_call(
                 "RunCode",
                 "ptc_1",
-                serde_json::json!({"code": py_program, "description": "Read files, edit one.txt, and update todos"}),
+                serde_json::json!({"code": py_program, "description": "Read files and edit one.txt"}),
             ),
             stop(),
         ],
@@ -509,12 +512,21 @@ inspect({"count": len(reads), "applied": ed["applied"], "todo_rev": adv["revisio
     assert_eq!(requests.len(), 3);
     assert!(requests[0].system_prompt.contains("<ptc-mode>"));
     assert!(requests[0].system_prompt.contains("<ptc-sdk>"));
-    assert!(
-        requests[0]
-            .tools
-            .iter()
-            .any(|t| t["name"].as_str() == Some("RunCode"))
-    );
+    for required_wire in [
+        "RunCode",
+        "TodoRead",
+        "TodoWrite",
+        "TodoAdvance",
+        "GoalRead",
+    ] {
+        assert!(
+            requests[0]
+                .tools
+                .iter()
+                .any(|t| t["name"].as_str() == Some(required_wire)),
+            "missing wire tool {required_wire}"
+        );
+    }
     assert!(!requests[0].tools.iter().any(|t| matches!(
         t["name"].as_str(),
         Some("Read" | "Edit" | "Bash" | "Python")

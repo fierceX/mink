@@ -26,7 +26,7 @@
 | `--api-key KEY` | env | 覆盖 API Key |
 | `--base-url URL` | 默认端点 | 覆盖 API 端点 |
 | `--enabled-tools <list>` | 默认集合 | 逗号分隔的精确工具列表；`none` 禁用全部 |
-| `--ptc <mode>` | `off` | Python 宿主 PTC 模式：`off` / `tool` / `exclusive` |
+| `--ptc <mode>` | `off` | Python 宿主 PTC 模式：`off` / `tool`（别名 `hybrid`，推荐开启档）/ `exclusive` |
 | `--edit-mode <mode>` | `hashline` | `hashline` / `replace`；runtime 启动后固定 |
 | `--edit-fuzzy-match <bool>` | `true` | Replace 行窗口模糊匹配开关 |
 | `--edit-fuzzy-threshold <n>` | `0.95` | Replace 阈值，有限数且在 `0.0..=1.0` |
@@ -113,11 +113,12 @@ wasm_path = "/path/to/python.wasm"
 read_dirs = ["./data"]
 
 [ptc]
-mode = "off"                          # off | tool | exclusive（也可用 MINK_PTC_MODE 或 --ptc）
+mode = "off"                          # off | tool (hybrid) | exclusive（也可用 MINK_PTC_MODE 或 --ptc）
 backend = "subprocess-python"         # subprocess-python | wasi-python（需 python-sandbox feature）
 timeout_secs = 120
+max_timeout_secs = 3600
 max_parallel_sub_calls = 8
-max_sub_calls_per_minute = 240
+max_sub_calls_per_minute = 512
 ```
 
 旧的顶层扁平字段不再接受；解析器会报告 unknown field。算法阈值、先验、衰减、证据长度、冷却和恢复限制是内部策略，不属于配置协议。

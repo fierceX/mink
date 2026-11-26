@@ -78,7 +78,12 @@ impl PtcRuntime for WasiPythonPtcRuntime {
             });
         }
 
-        let (engine, module) = crate::tools::sandbox_python::load_compiled_wasm(wasm_path)?;
+        let wasm_path_owned = wasm_path.to_path_buf();
+        let (engine, module) = tokio::task::spawn_blocking(move || {
+            crate::tools::sandbox_python::load_compiled_wasm(&wasm_path_owned)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("WASI Python load task failed: {e}"))??;
         let (host_to_guest_w, guest_stdin_r) = tokio::io::duplex(64 * 1024);
         let (guest_stdout_w, host_from_guest_r) = tokio::io::duplex(64 * 1024);
         let stderr_pipe = MemoryOutputPipe::new(256 * 1024);
@@ -210,11 +215,14 @@ impl PtcRuntime for WasiPythonPtcRuntime {
                 }
             }
         }
-        let _ = wasm_thread.join();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = wasm_thread.join();
+        })
+        .await;
 
         let stderr = String::from_utf8_lossy(&stderr_pipe.contents()).to_string();
-        if !stderr.trim().is_empty() {
-            outcome.ledger.push_text(&stderr);
+        if !stderr.trim().is_empty() && outcome.ledger.push_text(&stderr) {
+            outcome.output_truncated = true;
         }
 
         Ok(finalize_run_result(

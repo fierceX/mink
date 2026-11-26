@@ -39,6 +39,8 @@ fn builder_for_config(names: &[&str], base: Config) -> Builder {
         signal_policy: base.signal_policy,
         image_capable: false,
         skill_index_budget_chars: crate::prompt::DEFAULT_SKILL_INDEX_BUDGET_CHARS,
+        ptc_timeout_secs: base.ptc.timeout_secs,
+        ptc_max_timeout_secs: base.ptc.max_timeout_secs,
     }
 }
 

@@ -187,11 +187,13 @@ impl TurnExecutor {
             decision_engine: crate::agent::decision::DecisionEngine::from_config(
                 &ctx.config.signal,
             ),
-            recovery_policy: crate::agent::recovery_policy::RecoveryPolicy::from_resolved(
-                &ctx.tools.tool_capabilities,
-                crate::tools::catalog::ToolCatalog::builtin()
-                    .expect("built-in tool catalog was validated during context construction"),
-            ),
+            recovery_policy:
+                crate::agent::recovery_policy::RecoveryPolicy::from_resolved_for_surface(
+                    &ctx.tools.tool_capabilities,
+                    crate::tools::catalog::ToolCatalog::builtin()
+                        .expect("built-in tool catalog was validated during context construction"),
+                    &ctx.tools.tool_surface,
+                ),
         }
     }
 

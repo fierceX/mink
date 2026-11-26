@@ -37,6 +37,8 @@ pub struct Builder {
     /// Character budget for the model-visible skill index (see
     /// [`skill_index_budget_chars`]).
     pub skill_index_budget_chars: usize,
+    pub ptc_timeout_secs: u64,
+    pub ptc_max_timeout_secs: u64,
 }
 
 pub struct DelegationScope {

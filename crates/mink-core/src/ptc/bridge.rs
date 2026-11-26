@@ -29,6 +29,7 @@ pub struct PtcDispatchBridge {
     ctx: Arc<ToolContext>,
     parent_call_id: String,
     run_cancel: CancellationToken,
+    run_deadline: Instant,
     max_sub_calls: usize,
     sub_call_limit_label: String,
     attempt_seq: AtomicUsize,
@@ -47,6 +48,8 @@ struct BridgeState {
     todo_advanced: bool,
     edited_paths: Vec<String>,
     quota_exceeded_message: Option<String>,
+    raw_sub_call_bytes: usize,
+    failed_sub_calls: usize,
 }
 
 struct ActiveDispatchGuard {
@@ -71,10 +74,13 @@ impl PtcDispatchBridge {
         max_parallel: usize,
         sub_call_limit_label: impl Into<String>,
     ) -> Self {
+        let mut bridge_ctx = (*ctx).clone();
+        bridge_ctx.bypass_read_memo = true;
         Self {
-            ctx,
+            ctx: Arc::new(bridge_ctx),
             parent_call_id: parent_call_id.into(),
             run_cancel,
+            run_deadline: Instant::now() + std::time::Duration::from_secs(3600),
             max_sub_calls: max_sub_calls.max(1),
             sub_call_limit_label: sub_call_limit_label.into(),
             attempt_seq: AtomicUsize::new(0),
@@ -84,6 +90,11 @@ impl PtcDispatchBridge {
             drained_notify: Arc::new(Notify::new()),
             state: Mutex::new(BridgeState::default()),
         }
+    }
+
+    pub fn with_deadline(mut self, run_deadline: Instant) -> Self {
+        self.run_deadline = run_deadline;
+        self
     }
 
     /// Abort any queued work and wait until every started nested dispatch has settled.
@@ -145,6 +156,60 @@ impl PtcDispatchBridge {
             .clone()
     }
 
+    pub fn raw_sub_call_bytes(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .raw_sub_call_bytes
+    }
+
+    pub fn failed_sub_calls(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .failed_sub_calls
+    }
+
+    fn clamp_bash_timeout(
+        &self,
+        input_json: &mut Value,
+        fields: &mut BTreeMap<String, String>,
+    ) -> std::result::Result<(), PtcBindingError> {
+        let remaining = self.run_deadline.saturating_duration_since(Instant::now());
+        if remaining < std::time::Duration::from_secs(3) {
+            return Err(PtcBindingError {
+                tool_name: "Bash".to_string(),
+                kind: ToolFailureKind::Timeout,
+                message: "remaining RunCode timeout budget is too small (< 3s) to start Bash"
+                    .to_string(),
+            });
+        }
+        let max_bash_secs = remaining.as_secs().saturating_sub(2).max(1);
+        let configured_max = u64::try_from(self.ctx.tool_config.tool_timeout_max_secs)
+            .unwrap_or(0)
+            .max(5);
+        let req_timeout = input_json.get("timeout").and_then(Value::as_u64);
+        let clamp_to = match req_timeout {
+            Some(req) if req > 0 && req <= configured_max && req > max_bash_secs => {
+                Some(max_bash_secs)
+            }
+            Some(_) => None,
+            None => {
+                let default_req = u64::try_from(self.ctx.tool_config.tool_timeout_secs)
+                    .unwrap_or(120)
+                    .clamp(5, configured_max);
+                (default_req > max_bash_secs).then_some(max_bash_secs)
+            }
+        };
+        if let Some(clamped) = clamp_to
+            && let Some(obj) = input_json.as_object_mut()
+        {
+            obj.insert("timeout".to_string(), Value::from(clamped));
+            fields.insert("timeout".to_string(), clamped.to_string());
+        }
+        Ok(())
+    }
+
     fn emit_event(&self, event: EventLog) {
         if let Some(sink) = &self.ctx.ptc_event_sink {
             sink(event);
@@ -178,6 +243,10 @@ impl PtcDispatchBridge {
 #[allow(clippy::double_must_use)]
 #[async_trait]
 impl PtcBindingDispatcher for PtcDispatchBridge {
+    fn cancel_pending(&self) {
+        self.run_cancel.cancel();
+    }
+
     async fn invoke(
         &self,
         tool_name: &str,
@@ -230,19 +299,53 @@ impl PtcBindingDispatcher for PtcDispatchBridge {
                 ),
             });
         }
-        if self.ctx.goal_drafting
-            || self.ctx.goal_review.is_some()
-            || self.ctx.goal_adjudication.is_some()
-        {
+        if self.ctx.goal_review.is_some() {
             return Err(PtcBindingError {
                 tool_name: tool_name.to_string(),
                 kind: ToolFailureKind::SafetyBlocked,
-                message: "RunCode is unavailable during goal drafting, review, or adjudication"
-                    .to_string(),
+                message: "RunCode is unavailable during goal review".to_string(),
             });
         }
+        if self.ctx.goal_drafting || self.ctx.goal_adjudication.is_some() {
+            if self.ctx.tool_config.ptc.mode != super::PtcMode::Exclusive {
+                return Err(PtcBindingError {
+                    tool_name: tool_name.to_string(),
+                    kind: ToolFailureKind::SafetyBlocked,
+                    message: "RunCode is unavailable during goal drafting or adjudication"
+                        .to_string(),
+                });
+            }
+            let is_custom = self
+                .ctx
+                .custom_tools
+                .iter()
+                .any(|t| t.definition.name == tool_name);
+            if !matches!(tool_name, "Read" | "Glob" | "Grep") || is_custom {
+                return Err(PtcBindingError {
+                    tool_name: tool_name.to_string(),
+                    kind: ToolFailureKind::SafetyBlocked,
+                    message: format!(
+                        "Tool '{tool_name}' is blocked inside RunCode during goal drafting or adjudication"
+                    ),
+                });
+            }
+            if tool_name == "Read"
+                && args.get("path").and_then(Value::as_str).is_some_and(|p| {
+                    p.contains("://")
+                        && !["artifact://", "skill://", "rule://", "session://"]
+                            .iter()
+                            .any(|scheme| p.starts_with(scheme))
+                })
+            {
+                return Err(PtcBindingError {
+                    tool_name: tool_name.to_string(),
+                    kind: ToolFailureKind::SafetyBlocked,
+                    message: "draft exploration cannot invoke custom resource handlers".to_string(),
+                });
+            }
+        }
 
-        let input_json = match args {
+        let mut input_json = match args {
             Value::Null => serde_json::json!({}),
             Value::Object(_) => args,
             other => {
@@ -253,7 +356,7 @@ impl PtcBindingDispatcher for PtcDispatchBridge {
                 });
             }
         };
-        let fields = input_json
+        let mut fields = input_json
             .as_object()
             .map(|map| {
                 map.iter()
@@ -267,6 +370,10 @@ impl PtcBindingDispatcher for PtcDispatchBridge {
                     .collect::<BTreeMap<_, _>>()
             })
             .unwrap_or_default();
+
+        if tool_name == "Bash" {
+            self.clamp_bash_timeout(&mut input_json, &mut fields)?;
+        }
 
         let sub_call_id = format!("{}:ptc:{seq}", self.parent_call_id);
         let call = ToolCallEvent {
@@ -379,6 +486,12 @@ impl PtcBindingDispatcher for PtcDispatchBridge {
                         status: res.status,
                         duration_ms,
                     });
+                    guard.raw_sub_call_bytes = guard
+                        .raw_sub_call_bytes
+                        .saturating_add(res.rendered_text.len());
+                    if !res.status.is_success() {
+                        guard.failed_sub_calls = guard.failed_sub_calls.saturating_add(1);
+                    }
                     if res.unknown_effect {
                         guard.unknown_effect = true;
                     }
@@ -394,6 +507,16 @@ impl PtcBindingDispatcher for PtcDispatchBridge {
                 }
 
                 if !res.status.is_success() {
+                    if tool_name == "Bash"
+                        && res.status == ToolStatus::Failed(ToolFailureKind::ProcessFailed)
+                        && let Some(val) = res.structured_value
+                    {
+                        return Ok(PtcBindingSuccess {
+                            value: val,
+                            inspection_text: Some(res.rendered_text),
+                            image: None,
+                        });
+                    }
                     let kind = res
                         .status
                         .failure_kind()
@@ -462,6 +585,7 @@ impl PtcBindingDispatcher for PtcDispatchBridge {
                         status,
                         duration_ms,
                     });
+                    guard.failed_sub_calls = guard.failed_sub_calls.saturating_add(1);
                     guard.unknown_effect = true;
                 }
                 Err(PtcBindingError {
@@ -528,6 +652,18 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err2.kind, ToolFailureKind::SafetyBlocked);
+
+        let err3 = bridge
+            .invoke("TodoRead", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err3.kind, ToolFailureKind::SafetyBlocked);
+
+        let err4 = bridge
+            .invoke("GoalRead", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err4.kind, ToolFailureKind::SafetyBlocked);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -578,12 +714,12 @@ mod tests {
         assert!(r1.is_ok(), "read a failed: {r1:?}");
         assert!(r2.is_ok(), "read b failed: {r2:?}");
 
-        // Call 3: TodoRead
+        // Call 3: Glob (mutating/read pool check)
         let r3 = bridge
-            .invoke("TodoRead", serde_json::json!({}))
+            .invoke("Glob", serde_json::json!({"pattern": "*.txt"}))
             .await
             .unwrap();
-        assert_eq!(r3.value["revision"], 0);
+        assert!(r3.value["files"].is_array());
 
         // Call 4 exceeds max_sub_calls = 3 -> Aborted & quota message set
         let r4 = bridge
@@ -606,5 +742,167 @@ mod tests {
             vec!["parent_1:ptc:1", "parent_1:ptc:2", "parent_1:ptc:3"]
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn bridge_bypasses_read_memo_and_isolates_direct_read() {
+        let shared =
+            crate::regression::test_context_for_agent_with_config("ptc-bridge-memo", |cfg| {
+                cfg.ptc = PtcConfig {
+                    mode: PtcMode::Tool,
+                    ..PtcConfig::default()
+                };
+            })
+            .await
+            .unwrap();
+        let ctx = Arc::new(ToolContext::from_shared(&shared));
+        std::fs::write(ctx.cwd.join("memo_ptc.txt"), "hello ptc\nsecond line\n").unwrap();
+
+        let bridge = Arc::new(PtcDispatchBridge::new(
+            ctx.clone(),
+            "parent_memo",
+            ctx.cancel.linked_child_token(),
+            10,
+            2,
+            "10 per min",
+        ));
+
+        let first = bridge
+            .invoke("Read", serde_json::json!({"path": "memo_ptc.txt"}))
+            .await
+            .unwrap();
+        assert_eq!(first.value["memo_hit"], false);
+        assert!(first.value["tag"].as_str().is_some());
+        assert_eq!(first.value["content"], "hello ptc\nsecond line\n");
+
+        // Second nested Read must NOT return memo stub: Python relies on content & tag.
+        let second = bridge
+            .invoke("Read", serde_json::json!({"path": "memo_ptc.txt"}))
+            .await
+            .unwrap();
+        assert_eq!(second.value["memo_hit"], false);
+        assert!(second.value["tag"].as_str().is_some());
+        assert_eq!(second.value["content"], "hello ptc\nsecond line\n");
+
+        // Nested Read must NOT seed parent's ReadMemo since the model never saw it.
+        let runner = crate::tools::runner::ToolRunner::new(ctx.clone());
+        let direct = runner
+            .execute_all(vec![ToolCallEvent {
+                name: "Read".into(),
+                id: "direct_1".into(),
+                input_json: serde_json::json!({"path": "memo_ptc.txt"}),
+                fields: BTreeMap::from([("path".into(), "memo_ptc.txt".into())]),
+                parse_error: None,
+                raw_arguments_digest: None,
+            }])
+            .await
+            .unwrap();
+        assert!(direct[0].content.contains("hello ptc"));
+    }
+
+    #[tokio::test]
+    async fn bridge_allows_readonly_exploration_only_during_exclusive_goal_drafting() {
+        let shared =
+            crate::regression::test_context_for_agent_with_config("ptc-bridge-draft", |cfg| {
+                cfg.ptc = PtcConfig {
+                    mode: PtcMode::Exclusive,
+                    ..PtcConfig::default()
+                };
+            })
+            .await
+            .unwrap();
+        let mut ctx_val = ToolContext::from_shared(&shared);
+        ctx_val.goal_drafting = true;
+        std::fs::write(ctx_val.cwd.join("draft_info.txt"), "draft data\n").unwrap();
+        let ctx = Arc::new(ctx_val);
+
+        let bridge = PtcDispatchBridge::new(
+            ctx.clone(),
+            "draft_parent",
+            ctx.cancel.linked_child_token(),
+            10,
+            2,
+            "10 per min",
+        );
+
+        let ok_read = bridge
+            .invoke("Read", serde_json::json!({"path": "draft_info.txt"}))
+            .await
+            .unwrap();
+        assert_eq!(ok_read.value["content"], "draft data\n");
+
+        let err_write = bridge
+            .invoke(
+                "Write",
+                serde_json::json!({"path": "out.txt", "content": "nope"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err_write.kind, ToolFailureKind::SafetyBlocked);
+
+        let err_custom_scheme = bridge
+            .invoke("Read", serde_json::json!({"path": "custom://secret"}))
+            .await
+            .unwrap_err();
+        assert_eq!(err_custom_scheme.kind, ToolFailureKind::SafetyBlocked);
+    }
+
+    #[tokio::test]
+    async fn bash_nonzero_exit_returns_bash_result_and_clamps_to_remaining_deadline() {
+        let shared =
+            crate::regression::test_context_for_agent_with_config("ptc-bridge-bash", |cfg| {
+                cfg.ptc = PtcConfig {
+                    mode: PtcMode::Exclusive,
+                    ..PtcConfig::default()
+                };
+            })
+            .await
+            .unwrap();
+        let ctx = Arc::new(ToolContext::from_shared(&shared));
+        let bridge = PtcDispatchBridge::new(
+            ctx.clone(),
+            "bash_parent",
+            ctx.cancel.linked_child_token(),
+            10,
+            2,
+            "10 per min",
+        )
+        .with_deadline(Instant::now() + std::time::Duration::from_secs(6));
+
+        let nonzero = bridge
+            .invoke(
+                "Bash",
+                serde_json::json!({"command": "echo out-err; exit 3", "timeout": 120}),
+            )
+            .await
+            .expect("normal non-zero Bash exit should return BashResult instead of raising");
+        assert_eq!(nonzero.value["exit_code"], 3);
+        assert_eq!(nonzero.value["timed_out"], false);
+        assert!(
+            nonzero.value["stdout"]
+                .as_str()
+                .unwrap_or("")
+                .contains("out-err")
+        );
+        assert_eq!(bridge.failed_sub_calls(), 1);
+        assert_eq!(
+            bridge.sub_calls()[0].status,
+            ToolStatus::Failed(ToolFailureKind::ProcessFailed)
+        );
+
+        let tight = PtcDispatchBridge::new(
+            ctx.clone(),
+            "bash_tight",
+            ctx.cancel.linked_child_token(),
+            10,
+            2,
+            "10 per min",
+        )
+        .with_deadline(Instant::now() + std::time::Duration::from_secs(2));
+        let err = tight
+            .invoke("Bash", serde_json::json!({"command": "echo hi"}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ToolFailureKind::Timeout);
     }
 }

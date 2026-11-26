@@ -392,19 +392,20 @@ runtime 启动时 fail closed。
 通过一段 Python 3 程序（支持顶层 `await`）在代码内编排运行时工具，启用方式由 `PtcMode` 控制：
 
 - `off`（默认）：隐藏 `RunCode` 与 `<ptc-sdk>`，所有行为与未引入 PTC 前字节级一致。
-- `tool`：`RunCode` 与普通工具共同出现在 wire `tools` 中，`<ptc-sdk>` 声明可编程工具签名；适合简单调用走直调、批量/循环走 `RunCode`。
-- `exclusive`：wire `tools` 只保留 `RunCode` 与直调控制工具（`PlanDraft`/`PlanConfirm`/`PlanClear`/`GoalDraft`/`GoalReview`/`SubAgent`），数据/文件/搜索/命令/Todo/`GoalRead` 迁移到 `<ptc-sdk>`，由 `RunCode` 内通过 `await tools.<Name>(...)` 统一调度。
+- `tool`（别名 `hybrid`，推荐开启档）：`RunCode` 与普通工具共同出现在 wire `tools` 中，`<ptc-sdk>` 仅补充调用规范、返回值类型与仅限 SDK 的工具，不重复输出 wire 工具完整参数 schema；适合单步/独立并行走原生直调、循环/过滤/依赖编排走 `RunCode`。
+- `exclusive`：wire `tools` 保留 `RunCode` 与规划/任务/目标/委派等直调控制工具（`TodoRead`/`TodoWrite`/`TodoAdvance`/`PlanDraft`/`PlanConfirm`/`PlanClear`/`GoalRead`/`GoalDraft`/`GoalReview`/`SubAgent`），工作区数据/文件/搜索/命令工具迁移到 `<ptc-sdk>`，由 `RunCode` 内通过 `await tools.<Name>(...)` 调度。
 
 | 参数 | 类型 | 说明 |
 |---|---|---|
 | `code` | string | Python 3 程序源码（支持顶层 `await`），必需 |
 | `description` | string | 5–10 词程序摘要，必需 |
-| `timeout` | integer | 单次运行超时秒数，可选 |
+| `timeout` | integer | 单次运行超时秒数，可选（默认 120s，默认上限 3600s；必须 >= 1） |
 
-- 运行时内提供 `tools.<Name>(...)`、`tools["name"](...)`、`await gather(*aws)`、`inspect(*values)`、`ToolCallError` 与不可变 `Image` 句柄。
-- 只读工具可按 `max_parallel_sub_calls` 滚动并发执行；写类、命令与自定义顺序工具自动在读锁/写锁屏障上串行化。
-- `inspect(*values)` 与有界 stdout/stderr 进入 `RunCode` 最终结果（超限走 `artifact://` 落盘，嵌套工具不单独截断）；多张 `Image` 句柄仅在 `inspect(img)` 时计入 `ImageBatchBudget`。
-- 禁止递归调用 `RunCode`、禁止从 PTC 内调用 `Python`/`PythonSandbox` 及直调控制工具；`GoalReviewer` 固定降为 `PtcMode::Off`。
+- 运行时内预注入全局对象 `tools`、`await gather(*aws)`、`inspect(*values)`、`ToolCallError` 与不可变 `Image` 句柄，同时注册合成模块 `sys.modules["tools"]` 兼容 `import tools` / `from tools import ...` 写法。
+- 只读工具可按 `max_parallel_sub_calls` 滚动并发执行；写类、命令与自定义顺序工具自动在读锁/写锁屏障上串行化；嵌套 `Bash` 超时自动按外层 `RunCode` 剩余预算收紧（保留 2s 余量）。
+- `tools.Bash(...)` 正常非零退出返回结构化 `BashResult`（含 `exit_code`/`stdout`/`stderr`/`timed_out`）而不中断整段 `RunCode`；`SafetyBlocked`/`Timeout`/`ArgumentInvalid`/`Aborted` 及其他工具失败抛出 `ToolCallError`。
+- `inspect(*values)` 与有界 stdout/stderr 进入 `RunCode` 最终结果（超限走 `artifact://` 落盘，嵌套工具不单独截断）；异常失败时额外附带失败前已执行的子调用摘要；多张 `Image` 句柄仅在 `inspect(img)` 时计入 `ImageBatchBudget`。
+- 禁止递归调用 `RunCode`、禁止从 PTC 内调用 `Python`/`PythonSandbox` 及直调规划/控制工具；`GoalReviewer` 固定降为 `PtcMode::Off`。每次运行结束后通过事件日志记录 `PtcRunSummary` 遥测。
 
 ## 工具事实权威表（Q11）
 

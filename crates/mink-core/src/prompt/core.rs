@@ -106,6 +106,12 @@ pub(super) fn append_core_sections(builder: &Builder, document: &mut PromptDocum
         if ptc_mode != crate::ptc::PtcMode::Off {
             let programmatic = builder.tool_surface.programmatic_tools();
             if !programmatic.is_empty() {
+                let wire_tool_names: BTreeSet<&str> = builder
+                    .tool_surface
+                    .wire_tools()
+                    .iter()
+                    .map(|tool| tool.metadata.name.as_ref())
+                    .collect();
                 let mut referenced_tools: BTreeSet<String> = programmatic
                     .iter()
                     .map(|tool| tool.metadata.name.to_string())
@@ -117,8 +123,11 @@ pub(super) fn append_core_sections(builder: &Builder, document: &mut PromptDocum
                     origin: PromptSectionOrigin::Workflow,
                     content: crate::ptc::sdk::render_python_sdk(
                         programmatic,
+                        &wire_tool_names,
                         ptc_mode,
                         builder.image_capable,
+                        builder.ptc_timeout_secs,
+                        builder.ptc_max_timeout_secs,
                     ),
                     name: None,
                     referenced_tools,

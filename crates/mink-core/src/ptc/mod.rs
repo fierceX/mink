@@ -25,10 +25,11 @@ pub enum PtcMode {
     /// Disabled: byte-for-byte native tool surface, prompts, and schemas.
     #[default]
     Off,
-    /// Additive: `RunCode` is exposed alongside normal tools plus `<ptc-sdk>`.
+    /// Recommended Hybrid mode: native tools remain directly callable alongside `RunCode`
+    /// and a deduplicated `<ptc-sdk>` for loops, filtering, and multi-step orchestration.
     Tool,
-    /// Exclusive: wire tools expose `RunCode` (+ direct-only control tools) while
-    /// programmatic tools are declared in `<ptc-sdk>` and invoked inside `RunCode`.
+    /// Strict/embedded domain mode: wire tools expose `RunCode` + planning/control tools
+    /// (`Plan*`, `Todo*`, `Goal*`, `SubAgent`) while workspace/exec tools live inside `RunCode`.
     Exclusive,
 }
 
@@ -36,9 +37,11 @@ impl PtcMode {
     pub fn parse(value: &str) -> Result<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "off" | "false" | "0" => Ok(Self::Off),
-            "tool" | "additive" => Ok(Self::Tool),
+            "tool" | "additive" | "hybrid" => Ok(Self::Tool),
             "exclusive" | "on" | "true" | "1" => Ok(Self::Exclusive),
-            other => bail!("invalid ptc mode {other:?}; expected 'off', 'tool', or 'exclusive'"),
+            other => {
+                bail!("invalid ptc mode {other:?}; expected 'off', 'tool'/'hybrid', or 'exclusive'")
+            }
         }
     }
 
@@ -107,7 +110,7 @@ impl Default for PtcConfig {
             backend: PtcBackendKind::SubprocessPython,
             python_executable: None,
             timeout_secs: 120,
-            max_timeout_secs: 600,
+            max_timeout_secs: 3600,
             max_parallel_sub_calls: 8,
             max_sub_calls_per_minute: 512,
             max_output_bytes: 16 * 1024 * 1024,
@@ -183,6 +186,7 @@ mod tests {
     fn ptc_mode_and_backend_parse_round_trip() {
         assert_eq!(PtcMode::parse("off").unwrap(), PtcMode::Off);
         assert_eq!(PtcMode::parse("TOOL").unwrap(), PtcMode::Tool);
+        assert_eq!(PtcMode::parse("hybrid").unwrap(), PtcMode::Tool);
         assert_eq!(PtcMode::parse("exclusive").unwrap(), PtcMode::Exclusive);
         assert!(PtcMode::parse("bogus").is_err());
 

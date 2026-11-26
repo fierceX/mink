@@ -33,7 +33,9 @@ impl ToolExec for GoalReadTool {
         } else {
             serde_json::json!({"goal":snapshot,"draft":null})
         };
-        Ok(ToolOutcome::text(serde_json::to_string(&value)?))
+        let mut outcome = ToolOutcome::text(serde_json::to_string(&value)?);
+        outcome.structured_value = Some(value);
+        Ok(outcome)
     }
 }
 

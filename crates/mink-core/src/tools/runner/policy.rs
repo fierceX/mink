@@ -88,12 +88,14 @@ impl ToolRunner {
             return PreparedCall::Immediate(blocked);
         }
 
+        let exclusive_ptc = self.ctx.tool_config.ptc.mode == crate::ptc::PtcMode::Exclusive;
         if self.ctx.goal_drafting
             && self.ctx.goal_review.is_none()
-            && (!matches!(
+            && ((!matches!(
                 call.name.as_str(),
                 "Read" | "Glob" | "Grep" | "GoalRead" | "GoalDraft"
-            ) || self.find_custom_tool(&call.name).is_some())
+            ) && !(exclusive_ptc && call.name == "RunCode"))
+                || self.find_custom_tool(&call.name).is_some())
         {
             return PreparedCall::Immediate(blocked_tool_result(call.id, call.name, call.fields,
                 "Goal draft is awaiting human confirmation; only read-only exploration and GoalDraft are allowed".into(), ToolBlocker::ToolSurface));
@@ -110,10 +112,11 @@ impl ToolRunner {
             ));
         }
         if self.ctx.goal_adjudication.is_some()
-            && (!matches!(
+            && ((!matches!(
                 call.name.as_str(),
                 "Read" | "Glob" | "Grep" | "GoalRead" | "GoalReview"
-            ) || self.find_custom_tool(&call.name).is_some())
+            ) && !(exclusive_ptc && call.name == "RunCode"))
+                || self.find_custom_tool(&call.name).is_some())
         {
             return PreparedCall::Immediate(blocked_tool_result(
                 call.id,

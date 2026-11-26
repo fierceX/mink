@@ -5,9 +5,15 @@ import json
 import math
 import os
 import sys
+import threading
 import traceback
+import types
 
 _PROTOCOL_VERSION = 1
+_MIN_INT64 = -(1 << 63)
+_MAX_UINT64 = (1 << 64) - 1
+_TEXT_CHUNK_CHARS = 512
+_WRITE_LOCK = threading.Lock()
 
 
 class _PtcRevoked(BaseException):
@@ -88,7 +94,11 @@ def _canonical_json(value: object) -> str:
 def _validate_lossless(value: object, depth: int = 0) -> object:
     if depth > 64:
         raise ValueError("tool arguments exceed maximum nesting depth")
-    if value is None or isinstance(value, (bool, str, int)):
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, int):
+        if value < _MIN_INT64 or value > _MAX_UINT64:
+            raise ValueError("integer out of 64-bit JSON range")
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
@@ -131,9 +141,10 @@ def _open_transport():
 
 def _write_frame(stream, msg: dict) -> None:
     line = (json.dumps(msg, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-    stream.write(line)
-    if hasattr(stream, "flush"):
-        stream.flush()
+    with _WRITE_LOCK:
+        stream.write(line)
+        if hasattr(stream, "flush"):
+            stream.flush()
 
 
 class _PtcStdoutWrapper:
@@ -166,22 +177,37 @@ def _main() -> int:
     code = run_msg["code"]
     cwd = run_msg.get("cwd") or ""
     tool_names = list(run_msg.get("tool_names") or [])
+    max_output_bytes = int(run_msg.get("max_output_bytes") or 0)
     if cwd:
         os.chdir(cwd)
 
+    output_lock = threading.Lock()
     output_discarded = False
+    emitted_text_bytes = 0
 
     def emit_text(text: str) -> None:
-        nonlocal output_discarded
-        if output_discarded or not text:
+        nonlocal output_discarded, emitted_text_bytes
+        if not text:
             return
-        _write_frame(out_stream, {"type": "output", "kind": "text", "text": text})
+        with output_lock:
+            if output_discarded:
+                return
+            for idx in range(0, len(text), _TEXT_CHUNK_CHARS):
+                if output_discarded:
+                    break
+                chunk = text[idx : idx + _TEXT_CHUNK_CHARS]
+                chunk_bytes = len(chunk.encode("utf-8"))
+                _write_frame(out_stream, {"type": "output", "kind": "text", "text": chunk})
+                emitted_text_bytes += chunk_bytes
+                if max_output_bytes > 0 and emitted_text_bytes > max_output_bytes:
+                    output_discarded = True
+                    break
 
     def emit_image(image_id: str) -> None:
-        nonlocal output_discarded
-        if output_discarded:
-            return
-        _write_frame(out_stream, {"type": "output", "kind": "image", "image_id": image_id})
+        with output_lock:
+            if output_discarded:
+                return
+            _write_frame(out_stream, {"type": "output", "kind": "image", "image_id": image_id})
 
     if stdio_ctrl:
         sys.stdout = _PtcStdoutWrapper(emit_text)
@@ -203,12 +229,12 @@ def _main() -> int:
             if isinstance(val, str):
                 return val
             obj_id = id(val)
-            if isinstance(val, (dict, list)):
+            if isinstance(val, (dict, list, tuple)):
                 if obj_id in seen:
                     return "<recursive>"
                 seen.add(obj_id)
                 try:
-                    if isinstance(val, list):
+                    if isinstance(val, (list, tuple)):
                         parts = []
                         for item in val:
                             if isinstance(item, Image):
@@ -242,7 +268,7 @@ def _main() -> int:
                 return "<recursive>"
             seen.add(obj_id)
             try:
-                if isinstance(val, list):
+                if isinstance(val, (list, tuple)):
                     return [_format_nested(item, seen) for item in val]
                 if isinstance(val, dict):
                     return {str(k): _format_nested(v, seen) for k, v in val.items()}
@@ -253,7 +279,7 @@ def _main() -> int:
         def _has_nested_image(val: object, seen: set[int] | None = None) -> bool:
             if isinstance(val, Image):
                 return True
-            if not isinstance(val, (dict, list)):
+            if not isinstance(val, (dict, list, tuple)):
                 return False
             if seen is None:
                 seen = set()
@@ -261,7 +287,7 @@ def _main() -> int:
             if oid in seen:
                 return False
             seen.add(oid)
-            if isinstance(val, list):
+            if isinstance(val, (list, tuple)):
                 return any(_has_nested_image(x, seen) for x in val)
             return any(_has_nested_image(v, seen) for v in val.values())
 
@@ -369,6 +395,24 @@ def _main() -> int:
 
         tools_proxy = _ToolsProxy(tool_names)
 
+        class _ToolsModule(types.ModuleType):
+            def __getattr__(self, name: str):
+                return getattr(tools_proxy, name)
+
+            def __getitem__(self, name: str):
+                return tools_proxy[name]
+
+            def __dir__(self) -> list[str]:
+                return dir(tools_proxy)
+
+        tools_mod = _ToolsModule("tools")
+        tools_mod.__all__ = sorted(tool_names)
+        for _t_name in tool_names:
+            if _t_name.isidentifier():
+                setattr(tools_mod, _t_name, getattr(tools_proxy, _t_name))
+        prev_tools_mod = sys.modules.get("tools")
+        sys.modules["tools"] = tools_mod
+
         def _handle_host_line(raw_line: bytes) -> bool:
             nonlocal output_discarded, revoked_reason
             if not raw_line:
@@ -432,8 +476,6 @@ def _main() -> int:
                 return False
             return True
 
-        import threading
-
         stop_reader = False
 
         def _reader_thread() -> None:
@@ -491,6 +533,10 @@ def _main() -> int:
             return False, {"kind": "exception", "message": tb.strip() or f"{type(exc).__name__}: {exc}"}
         finally:
             stop_reader = True
+            if prev_tools_mod is None:
+                sys.modules.pop("tools", None)
+            else:
+                sys.modules["tools"] = prev_tools_mod
             for fut in list(pending.values()):
                 if not fut.done():
                     fut.cancel()

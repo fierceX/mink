@@ -37,7 +37,7 @@ fn sandbox_profile_normalizes_write_dir_subpaths() {
     };
     let cwd = Path::new("/tmp/mink-work");
 
-    let profile = build_sb_profile(&config, Path::new("/bin/echo"), cwd);
+    let profile = build_sb_profile(&config, Path::new("/bin/echo"), cwd, true);
 
     assert!(profile.contains(r#"(allow file-write* (subpath "/tmp/mink-work/qa_cache/session"))"#));
     assert!(profile.contains(r#"(allow file-write* (subpath "/tmp/absolute"))"#));
@@ -54,7 +54,7 @@ fn sandbox_profile_includes_canonical_write_dir_variant() {
     };
     let cwd = Path::new("/tmp/mink-work");
 
-    let profile = build_sb_profile(&config, Path::new("/bin/echo"), cwd);
+    let profile = build_sb_profile(&config, Path::new("/bin/echo"), cwd, true);
 
     let canonical = std::fs::canonicalize("/tmp")
         .map(|path| path.join("bench-workspace"))
@@ -74,7 +74,12 @@ fn sandbox_profile_includes_canonical_temp_dir_variant() {
         write_dirs: vec!["/tmp/workspace".into()],
         ..SandboxConfig::default()
     };
-    let profile = build_sb_profile(&config, Path::new("/bin/echo"), Path::new("/tmp/mink-work"));
+    let profile = build_sb_profile(
+        &config,
+        Path::new("/bin/echo"),
+        Path::new("/tmp/mink-work"),
+        true,
+    );
 
     if let Ok(canonical) = std::fs::canonicalize(std::env::temp_dir()) {
         assert!(
@@ -100,6 +105,7 @@ fn sandbox_profile_allows_custom_mink_home_root() {
         cwd,
         "/Users/alice",
         Some("/srv/mink-home/./tenant-a"),
+        true,
     );
 
     assert!(
@@ -120,7 +126,8 @@ fn sandbox_profile_keeps_home_scope_narrow_when_mink_home_is_home() {
     };
     let cwd = Path::new("/tmp/mink-work");
 
-    let profile = build_sb_profile_with_env(&config, cwd, "/Users/alice", Some("/Users/alice"));
+    let profile =
+        build_sb_profile_with_env(&config, cwd, "/Users/alice", Some("/Users/alice"), true);
 
     assert!(
         profile.contains(r#"(allow file-write* (subpath "/Users/alice/.mink"))"#),
@@ -140,7 +147,8 @@ fn sandbox_profile_resolves_relative_mink_home_from_cwd() {
     };
     let cwd = Path::new("/tmp/mink-work");
 
-    let profile = build_sb_profile_with_env(&config, cwd, "/Users/alice", Some("./service-home"));
+    let profile =
+        build_sb_profile_with_env(&config, cwd, "/Users/alice", Some("./service-home"), true);
 
     assert!(
         profile.contains(r#"(allow file-write* (subpath "/tmp/mink-work/service-home"))"#),
@@ -157,7 +165,8 @@ fn sandbox_profile_denies_writes_even_when_write_dirs_is_empty() {
         allow_network: true,
         ..SandboxConfig::default()
     };
-    let profile = build_sb_profile_with_env(&config, Path::new("/tmp/work"), "/Users/alice", None);
+    let profile =
+        build_sb_profile_with_env(&config, Path::new("/tmp/work"), "/Users/alice", None, true);
     assert!(
         profile.contains(r#"(deny file-write* (subpath "/"))"#),
         "empty write_dirs must still deny global writes: {profile}"
@@ -175,7 +184,8 @@ fn sandbox_profile_denies_network_when_disallowed() {
         allow_network: false,
         ..SandboxConfig::default()
     };
-    let profile = build_sb_profile_with_env(&config, Path::new("/tmp/work"), "/Users/alice", None);
+    let profile =
+        build_sb_profile_with_env(&config, Path::new("/tmp/work"), "/Users/alice", None, true);
     assert!(
         profile.contains("(deny network*)"),
         "allow_network=false must emit (deny network*): {profile}"
@@ -189,9 +199,34 @@ fn sandbox_profile_escapes_quotes_and_backslashes_in_paths() {
         write_dirs: vec![r#"/tmp/weird"dir\sub"#.into()],
         ..SandboxConfig::default()
     };
-    let profile = build_sb_profile_with_env(&config, Path::new("/tmp/work"), "/Users/alice", None);
+    let profile =
+        build_sb_profile_with_env(&config, Path::new("/tmp/work"), "/Users/alice", None, true);
     assert!(
         profile.contains(r#"(allow file-write* (subpath "/tmp/weird\"dir\\sub"))"#),
         "SBPL special characters must be escaped: {profile}"
+    );
+}
+
+#[test]
+fn child_sandbox_profile_omits_session_storage_writes() {
+    let config = SandboxConfig {
+        enabled: true,
+        write_dirs: vec!["/tmp/workspace".into()],
+        ..SandboxConfig::default()
+    };
+    let cwd = Path::new("/tmp/mink-work");
+    let profile =
+        build_sb_profile_with_env(&config, cwd, "/Users/alice", Some("/srv/mink-home"), false);
+    assert!(
+        profile.contains(r#"(allow file-write* (subpath "/tmp/workspace"))"#),
+        "{profile}"
+    );
+    assert!(
+        !profile.contains("/srv/mink-home"),
+        "child PTC sandbox must not allow writing MINK_HOME: {profile}"
+    );
+    assert!(
+        !profile.contains("/tmp/mink-work/.mink"),
+        "child PTC sandbox must not allow writing .mink: {profile}"
     );
 }

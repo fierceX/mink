@@ -606,6 +606,24 @@ pub fn build_tool_call_summary(
                 label = format!("{truncated}...");
             }
         }
+        "RunCode" => {
+            label = fields
+                .get("description")
+                .filter(|d| !d.trim().is_empty())
+                .cloned()
+                .or_else(|| {
+                    fields
+                        .get("code")
+                        .and_then(|c| c.lines().find(|l| !l.trim().is_empty()))
+                        .map(|l| l.trim().to_string())
+                })
+                .unwrap_or_default()
+                .replace('\n', " ");
+            if label.chars().count() > 80 {
+                let truncated: String = label.chars().take(77).collect();
+                label = format!("{truncated}...");
+            }
+        }
         "TodoRead" => label = "state".into(),
         "TodoWrite" => {
             let changes = ["add", "update", "remove"]

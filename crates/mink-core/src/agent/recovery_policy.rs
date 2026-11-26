@@ -15,6 +15,7 @@ pub struct InspectionAction {
 #[derive(Debug, Clone)]
 pub struct RecoveryPolicy {
     inspection_actions: Vec<InspectionAction>,
+    allow_run_code_inspection: bool,
 }
 
 pub enum RecoveryFirstCallDecision {
@@ -23,10 +24,29 @@ pub enum RecoveryFirstCallDecision {
 }
 
 impl RecoveryPolicy {
+    #[cfg(test)]
     pub fn from_resolved(resolved: &ResolvedToolCapabilities, catalog: &ToolCatalog) -> Self {
+        Self::build(resolved, catalog, None)
+    }
+
+    pub fn from_resolved_for_surface(
+        resolved: &ResolvedToolCapabilities,
+        catalog: &ToolCatalog,
+        surface: &crate::tools::surface::ModelToolSurface,
+    ) -> Self {
+        Self::build(resolved, catalog, Some(surface))
+    }
+
+    fn build(
+        resolved: &ResolvedToolCapabilities,
+        catalog: &ToolCatalog,
+        surface: Option<&crate::tools::surface::ModelToolSurface>,
+    ) -> Self {
         use ToolSemanticCapability::*;
         let mut seen = BTreeSet::new();
         let mut inspection_actions = Vec::new();
+        let mut allow_run_code_inspection = false;
+        let run_code_on_wire = surface.is_some_and(|s| s.has("RunCode"));
         for capability in [
             PathRead,
             ContentSearch,
@@ -48,6 +68,14 @@ impl RecoveryPolicy {
             if metadata.mutating && capability != FocusedVerificationExec {
                 continue;
             }
+            if let Some(surface) = surface
+                && !surface.has(&provider.tool)
+            {
+                if run_code_on_wire && surface.has_programmatic(&provider.tool) {
+                    allow_run_code_inspection = true;
+                }
+                continue;
+            }
             if seen.insert((provider.tool.clone(), capability)) {
                 inspection_actions.push(InspectionAction {
                     capability,
@@ -55,13 +83,19 @@ impl RecoveryPolicy {
                 });
             }
         }
-        Self { inspection_actions }
+        Self {
+            inspection_actions,
+            allow_run_code_inspection,
+        }
     }
 
     pub fn classify_first_call(
         &self,
         call: &CapabilityCallContext<'_>,
     ) -> RecoveryFirstCallDecision {
+        if self.allow_run_code_inspection && call.tool_name == "RunCode" {
+            return RecoveryFirstCallDecision::Allowed;
+        }
         if self
             .inspection_actions
             .iter()
@@ -69,11 +103,14 @@ impl RecoveryPolicy {
         {
             return RecoveryFirstCallDecision::Allowed;
         }
-        let referenced_tools: BTreeSet<_> = self
+        let mut referenced_tools: BTreeSet<_> = self
             .inspection_actions
             .iter()
             .map(|action| action.provider.tool.clone())
             .collect();
+        if self.allow_run_code_inspection {
+            referenced_tools.insert("RunCode".to_string());
+        }
         let content = if referenced_tools.is_empty() {
             "SIGNAL_RECOVERY guard: no tool call is allowed because no active inspection provider is available. Report the limitation and stop the turn.".to_string()
         } else {

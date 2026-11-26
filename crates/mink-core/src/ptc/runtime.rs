@@ -86,6 +86,9 @@ pub trait PtcBindingDispatcher: Send + Sync {
         tool_name: &str,
         args: serde_json::Value,
     ) -> std::result::Result<PtcBindingSuccess, PtcBindingError>;
+
+    /// Signal any queued or active dispatches to cancel when a PTC control loop exits.
+    fn cancel_pending(&self) {}
 }
 
 /// Unresolved run request passed by `RunCode` (or a host caller) into `PtcRuntime::resolve`.

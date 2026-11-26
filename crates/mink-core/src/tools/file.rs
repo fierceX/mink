@@ -107,15 +107,23 @@ fn format_preview_tail(tail: &[String], total: Option<usize>) -> String {
     }
     out
 }
+struct FullReadPreview {
+    text: String,
+    shown_lines: usize,
+    total_lines: usize,
+}
+
 /// When a full read would exceed the byte limit, return a preview response
 /// (size, line count, head lines, tail lines, selector example); Ok(None)
 /// means the file fits within the limit and should be read normally.
-fn full_read_preview(path: &Path, max_bytes: usize) -> Result<Option<String>> {
+fn full_read_preview(path: &Path, max_bytes: usize) -> Result<Option<FullReadPreview>> {
     let meta = std::fs::metadata(path).map_err(|_| anyhow!(file_not_found_suggestion(path)))?;
     if meta.len() as u128 <= max_bytes as u128 {
         return Ok(None);
     }
     let (head, exact_total) = read_head_lines(path, FULL_READ_PREVIEW_LINES)?;
+    let shown_lines = head.len();
+    let total_lines = exact_total.unwrap_or(shown_lines);
     let total_desc = match exact_total {
         Some(total) => format!("{total} lines"),
         None => format!("more than {FULL_READ_PREVIEW_LINES} lines"),
@@ -131,7 +139,11 @@ fn full_read_preview(path: &Path, max_bytes: usize) -> Result<Option<String>> {
         "[Full file exceeds the read limit ({max_bytes} bytes). Use 'path:start-end' to read a line range, e.g. '{}:1-{FULL_READ_PREVIEW_LINES}'.]",
         path.display()
     ));
-    Ok(Some(out))
+    Ok(Some(FullReadPreview {
+        text: out,
+        shown_lines,
+        total_lines,
+    }))
 }
 
 pub fn read(path: &str, offset: Option<usize>, limit: Option<usize>) -> Result<String> {
@@ -488,7 +500,23 @@ impl super::runner::ToolExec for ReadTool {
                 selection.limit,
                 &selection.path,
             )?;
-            return Ok(super::runner::ToolOutcome::text(text));
+            let start_line = selection.offset.unwrap_or(1);
+            let visible_count = crate::tools::snapshot::split_content_lines(&text).len();
+            let total_lines = crate::tools::snapshot::split_content_lines(&resource.content).len();
+            let end_line = start_line.saturating_add(visible_count.saturating_sub(1));
+            let mut outcome = super::runner::ToolOutcome::text(text.clone());
+            outcome.structured_value = Some(serde_json::json!({
+                "path": selection.path,
+                "tag": serde_json::Value::Null,
+                "start_line": start_line,
+                "end_line": end_line,
+                "total_lines": total_lines,
+                "content": text,
+                "raw": selection.raw,
+                "memo_hit": false,
+                "truncated": false,
+            }));
+            return Ok(outcome);
         }
         if let Some(vfs) = &ctx.read_only_fs {
             let virtual_path = crate::tools::vfs::normalize_virtual_file_path(&selection.path)?;
@@ -545,33 +573,72 @@ impl super::runner::ToolExec for ReadTool {
                     selection.path,
                     FULL_READ_PREVIEW_LINES
                 ));
-                return Ok(super::runner::ToolOutcome::text(preview));
+                let mut outcome = super::runner::ToolOutcome::text(preview.clone());
+                outcome.structured_value = Some(serde_json::json!({
+                    "path": selection.path,
+                    "tag": serde_json::Value::Null,
+                    "start_line": 1usize,
+                    "end_line": shown,
+                    "total_lines": result.total_lines.max(shown),
+                    "content": preview,
+                    "raw": selection.raw,
+                    "memo_hit": false,
+                    "truncated": true,
+                }));
+                return Ok(outcome);
             }
-            if selection.raw {
-                return Ok(super::runner::ToolOutcome::text(result.content));
-            }
-            return Ok(super::runner::ToolOutcome::text(format_read_only_virtual(
-                &selection.path,
-                selection.offset.unwrap_or(1),
-                &result.content,
-            )));
+            let start_line = selection.offset.unwrap_or(1);
+            let visible_count = crate::tools::snapshot::split_content_lines(&result.content).len();
+            let end_line = start_line.saturating_add(visible_count.saturating_sub(1));
+            let rendered = if selection.raw {
+                result.content.clone()
+            } else {
+                format_read_only_virtual(&selection.path, start_line, &result.content)
+            };
+            let mut outcome = super::runner::ToolOutcome::text(rendered);
+            outcome.structured_value = Some(serde_json::json!({
+                "path": selection.path,
+                "tag": serde_json::Value::Null,
+                "start_line": start_line,
+                "end_line": end_line,
+                "total_lines": result.total_lines.max(end_line),
+                "content": result.content,
+                "raw": selection.raw,
+                "memo_hit": false,
+                "truncated": false,
+            }));
+            return Ok(outcome);
         }
         let path = resolve_tool_path(&ctx.cwd, &selection.path)?;
         if selection.offset.is_none()
             && selection.limit.is_none()
             && let Some(preview) = full_read_preview(&path, ctx.tool_config.tool_result_max_bytes)?
         {
-            return Ok(super::runner::ToolOutcome::text(preview));
+            let mut outcome = super::runner::ToolOutcome::text(preview.text.clone());
+            outcome.structured_value = Some(serde_json::json!({
+                "path": selection.path,
+                "tag": serde_json::Value::Null,
+                "start_line": 1usize,
+                "end_line": preview.shown_lines,
+                "total_lines": preview.total_lines,
+                "content": preview.text,
+                "raw": selection.raw,
+                "memo_hit": false,
+                "truncated": true,
+            }));
+            return Ok(outcome);
         }
-        if let Some(cached) = ctx.memo_hit(
-            &path,
-            selection.raw,
-            selection.offset,
-            selection
-                .offset
-                .zip(selection.limit)
-                .map(|(start, count)| start.saturating_add(count.saturating_sub(1))),
-        ) {
+        if !ctx.bypass_read_memo
+            && let Some(cached) = ctx.memo_hit(
+                &path,
+                selection.raw,
+                selection.offset,
+                selection
+                    .offset
+                    .zip(selection.limit)
+                    .map(|(start, count)| start.saturating_add(count.saturating_sub(1))),
+            )
+        {
             let mut outcome = super::runner::ToolOutcome::text(cached.clone());
             let start_line = selection.offset.unwrap_or(1);
             outcome.structured_value = Some(serde_json::json!({
@@ -631,12 +698,14 @@ impl super::runner::ToolExec for ReadTool {
             // truncated content. Raw reads stay under the raw flag and never
             // satisfy non-raw requests.
             let mut outcome = super::runner::ToolOutcome::text(content.clone());
-            outcome.memo_candidate = Some(super::runner::MemoCandidate {
-                path: path.clone(),
-                raw: true,
-                start_line: selection.offset,
-                end_line: memo_end_line(selection.offset, selection.limit, visible_count),
-            });
+            if !ctx.bypass_read_memo {
+                outcome.memo_candidate = Some(super::runner::MemoCandidate {
+                    path: path.clone(),
+                    raw: true,
+                    start_line: selection.offset,
+                    end_line: memo_end_line(selection.offset, selection.limit, visible_count),
+                });
+            }
             let end_line = start_line.saturating_add(visible_count.saturating_sub(1));
             outcome.structured_value = Some(serde_json::json!({
                 "path": selection.path,
@@ -694,12 +763,14 @@ impl super::runner::ToolExec for ReadTool {
         // that was truncated or spilled at the runner layer.
         let end_line = start_line.saturating_add(visible_count.saturating_sub(1));
         let mut outcome = super::runner::ToolOutcome::text(rendered);
-        outcome.memo_candidate = Some(super::runner::MemoCandidate {
-            path: path.clone(),
-            raw: false,
-            start_line: selection.offset,
-            end_line: memo_end_line(selection.offset, selection.limit, visible_count),
-        });
+        if !ctx.bypass_read_memo {
+            outcome.memo_candidate = Some(super::runner::MemoCandidate {
+                path: path.clone(),
+                raw: false,
+                start_line: selection.offset,
+                end_line: memo_end_line(selection.offset, selection.limit, visible_count),
+            });
+        }
         outcome.structured_value = Some(serde_json::json!({
             "path": selection.path,
             "tag": structured_tag,

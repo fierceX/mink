@@ -17,7 +17,7 @@ pub fn try_sandbox_exec(
     args: &[String],
 ) -> Result<Vec<String>, String> {
     let cwd = std::env::current_dir().unwrap_or_default();
-    try_sandbox_exec_in_dir(config, exe, args, &cwd)
+    try_sandbox_exec_in_dir(config, exe, args, &cwd, true)
 }
 
 /// Build a sandbox-exec command line rooted at an explicit `cwd`.
@@ -26,8 +26,9 @@ pub fn try_sandbox_exec_in_dir(
     exe: &Path,
     args: &[String],
     cwd: &Path,
+    allow_session_storage_writes: bool,
 ) -> Result<Vec<String>, String> {
-    let sb_profile = build_sb_profile(config, exe, cwd);
+    let sb_profile = build_sb_profile(config, exe, cwd, allow_session_storage_writes);
 
     let mut cmd: Vec<String> = vec![
         "sandbox-exec".into(),
@@ -54,11 +55,22 @@ pub fn try_sandbox_exec_in_dir(
 ///   2. ``(deny file-write* (subpath "/"))`` — deny all writes
 ///   3. ``(allow file-write* ...)`` — allow writes only to specified dirs
 ///   4. No blanket ``(deny file-read* ...)`` — reads blocked at app-level
-fn build_sb_profile(config: &SandboxConfig, _exe: &Path, cwd: &Path) -> String {
+fn build_sb_profile(
+    config: &SandboxConfig,
+    _exe: &Path,
+    cwd: &Path,
+    allow_session_storage_writes: bool,
+) -> String {
     let home = std::env::var("HOME").unwrap_or_default();
     let mink_home = std::env::var("MINK_HOME").ok();
 
-    build_sb_profile_with_env(config, cwd, &home, mink_home.as_deref())
+    build_sb_profile_with_env(
+        config,
+        cwd,
+        &home,
+        mink_home.as_deref(),
+        allow_session_storage_writes,
+    )
 }
 
 fn build_sb_profile_with_env(
@@ -66,6 +78,7 @@ fn build_sb_profile_with_env(
     cwd: &Path,
     home: &str,
     mink_home: Option<&str>,
+    allow_session_storage_writes: bool,
 ) -> String {
     let mut lines: Vec<String> = vec!["(version 1)".into()];
 
@@ -98,14 +111,15 @@ fn build_sb_profile_with_env(
     lines.push("(allow file-write* (subpath \"/tmp\"))".into());
     lines.push("(allow file-write* (subpath \"/private/tmp\"))".into());
 
-    // Always allow mink session storage. When MINK_HOME is a dedicated
-    // service root, allow that root so Direct layout can write
-    // MINK_HOME/<session_id>. If MINK_HOME is unset or equals HOME, keep
-    // the narrower historical HOME/.mink permission.
-    for dir in session_storage_write_dirs(home, mink_home, cwd) {
-        for variant in sandbox_path_variants(Path::new(&dir)) {
-            let escaped = escape_sbpl_string(&variant);
-            lines.push(format!("(allow file-write* (subpath \"{escaped}\"))"));
+    // Always allow mink session storage when running the mink host process itself.
+    // Child subprocesses (e.g., PTC Python workers) must not receive extra write
+    // holes into session storage files unless explicitly allowed by `write_dirs`.
+    if allow_session_storage_writes {
+        for dir in session_storage_write_dirs(home, mink_home, cwd) {
+            for variant in sandbox_path_variants(Path::new(&dir)) {
+                let escaped = escape_sbpl_string(&variant);
+                lines.push(format!("(allow file-write* (subpath \"{escaped}\"))"));
+            }
         }
     }
 

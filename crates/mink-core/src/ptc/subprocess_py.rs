@@ -454,4 +454,141 @@ except Exception:
             .collect();
         assert!(!text.contains("swallowed"), "{text}");
     }
+
+    #[tokio::test]
+    async fn huge_inspect_chunks_cleanly_tuple_extracts_image_and_huge_int_is_value_error() {
+        let rt = SubprocessPythonPtcRuntime::new(PtcConfig {
+            mode: super::super::PtcMode::Exclusive,
+            max_output_bytes: 1024,
+            max_message_bytes: 4096,
+            ..PtcConfig::default()
+        });
+        let cwd = std::env::current_dir().unwrap();
+        let spec = rt
+            .resolve(PtcRunRequest {
+                code: r#"
+try:
+    await tools.Echo(huge=1 << 100)
+except ValueError as exc:
+    inspect("int-caught")
+inspect("x" * 20000)
+"#
+                .to_string(),
+                cwd: cwd.clone(),
+                tool_names: vec!["Echo".into()],
+                timeout_secs: Some(15),
+                cancel: CancellationToken::new(),
+                interrupt: InterruptSignal::new(),
+                sandbox: None,
+            })
+            .unwrap();
+        let disp = Arc::new(MockDispatcher {
+            calls: AtomicUsize::new(0),
+        });
+        let res = rt.run(spec, disp).await.unwrap();
+        assert!(res.error.is_none(), "unexpected error: {:?}", res.error);
+        assert!(res.output_truncated);
+        let text: String = res
+            .output
+            .iter()
+            .filter_map(|item| match item {
+                PtcOutputItem::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.contains("int-caught"), "{text}");
+        assert!(
+            text.len() <= 1024,
+            "truncated text exceeded cap: {}",
+            text.len()
+        );
+
+        // Tuple traversal emits nested Image handles.
+        struct ImgDisp;
+        #[async_trait]
+        impl PtcBindingDispatcher for ImgDisp {
+            async fn invoke(
+                &self,
+                _tool_name: &str,
+                _args: serde_json::Value,
+            ) -> std::result::Result<PtcBindingSuccess, PtcBindingError> {
+                Ok(PtcBindingSuccess {
+                    value: serde_json::json!({}),
+                    inspection_text: None,
+                    image: Some(crate::ptc::PtcImageDescriptor {
+                        image_id: "img_tuple_1".into(),
+                        path: "pic.png".into(),
+                        format: "png".into(),
+                        width: 10,
+                        height: 10,
+                        bytes: 42,
+                    }),
+                })
+            }
+        }
+        let tuple_spec = rt
+            .resolve(PtcRunRequest {
+                code: r#"
+img = await tools.Read(path="pic.png")
+inspect((img, "caption"))
+"#
+                .to_string(),
+                cwd,
+                tool_names: vec!["Read".into()],
+                timeout_secs: Some(15),
+                cancel: CancellationToken::new(),
+                interrupt: InterruptSignal::new(),
+                sandbox: None,
+            })
+            .unwrap();
+        let tuple_res = rt.run(tuple_spec, Arc::new(ImgDisp)).await.unwrap();
+        assert!(
+            tuple_res.error.is_none(),
+            "tuple image error: {:?}",
+            tuple_res.error
+        );
+        assert!(tuple_res.output.iter().any(
+            |item| matches!(item, PtcOutputItem::Image { image_id } if image_id == "img_tuple_1")
+        ));
+    }
+
+    #[tokio::test]
+    async fn supports_from_tools_import_and_import_tools_syntaxes() {
+        let rt = test_runtime();
+        let cwd = std::env::current_dir().unwrap();
+        let spec = rt
+            .resolve(PtcRunRequest {
+                code: r#"
+from tools import Echo
+import tools as t
+a = await Echo(via="from-import")
+b = await t.Echo(via="module-import")
+inspect(a["echo"]["via"], b["echo"]["via"])
+"#
+                .to_string(),
+                cwd,
+                tool_names: vec!["Echo".into()],
+                timeout_secs: Some(15),
+                cancel: CancellationToken::new(),
+                interrupt: InterruptSignal::new(),
+                sandbox: None,
+            })
+            .unwrap();
+        let disp = Arc::new(MockDispatcher {
+            calls: AtomicUsize::new(0),
+        });
+        let res = rt.run(spec, disp.clone()).await.unwrap();
+        assert!(res.error.is_none(), "unexpected error: {:?}", res.error);
+        assert_eq!(disp.calls.load(Ordering::SeqCst), 2);
+        let text: String = res
+            .output
+            .iter()
+            .filter_map(|item| match item {
+                PtcOutputItem::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.contains("from-import"), "{text}");
+        assert!(text.contains("module-import"), "{text}");
+    }
 }

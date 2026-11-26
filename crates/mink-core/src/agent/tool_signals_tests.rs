@@ -151,3 +151,26 @@ fn edited_paths_uses_authoritative_hashline_header_grammar() {
         vec!["dir/a.rs".to_string(), "quoted.rs".to_string()]
     );
 }
+
+#[tokio::test]
+async fn succeeded_run_code_does_not_scan_error_patterns() {
+    let mut processor = ToolSignalProcessor::default();
+    let mut result = ToolExecution {
+        tool_name: "RunCode".into(),
+        status: crate::tools::metadata::ToolStatus::Succeeded,
+        ..tool_result("error[E0425]: example error string read from a source file\ntimeout comment")
+    };
+    processor
+        .process_with_mode(
+            &mut result,
+            None,
+            &crate::regression::test_context_for_agent("tool-signals-run-code-ok")
+                .await
+                .unwrap(),
+            "flash",
+            true,
+        )
+        .await;
+    assert!(result.signals.is_empty(), "{:?}", result.signals);
+    assert_eq!(processor.tool_error_count(), 0);
+}

@@ -484,6 +484,26 @@ fn build_tool_call_summary_labels() {
         build_tool_call_summary("TodoRead", &Default::default()),
         "TodoRead(state)"
     );
+
+    let ptc = std::collections::BTreeMap::from([
+        ("description".into(), "Summarize workspace files".into()),
+        (
+            "code".into(),
+            "inspect(await tools.Glob(pattern='*'))".into(),
+        ),
+    ]);
+    assert_eq!(
+        build_tool_call_summary("RunCode", &ptc),
+        "RunCode(Summarize workspace files)"
+    );
+    let ptc_code_only = std::collections::BTreeMap::from([(
+        "code".into(),
+        "\ninspect(await tools.Glob(pattern='*'))\n".into(),
+    )]);
+    assert_eq!(
+        build_tool_call_summary("RunCode", &ptc_code_only),
+        "RunCode(inspect(await tools.Glob(pattern='*')))"
+    );
 }
 
 #[test]

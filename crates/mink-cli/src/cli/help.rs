@@ -43,7 +43,7 @@ pub(super) fn print_usage() {
     println!("  --agent-jsonl           Agent JSONL protocol");
     println!("  --enabled-tools <list>  Comma-separated tools to enable, or 'none'");
     println!(
-        "  --ptc MODE              Programmatic tool calling: off (default) | tool | exclusive"
+        "  --ptc MODE              Programmatic tool calling: off (default) | tool (hybrid, recommended) | exclusive"
     );
     println!("  --edit-mode MODE        Edit protocol: hashline (default) or replace");
     println!("  --edit-fuzzy-match BOOL Enable Replace progressive/fuzzy matching");

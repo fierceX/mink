@@ -158,6 +158,7 @@ pub struct ToolContext {
     /// Image ids captured during the current user input (v7 §9.5). Reset per
     /// input; fresh-attachment materialization failures fail the request.
     pub(crate) this_turn_image_ids: Arc<Mutex<std::collections::HashSet<String>>>,
+    pub(crate) bypass_read_memo: bool,
     pub(crate) ptc_runtime: Option<Arc<dyn crate::ptc::PtcRuntime>>,
     pub(crate) ptc_event_sink: Option<PtcEventSink>,
 }
@@ -224,6 +225,7 @@ impl From<&AgentSharedContext> for ToolContext {
             model_capabilities: ctx.tools.model_capabilities.clone(),
             image_cache: ctx.media.image_cache.clone(),
             this_turn_image_ids: ctx.media.this_turn_image_ids.clone(),
+            bypass_read_memo: false,
             ptc_runtime: ctx.tools.ptc_runtime.clone(),
             ptc_event_sink: None,
         }
@@ -550,6 +552,8 @@ impl AgentSharedContext {
             skill_index_budget_chars: crate::prompt::skill_index_budget_chars(
                 self.config.max_context_tokens,
             ),
+            ptc_timeout_secs: self.config.ptc.timeout_secs,
+            ptc_max_timeout_secs: self.config.ptc.max_timeout_secs,
         }
         .build_system_prompt()?;
         Ok(system_prompt)

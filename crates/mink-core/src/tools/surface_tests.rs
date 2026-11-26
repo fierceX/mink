@@ -326,14 +326,27 @@ fn ptc_modes_partition_wire_and_programmatic_surfaces() {
             .contains("RunCode")
     );
 
-    // Tool: additive RunCode on wire + programmatic SDK excludes control tools & Python.
+    // Tool: additive RunCode on wire + programmatic SDK excludes planning/control tools & Python.
     let mut tool_cfg = ToolConfig::from_config(&Config::default());
     tool_cfg.ptc.mode = crate::ptc::PtcMode::Tool;
     let tool_surface = resolve(&tool_cfg, AgentRole::Primary, false).unwrap();
     assert_eq!(tool_surface.ptc_mode(), crate::ptc::PtcMode::Tool);
-    assert!(tool_surface.has_all(&["RunCode", "Read", "Edit", "GoalDraft", "SubAgent"]));
+    assert!(tool_surface.has_all(&[
+        "RunCode",
+        "Read",
+        "Edit",
+        "TodoRead",
+        "TodoWrite",
+        "TodoAdvance",
+        "GoalRead",
+        "GoalDraft",
+        "SubAgent"
+    ]));
     assert!(tool_surface.has_programmatic("Read"));
-    assert!(tool_surface.has_programmatic("GoalRead"));
+    assert!(!tool_surface.has_programmatic("GoalRead"));
+    assert!(!tool_surface.has_programmatic("TodoRead"));
+    assert!(!tool_surface.has_programmatic("TodoWrite"));
+    assert!(!tool_surface.has_programmatic("TodoAdvance"));
     assert!(!tool_surface.has_programmatic("RunCode"));
     assert!(!tool_surface.has_programmatic("Python"));
     assert!(!tool_surface.has_programmatic("PlanDraft"));
@@ -341,14 +354,18 @@ fn ptc_modes_partition_wire_and_programmatic_surfaces() {
     assert!(!tool_surface.has_programmatic("SubAgent"));
     assert_ne!(off_surface.fingerprint(), tool_surface.fingerprint());
 
-    // Exclusive: wire has RunCode + control tools only; programmatic has core/custom tools;
+    // Exclusive: wire has RunCode + planning/control tools only; programmatic has workspace/exec/custom tools;
     // Python/PythonSandbox hidden; GoalReviewer forced back to Off.
     let mut exc_cfg = ToolConfig::from_config(&Config::default());
     exc_cfg.ptc.mode = crate::ptc::PtcMode::Exclusive;
     let exc_surface = resolve(&exc_cfg, AgentRole::Primary, false).unwrap();
     assert!(exc_surface.has_all(&[
         "RunCode",
+        "TodoRead",
+        "TodoWrite",
+        "TodoAdvance",
         "PlanDraft",
+        "GoalRead",
         "GoalDraft",
         "GoalReview",
         "SubAgent"
@@ -360,7 +377,8 @@ fn ptc_modes_partition_wire_and_programmatic_surfaces() {
     assert!(exc_surface.has_programmatic("Read"));
     assert!(exc_surface.has_programmatic("Edit"));
     assert!(exc_surface.has_programmatic("Bash"));
-    assert!(exc_surface.has_programmatic("GoalRead"));
+    assert!(!exc_surface.has_programmatic("GoalRead"));
+    assert!(!exc_surface.has_programmatic("TodoRead"));
     assert!(exc_surface.has_any_reachable("Read"));
     assert!(exc_surface.has_any_reachable("Bash"));
     assert!(!exc_surface.has_any_reachable("Python"));

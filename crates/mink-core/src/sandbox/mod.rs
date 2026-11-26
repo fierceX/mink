@@ -92,14 +92,14 @@ pub(crate) fn wrap_child_argv(
     #[cfg(target_os = "linux")]
     {
         if config.backend == "nsjail" || config.backend == "auto" {
-            match platform_linux::try_nsjail_in_dir(config, exe, args, cwd, pass_fd) {
+            match platform_linux::try_nsjail_in_dir(config, exe, args, cwd, pass_fd, false) {
                 Ok(cmd) => return Ok(cmd),
                 Err(e) if config.backend == "nsjail" => return Err(e),
                 Err(_) => {}
             }
         }
         if config.backend == "bwrap" || config.backend == "auto" {
-            return platform_linux::try_bwrap_in_dir(config, exe, args, cwd)
+            return platform_linux::try_bwrap_in_dir(config, exe, args, cwd, false)
                 .map_err(|e| format!("bwrap: {e}"));
         }
         Err("no Linux sandbox backend available (tried nsjail, bwrap)".into())
@@ -113,7 +113,7 @@ pub(crate) fn wrap_child_argv(
                 config.backend
             ));
         }
-        platform_macos::try_sandbox_exec_in_dir(config, exe, args, cwd)
+        platform_macos::try_sandbox_exec_in_dir(config, exe, args, cwd, false)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {

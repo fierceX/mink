@@ -264,10 +264,11 @@ where
         mpsc::unbounded_channel::<(u64, std::result::Result<PtcBindingSuccess, PtcBindingError>)>();
 
     let allowed_tools: HashSet<String> = spec.tool_names.iter().cloned().collect();
+    let mut active_ids: HashSet<u64> = HashSet::new();
+    let mut dispatch_tasks = tokio::task::JoinSet::new();
     let mut ledger = OutputLedger::new(config.max_output_bytes);
     let mut line_buf = Vec::new();
     let mut ready_seen = false;
-    let mut in_flight_calls = 0usize;
     let mut terminal_error: Option<PtcRunFailure> = None;
     let mut guest_done_truncated = false;
     let mut guest_done = false;
@@ -314,8 +315,17 @@ where
                 revoked = true;
                 revoke_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(config.stop_grace_ms));
             }
+            Some(join_res) = dispatch_tasks.join_next(), if !dispatch_tasks.is_empty() => {
+                if let Err(err) = join_res {
+                    terminal_error.get_or_insert(PtcRunFailure {
+                        kind: PtcFailureKind::Protocol,
+                        message: format!("PTC dispatch task failed: {err}"),
+                    });
+                    break;
+                }
+            }
             Some((call_id, outcome)) = reply_rx.recv() => {
-                in_flight_calls = in_flight_calls.saturating_sub(1);
+                active_ids.remove(&call_id);
                 if !revoked {
                     let reply = match outcome {
                         Ok(success) => HostMessage::ToolReply {
@@ -373,6 +383,13 @@ where
                         }
                         match decode_guest_line(trimmed, config.max_message_bytes) {
                             Ok(GuestMessage::Ready { protocol_version }) => {
+                                if ready_seen {
+                                    terminal_error.get_or_insert(PtcRunFailure {
+                                        kind: PtcFailureKind::Protocol,
+                                        message: "unexpected duplicate ready message".to_string(),
+                                    });
+                                    break;
+                                }
                                 if protocol_version != PTC_PROTOCOL_VERSION {
                                     terminal_error.get_or_insert(PtcRunFailure {
                                         kind: PtcFailureKind::Protocol,
@@ -422,7 +439,14 @@ where
                                     let _ = send_host_msg(&mut ctrl_write, &reply).await;
                                     continue;
                                 }
-                                if in_flight_calls >= config.max_pending_calls {
+                                if active_ids.contains(&id) {
+                                    terminal_error.get_or_insert(PtcRunFailure {
+                                        kind: PtcFailureKind::Protocol,
+                                        message: format!("duplicate in-flight tool call id {id}"),
+                                    });
+                                    break;
+                                }
+                                if active_ids.len() >= config.max_pending_calls {
                                     let reason = format!(
                                         "pending PTC tool calls exceeded limit ({})",
                                         config.max_pending_calls
@@ -436,15 +460,22 @@ where
                                     revoke_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(config.stop_grace_ms));
                                     continue;
                                 }
-                                in_flight_calls += 1;
+                                active_ids.insert(id);
                                 let disp = dispatcher.clone();
                                 let tx = reply_tx.clone();
-                                tokio::spawn(async move {
+                                dispatch_tasks.spawn(async move {
                                     let res = disp.invoke(&name, args).await;
                                     let _ = tx.send((id, res));
                                 });
                             }
                             Ok(GuestMessage::Output { kind, text, image_id }) => {
+                                if !ready_seen {
+                                    terminal_error.get_or_insert(PtcRunFailure {
+                                        kind: PtcFailureKind::Protocol,
+                                        message: "output received before ready handshake".to_string(),
+                                    });
+                                    break;
+                                }
                                 let newly_truncated = match kind.as_str() {
                                     "text" => text.as_deref().is_some_and(|t| ledger.push_text(t)),
                                     "image" => image_id.is_some_and(|id| ledger.push_image(id)),
@@ -462,6 +493,13 @@ where
                                 }
                             }
                             Ok(GuestMessage::Done { ok, error, output_truncated }) => {
+                                if !ready_seen {
+                                    terminal_error.get_or_insert(PtcRunFailure {
+                                        kind: PtcFailureKind::Protocol,
+                                        message: "done received before ready handshake".to_string(),
+                                    });
+                                    break;
+                                }
                                 guest_done = true;
                                 guest_done_truncated = output_truncated;
                                 if !ok && terminal_error.is_none() {
@@ -499,6 +537,9 @@ where
         }
     }
 
+    dispatcher.cancel_pending();
+    while dispatch_tasks.join_next().await.is_some() {}
+
     let output_truncated = ledger.truncated || guest_done_truncated;
     ControlLoopOutcome {
         guest_done,
@@ -513,7 +554,8 @@ pub(crate) fn resolve_timeout_and_cwd(
     request: PtcRunRequest,
 ) -> Result<PtcRunSpec> {
     let timeout_secs = match request.timeout_secs {
-        Some(secs) if secs > 0 => {
+        Some(0) => bail!("Error: timeout must be >= 1 second"),
+        Some(secs) => {
             if secs > config.max_timeout_secs {
                 bail!(
                     "Error: timeout must not exceed {} seconds; got {secs}",
@@ -522,7 +564,7 @@ pub(crate) fn resolve_timeout_and_cwd(
             }
             secs
         }
-        _ => config.timeout_secs.clamp(5, config.max_timeout_secs),
+        None => config.timeout_secs.clamp(5, config.max_timeout_secs),
     };
     let cwd = if request.cwd.is_absolute() {
         request.cwd
@@ -638,5 +680,104 @@ mod tests {
             ledger.items,
             vec![PtcOutputItem::Text("abcd你".to_string())]
         );
+    }
+
+    struct NoopDispatcher;
+    #[async_trait::async_trait]
+    impl PtcBindingDispatcher for NoopDispatcher {
+        async fn invoke(
+            &self,
+            _tool_name: &str,
+            _args: serde_json::Value,
+        ) -> std::result::Result<PtcBindingSuccess, PtcBindingError> {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok(PtcBindingSuccess {
+                value: serde_json::json!({}),
+                inspection_text: None,
+                image: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn control_loop_rejects_duplicate_ready_and_duplicate_inflight_call_id() {
+        let cfg = PtcConfig::default();
+        let spec = resolve_timeout_and_cwd(
+            &cfg,
+            PtcRunRequest {
+                code: "1".into(),
+                cwd: std::env::current_dir().unwrap(),
+                tool_names: vec!["Read".into()],
+                timeout_secs: Some(5),
+                cancel: crate::cancel::CancellationToken::new(),
+                interrupt: crate::cancel::InterruptSignal::new(),
+                sandbox: None,
+            },
+        )
+        .unwrap();
+
+        let dup_ready = b"{\"type\":\"ready\",\"protocol_version\":1}\n{\"type\":\"ready\",\"protocol_version\":1}\n";
+        let mut sink = Vec::new();
+        let disp: Arc<dyn PtcBindingDispatcher> = Arc::new(NoopDispatcher);
+        let outcome = run_control_loop(
+            &cfg,
+            &spec,
+            &disp,
+            tokio::io::BufReader::new(&dup_ready[..]),
+            &mut sink,
+            None,
+        )
+        .await;
+        assert_eq!(
+            outcome.terminal_error.as_ref().map(|e| e.kind),
+            Some(PtcFailureKind::Protocol)
+        );
+
+        let dup_call = concat!(
+            "{\"type\":\"ready\",\"protocol_version\":1}\n",
+            "{\"type\":\"tool_call\",\"id\":7,\"name\":\"Read\",\"args\":{}}\n",
+            "{\"type\":\"tool_call\",\"id\":7,\"name\":\"Read\",\"args\":{}}\n"
+        );
+        let mut sink2 = Vec::new();
+        let outcome2 = run_control_loop(
+            &cfg,
+            &spec,
+            &disp,
+            tokio::io::BufReader::new(dup_call.as_bytes()),
+            &mut sink2,
+            None,
+        )
+        .await;
+        assert_eq!(
+            outcome2.terminal_error.as_ref().map(|e| e.kind),
+            Some(PtcFailureKind::Protocol)
+        );
+        assert!(
+            outcome2
+                .terminal_error
+                .unwrap()
+                .message
+                .contains("duplicate in-flight tool call id 7")
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_zero_timeout() {
+        let cfg = PtcConfig::default();
+        let err = resolve_timeout_and_cwd(
+            &cfg,
+            PtcRunRequest {
+                code: "1".into(),
+                cwd: std::env::current_dir().unwrap(),
+                tool_names: vec![],
+                timeout_secs: Some(0),
+                cancel: crate::cancel::CancellationToken::new(),
+                interrupt: crate::cancel::InterruptSignal::new(),
+                sandbox: None,
+            },
+        )
+        .err()
+        .expect("timeout 0 must fail");
+        assert!(err.to_string().contains("timeout"), "{err}");
     }
 }

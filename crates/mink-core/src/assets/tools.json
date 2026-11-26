@@ -567,7 +567,7 @@
   },
   {
     "name": "RunCode",
-    "description": "Execute a Python 3 program that orchestrates runtime tools programmatically via the `tools` module and returns `inspect(...)` output plus bounded stdout/stderr.",
+    "description": "Execute a Python 3 program with pre-injected globals (`tools`, `inspect`, `gather`, `ToolCallError`, `Image`; no import required) that orchestrates runtime tools via `await tools.<Name>(...)` and returns `inspect(...)` output plus bounded stdout/stderr.",
     "input_schema": {
       "type": "object",
       "properties": {
