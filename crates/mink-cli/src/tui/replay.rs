@@ -16,8 +16,7 @@ pub(crate) struct LoadedHistory {
 pub(crate) fn load_session_history(events_path: &Path) -> LoadedHistory {
     // Guidance is authoritative conversation history, not a new user turn in
     // events.jsonl. Use complete formal turns when that window contains it.
-    // Goal boundaries are the same: they exist only as committed rows, so a
-    // window holding one must be rebuilt from those rows.
+    // Goal boundaries and native web results also live in committed rows.
     if let Some(directory) = events_path.parent()
         && let Ok(rows) = crate::runtime::session::SessionReader::new(directory).conversation_turns(
             1,
@@ -70,6 +69,9 @@ fn needs_conversation_rows(row: &serde_json::Value) -> bool {
     metadata["guidance"] == true
         || metadata.get("goal_message").is_some()
         || metadata.get("goal_state_kind").is_some()
+        || row["content"]
+            .as_array()
+            .is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "deepseek_web"))
 }
 
 /// What one committed row means to the transcript.
@@ -168,6 +170,7 @@ fn conversation_events(rows: &[serde_json::Value]) -> Vec<serde_json::Value> {
             }
         }
         if let Some(blocks) = row["content"].as_array() {
+            let mut citations = None;
             for block in blocks {
                 let mut event = block.clone();
                 match block["type"].as_str() {
@@ -180,6 +183,11 @@ fn conversation_events(rows: &[serde_json::Value]) -> Vec<serde_json::Value> {
                     Some("tool_use") if row["role"] == "assistant" => {
                         event["type"] = "tool_call".into();
                     }
+                    Some("deepseek_web") if row["role"] == "assistant" => {
+                        append_web_calls(&mut events, block);
+                        citations = block["citations"].as_array();
+                        continue;
+                    }
                     Some("tool_result") => {
                         if let Some(metadata) = block["_mink"].as_object() {
                             event.as_object_mut().unwrap().extend(metadata.clone());
@@ -190,9 +198,38 @@ fn conversation_events(rows: &[serde_json::Value]) -> Vec<serde_json::Value> {
                 }
                 events.push(event);
             }
+            for citation in citations.into_iter().flatten() {
+                if let Some(url) = citation["url"].as_str() {
+                    events
+                        .push(json!({"type":"web_source","content":format!("[Web source] {url}")}));
+                }
+            }
         }
     }
     events
+}
+
+fn append_web_calls(events: &mut Vec<serde_json::Value>, block: &serde_json::Value) {
+    use serde_json::json;
+    for call in block["calls"].as_array().into_iter().flatten() {
+        let (Some(id), Some(name)) = (call["id"].as_str(), call["tool"].as_str()) else {
+            continue;
+        };
+        events.push(json!({"type":"tool_call","id":id,"name":name,"input":call["action"]}));
+        let status = match call["status"].as_str() {
+            Some("completed") => json!({"state":"succeeded"}),
+            Some("failed") => json!({"state":"failed","reason":"unknown"}),
+            _ => serde_json::Value::Null,
+        };
+        events.push(json!({
+            "type":"tool_result",
+            "tool_use_id":id,
+            "name":name,
+            "result_kind":"search",
+            "status":status,
+            "content":serde_json::to_string_pretty(call).unwrap_or_default()
+        }));
+    }
 }
 
 fn load_recent_turn_events(file: std::fs::File) -> Vec<serde_json::Value> {
@@ -250,6 +287,13 @@ fn build_history_from_events(events: &[serde_json::Value]) -> LoadedHistory {
                     goal_id: evt["goal_id"].as_str().unwrap_or_default().to_string(),
                     revision: evt["revision"].as_u64().unwrap_or(0),
                 });
+                continue;
+            }
+            "web_source" => {
+                state.finalize_stream();
+                state.apply(&TuiSignal::Info(
+                    crate::replay::event_content(evt).to_string(),
+                ));
                 continue;
             }
             _ => {}
@@ -378,6 +422,32 @@ pub(crate) fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<Trans
 mod tests {
     use super::*;
     use crate::runtime::GoalMessageKind;
+
+    #[test]
+    fn web_history_restores_calls_and_sources_from_conversation() {
+        let rows = vec![serde_json::json!({"role":"assistant","content":[
+            {"type":"deepseek_web","calls":[{
+                "id":"web1", "tool":"DeepSeekReadUrl",
+                "action":{"type":"read_link","url":"https://example.test/"},
+                "status":"completed", "page":{"url":"https://example.test/"}
+            }],"citations":[{"url":"https://example.test/","title":"source","start_index":0,"end_index":6}]},
+            {"type":"text","text":"answer"}
+        ]})];
+        assert!(rows.iter().any(needs_conversation_rows));
+        let loaded = build_history_from_events(&conversation_events(&rows));
+        assert!(
+            loaded
+                .lines
+                .iter()
+                .any(|line| line.text.contains("DeepSeekReadUrl"))
+        );
+        assert!(
+            loaded
+                .lines
+                .iter()
+                .any(|line| line.text.contains("[Web source] https://example.test/"))
+        );
+    }
 
     #[test]
     fn sub_agent_events_replay_preserves_session_index_and_restored_detail_fallback() {

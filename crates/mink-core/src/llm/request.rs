@@ -47,10 +47,13 @@ impl RequestProjection {
     pub(crate) fn build(messages: &[Value], system_prompt: &str, tools: &[Value]) -> Result<Self> {
         #[cfg(test)]
         BUILD_COUNT.with(|count| count.set(count.get() + 1));
-        let runtime_projected = Arc::new(
-            crate::llm::image_projection::project_consumed_attachments(messages),
-        );
-        let openai_projected = Arc::new(transport::convert_messages_to_openai(&runtime_projected)?);
+        let mut runtime_projected =
+            crate::llm::image_projection::project_consumed_attachments(messages);
+        super::deepseek_web::project_replay(&mut runtime_projected, tools);
+        let openai_projected = Arc::new(transport::convert_messages_to_openai(
+            &runtime_projected,
+            tools,
+        )?);
         let openai_tools = Arc::new(transport::convert_tools_to_openai(tools));
         let estimated_tokens =
             transport::estimate_openai_converted(&openai_projected, &openai_tools, system_prompt)?;
@@ -67,7 +70,7 @@ impl RequestProjection {
                 })
         });
         Ok(Self {
-            runtime_projected,
+            runtime_projected: Arc::new(runtime_projected),
             openai_projected,
             openai_tools,
             runtime_tools: Arc::new(tools.to_vec()),
@@ -84,6 +87,25 @@ impl RequestProjection {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn web_replay_is_excluded_from_the_projection_when_native_tools_are_off() {
+        let basic = json!({"role":"assistant","content":[{"type":"text","text":"answer"}]});
+        let mut with_replay = basic.clone();
+        with_replay["_mink"]["deepseek_web"] = json!({
+            "calls":[{"calls":[{"signature":"s".repeat(9000)}]}],
+            "reasoning_content":""
+        });
+        let baseline = RequestProjection::build(&[basic], "", &[]).unwrap();
+        let off = RequestProjection::build(&[with_replay.clone()], "", &[]).unwrap();
+        let on =
+            RequestProjection::build(&[with_replay], "", &[json!({"type":"deepseek_read_url"})])
+                .unwrap();
+        assert_eq!(off.estimated_tokens, baseline.estimated_tokens);
+        assert!(off.openai_projected[0].get("server_tool_calls").is_none());
+        assert!(off.runtime_projected[0].get("_mink").is_none());
+        assert!(on.openai_projected[0]["server_tool_calls"].is_array());
+    }
 
     #[test]
     fn projection_build_counter_is_observable() {

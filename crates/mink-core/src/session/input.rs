@@ -63,6 +63,22 @@ struct State {
     active: Option<String>,
 }
 
+impl State {
+    fn active_primary(&self) -> Option<&InputReceipt> {
+        self.snapshot
+            .entries
+            .iter()
+            .find(|entry| Some(&entry.turn_id) == self.active.as_ref() && !entry.guidance)
+    }
+
+    fn accepts_guidance(&self) -> bool {
+        self.active_primary().is_none_or(|entry| {
+            entry.status != InputStatus::Withdrawn
+                && crate::tools::web::command(&entry.input.text).is_none()
+        })
+    }
+}
+
 pub struct InputInbox {
     path: PathBuf,
     state: Mutex<State>,
@@ -125,6 +141,14 @@ impl InputInbox {
             .active
             .clone()
     }
+
+    pub(crate) fn active_primary(&self) -> Option<InputReceipt> {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .active_primary()
+            .cloned()
+    }
     pub fn existing(&self, input: &HumanInput) -> Result<Option<InputReceipt>> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = state
@@ -172,15 +196,8 @@ impl InputInbox {
         }
         let guidance = input.target_turn_id.is_some();
         let turn_id = if let Some(target) = &input.target_turn_id {
-            if state.active.as_ref() != Some(target) {
+            if state.active.as_ref() != Some(target) || !state.accepts_guidance() {
                 bail!("target turn no longer accepts guidance");
-            }
-            if state.snapshot.entries.iter().any(|entry| {
-                entry.turn_id == *target
-                    && !entry.guidance
-                    && crate::tools::web::command(&entry.input.text).is_some()
-            }) {
-                bail!("a web retrieval turn does not accept guidance");
             }
             target.clone()
         } else {
@@ -276,7 +293,9 @@ impl InputInbox {
                 }
                 let mut snapshot = state.snapshot.clone();
                 let Some(entry) = snapshot.entries.iter_mut().find(|e| {
-                    e.status == InputStatus::Pending && Some(&e.turn_id) == state.active.as_ref()
+                    e.status == InputStatus::Pending
+                        && Some(&e.turn_id) == state.active.as_ref()
+                        && (!e.guidance || state.accepts_guidance())
                 }) else {
                     return Ok(applied);
                 };

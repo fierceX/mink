@@ -37,7 +37,7 @@ cd apps/web && npx playwright test    # UI 验收（fixtures + live；CI 浏览�
 
 在 server 的 [`[web]` 配置](../reference/configuration.md#网页搜索与读取) 开启 `client` 后，从输入框命令菜单选择 `/web-search` 或 `/web-fetch`，填写关键词或 URL 并发送。结果卡显示搜索来源或网页正文，较长正文可从输出产物打开。两条命令作为独立轮次提交，草稿图片留给下一条消息。
 
-开启 `native_search` 或 `native_read_url` 后，DeepSeek Flash 可以在普通提问中按需联网。工作台在过程区显示联网调用，在回答下方显示来源和对应的回答片段。
+使用支持相应协议的模型并开启 `native_search` 或 `native_read_url` 后，模型可以在普通提问中按需联网。工作台在过程区显示联网调用，在回答下方显示来源和对应的回答片段。
 
 ## Web 开发工作台
 

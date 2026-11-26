@@ -462,8 +462,25 @@ impl TurnExecutor {
 
     pub async fn execute(
         &mut self,
+        input: &str,
+        belief: Option<&mut crate::agent::belief::BeliefTracker>,
+    ) -> Result<(TurnDecision, Vec<TurnEffect>)> {
+        self.execute_input(input, belief, false).await
+    }
+
+    pub(super) async fn execute_human(
+        &mut self,
+        input: &str,
+        belief: Option<&mut crate::agent::belief::BeliefTracker>,
+    ) -> Result<(TurnDecision, Vec<TurnEffect>)> {
+        self.execute_input(input, belief, true).await
+    }
+
+    async fn execute_input(
+        &mut self,
         user_input: &str,
         mut belief: Option<&mut crate::agent::belief::BeliefTracker>,
+        human: bool,
     ) -> Result<(TurnDecision, Vec<TurnEffect>)> {
         // A latched persistence fault means the session must not accept new
         // work: refuse before the model request, history append or tools.
@@ -478,6 +495,7 @@ impl TurnExecutor {
 
         let mut messages = self.ctx.stores.compaction.active_messages().await?;
         self.reconcile_todo_state(&mut messages).await?;
+        let mut primary = None;
         if let Some(session) = &self.goal_adjudication {
             self.ctx.stores.store.append_runtime_message(serde_json::json!({
                 "role":"user", "content":user_input, "internal":true,
@@ -491,9 +509,25 @@ impl TurnExecutor {
                     self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set()
                 })
                 .await?;
+            if human {
+                primary = self.ctx.stores.input_inbox.active_primary();
+            }
         } else {
             self.ctx.stores.store.add_user(user_input).await?;
         }
+        let user_input = match primary.as_ref() {
+            Some(receipt) if receipt.status == crate::runtime::InputStatus::Applied => {
+                self.local
+                    .current_user_input
+                    .clone_from(&receipt.input.text);
+                receipt.input.text.as_str()
+            }
+            Some(_) => {
+                self.ctx.io.display.render_stop("interrupted");
+                return Ok((TurnDecision::Interrupted, Vec::new()));
+            }
+            None => user_input,
+        };
         if self.goal_adjudication.is_none() {
             self.ctx.stores.stats.record_turn().await;
             self.ctx.log_event(crate::events::EventLog::UserInput {
@@ -504,9 +538,7 @@ impl TurnExecutor {
 
         let mut turn = 0;
         let mut effects = Vec::new();
-        if self.goal_adjudication.is_none()
-            && let Some((name, argument)) = crate::tools::web::command(user_input)
-        {
+        if human && let Some((name, argument)) = crate::tools::web::command(user_input) {
             let decision = self.run_web_command(name, argument, &mut effects).await?;
             return Ok((decision, effects));
         }
@@ -809,10 +841,22 @@ impl TurnExecutor {
                     // (text and every call, however complete it looks). Only
                     // the provider bill remains.
                     self.record_discarded_usage(&usage).await;
-                    let diagnostic = format!(
-                        "<output-truncated>The previous response hit the output limit (stop: {}) and was discarded without executing anything. Continue with one smaller, focused step.</output-truncated>",
+                    let mut diagnostic = format!(
+                        "<output-truncated>The previous response hit the output limit (stop: {}). Continue with one smaller, focused step.",
                         truncate_str(&stop, 80)
                     );
+                    // DeepSeek looks for links in the last user message. Repeat
+                    // the read targets in this feedback while discarding the
+                    // truncated assistant candidate and its replay payload.
+                    if let Some(web) = &web {
+                        let urls = web.read_link_urls();
+                        if !urls.is_empty() {
+                            diagnostic.push_str("\nLinks from the original request:\n");
+                            diagnostic.push_str(&urls.join("\n"));
+                            diagnostic.push('\n');
+                        }
+                    }
+                    diagnostic.push_str("</output-truncated>");
                     self.ctx.stores.store.add_runtime_user(&diagnostic).await?;
                     true
                 }

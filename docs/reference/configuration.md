@@ -368,10 +368,12 @@ native_read_url = true
 | 字段 | 用途 |
 | --- | --- |
 | `client` | 开启 `WebSearch`、`WebFetch` 以及 `/web-search`、`/web-fetch`。Mink 通过 DeepSeek 独立接口按需获取结果。工具选择和审批仍适用。 |
-| `native_search` | 在支持该能力的 DeepSeek Flash 对话请求中声明 `deepseek_web_search`。开启思考时采用深度搜索。 |
-| `native_read_url` | 在支持该能力的 DeepSeek Flash 对话请求中声明 `deepseek_read_url`，由模型选择最后一条用户消息里的链接。 |
+| `native_search` | 在当前对话请求中声明 `deepseek_web_search`。DeepSeek 开启思考时采用深度搜索。 |
+| `native_read_url` | 在当前对话请求中声明 `deepseek_read_url`，由服务端模型选择最后一条用户消息里的链接。 |
 
-独立接口固定使用 `https://api.deepseek.com`。模型也走 DeepSeek 官方端点时，优先使用现有的 DeepSeek 模型 API 密钥，其余情况使用 `DEEPSEEK_API_KEY`。对话内置联网使用官方 Chat Completions 端点和实际解析出的 `deepseek-flash`（含兼容模型名）。思考模式下同时声明两个工具时，DeepSeek 采用深度搜索。要保留思考模式和独立读链行为，可只开启 `native_read_url`。独立 Search / Fetch 按成功且有结果的请求计费。 [DeepSeek 联网工具](https://api-docs.deepseek.com/zh-cn/guides/web_tools/) · [DeepSeek 网页搜索与抓取](https://api-docs.deepseek.com/zh-cn/guides/search/)
+内置联网由开关决定，适用的供应商和模型由用户选择。切换供应商时，可将 `native_search` 和 `native_read_url` 都设为 `false`，关闭联网声明和历史签名回传。`client` 独立控制 Mink 的 Search / Fetch。它固定调用 `https://api.deepseek.com`，对话走 DeepSeek 官方端点时优先使用现有的模型 API 密钥，其余情况使用 `DEEPSEEK_API_KEY`。
+
+在 DeepSeek 上，思考模式同时声明两个原生工具时采用深度搜索。要保留思考模式和独立读链行为，可只开启 `native_read_url`。独立 Search / Fetch 按成功且有结果的请求计费。 [DeepSeek 联网工具](https://api-docs.deepseek.com/zh-cn/guides/web_tools/) · [DeepSeek 网页搜索与抓取](https://api-docs.deepseek.com/zh-cn/guides/search/)
 
 JSONL 请求使用 `options.web`，字段同 `[web]`。Python `SandboxConfig` 对应 `web_client`、`web_native_search`、`web_native_read_url`。Rust 宿主使用 `AgentOptions::with_web_options(WebOptions { .. })`。
 

@@ -805,7 +805,7 @@ async fn partial_alignment_rolls_back_before_incomplete_tool_exchange() -> anyho
 
     assert_eq!(input.meta.input_mode, "partial_aligned");
     assert_eq!(input.meta.aligned_messages, 1);
-    let wire = crate::llm::transport::convert_messages_to_openai(&input.messages)?;
+    let wire = crate::llm::transport::convert_messages_to_openai(&input.messages, &input.tools)?;
     let serialized = serde_json::to_string(&wire)?;
     assert!(serialized.contains("[tool Read id=image-read-1] path=diagram.png"));
     assert!(serialized.contains("[tool_result id=image-read-1] Image captured."));

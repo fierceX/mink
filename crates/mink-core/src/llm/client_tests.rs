@@ -453,7 +453,8 @@ async fn prepared_body_matches_the_ordinary_build() -> anyhow::Result<()> {
     ] {
         let mut request = request.clone();
         request.messages = Arc::new(messages);
-        let converted = crate::llm::transport::convert_messages_to_openai(&request.messages)?;
+        let converted =
+            crate::llm::transport::convert_messages_to_openai(&request.messages, &request.tools)?;
         let tools = crate::llm::transport::convert_tools_to_openai(&request.tools);
         let prepared = backend
             .build_body(&request, &converted, &tools)?
@@ -538,6 +539,63 @@ async fn start_http_server(
         }
     });
     Ok((format!("http://{addr}/chat/completions"), seen, handle))
+}
+
+#[tokio::test]
+async fn web_native_stream_follows_declarations_on_an_arbitrary_endpoint() -> anyhow::Result<()> {
+    let response = json!({
+        "choices":[{"finish_reason":"stop","delta":{
+            "content":"answer",
+            "server_tool_calls":[{"calls":[{
+                "id":"srvtoolu_read","type":"deepseek_read_url","kind":"read_link",
+                "status":"completed","signature":"new-signature"
+            }]}]
+        }}]
+    });
+    let (api_url, seen, server) = start_http_server(vec![http_response(
+        200,
+        &[("content-type", "text/event-stream")],
+        &format!("data: {response}\n\ndata: [DONE]\n\n"),
+    )])
+    .await?;
+    let ctx = test_context("web-native-arbitrary-endpoint", &api_url).await?;
+    let request = LlmRequest {
+        purpose: LlmPurpose::Agent,
+        model: "fixture-model".into(),
+        model_alias: None,
+        api_url,
+        api_key: "secret-key".into(),
+        system_prompt: "system".into(),
+        messages: vec![json!({"role":"user","content":"ping"})].into(),
+        tools: vec![json!({"type":"deepseek_read_url"})].into(),
+        max_tokens: ctx.max_tokens(),
+        cancel: ctx.cancel.clone(),
+        verbose: false,
+        display: ctx.io.display.clone(),
+    };
+    let backend = OpenAiCompatibleBackend::deepseek_defaults();
+    let converted =
+        crate::llm::transport::convert_messages_to_openai(&request.messages, &request.tools)?;
+    let body = backend
+        .build_body(&request, &converted, &request.tools)?
+        .unwrap();
+    let wire: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(wire["tools"], json!([{"type":"deepseek_read_url"}]));
+    let mut events = backend.stream_prepared(request, Some(body)).await?.events;
+    let mut saw_web = false;
+    while let Some(event) = events.next().await {
+        if let Event::DeepSeekWeb(result) = event? {
+            assert_eq!(
+                result.calls.unwrap()[0]["calls"][0]["signature"],
+                "new-signature"
+            );
+            saw_web = true;
+        }
+    }
+    server.abort();
+    assert!(saw_web);
+    assert_eq!(seen.load(Ordering::SeqCst), 1);
+    Ok(())
 }
 
 #[tokio::test]

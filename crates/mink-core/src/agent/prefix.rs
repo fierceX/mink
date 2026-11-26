@@ -69,26 +69,16 @@ impl PrefixManager {
         {
             return Vec::new();
         }
-        let model = self
-            .ctx
-            .active_model
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if !self
-            .ctx
-            .llm_backend
-            .supports_deepseek_web(&self.ctx.paths.api_url, &model.actual)
-        {
-            return Vec::new();
-        }
         crate::llm::deepseek_web::declarations(options)
     }
 
     pub async fn ensure(&self) -> Result<(String, Vec<serde_json::Value>)> {
         if let Some(source) = &self.ctx.tools.prefix_source
-            && let Some(prefix) = source.prefix(&self.ctx.paths.events_path)
+            && let Some((system_prompt, mut tools)) = source.prefix(&self.ctx.paths.events_path)
         {
-            return Ok(prefix);
+            tools.retain(|tool| !crate::llm::deepseek_web::is_declaration(tool));
+            tools.extend(self.web_tools());
+            return Ok((system_prompt, tools));
         }
 
         // One async build gate: the std guard below is never held across the

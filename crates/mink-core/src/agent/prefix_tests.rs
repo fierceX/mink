@@ -2,9 +2,9 @@ use super::*;
 use crate::session::prefix::ImmutablePrefix;
 
 #[tokio::test]
-async fn web_switches_follow_the_resolved_model_and_keep_function_tools() -> anyhow::Result<()> {
+async fn web_switches_follow_configuration_on_any_model_and_endpoint() -> anyhow::Result<()> {
     let ctx = crate::regression::test_context_for_agent_with_config("web-prefix", |config| {
-        config.base_url = "https://api.deepseek.com/v1".into();
+        config.base_url = "https://example.invalid/v1".into();
         config.model = "deepseek-flash".into();
         config.web.native_read_url = true;
         config.web.client = true;
@@ -23,7 +23,7 @@ async fn web_switches_follow_the_resolved_model_and_keep_function_tools() -> any
     *ctx.active_model.lock().unwrap() =
         crate::config::model_resolver(&ctx.config).resolve("deepseek-v4-pro");
     let (_, tools) = manager.ensure().await?;
-    assert!(!tools.iter().any(crate::llm::deepseek_web::is_declaration));
+    assert!(tools.iter().any(|tool| tool["type"] == "deepseek_read_url"));
     assert!(tools.iter().any(|tool| tool["name"] == "WebSearch"));
     Ok(())
 }

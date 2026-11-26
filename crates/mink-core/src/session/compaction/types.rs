@@ -103,7 +103,8 @@ impl MainRequestShape<'_> {
     pub(super) fn estimate(&self, messages: &[Value]) -> Result<usize> {
         match self.openai_tools {
             Some(openai_tools) => {
-                let converted = crate::llm::transport::convert_messages_to_openai(messages)?;
+                let converted =
+                    crate::llm::transport::convert_messages_to_openai(messages, self.tools)?;
                 crate::llm::transport::estimate_openai_converted(
                     &converted,
                     openai_tools,

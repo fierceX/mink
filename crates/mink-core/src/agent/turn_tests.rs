@@ -19,7 +19,9 @@ async fn web_command_uses_tool_path_without_a_model_request() -> Result<()> {
         })
         .await?;
         let mut turn = TurnExecutor::new(context.clone());
-        let (decision, _) = turn.execute("/web-fetch file:///tmp/example", None).await?;
+        let (decision, _) = turn
+            .execute_human("/web-fetch file:///tmp/example", None)
+            .await?;
         let TurnDecision::Failed { reason, detail } = decision else {
             panic!("expected web retrieval failure, got {decision:?}");
         };
@@ -43,6 +45,66 @@ async fn web_command_uses_tool_path_without_a_model_request() -> Result<()> {
 
 struct OverflowThenRecoverBackend {
     calls: AtomicUsize,
+}
+
+#[tokio::test]
+async fn web_command_text_from_an_internal_turn_stays_model_input() -> Result<()> {
+    let backend = ScriptedBackend::new(vec![complete("ordinary internal input")]);
+    let ctx = scripted_context("internal-web-input", backend.clone(), |cfg| {
+        cfg.web.client = true;
+    })
+    .await?;
+    let mut executor = TurnExecutor::new(ctx);
+    let (decision, _) = executor
+        .execute("/web-fetch file:///internal", None)
+        .await?;
+    assert_eq!(decision, TurnDecision::Stop);
+    assert_eq!(backend.calls(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn web_read_targets_survive_truncated_response_feedback() -> Result<()> {
+    let backend = ScriptedBackend::new(vec![
+        ScriptedAttempt::Events(vec![
+            Ok(Event::DeepSeekWeb(crate::runtime::DeepSeekWebResponse {
+                calls: Some(serde_json::json!([{"calls":[{
+                    "kind":"read_link", "id":"read-1", "type":"deepseek_read_url",
+                    "action":{"type":"read_link","url":"https://example.test/article"},
+                    "status":"completed", "signature":"opaque"
+                }]}])),
+                annotations: None,
+                reasoning: String::new(),
+            })),
+            Ok(Event::Stop(StopEvent {
+                reason: "length".into(),
+            })),
+        ]),
+        complete("recovered"),
+    ]);
+    let ctx = scripted_context("web-read-truncated", backend.clone(), |cfg| {
+        cfg.web.native_read_url = true;
+    })
+    .await?;
+    let mut executor = TurnExecutor::new(ctx.clone());
+    let (decision, _) = executor
+        .execute("Read https://example.test/article", None)
+        .await?;
+    assert_eq!(decision, TurnDecision::Stop);
+    let requests = backend.requests();
+    let retry_input = requests[1]
+        .iter()
+        .rev()
+        .find(|row| row["role"] == "user")
+        .unwrap();
+    assert!(
+        retry_input["content"]
+            .as_str()
+            .unwrap()
+            .contains("https://example.test/article")
+    );
+    assert!(!serde_json::to_string(&ctx.stores.store.lines().await?)?.contains("opaque"));
+    Ok(())
 }
 
 #[async_trait::async_trait]

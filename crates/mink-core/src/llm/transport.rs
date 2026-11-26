@@ -51,7 +51,7 @@ pub(crate) fn build_openai_body_with_options_and_extensions(
     tool_choice: Option<&Value>,
     extra_body: &BTreeMap<String, Value>,
 ) -> Result<Vec<u8>> {
-    let converted = convert_messages_to_openai(messages)?;
+    let converted = convert_messages_to_openai(messages, tools)?;
     let openai_tools = convert_tools_to_openai(tools);
     build_openai_body_from_converted(
         model,
@@ -131,7 +131,7 @@ pub(crate) fn estimate_openai_context_tokens(
     tools: &[Value],
     system_prompt: &str,
 ) -> Result<usize> {
-    let converted = convert_messages_to_openai(messages)?;
+    let converted = convert_messages_to_openai(messages, tools)?;
     let openai_tools = convert_tools_to_openai(tools);
     estimate_openai_converted(&converted, &openai_tools, system_prompt)
 }
@@ -239,14 +239,18 @@ fn is_reserved_body_key(key: &str) -> bool {
     )
 }
 
-pub(crate) fn convert_messages_to_openai(messages: &[Value]) -> Result<Vec<Value>> {
+pub(crate) fn convert_messages_to_openai(
+    messages: &[Value],
+    tools: &[Value],
+) -> Result<Vec<Value>> {
+    let native_web = super::deepseek_web::enabled(tools);
     let mut result = Vec::new();
     for msg in messages {
         let role = msg.get("role").and_then(Value::as_str).unwrap_or("");
         let content = msg.get("content").cloned().unwrap_or(Value::Null);
         if content.is_array() && role == "assistant" {
             let mut assistant = convert_assistant_message(&content)?;
-            if let Some(web) = super::deepseek_web::replay_fields(msg) {
+            if native_web && let Some(web) = super::deepseek_web::replay_fields(msg) {
                 assistant["server_tool_calls"] = web["calls"].clone();
                 assistant["reasoning_content"] = web["reasoning_content"].clone();
             }
@@ -264,6 +268,9 @@ pub(crate) fn convert_messages_to_openai(messages: &[Value]) -> Result<Vec<Value
         if let Some(object) = message.as_object_mut() {
             object.remove("_mink");
             object.remove("internal");
+            if !native_web {
+                object.remove("server_tool_calls");
+            }
         }
         result.push(message);
     }

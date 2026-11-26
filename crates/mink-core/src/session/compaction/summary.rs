@@ -84,14 +84,7 @@ impl CompactionEngine {
             mut messages,
             meta,
         } = input;
-        if !self
-            .llm_backend
-            .supports_deepseek_web(&self.api_url, target.model)
-        {
-            messages
-                .iter_mut()
-                .for_each(crate::llm::deepseek_web::remove_replay_fields);
-        }
+        crate::llm::deepseek_web::project_replay(&mut messages, &tools);
 
         // The summary request uses the same request-retry budget and backoff
         // as the main agent, but keeps its own consumption loop: a completed
@@ -502,6 +495,11 @@ impl CompactionEngine {
                 let Some(recent_projection) = latest.projection.as_ref() else {
                     return Err("backend_projection_unavailable".into());
                 };
+                let mut projected_source = source_messages.clone();
+                crate::llm::deepseek_web::project_replay(
+                    &mut projected_source,
+                    &latest.source_tools,
+                );
                 let source_request = LlmRequest {
                     purpose: LlmPurpose::Agent,
                     model: target.model.to_string(),
@@ -509,7 +507,7 @@ impl CompactionEngine {
                     api_url: self.api_url.clone(),
                     api_key: self.api_key.clone(),
                     system_prompt: latest.source_system_prompt.clone(),
-                    messages: Arc::new(source_messages.clone()),
+                    messages: Arc::new(projected_source),
                     tools: latest.source_tools.clone(),
                     max_tokens: effective_max_tokens(&self.config),
                     cancel: self.cancel.clone(),

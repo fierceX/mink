@@ -242,6 +242,7 @@ impl OrchActor {
                             turn_id: turn_id.to_string(),
                         });
                         let started_at = Instant::now();
+                        let human = goal_source.is_none() && goal_draft.is_none();
                         let prepared = match goal_source {
                             Some(source) => self.publish_goal_boundary(input.as_str(), &source).await,
                             None => match goal_draft {
@@ -250,7 +251,7 @@ impl OrchActor {
                             },
                         };
                         let result = match prepared {
-                            Ok(()) => self.handle_user_input(input).await,
+                            Ok(()) => self.handle_user_input(input, human).await,
                             Err(error) => {
                                 let finish_error = self.ctx.stores.input_inbox.finish().err();
                                 TurnRunResult::failed_with(
@@ -460,7 +461,7 @@ impl OrchActor {
             Err(error) => Err(error),
         }
     }
-    async fn handle_user_input(&mut self, input: String) -> TurnRunResult {
+    async fn handle_user_input(&mut self, input: String, human: bool) -> TurnRunResult {
         let billing_turn_id = self.ctx.stores.usage.begin_turn();
         if self.ctx.stores.goal_store.snapshot().is_some_and(|g| {
             g.phase == crate::session::goal::GoalPhase::Executing
@@ -494,7 +495,12 @@ impl OrchActor {
         self.refresh_title().await;
         let (model, mut executor) = self.prepare_turn();
 
-        let result = match executor.execute(&input, Some(&mut self.belief)).await {
+        let decision = if human {
+            executor.execute_human(&input, Some(&mut self.belief)).await
+        } else {
+            executor.execute(&input, Some(&mut self.belief)).await
+        };
+        let result = match decision {
             Ok((decision, effects)) => {
                 self.post_process_turn(decision, effects, &executor, &model)
                     .await

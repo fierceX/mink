@@ -1,6 +1,57 @@
 use super::*;
 
 #[tokio::test]
+async fn web_commands_respect_the_committed_input_revision() {
+    use crate::agent::orchestrator::TurnStatus;
+    use crate::runtime::HumanInput;
+    let home = unique_temp_dir("web-revision-home");
+    let cwd = unique_temp_dir("web-revision-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let mut config = runtime_config_with_mock(&home, &cwd, mock_llm_hello());
+    config.config.web.client = true;
+    let runtime = build_runtime(config).await.unwrap();
+    let handle = runtime.handle();
+    for (id, edit) in [
+        ("edited", Some("/web-fetch file:///edited".to_string())),
+        ("withdrawn", None),
+    ] {
+        let (receipt, stream) = handle
+            .stream_input(HumanInput {
+                request_id: id.into(),
+                text: "/web-fetch file:///original".into(),
+                target_turn_id: None,
+                attachment_ids: vec![],
+            })
+            .unwrap();
+        handle
+            .input_inbox()
+            .update(id, receipt.revision, edit)
+            .unwrap();
+        let mut stream = stream.unwrap();
+        while stream.recv().await.is_some() {}
+        let outcome = stream.outcome().await.unwrap();
+        assert_eq!(
+            outcome.status,
+            if id == "edited" {
+                TurnStatus::Failed
+            } else {
+                TurnStatus::Interrupted
+            }
+        );
+    }
+    let rows = runtime.ctx.stores.store.lines().await.unwrap();
+    let inputs: Vec<_> = rows
+        .iter()
+        .filter_map(|row| row["content"].as_array())
+        .flatten()
+        .filter(|block| block["name"] == "WebFetch")
+        .map(|block| block["input"]["url"].as_str().unwrap())
+        .collect();
+    assert_eq!(inputs, ["file:///edited"]);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn dropping_completed_old_stream_does_not_interrupt_new_turn() {
     let home = unique_temp_dir("mock-drop-completed-home");
     let cwd = unique_temp_dir("mock-drop-completed-cwd");

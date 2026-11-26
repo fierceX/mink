@@ -29,7 +29,7 @@ async fn web_wire_replays_saved_calls_without_exposing_signatures_in_history() {
         .await
         .unwrap();
     let rows = ctx.stores.store.lines().await.unwrap();
-    let wire = convert_messages_to_openai(&rows).unwrap();
+    let wire = convert_messages_to_openai(&rows, &[json!({"type":"deepseek_read_url"})]).unwrap();
     assert_eq!(wire[0]["server_tool_calls"], web.calls.unwrap());
     assert_eq!(wire[0]["reasoning_content"], "after");
     assert!(wire[0].get("tool_calls").is_none());
@@ -109,7 +109,7 @@ fn convert_messages_strips_orphaned_end_to_end() {
         // No tool result for orphan_1 → next message is another user message
         json!({"role": "user", "content": "next"}),
     ];
-    let converted = convert_messages_to_openai(&msgs).unwrap();
+    let converted = convert_messages_to_openai(&msgs, &[]).unwrap();
     // The assistant message should have tool_calls stripped (no matching tool msg)
     let assistant = converted.iter().find(|m| m["role"] == "assistant").unwrap();
     assert!(assistant.get("tool_calls").is_none());
@@ -131,7 +131,7 @@ fn convert_strips_orphans_across_large_tool_history() {
     msgs.push(json!({"role":"assistant","content":[
         {"type":"tool_use","id":"orphan","name":"Read","input":{"path":"/x"}}
     ]}));
-    let converted = convert_messages_to_openai(&msgs).unwrap();
+    let converted = convert_messages_to_openai(&msgs, &[]).unwrap();
     let assistant_calls = converted
         .iter()
         .filter(|m| m["role"] == "assistant" && m.get("tool_calls").is_some())
@@ -158,7 +158,7 @@ fn convert_messages_keeps_matched_tool_calls() {
             {"type": "tool_result", "tool_use_id": "call_1", "content": "result"}
         ]}),
     ];
-    let converted = convert_messages_to_openai(&msgs).unwrap();
+    let converted = convert_messages_to_openai(&msgs, &[]).unwrap();
     // Should have tool-role message for call_1
     assert!(
         converted
@@ -181,7 +181,7 @@ fn internal_todo_metadata_is_not_sent_to_the_provider() {
             "_mink": {"todo_revision": 2, "todo_state_kind": "sync"},
         }),
     ];
-    let converted = convert_messages_to_openai(&messages).unwrap();
+    let converted = convert_messages_to_openai(&messages, &[]).unwrap();
     assert_eq!(converted.len(), 2);
     assert_eq!(converted[0], messages[0]);
     assert_eq!(converted[1]["content"], messages[1]["content"]);

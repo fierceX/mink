@@ -4,15 +4,23 @@ pub(crate) const PRIVATE_FIELD: &str = "deepseek_web";
 const SEARCH: &str = "deepseek_web_search";
 const READ_URL: &str = "deepseek_read_url";
 
-pub(crate) fn supported(api_url: &str, model: &str) -> bool {
-    matches!(
-        model,
-        "deepseek-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp"
-    ) && crate::tools::web::is_deepseek_endpoint(api_url)
-}
-
 pub(crate) fn is_declaration(tool: &Value) -> bool {
     matches!(tool["type"].as_str(), Some(SEARCH | READ_URL))
+}
+
+pub(crate) fn enabled(tools: &[Value]) -> bool {
+    tools.iter().any(is_declaration)
+}
+
+pub(crate) fn project_replay(messages: &mut [Value], tools: &[Value]) {
+    if !enabled(tools) {
+        for message in messages {
+            remove_replay_fields(message);
+            if let Some(object) = message.as_object_mut() {
+                object.remove("server_tool_calls");
+            }
+        }
+    }
 }
 
 pub(crate) fn declarations(options: crate::runtime::WebOptions) -> Vec<Value> {
@@ -49,14 +57,35 @@ pub struct DeepSeekWebResponse {
 }
 
 impl DeepSeekWebResponse {
-    pub(crate) fn public_block(&self) -> Value {
-        let calls = self
-            .calls
+    fn tool_calls(&self) -> impl Iterator<Item = &Value> {
+        self.calls
             .as_ref()
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .flat_map(|step| step["calls"].as_array().into_iter().flatten())
+    }
+
+    pub(crate) fn read_link_urls(&self) -> Vec<&str> {
+        let mut urls = Vec::new();
+        for call in self.tool_calls() {
+            if call["kind"] == "read_link"
+                && let Some(url) =
+                    safe_url(&call["action"]["url"]).or_else(|| safe_url(&call["page"]["url"]))
+                && !urls.contains(&url)
+            {
+                urls.push(url);
+                if urls.len() == 10 {
+                    break;
+                }
+            }
+        }
+        urls
+    }
+
+    pub(crate) fn public_block(&self) -> Value {
+        let calls = self
+            .tool_calls()
             .filter_map(public_call)
             .take(40)
             .collect::<Vec<_>>();
