@@ -71,6 +71,50 @@ fn basic_text_with_done() {
 }
 
 #[test]
+fn web_stream_preserves_final_replay_and_unicode_offsets() {
+    let mut parser = OpenAIParser::new();
+    parser.enable_deepseek_web(true);
+    let events = collect_lines(
+        &mut parser,
+        &[
+            r#"data: {"choices":[{"delta":{"reasoning_content":"step one"}}]}"#,
+            r#"data: {"choices":[{"delta":{},"server_tool_event":{"type":"step_reasoning_done","step":0}}]}"#,
+            r#"data: {"choices":[{"delta":{},"server_tool_event":{"type":"call_started","step":0,"call":{"id":"srvtoolu_1","type":"deepseek_read_url","action":{"type":"read_link","url":"https://example.test/"}}}}]}"#,
+            r#"data: {"choices":[{"delta":{"reasoning_content":"final step","content":"\n🌏正文"}}]}"#,
+            r#"data: {"choices":[{"finish_reason":"stop","delta":{"server_tool_calls":[{"index":0,"reasoning_content":"step one","calls":[{"index":0,"id":"srvtoolu_1","type":"deepseek_read_url","kind":"read_link","status":"completed","signature":"opaque","page":{"url":"https://example.test/"}}]}],"annotations":[{"type":"url_citation","url_citation":{"url":"https://example.test/","start_index":2,"end_index":4}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":4}}"#,
+            "data: [DONE]",
+        ],
+    );
+    assert!(matches!(&events[1], Event::DeepSeekWebProgress(call) if call["id"] == "srvtoolu_1"));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Text(text) if text.content == "\n🌏正文"))
+    );
+    let response = events
+        .iter()
+        .find_map(|event| match event {
+            Event::DeepSeekWeb(response) => Some(response),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(response.reasoning, "final step");
+    assert_eq!(
+        response.calls.as_ref().unwrap()[0]["calls"][0]["signature"],
+        "opaque"
+    );
+    let public = response.public_block();
+    assert_eq!(public["citations"][0]["start_index"], 2);
+    assert!(!public.to_string().contains("opaque"));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::ToolCall(_)))
+    );
+    assert!(matches!(events.last(), Some(Event::Stop(stop)) if stop.reason == "stop"));
+}
+
+#[test]
 fn sse_data_without_space_after_colon_is_accepted() {
     let mut parser = OpenAIParser::new();
     let events = collect_lines(

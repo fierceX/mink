@@ -43,6 +43,8 @@ export function processSummary(items: TranscriptItem[], active: boolean): string
   const tools = items.filter(item => item.kind === "tool");
   const last = tools.at(-1);
   if (active && last?.result === undefined && last) {
+    if (last.name === "WebSearch" || last.name === "DeepSeekWebSearch") return `正在搜索网页 · ${last.summary}`;
+    if (last.name === "WebFetch" || last.name === "DeepSeekReadUrl") return `正在读取网页 · ${last.summary}`;
     const label = last.name === "Read" ? "正在读取文件" : ["Edit","Write"].includes(last.name) ? "正在修改文件" : last.name === "SubAgent" ? "等待子代理" : last.color === "exec" ? "正在执行命令" : "正在执行工具";
     return `${label} · ${last.summary}`;
   }

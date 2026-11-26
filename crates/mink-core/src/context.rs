@@ -34,6 +34,7 @@ pub(crate) type PtcEventSink = Arc<dyn Fn(crate::events::EventLog) + Send + Sync
 
 #[derive(Clone)]
 pub struct ToolConfig {
+    pub web_client: bool,
     pub tool_timeout_secs: i32,
     /// 单次 Bash/Python/自定义工具调用的超时上限（默认 7200 秒）。
     pub tool_timeout_max_secs: i32,
@@ -63,6 +64,7 @@ pub struct ToolConfig {
 impl ToolConfig {
     pub fn from_config(cfg: &crate::config::ResolvedConfig) -> Self {
         Self {
+            web_client: cfg.web.client,
             tool_timeout_secs: cfg.tool_timeout_secs,
             tool_timeout_max_secs: cfg.tool_timeout_max_secs,
             sub_agent_timeout_secs: cfg.sub_agent_timeout_secs,
@@ -122,6 +124,8 @@ pub(crate) fn resolve_tool_runtime(
 /// 从 `AgentSharedContext` 通过 `From` trait 创建。
 #[derive(Clone)]
 pub struct ToolContext {
+    pub(crate) web_api_key: Option<Arc<str>>,
+    pub(crate) human_web_command: bool,
     pub(crate) goal_drafting: bool,
     pub(crate) goal_review: Option<Arc<dyn crate::goal_review::GoalReviewToolSession>>,
     /// Present only in the host's candidate-bound adjudication turn.
@@ -186,6 +190,8 @@ impl FileEditContext<'_> {
 impl From<&AgentSharedContext> for ToolContext {
     fn from(ctx: &AgentSharedContext) -> Self {
         Self {
+            web_api_key: crate::tools::web::api_key(&ctx.config),
+            human_web_command: false,
             goal_drafting: ctx
                 .stores
                 .goal_store

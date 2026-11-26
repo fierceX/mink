@@ -115,6 +115,11 @@ pub struct LlmRequest {
 pub trait LlmBackend: Send + Sync {
     fn name(&self) -> &str;
 
+    /// Opt into DeepSeek's typed server tools and opaque assistant replay data.
+    fn supports_deepseek_web(&self, _api_url: &str, _model: &str) -> bool {
+        false
+    }
+
     /// Opt into the legacy text protocol (standalone XML/bracket/DSML
     /// envelopes in content, DSML in reasoning). Bare JSON stays prose.
     fn supports_wrapped_tool_calls(&self) -> bool {
@@ -411,7 +416,12 @@ impl OpenAiCompatibleBackend {
             .map_err(anyhow::Error::new)?;
         let (tx, rx) = mpsc::channel(SSE_QUEUE_CAPACITY);
         let cancel = request.cancel.linked_child_token();
-        AsyncLlClient::spawn_stream_task(resp, cancel.clone(), tx);
+        let native_web = self.supports_deepseek_web(&request.api_url, &request.model)
+            && request
+                .tools
+                .iter()
+                .any(super::deepseek_web::is_declaration);
+        AsyncLlClient::spawn_stream_task(resp, cancel.clone(), tx, native_web);
         Ok(LlmResponseStream {
             events: Box::pin(SseEventStream { rx, cancel }),
             attempt_count: 1,
@@ -421,6 +431,10 @@ impl OpenAiCompatibleBackend {
 
 #[async_trait::async_trait]
 impl LlmBackend for OpenAiCompatibleBackend {
+    fn supports_deepseek_web(&self, api_url: &str, model: &str) -> bool {
+        super::deepseek_web::supported(api_url, model)
+    }
+
     fn supports_wrapped_tool_calls(&self) -> bool {
         true
     }
@@ -453,7 +467,17 @@ impl LlmBackend for OpenAiCompatibleBackend {
         if source_prefix_len > request.messages.len() {
             return None;
         }
-        let messages = if source_prefix_len == request.messages.len() {
+        let messages = if !self.supports_deepseek_web(&request.api_url, &request.model)
+            && request.messages[..source_prefix_len]
+                .iter()
+                .any(|msg| super::deepseek_web::replay_fields(msg).is_some())
+        {
+            let mut messages = request.messages[..source_prefix_len].to_vec();
+            messages
+                .iter_mut()
+                .for_each(super::deepseek_web::remove_replay_fields);
+            Arc::new(messages)
+        } else if source_prefix_len == request.messages.len() {
             request.messages.clone()
         } else {
             Arc::new(request.messages[..source_prefix_len].to_vec())
@@ -472,6 +496,46 @@ impl LlmBackend for OpenAiCompatibleBackend {
         openai_messages: &[serde_json::Value],
         openai_tools: &[serde_json::Value],
     ) -> Result<Option<Arc<Vec<u8>>>> {
+        let compatible = self.supports_deepseek_web(&request.api_url, &request.model);
+        let projected_messages;
+        let openai_messages = if !compatible
+            && openai_messages
+                .iter()
+                .any(|msg| msg.get("server_tool_calls").is_some())
+        {
+            projected_messages = openai_messages
+                .iter()
+                .cloned()
+                .map(|mut msg| {
+                    if let Some(object) = msg.as_object_mut() {
+                        object.remove("server_tool_calls");
+                    }
+                    msg
+                })
+                .collect::<Vec<_>>();
+            &projected_messages
+        } else {
+            openai_messages
+        };
+        let projected_tools;
+        let has_web = openai_tools.iter().any(super::deepseek_web::is_declaration);
+        let openai_tools = if !compatible && has_web {
+            projected_tools = openai_tools
+                .iter()
+                .filter(|tool| !super::deepseek_web::is_declaration(tool))
+                .cloned()
+                .collect::<Vec<_>>();
+            &projected_tools
+        } else {
+            openai_tools
+        };
+        let none = serde_json::Value::from("none");
+        let tool_choice =
+            if compatible && has_web && matches!(request.purpose, LlmPurpose::Compaction) {
+                Some(&none)
+            } else {
+                self.tool_choice.as_ref()
+            };
         let body = crate::llm::transport::build_openai_body_from_converted(
             &request.model,
             openai_messages,
@@ -479,7 +543,7 @@ impl LlmBackend for OpenAiCompatibleBackend {
             &request.system_prompt,
             request.max_tokens,
             &self.options,
-            self.tool_choice.as_ref(),
+            tool_choice,
             &self.extra_body,
         )?;
         Ok(Some(Arc::new(body)))
@@ -500,17 +564,8 @@ impl LlmBackend for OpenAiCompatibleBackend {
                 let converted =
                     crate::llm::transport::convert_messages_to_openai(&request.messages)?;
                 let openai_tools = crate::llm::transport::convert_tools_to_openai(&request.tools);
-                let body = crate::llm::transport::build_openai_body_from_converted(
-                    &request.model,
-                    &converted,
-                    &openai_tools,
-                    &request.system_prompt,
-                    request.max_tokens,
-                    &self.options,
-                    self.tool_choice.as_ref(),
-                    &self.extra_body,
-                )?;
-                Arc::new(body)
+                self.build_body(&request, &converted, &openai_tools)?
+                    .expect("OpenAiCompatibleBackend always builds a body")
             }
         };
         self.send_prepared(request, body).await
@@ -574,12 +629,14 @@ impl AsyncLlClient {
         resp: reqwest::Response,
         cancel: crate::cancel::CancellationToken,
         tx: mpsc::Sender<Result<Event>>,
+        native_web: bool,
     ) {
         tokio::spawn(async move {
             let mut byte_stream = resp.bytes_stream();
             let mut buf: Vec<u8> = Vec::new();
             let mut clean_end = false;
             let mut parser = OpenAIParser::new();
+            parser.enable_deepseek_web(native_web);
             let mut pending: Vec<Event> = Vec::new();
 
             'outer: loop {
@@ -842,7 +899,7 @@ pub(crate) async fn prepare_llm_request(
     let is_agent_request = matches!(purpose, LlmPurpose::Agent);
     let local_tokens = projection.estimated_tokens;
     let wants_prebuilt_body = backend.supports_prebuilt_body();
-    let (messages, openai_messages) = if projection.has_images {
+    let (mut messages, mut openai_messages) = if projection.has_images {
         // Fresh images are the only case that needs a second conversion: the
         // budget projection intentionally kept `tool_attachment` metadata,
         // while the wire body needs resolved data URLs.
@@ -884,6 +941,22 @@ pub(crate) async fn prepare_llm_request(
             Some(projection.openai_projected.clone()),
         )
     };
+    if !backend.supports_deepseek_web(&ctx.paths.api_url, model_name)
+        && messages
+            .iter()
+            .any(|message| super::deepseek_web::replay_fields(message).is_some())
+    {
+        Arc::make_mut(&mut messages)
+            .iter_mut()
+            .for_each(super::deepseek_web::remove_replay_fields);
+        if let Some(converted) = &mut openai_messages {
+            Arc::make_mut(converted).iter_mut().for_each(|message| {
+                if let Some(object) = message.as_object_mut() {
+                    object.remove("server_tool_calls");
+                }
+            });
+        }
+    }
     let request = Arc::new(LlmRequest {
         purpose,
         model: model_name.to_string(),

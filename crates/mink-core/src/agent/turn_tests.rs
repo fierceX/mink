@@ -5,6 +5,42 @@ use crate::protocol::{Event, StopEvent, TextEvent};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
+#[tokio::test]
+async fn web_command_uses_tool_path_without_a_model_request() -> Result<()> {
+    use crate::ptc::PtcMode;
+    for (enabled, mode) in [
+        (false, PtcMode::Off),
+        (true, PtcMode::Off),
+        (true, PtcMode::Exclusive),
+    ] {
+        let context = crate::regression::test_context_for_agent_with_config("web-command", |cfg| {
+            cfg.web.client = enabled;
+            cfg.ptc.mode = mode;
+        })
+        .await?;
+        let mut turn = TurnExecutor::new(context.clone());
+        let (decision, _) = turn.execute("/web-fetch file:///tmp/example", None).await?;
+        let TurnDecision::Failed { reason, detail } = decision else {
+            panic!("expected web retrieval failure, got {decision:?}");
+        };
+        assert_eq!(reason, TurnFailureReason::WebRetrievalFailed);
+        assert!(
+            detail.contains(if enabled { "HTTP(S)" } else { "disabled" }),
+            "{detail}"
+        );
+        let lines = context.stores.store.lines().await?;
+        assert_eq!(lines.len(), if enabled { 3 } else { 1 });
+        if enabled {
+            assert_eq!(lines[1]["content"][2]["name"], "WebFetch");
+            assert_eq!(
+                lines[1]["content"][2]["id"],
+                lines[2]["content"][0]["tool_use_id"]
+            );
+        }
+    }
+    Ok(())
+}
+
 struct OverflowThenRecoverBackend {
     calls: AtomicUsize,
 }

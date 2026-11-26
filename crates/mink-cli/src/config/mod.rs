@@ -84,6 +84,7 @@ pub struct CliConfig {
     pub llm_recovery: mink::runtime::LlmRecoveryPolicy,
     /// Python-hosted Programmatic Tool Calling ([ptc] / --ptc / SDK options.ptc).
     pub ptc: PtcConfig,
+    pub web: mink::runtime::WebOptions,
 }
 
 /// Fields explicitly provided by CLI flags. Only these inputs outrank the
@@ -134,6 +135,7 @@ impl Default for CliConfig {
             signal_policy: SignalPolicy::Full,
             llm_recovery: mink::runtime::LlmRecoveryPolicy::default(),
             ptc: PtcConfig::default(),
+            web: mink::runtime::WebOptions::default(),
         }
     }
 }

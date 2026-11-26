@@ -173,6 +173,7 @@ pub(super) fn apply_config_sources(
     let cli = cfg.cli_overrides.clone();
 
     for toml_cfg in [user_cfg, project_cfg, cli_cfg].into_iter().flatten() {
+        toml_cfg.web.apply(&mut cfg.web);
         if let Some(value) = toml_cfg.recovery.format_window_size {
             cfg.llm_recovery.format_window_size = value;
         }
@@ -681,6 +682,7 @@ pub(crate) fn apply_sdk_request_options(
         cfg.llm_recovery.request_timeout_secs = Some(value);
     }
     let ptc = &options.ptc;
+    options.web.apply(&mut cfg.web);
     if !cfg.cli_overrides.ptc_mode
         && let Some(mode) = ptc.mode
     {

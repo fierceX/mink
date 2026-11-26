@@ -1,6 +1,15 @@
 import type { GoalSnapshot, RawEvent, SessionState, ImageLimits, InputReceipt, TodoResource } from "./types.ts";
 import { reduceEvent } from "./reducer.ts";
-import { conversationToEvents } from "./toolFormat.ts";
+import { conversationToEvents, isProviderWebTool } from "./toolFormat.ts";
+
+function isProviderWebProgress(event: RawEvent): boolean {
+  return (event.type === "tool_call" && isProviderWebTool(event.name))
+    || (event.type === "tool_result" && isProviderWebTool(event.tool_name));
+}
+
+function isTransientProgress(event: RawEvent): boolean {
+  return event.type === "text" || event.type === "thinking" || isProviderWebProgress(event);
+}
 export function projectMessages(state: SessionState, messages: Record<string, unknown>[]): SessionState {
   let output: SessionState = { ...state, items: [], seenTurnEvents: [], messages };
   const overlays = [...state.overlays ?? []];
@@ -64,9 +73,9 @@ export function reduceWorkbench(state: SessionState, event: RawEvent): SessionSt
       // not depend on the next lifecycle change to learn it still has a goal.
       goal: (event.goal as GoalSnapshot | null | undefined)?.hidden ? null : (event.goal as GoalSnapshot | null | undefined) ?? null,
       workState: event.running ? "waiting" : "idle" }, event.conversation as Record<string, unknown>[]);
-    next.overlays = (event.progress as RawEvent[] ?? []).filter(progress => !["text","thinking"].includes(progress.type));
+    next.overlays = (event.progress as RawEvent[] ?? []).filter(progress => !isTransientProgress(progress));
     next = projectMessages(next, next.messages ?? []);
-    for (const progress of (event.progress as RawEvent[] ?? [])) if (["text","thinking"].includes(progress.type)) next = reduceEvent(next, progress);
+    for (const progress of (event.progress as RawEvent[] ?? [])) if (isTransientProgress(progress)) next = reduceEvent(next, progress);
     if (event.diagnostics) next = reduceEvent(next,event.diagnostics as RawEvent);
     if (event.last_final && !event.running) next = recordOutcome(reduceEvent(next,event.last_final as RawEvent),event.last_final as RawEvent);
     const activity = event.activity as { work_state?: string; wait_elapsed_secs?: number | null; active_sub_agents?: string[] } | undefined;
@@ -139,9 +148,13 @@ export function reduceWorkbench(state: SessionState, event: RawEvent): SessionSt
     const snapshot = (event.goal ?? null) as GoalSnapshot | null;
     return { ...state, goal: snapshot?.hidden ? null : snapshot, lastSeq: Number(event.stream_sequence) };
   }
-  // Tool records are already in the formal history; live tool events only update activity.
+  if (isProviderWebProgress(event)) return reduceEvent(state, event);
+  // Locally executed tools are already in the formal history.
   if (event.type === "tool_call" || event.type === "tool_result") return { ...state, workState: event.type === "tool_call" ? "tool" : "waiting", waitElapsedSecs: null, lastSeq: Number(event.stream_sequence) };
   const next = event.type === "turn_final" ? recordOutcome(reduceEvent(state,event),event) : reduceEvent(state,event);
+  if (event.type === "retry" || event.type === "turn_final") {
+    next.items = next.items.filter(item => item.kind !== "tool" || !isProviderWebTool(item.name) || !String(item.key).startsWith("live:"));
+  }
   if (["error","signal","sub_agent_status","sub_agent_output","retry","compact","stop","turn_error","turn_final"].includes(event.type)) next.overlays = [...state.overlays ?? [], event];
   if (event.type === "turn_started") { next.currentTurn = String(event.turn_id); next.phase = "running"; }
   if (event.type === "turn_final") { next.currentTurn = null; if (!["closing","closed"].includes(state.phase ?? "")) next.phase = "idle"; }

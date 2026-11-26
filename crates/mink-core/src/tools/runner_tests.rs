@@ -310,6 +310,7 @@ fn policy_gate_blocks_tools_disabled_by_whitelist_before_execution() {
     )
     .unwrap();
     let gate = ToolPolicyGate {
+        human_web_command: false,
         surface: &surface,
         storm: &storm,
     };
@@ -342,6 +343,7 @@ fn policy_gate_blocks_tools_hidden_by_role_or_backend() {
         crate::tools::surface::ModelToolSurface::resolve(catalog, &config, &sub_agent_resolution)
             .unwrap();
     let sub_agent_gate = ToolPolicyGate {
+        human_web_command: false,
         surface: &sub_agent_surface,
         storm: &storm,
     };
@@ -363,6 +365,7 @@ fn policy_gate_blocks_tools_hidden_by_role_or_backend() {
         crate::tools::surface::ModelToolSurface::resolve(catalog, &config, &vfs_resolution)
             .unwrap();
     let vfs_gate = ToolPolicyGate {
+        human_web_command: false,
         surface: &vfs_surface,
         storm: &storm,
     };
@@ -392,6 +395,7 @@ fn approval_test_config<const N: usize>(
     overrides: [(String, ToolApprovalPolicy); N],
 ) -> ToolConfig {
     ToolConfig {
+        web_client: false,
         tool_timeout_secs: 600,
         tool_timeout_max_secs: 600,
         sub_agent_timeout_secs: 300,

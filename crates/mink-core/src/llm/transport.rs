@@ -245,7 +245,12 @@ pub(crate) fn convert_messages_to_openai(messages: &[Value]) -> Result<Vec<Value
         let role = msg.get("role").and_then(Value::as_str).unwrap_or("");
         let content = msg.get("content").cloned().unwrap_or(Value::Null);
         if content.is_array() && role == "assistant" {
-            result.push(convert_assistant_message(&content)?);
+            let mut assistant = convert_assistant_message(&content)?;
+            if let Some(web) = super::deepseek_web::replay_fields(msg) {
+                assistant["server_tool_calls"] = web["calls"].clone();
+                assistant["reasoning_content"] = web["reasoning_content"].clone();
+            }
+            result.push(assistant);
             continue;
         }
         if content.is_array() && role == "user" {
@@ -375,7 +380,7 @@ fn convert_tool_result_messages(content: &Value) -> Result<Vec<Value>> {
 
 pub(crate) fn convert_tools_to_openai(tools: &[Value]) -> Vec<Value> {
     tools.iter().map(|tool| {
-        if tool.get("type").and_then(Value::as_str) == Some("function") { return tool.clone(); }
+        if tool.get("type").and_then(Value::as_str) == Some("function") || super::deepseek_web::is_declaration(tool) { return tool.clone(); }
         json!({
             "type":"function",
             "function":{

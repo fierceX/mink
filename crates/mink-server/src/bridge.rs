@@ -50,7 +50,8 @@ fn read_jsonl_page(
         } else if !tail && line_no <= from_seq {
             continue;
         }
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+        if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&line) {
+            mink::runtime::SessionReader::redact_provider_replay(&mut v);
             if retain_tail && events.len() == limit {
                 events.pop_front();
             }

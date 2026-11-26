@@ -107,6 +107,11 @@ pub struct SessionUsage {
 }
 
 impl SessionReader {
+    /// Remove provider replay metadata before publishing a conversation row.
+    pub fn redact_provider_replay(message: &mut serde_json::Value) {
+        crate::llm::deepseek_web::remove_replay_fields(message);
+    }
+
     /// Derived delegation catalog recorded in this session's event log.
     pub fn subagent_catalog(&self) -> Result<Vec<SubAgentCatalogEntry>> {
         crate::session::subagent_catalog::read_catalog(&self.directory)
@@ -168,7 +173,10 @@ impl SessionReader {
     }
 
     pub fn conversation(&self) -> Result<Vec<serde_json::Value>> {
-        self.conversation_with_sequence().map(|(rows, _)| rows)
+        self.conversation_with_sequence().map(|(mut rows, _)| {
+            rows.iter_mut().for_each(Self::redact_provider_replay);
+            rows
+        })
     }
 
     /// Read committed conversation rows with their physical JSONL sequence.
@@ -256,6 +264,7 @@ impl SessionReader {
                     && row["content"].is_string()
                     && row["internal"] != true
                     && row.pointer("/_mink/guidance") != Some(&serde_json::Value::Bool(true));
+                Self::redact_provider_replay(&mut row);
                 if starts_turn && !current.is_empty() {
                     retain(std::mem::take(&mut current), &mut turns);
                 }

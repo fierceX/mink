@@ -11,6 +11,7 @@ Mink 是用 Rust 1.99+ 实现的轻量 AI coding agent，面向 DeepSeek/OpenAI-
 - 上下文自适应压缩：显式阈值/响应预留/热尾部/摘要预算，摘要以 `<compacted-summary>` checkpoint 投影；Todo（`todos.json` 权威快照 + revision/稳定 ID）、Artifact（超长输出落盘）、轻量资源读取（artifact/skill/rule/session URL）
 - Goal：草案确认、独立只读审核、按需读取，显式跨轮目标、默认 20 turn/60 分钟绝对期限、三种验收、持久恢复与未知副作用对账；core SessionLease 覆盖所有可写 runtime
 - 工具元数据与审批策略；Edit 双模式（Hashline snapshot / Replace exact+fuzzy，启动后固定）；Python 宿主 Programmatic Tool Calling（`RunCode`，支持 `PtcMode::Off` / `Tool`（别名 `hybrid`，推荐开启档）/ `Exclusive` 与 Subprocess / 可选 WASI 后端；`Plan*`/`Todo*`/`Goal*`/`SubAgent` 始终保留为直调工具，`mink::ptc` + `PtcDispatchBridge` 滚动并发/mutating 串行栏、`Bash` 非零退出结构化返回与 `PtcRunSummary` 遥测）；子代理（isolated home，可目录级 fork）；TUI `Ctrl+V` 粘贴图片（session `attachments/` 传输副本 + 绝对路径，图片仍由 `Read` 捕获）
+- 网页搜索与读取由 `[web]` 独立开启。客户端 `WebSearch`/`WebFetch` 复用工具审批及 Artifact 预算，对话内置调用由 DeepSeek 执行。原生签名随正式历史回传给兼容端点，公开历史和客户端事件只发布展示字段。
 
 ---
 

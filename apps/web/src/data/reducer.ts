@@ -6,6 +6,7 @@ import { emptySession } from "./types";
 import {
   extractArtifact,
   formatSignal,
+  isWebTool,
   kindBadge,
   resultViewKind,
   stripAnsi,
@@ -134,7 +135,9 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
 
     case "text":
       next.workState = "generating";
-      next.items = appendStream(next.items, "text", String(raw.content ?? ""), eventKey(raw));
+      next.items = Array.isArray(raw.citations) && raw.citations.length > 0
+        ? [...next.items, withKey({ kind: "text", text: String(raw.content ?? ""), citations: raw.citations }, raw)]
+        : appendStream(next.items, "text", String(raw.content ?? ""), eventKey(raw));
       break;
 
     case "tool_call": {
@@ -201,6 +204,8 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
       const content = stripAnsi(String(raw.content ?? ""));
       const status = raw.status as Record<string, unknown> | undefined;
       const succeeded = status ? status.state === "succeeded" : typeof raw.success === "boolean" ? raw.success : undefined;
+      const artifacts = Array.isArray(raw.artifacts) ? raw.artifacts : undefined;
+      const webArtifact = artifacts?.find(artifact => typeof artifact?.id === "string")?.id;
       const updated: ToolItem = {
         ...item,
         name: toolName,
@@ -209,10 +214,10 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
         rawResultKind: raw.result_kind == null ? undefined : String(raw.result_kind),
         success: succeeded,
         exitCode: typeof raw.exit_code === "number" ? raw.exit_code : raw.exit_code === null ? null : undefined,
-        artifact: extractArtifact(content),
+        artifact: isWebTool(toolName) ? webArtifact : extractArtifact(content),
         failed: succeeded === false,
         presentation: raw.presentation,
-        artifacts: Array.isArray(raw.artifacts) ? raw.artifacts : undefined,
+        artifacts,
       };
       next.items = [...next.items.slice(0, idx), updated, ...next.items.slice(idx + 1)];
       break;

@@ -25,13 +25,14 @@ pub use crate::config::{
     EditMode, LlmRecoveryPolicy, ModelResolver, OutputFormat, ResolvedModel, SandboxConfig,
     SandboxPythonConfig, SignalPolicy, ToolApprovalMode, ToolApprovalPolicy,
 };
-pub use crate::config::{ResolvedConfig, vision_model_defaults};
+pub use crate::config::{ResolvedConfig, WebOptions, vision_model_defaults};
 pub use crate::llm::client::{
     LlmBackend, LlmCacheProjection, LlmCancelToken, LlmErrorEvent, LlmEvent, LlmEventStream,
     LlmPurpose, LlmRequest, LlmRequestFailure, LlmResponseStream, LlmRetryEvent, LlmStopEvent,
     LlmTextEvent, LlmThinkingEvent, LlmToolCallEvent, LlmUsageEvent, OpenAiCompatibleBackend,
     OpenAiCompatibleOptions, TokenParamKind,
 };
+pub use crate::llm::deepseek_web::DeepSeekWebResponse;
 pub use crate::llm::recovery::{LlmUpstreamError, UpstreamFailureKind};
 pub use crate::ptc::{
     PtcBackendKind, PtcBindingDispatcher, PtcBindingError, PtcBindingSuccess, PtcConfig,
@@ -83,6 +84,11 @@ pub use handle::{
     RuntimeError, RuntimeResult, TurnId, TurnOutcome,
 };
 pub use options::{AgentOptions, ContextPolicy, GenerationOptions, ProviderOptions, ToolOptions};
+
+/// Whether this input is an explicit Search/Fetch turn.
+pub fn is_web_retrieval_command(input: &str) -> bool {
+    crate::tools::web::command(input).is_some()
+}
 
 /// Display trait 的唯一定义（此前在 mink-cli 逐字复制一份）。
 pub use crate::ui::Display;

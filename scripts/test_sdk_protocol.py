@@ -165,6 +165,23 @@ class SDKProtocolHarness(unittest.TestCase):
             session.close()
 
 
+class RequestOptions(SDKProtocolHarness):
+    def test_web_switches_round_trip_to_worker_options(self):
+        session = self.make_session("empty_ok")
+        try:
+            session._config.web_client = True
+            session._config.web_native_search = False
+            session._config.web_native_read_url = True
+            request = json.loads(session._build_request("hello", None))
+            self.assertEqual(request["options"]["web"], {
+                "client": True,
+                "native_search": False,
+                "native_read_url": True,
+            })
+        finally:
+            session.close()
+
+
 class MissingFinal(SDKProtocolHarness):
     def test_empty_stdout_exit_zero_is_failed(self):
         _, final = self.collect("empty_ok")

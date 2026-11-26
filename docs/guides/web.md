@@ -33,6 +33,12 @@ cd apps/web && npx playwright test    # UI 验收（fixtures + live；CI 浏览�
 迟到的模型/目标/回执结果不会作用到另一个会话；两版的差异与迁移清单见
 [Web 与官网维护](../development/web-and-site.md)。
 
+## 网页搜索与读取
+
+在 server 的 [`[web]` 配置](../reference/configuration.md#网页搜索与读取) 开启 `client` 后，从输入框命令菜单选择 `/web-search` 或 `/web-fetch`，填写关键词或 URL 并发送。结果卡显示搜索来源或网页正文，较长正文可从输出产物打开。两条命令作为独立轮次提交，草稿图片留给下一条消息。
+
+开启 `native_search` 或 `native_read_url` 后，DeepSeek Flash 可以在普通提问中按需联网。工作台在过程区显示联网调用，在回答下方显示来源和对应的回答片段。
+
 ## Web 开发工作台
 
 运行 `mink-server` 后打开 `http://localhost:8765`。桌面左侧按项目列出会话，中间按用户轮次展示对话，右侧按需查看任务、文件、工具输出和诊断。项目行 ➕ 直接在该项目新建对话；左侧「新建项目」只选择工作目录，首次发送后才产生会话。切换会话、返回首页或关闭浏览器不会停止任务。

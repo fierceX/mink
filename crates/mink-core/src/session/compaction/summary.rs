@@ -81,9 +81,17 @@ impl CompactionEngine {
         let SummaryRequestInput {
             system_prompt,
             tools,
-            messages,
+            mut messages,
             meta,
         } = input;
+        if !self
+            .llm_backend
+            .supports_deepseek_web(&self.api_url, target.model)
+        {
+            messages
+                .iter_mut()
+                .for_each(crate::llm::deepseek_web::remove_replay_fields);
+        }
 
         // The summary request uses the same request-retry budget and backoff
         // as the main agent, but keeps its own consumption loop: a completed

@@ -154,6 +154,9 @@ pub(crate) fn apply_to(mut options: AgentOptions, cfg: &AgentConfig) -> AgentOpt
     options = apply_sandbox(options, &cfg.sandbox);
     options = apply_sandbox_python(options, &cfg.sandbox_python);
     options = apply_ptc(options, &cfg.ptc);
+    let mut web = mink::runtime::WebOptions::default();
+    cfg.web.apply(&mut web);
+    options = options.with_web_options(web);
     // Image capability wiring (v7 §3.1), mirroring the CLI's
     // `assemble_runtime_options`: an explicit override beats the backend
     // declaration; an explicit vision-model list replaces the built-in

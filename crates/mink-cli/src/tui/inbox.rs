@@ -98,13 +98,17 @@ impl TuiState {
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_nanos()
         );
+        let web_command = mink::runtime::is_web_retrieval_command(&self.input.buf);
+        let images = if web_command {
+            &[][..]
+        } else {
+            &self.input.pending_images[..]
+        };
         let input = HumanInput {
             request_id,
-            text: submitted_user_input(&self.input.buf, &self.input.pending_images),
+            text: submitted_user_input(&self.input.buf, images),
             target_turn_id: self.stream.active_turn_id.clone(),
-            attachment_ids: self
-                .input
-                .pending_images
+            attachment_ids: images
                 .iter()
                 .filter_map(|image| {
                     image
@@ -147,11 +151,13 @@ impl TuiState {
         self.accept_stream(&receipt, stream, tx)?;
         if !receipt.guidance {
             self.finalize_stream();
+            let shown = if web_command {
+                self.input.buf.clone()
+            } else {
+                display_user_input(&self.input.buf, &self.input.pending_images)
+            };
             self.push_line(TranscriptItem::new(
-                format!(
-                    "> {}",
-                    display_user_input(&self.input.buf, &self.input.pending_images)
-                ),
+                format!("> {shown}"),
                 TranscriptKind::Info,
             ));
         }
@@ -161,7 +167,9 @@ impl TuiState {
         }
         self.input.buf.clear();
         self.input.cursor = 0;
-        self.input.pending_images.clear();
+        if !web_command {
+            self.input.pending_images.clear();
+        }
         self.input.history_idx = None;
         self.admission.input_notice = None;
         self.input.undo.clear();
@@ -212,14 +220,13 @@ impl TuiState {
                 }
                 if !receipt.guidance && matches!(completion.action, AdmissionAction::Submit) {
                     self.finalize_stream();
+                    let shown = if mink::runtime::is_web_retrieval_command(&completion.draft.buf) {
+                        completion.draft.buf.clone()
+                    } else {
+                        display_user_input(&completion.draft.buf, &completion.draft.pending_images)
+                    };
                     self.push_line(TranscriptItem::new(
-                        format!(
-                            "> {}",
-                            display_user_input(
-                                &completion.draft.buf,
-                                &completion.draft.pending_images
-                            )
-                        ),
+                        format!("> {shown}"),
                         TranscriptKind::Info,
                     ));
                 }
@@ -241,7 +248,9 @@ impl TuiState {
                 if same_draft && consumes_text {
                     self.input.buf.clear();
                     self.input.cursor = 0;
-                    if matches!(completion.action, AdmissionAction::Submit) {
+                    if matches!(completion.action, AdmissionAction::Submit)
+                        && !mink::runtime::is_web_retrieval_command(&completion.draft.buf)
+                    {
                         self.input.pending_images.clear();
                     }
                     self.input.undo.clear();

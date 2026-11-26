@@ -48,6 +48,7 @@ import {
 } from './toolCards.ts'
 import { DIFF_LABELS, READ_LABELS, SEARCH_LABELS, TERMINAL_LABELS } from './toolLabels.ts'
 import { MARKDOWN_LABELS } from '../labels.ts'
+import { webToolBody } from './webContent.tsx'
 import css from './ToolRow.module.css'
 
 /**
@@ -59,7 +60,8 @@ function toolIcon(name: string) {
   if (['Bash', 'Python', 'PythonSandbox', 'RunCode'].includes(name)) return <IconApiOutlineRegular size={14} />
   if (name === 'Read') return <IconBrowseOutlineRegular size={14} />
   if (['Edit', 'Write'].includes(name)) return <IconEditOutlineRegular size={14} />
-  if (['Grep', 'Glob'].includes(name)) return <IconSearchOutlineRegular size={14} />
+  if (['Grep', 'Glob', 'WebSearch', 'DeepSeekWebSearch'].includes(name)) return <IconSearchOutlineRegular size={14} />
+  if (['WebFetch', 'DeepSeekReadUrl'].includes(name)) return <IconBrowseOutlineRegular size={14} />
   if (['TodoRead', 'TodoWrite', 'TodoAdvance'].includes(name)) return <IconChecklistOutlineRegular />
   if (name.startsWith('Plan')) return <IconPlanOutlineRegular size={14} />
   if (name === 'GoalReport') return <IconGoalOutlineRegular size={14} />
@@ -92,14 +94,15 @@ function stateStatus(state: ReturnType<typeof toolState>): string | null {
  * @param props.item - the transcript tool item.
  * @returns the tool row with its lazily mounted result card.
  */
-export const ToolCard = memo(function ToolCard({ item, onOpenFile, onOpenArtifact }: {
+export const ToolCard = memo(function ToolCard({ item, onOpenFile, onOpenArtifact, defaultExpanded = false }: {
   item: ToolItem
+  defaultExpanded?: boolean
   /** Open the file this call names in the detail panel's file tab. */
   onOpenFile?: ((path: string) => void) | undefined
   /** Open the output this call spilled into once it passed the size guard. */
   onOpenArtifact?: ((id: string) => void) | undefined
 }) {
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useState(defaultExpanded)
   const state = toolState(item)
   const variant = toolVariant(item.name)
   const terminal = variant === 'bash'
@@ -121,6 +124,7 @@ export const ToolCard = memo(function ToolCard({ item, onOpenFile, onOpenArtifac
   const card = terminal || diff !== null || read !== null || search !== null || ptc !== null || result === null ? null : result
   const expandable = state !== 'running' && (result !== null || read !== null || ptc !== null)
   const open = expanded && expandable
+  const web = open ? webToolBody(item) : null
   const status = stateStatus(state)
   const totals = useMemo(() => (diff === null ? null : diffTotals(diff.diffs)), [diff])
 
@@ -160,7 +164,7 @@ export const ToolCard = memo(function ToolCard({ item, onOpenFile, onOpenArtifac
       >
         {open && (
           <div className={css.bodyWrap}>
-            {terminal
+            {web ?? (terminal
               ? (
                 <TerminalBlock
                   className={css.terminalBody}
@@ -352,7 +356,7 @@ export const ToolCard = memo(function ToolCard({ item, onOpenFile, onOpenArtifac
                           </>
                         )}
                       </div>
-                    )}
+                    ))}
           </div>
         )}
         {open && (filePath !== null || item.artifact !== undefined) && (

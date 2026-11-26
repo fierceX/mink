@@ -10,13 +10,14 @@ export interface RawEvent {
   [key: string]: unknown;
 }
 
-export type TranscriptKey = number | `live:${number}` | `live:${string}:${number}` | `message:${number}:${number}` | `input:${string}`;
+export type TranscriptKey = number | `live:${number}` | `live:${string}:${number}` | `message:${number}:${number}` | `message:${number}:${number}:${number}` | `input:${string}`;
 
 export type ToolColor = "exec" | "file" | "search" | "todo" | "plan" | "delegate" | "tool";
 export type ResultView = "command" | "file" | "search" | "todo" | "plan" | "diff" | "text";
 
 export interface ThinkingItem { key?: TranscriptKey; kind: "thinking"; text: string; }
-export interface TextItem { key?: TranscriptKey; kind: "text"; text: string; }
+export interface TextItem { key?: TranscriptKey; kind: "text"; text: string; citations?: WebCitation[]; }
+export interface WebCitation { url: string; title?: string | null; start_index: number; end_index: number; }
 /** A goal boundary published by core; rendered as a card, never as prose. */
 export interface GoalMessageItem {
   key?: TranscriptKey;

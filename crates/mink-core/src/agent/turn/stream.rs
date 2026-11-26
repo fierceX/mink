@@ -411,6 +411,7 @@ impl super::TurnExecutor {
         let mut calls: Vec<ToolCallEvent> = Vec::new();
         let mut stop = String::new();
         let mut usage: Option<UsageEvent> = None;
+        let mut web = None;
         let mut saw_stop = false;
         let mut saw_any_event = false;
         let mut saw_visible_output = false;
@@ -527,6 +528,13 @@ impl super::TurnExecutor {
                     saw_visible_output = true;
                     calls.push(call);
                 }
+                Event::DeepSeekWebProgress(call) => {
+                    saw_visible_output = true;
+                    crate::llm::deepseek_web::render_progress(self.ctx.io.display.as_ref(), &call);
+                }
+                Event::DeepSeekWeb(response) => {
+                    web = Some(response);
+                }
                 Event::Usage(u) => {
                     self.ctx.log_event(crate::events::EventLog::Usage {
                         version: None,
@@ -588,6 +596,7 @@ impl super::TurnExecutor {
                     calls.clear();
                     stop.clear();
                     usage = None;
+                    web = None;
                     saw_stop = false;
                     self.ctx.io.display.render_retry();
                 }
@@ -611,6 +620,7 @@ impl super::TurnExecutor {
             calls,
             stop,
             usage,
+            web,
             format_abort: None,
             had_format_error: false,
         })

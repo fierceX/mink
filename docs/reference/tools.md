@@ -261,6 +261,17 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 - `output > 100000 bytes`：触发搜索工具内部输出字节上限，和文件数/结果数上限无关。
 - `[Full output: artifact://...]`：触发统一工具结果保护，完整输出已写入 session artifact。
 
+## `WebSearch` 与 `WebFetch`
+
+两个只读工具由 [`[web] client`](configuration.md#网页搜索与读取) 启用，并受工具选择和审批控制。
+
+| 工具 | 参数 | 结果 |
+| --- | --- | --- |
+| `WebSearch` | `query` 为 1–128 个 Unicode 字符且含非空白字符，`count` 可选，范围 1–50，默认 10 | 标题、链接、摘要和可用的站点及发布日期。零命中返回空结果数组。 |
+| `WebFetch` | `url` 为含主机且无凭据的 HTTP(S) URL，最长 8192 字符 | 标题、请求链接与网页 Markdown 正文。 |
+
+Mink 通过 DeepSeek 的独立 API 执行请求。工具输出使用统一字节预算和 Artifact 机制。中断会取消本地等待。 [DeepSeek 网页搜索与抓取](https://api-docs.deepseek.com/zh-cn/guides/search/)
+
 ## `TodoRead`
 
 读取当前 session 的持久化 todo 状态。结果包含 revision、状态计数、稳定 ID 和条目正文；

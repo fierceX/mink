@@ -114,6 +114,14 @@
       "kind": "compact"
     },
     {
+      "input": "/web-search 实时天气",
+      "not_command": true
+    },
+    {
+      "input": "/web-fetch https://example.com/",
+      "not_command": true
+    },
+    {
       "input": "/flash",
       "kind": "flash"
     },

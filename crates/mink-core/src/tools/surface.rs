@@ -273,6 +273,10 @@ impl ModelToolSurface {
                     continue;
                 }
             };
+            if matches!(tool.name.as_str(), "WebSearch" | "WebFetch") && !config.web_client {
+                hidden.insert(tool.name.clone(), ToolHiddenReason::ExplicitOptInRequired);
+                continue;
+            }
             if tool.name == "RunCode" {
                 if context.ptc_mode == crate::ptc::PtcMode::Off {
                     if explicitly_selected("RunCode") {

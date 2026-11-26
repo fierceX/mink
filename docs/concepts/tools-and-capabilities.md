@@ -27,7 +27,7 @@ resolved capabilities）、执行门禁（surface 校验 → StormBreaker → To
 
 ### 关键不变式
 
-- `enabled_tools` 是唯一工具启用输入；`ModelToolSurface` 在 session/prefix 构造前
+- `enabled_tools` 控制普通工具的选择，独立网页工具还须开启 `[web] client`。`ModelToolSurface` 在 session/prefix 构造前
   一次解析，`ToolRunner::execute_all()` 在执行前校验同一 surface
 - Goal 使用 `GoalRead` 按需读取权威契约，草案讨论另有 `GoalDraft`，独立只读审核返回描述性报告，宿主 agent 通过固定的 `GoalReview` 工具提交候选绑定的轻量继续或完整审核结论；不存在模型自报完成的默认 `GoalReport` 工具。草案确认、验收与生命周期状态由宿主控制
 - 只读工具按连续批次并发执行；写入、执行、控制和 SubAgent 工具按调用顺序串行执行
@@ -37,6 +37,10 @@ resolved capabilities）、执行门禁（surface 校验 → StormBreaker → To
 - 同步只读 VFS hook（`ReadOnlyFileSystem`）只替换普通路径后端，不注册新工具；
   `artifact://`、`skill://`、`rule://`、`session://` 不进入 VFS
 - 工具执行失败返回 `Error:` 前缀的结构化消息，不 panic
+
+### DeepSeek 联网
+
+独立 `WebSearch` / `WebFetch` 走普通工具分发和输出保护。用户明确提交搜索或读取命令时，运行时执行一次真实的工具调用并记录完整的工具交换。对话内置工具由 Chat Completions 服务执行，声明随已解析模型进入请求 prefix。实时进度来自流式事件，正式历史以终帧的调用和引用为准。签名随历史回传给兼容 DeepSeek 请求，公开历史仅投影展示字段。内置工具使用量参与账单统计，检索响应中的累计用量不用于提示词预算校准。
 
 ## 系统提示词构建
 

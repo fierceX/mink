@@ -62,6 +62,15 @@ pub(super) fn value_type(value: &serde_json::Value) -> Option<&str> {
     value.get("type").and_then(serde_json::Value::as_str)
 }
 
+fn is_provider_web_progress(value: &serde_json::Value) -> bool {
+    let name = match value_type(value) {
+        Some("tool_call") => &value["name"],
+        Some("tool_result") => &value["tool_name"],
+        _ => return false,
+    };
+    matches!(name.as_str(), Some("DeepSeekWebSearch" | "DeepSeekReadUrl"))
+}
+
 pub(super) fn bounded_text(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text.to_string();
@@ -187,8 +196,10 @@ pub(super) fn publish_locked(
             let mut row = value["message"].clone();
             row["seq"] = value["conversation_seq"].clone();
             if row["role"] == "assistant" {
-                p.progress
-                    .retain(|e| !matches!(e["type"].as_str(), Some("text" | "thinking")));
+                p.progress.retain(|e| {
+                    !matches!(e["type"].as_str(), Some("text" | "thinking"))
+                        && !is_provider_web_progress(e)
+                });
             }
             if let Some(blocks) = row["content"].as_array() {
                 for block in blocks {
@@ -253,6 +264,12 @@ pub(super) fn publish_locked(
         }
         "signal" | "error" | "sub_agent_status" | "sub_agent_output" | "retry"
         | "context_compact" => {
+            if value["type"] == "retry" {
+                p.progress.retain(|event| !is_provider_web_progress(event));
+            }
+            push_bounded_progress(&mut p.progress, value.clone());
+        }
+        "tool_call" | "tool_result" if is_provider_web_progress(&value) => {
             push_bounded_progress(&mut p.progress, value.clone());
         }
         _ => {}

@@ -1,6 +1,45 @@
 use super::*;
 
 #[test]
+fn web_wire_preserves_native_tool_declarations() {
+    let native = json!({"type":"deepseek_web_search"});
+    let function = json!({"name":"Read","input_schema":{"type":"object"}});
+    let converted = convert_tools_to_openai(&[native.clone(), function]);
+    assert_eq!(converted[0], native);
+    assert_eq!(converted[1]["function"]["name"], "Read");
+}
+
+#[tokio::test]
+async fn web_wire_replays_saved_calls_without_exposing_signatures_in_history() {
+    let ctx = crate::regression::test_context_for_agent("web-replay")
+        .await
+        .unwrap();
+    let web = super::super::deepseek_web::DeepSeekWebResponse {
+        calls: Some(json!([{"index":0,"reasoning_content":"before","calls":[{
+            "index":0,"id":"srvtoolu_1","type":"deepseek_read_url","kind":"read_link",
+            "signature":"opaque","status":"completed",
+            "page":{"url":"https://example.test/","title":"Read me"}
+        }]}])),
+        annotations: None,
+        reasoning: "after".into(),
+    };
+    ctx.stores
+        .store
+        .add_assistant_with_web("正文", "beforeafter", &[], Some(&web))
+        .await
+        .unwrap();
+    let rows = ctx.stores.store.lines().await.unwrap();
+    let wire = convert_messages_to_openai(&rows).unwrap();
+    assert_eq!(wire[0]["server_tool_calls"], web.calls.unwrap());
+    assert_eq!(wire[0]["reasoning_content"], "after");
+    assert!(wire[0].get("tool_calls").is_none());
+    let reader = crate::runtime::SessionReader::new(ctx.stores.store.path().parent().unwrap());
+    let history = serde_json::to_string(&reader.conversation().unwrap()).unwrap();
+    assert!(history.contains("Read me"));
+    assert!(!history.contains("opaque"));
+}
+
+#[test]
 fn strip_orphaned_tool_calls_removes_unmatched() {
     let mut msg = json!({
         "role": "assistant",

@@ -11,6 +11,8 @@ pub(crate) const COMMON_COMMAND_HELP: &[&str] = &[
     "  /pro            Switch to pro alias",
     "  /model NAME     Switch to a model name or alias",
     "  /compact        Force context compaction",
+    "  /web-search QUERY  Search public webpages ([web] client)",
+    "  /web-fetch URL     Read a public webpage ([web] client)",
     "  /skills         List available skills",
     "  /goal TEXT      Draft a goal, same as /goal create (agent_reviewed)",
     "  /goal refine TEXT     Refine the pending goal proposal",

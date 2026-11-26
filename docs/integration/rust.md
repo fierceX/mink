@@ -202,6 +202,7 @@ match outcome.failure {
 | Session | `with_session()` / `with_session_layout()`（或布局快捷方法） |
 | Signal | `with_signal_policy(SignalPolicy)` |
 | Recovery | `with_llm_recovery(LlmRecoveryPolicy { format_window_size, format_max_errors, request_max_retries, request_timeout_secs })` |
+| 网页搜索与读取 | `with_web_options(WebOptions { client, native_search, native_read_url })` |
 | OpenAI | `with_openai_reasoning_effort()` / `with_openai_tool_choice()` / `with_openai_extra_body()` / `with_openai_token_param()` / `with_openai_include_usage()` / `with_provider_http_timeout_secs()` |
 | 多模态 | `with_image_input(ImageInputCapability)` / `with_vision_models(Vec<String>)` / `with_image_limits(ImageLimitsOverrides)` |
 | 能力 | `with_mission_content()` / `with_selected_skills()` / `with_runtime_skill_content()` / `with_skill_discovery_policy()` / `with_resource_handler()` / `with_read_only_file_system()` / `with_resource_session_id()` |

@@ -162,7 +162,8 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
     let commit_display = event_display.clone();
     ctx.stores
         .store
-        .observe_commits(Arc::new(move |conversation_seq, message| {
+        .observe_commits(Arc::new(move |conversation_seq, mut message| {
+            crate::llm::deepseek_web::remove_replay_fields(&mut message);
             commit_display.emit(crate::runtime::AgentEventKind::ConversationCommitted {
                 conversation_seq,
                 message,

@@ -22,6 +22,7 @@ pub mod snapshot;
 pub mod surface;
 pub mod todo;
 pub mod vfs;
+pub(crate) mod web;
 
 /// Shared DFS cycle detector for tool / capability dependency graphs.
 ///

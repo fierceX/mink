@@ -41,8 +41,9 @@ export interface WebFetchBlockProps {
   labels: WebBlockLabels
   /** The final URL after allowed redirects; becomes a safe external link when http(s). */
   url: string
+  title?: string | undefined
   /** HTTP status code of the fetched response. */
-  statusCode: number
+  statusCode?: number | undefined
   /** True when the provider or the output cap cut the fetched content. */
   truncated: boolean
   /** Extra class merged onto the wrapper (callers position; this component draws). */
@@ -174,14 +175,16 @@ function WebSearchBlock({ answer, sources, truncated, labels, className }: WebSe
  * @param props - see {@link WebFetchBlockProps}.
  * @returns the fetch card element.
  */
-function WebFetchBlock({ url, statusCode, truncated, labels, className }: WebFetchBlockProps) {
+function WebFetchBlock({ url, title, statusCode, truncated, labels, className }: WebFetchBlockProps) {
   return (
     <div className={clsx(css.block, css.fetch, className)} data-web="fetch">
-      <SafeLink url={url} label={url} className={css.fetchUrl} />
-      <div className={css.fetchMeta}>
-        <span className={css.status}>{labels.http} {statusCode}</span>
-        {truncated && <span className={css.truncated}>{labels.contentTruncated}</span>}
-      </div>
+      <SafeLink url={url} label={title || url} className={css.fetchUrl} />
+      {(statusCode !== undefined || truncated) && (
+        <div className={css.fetchMeta}>
+          {statusCode !== undefined && <span className={css.status}>{labels.http} {statusCode}</span>}
+          {truncated && <span className={css.truncated}>{labels.contentTruncated}</span>}
+        </div>
+      )}
     </div>
   )
 }

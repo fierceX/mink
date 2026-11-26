@@ -146,6 +146,7 @@ pub(super) fn from_file(file: &MinkConfigFile) -> AgentConfig {
     cfg.sandbox = file.sandbox.clone();
     cfg.sandbox_python = file.sandbox_python.clone();
     cfg.ptc = file.ptc.clone();
+    cfg.web = file.web.clone();
     cfg
 }
 

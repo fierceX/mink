@@ -64,6 +64,8 @@ fn schemas_declare_exactly_the_runtime_accepted_fields() {
             ],
         ),
         ("Glob", &["pattern", "path"]),
+        ("WebSearch", &["query", "count"]),
+        ("WebFetch", &["url"]),
         (
             "Grep",
             &[

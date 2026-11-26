@@ -299,6 +299,7 @@ impl Default for SignalConfig {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedConfig {
+    pub web: WebOptions,
     pub model: String,
     pub model_aliases: BTreeMap<String, String>,
     pub openai_reasoning_effort: Option<String>,
@@ -391,6 +392,30 @@ pub fn vision_model_defaults() -> Vec<String> {
     vec!["deepseek-v4-flash-vision-exp".to_string()]
 }
 
+/// Independent opt-ins for client retrieval and DeepSeek conversation tools.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WebOptions {
+    pub client: bool,
+    pub native_search: bool,
+    pub native_read_url: bool,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebOptionOverrides {
+    pub client: Option<bool>,
+    pub native_search: Option<bool>,
+    pub native_read_url: Option<bool>,
+}
+
+impl WebOptionOverrides {
+    pub fn apply(&self, options: &mut WebOptions) {
+        options.client = self.client.unwrap_or(options.client);
+        options.native_search = self.native_search.unwrap_or(options.native_search);
+        options.native_read_url = self.native_read_url.unwrap_or(options.native_read_url);
+    }
+}
+
 impl Default for ResolvedConfig {
     fn default() -> Self {
         Self {
@@ -438,6 +463,7 @@ impl Default for ResolvedConfig {
             sandbox: SandboxConfig::default(),
             sandbox_python: SandboxPythonConfig::default(),
             ptc: crate::ptc::PtcConfig::default(),
+            web: WebOptions::default(),
             mission_file: None,
             mission_content: None,
             enabled_tools: None,

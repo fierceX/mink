@@ -37,6 +37,8 @@ pub enum TurnFailureReason {
     SignalHandover,
     /// The goal review budget is exhausted.
     GoalBudgetExhausted,
+    /// An explicit user Search/Fetch request failed.
+    WebRetrievalFailed,
     /// A session state publication fault latched the session.
     Persistence,
     /// No typed source matched; the error text is the only diagnostic.
@@ -58,6 +60,7 @@ impl TurnFailureReason {
             Self::SignalAborted => "signal_aborted",
             Self::SignalHandover => "signal_handover",
             Self::GoalBudgetExhausted => "goal_budget_exhausted",
+            Self::WebRetrievalFailed => "web_retrieval_failed",
             Self::Persistence => "persistence",
             Self::Internal => "internal",
         }
@@ -153,6 +156,7 @@ mod tests {
             TurnFailureReason::SignalAborted,
             TurnFailureReason::SignalHandover,
             TurnFailureReason::GoalBudgetExhausted,
+            TurnFailureReason::WebRetrievalFailed,
             TurnFailureReason::Persistence,
             TurnFailureReason::Internal,
         ];

@@ -10,6 +10,7 @@ pub(super) enum PreparedCall {
 }
 
 pub(super) struct ToolPolicyGate<'a> {
+    pub(super) human_web_command: bool,
     pub(super) surface: &'a crate::tools::surface::ModelToolSurface,
     pub(super) storm: &'a Mutex<StormBreaker>,
 }
@@ -81,6 +82,7 @@ impl ToolRunner {
         // bypass them; only then is the known-format failure reported.
         let tool_metadata = self.metadata_for(&call.name);
         let policy = ToolPolicyGate {
+            human_web_command: self.ctx.human_web_command,
             surface: &self.ctx.tool_surface,
             storm: &self.storm,
         };
@@ -195,7 +197,11 @@ impl ToolPolicyGate<'_> {
                 ToolBlocker::ToolSurface,
             ));
         };
-        if !self.surface.has(&call.name) {
+        let can_run = self.surface.has(&call.name)
+            || (self.human_web_command
+                && matches!(call.name.as_str(), "WebSearch" | "WebFetch")
+                && self.surface.has_programmatic(&call.name));
+        if !can_run {
             if self.surface.has_programmatic(&call.name) {
                 return Some(blocked_tool_result(
                     call.id.clone(),

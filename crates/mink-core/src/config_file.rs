@@ -3,6 +3,7 @@
 //! Host-specific precedence and conversion into runtime options stay with the
 //! host adapters; the accepted TOML shape and unknown-field behavior live here.
 
+pub use crate::config::WebOptionOverrides as WebConfigFile;
 use crate::runtime::{
     EditMode, ImageDetail, ImageInputCapability, ImageLimitsOverrides, OpenAiChatImageUrlLimits,
     SignalPolicy, ToolApprovalMode, ToolApprovalPolicy,
@@ -31,6 +32,8 @@ pub struct MinkConfigFile {
     pub sandbox_python: SandboxPythonConfigFile,
     #[serde(default)]
     pub ptc: PtcConfigFile,
+    #[serde(default)]
+    pub web: WebConfigFile,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -265,6 +268,17 @@ pub fn parse_image_limits(file: &ImageConfigFile) -> anyhow::Result<Option<Image
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_config_accepts_independent_switches() {
+        assert!(
+            parse_config_file(
+                "[web]\nclient = true\nnative_search = false\nnative_read_url = true\n"
+            )
+            .is_ok()
+        );
+        assert!(parse_config_file("[web]\nunknown = true\n").is_err());
+    }
 
     #[test]
     fn shared_schema_keeps_explicit_empty_tool_list_and_rejects_unknown_fields() {

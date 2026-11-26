@@ -31,7 +31,7 @@ pub(crate) struct SlashCommandError {
 }
 
 pub(crate) fn parse_slash_command(input: &str) -> Result<Option<SlashCommand>, SlashCommandError> {
-    if !input.starts_with('/') {
+    if !input.starts_with('/') || mink::runtime::is_web_retrieval_command(input) {
         return Ok(None);
     }
 

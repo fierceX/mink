@@ -42,7 +42,10 @@ pub struct SdkOptions {
     pub signal: SdkSignalOptions,
     pub recovery: SdkRecoveryOptions,
     pub ptc: SdkPtcOptions,
+    pub web: SdkWebOptions,
 }
+
+pub use crate::config::WebOptionOverrides as SdkWebOptions;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]

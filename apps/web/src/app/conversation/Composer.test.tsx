@@ -60,6 +60,29 @@ function receipt(overrides: Partial<InputReceipt> = {}): InputReceipt {
 }
 
 describe('composer', () => {
+  it('submits direct search independently of command controls and queued images', async () => {
+    const onSend = vi.fn(async () => undefined)
+    const onCommand = vi.fn(async () => ({ message: '', ok: true }))
+    render(<Composer
+      hero={false}
+      running={false}
+      targetTurnId={null}
+      disabled={false}
+      attachments={noAttachments({ ids: ['image-1'] })}
+      canAttach
+      model="deepseek-flash"
+      onSend={onSend}
+      onGuide={async () => undefined}
+      onCommand={onCommand}
+      onStop={() => {}}
+    />)
+    const input = screen.getByLabelText('输入消息')
+    fireEvent.change(input, { target: { value: '/web-search 天气' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith('/web-search 天气', [], []))
+    expect(onCommand).not.toHaveBeenCalled()
+  })
+
   it('sends a fresh turn when nothing is running', async () => {
     const onSend = vi.fn(async () => undefined)
     const onGuide = vi.fn(async () => undefined)

@@ -15,7 +15,7 @@ import { PopupSelectView } from '../../ui/commands/PopupSelectView.tsx'
 import { COMMAND_LOCALE, commandText } from '../commands/locale.ts'
 import { Menu, MenuItemButton, Tooltip } from '../../ui/primitives/index.ts'
 import type { DraftAttachment } from './useAttachments.ts'
-import { commandHintsFor, inCommandMode } from '../../data/commands.ts'
+import { commandHintsFor, inCommandMode, isWebRetrievalCommand } from '../../data/commands.ts'
 import css from './InputBar.module.css'
 import modelCss from './ModelSeat.module.css'
 
@@ -220,16 +220,25 @@ export function Composer({
   }, [busy, onCommand, write])
 
   const submit = useCallback(() => {
-    if (commandMode) {
+    const webCommand = isWebRetrievalCommand(text)
+    if (commandMode && !webCommand) {
       runCommand(text)
       return
     }
     const payload = text.trim()
-    const ids = attachments.ids
+    const ids = webCommand ? [] : attachments.ids
     // Freeze the attachment set this submission carries: an acceptance consumes
     // exactly these draft identities, never files chosen while it was in flight.
-    const submittedKeys = attachments.entries.map(entry => entry.key)
-    if ((payload === '' && attachments.entries.length === 0) || disabled || busy || attachments.blocked) return
+    const submittedKeys = webCommand ? [] : attachments.entries.map(entry => entry.key)
+    if ((payload === '' && attachments.entries.length === 0) || disabled || busy || (!webCommand && attachments.blocked)) return
+    if (webCommand && running) {
+      setFailure('网页搜索和读取需要单独提交，请等待当前任务结束')
+      return
+    }
+    if (webCommand && !/\s+\S/.test(payload)) {
+      setFailure(payload === '/web-search' ? '请输入搜索关键词' : '请输入网页 URL')
+      return
+    }
     if (running && targetTurnId === null) {
       setFailure('当前会话尚未取得引导能力，请等待同步')
       return
@@ -476,7 +485,7 @@ export function Composer({
                 type="button"
                 className={css.primary}
                 aria-label={running ? '提交引导' : '发送'}
-                disabled={disabled || busy || attachments.blocked || (text.trim() === '' && attachments.ids.length === 0)}
+                disabled={disabled || busy || (attachments.blocked && !isWebRetrievalCommand(text)) || (text.trim() === '' && attachments.ids.length === 0)}
                 onMouseDown={(event) => { event.preventDefault() }}
                 onClick={submit}
               >

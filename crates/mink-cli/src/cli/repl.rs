@@ -157,7 +157,7 @@ fn simple_stdin_loop(
         if line.is_empty() {
             continue;
         }
-        if line.starts_with('/') {
+        if line.starts_with('/') && !mink::runtime::is_web_retrieval_command(&line) {
             match dispatch_local_command(&line, cmd_tx) {
                 LocalCommandOutcome::Shutdown => break,
                 LocalCommandOutcome::Handled | LocalCommandOutcome::PassThrough => {}

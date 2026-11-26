@@ -18,7 +18,7 @@ use std::path::Path;
 
 use mink::config_file::{
     MIN_TOOL_TIMEOUT_MAX_SECS, MinkConfigFile, PtcConfigFile, RecoveryConfigFile,
-    SandboxConfigFile, SandboxPythonConfigFile, normalize_openai_reasoning_effort,
+    SandboxConfigFile, SandboxPythonConfigFile, WebConfigFile, normalize_openai_reasoning_effort,
     parse_image_input, parse_image_limits, parse_size_bytes,
 };
 
@@ -81,6 +81,7 @@ pub(crate) struct AgentConfig {
     pub sandbox: SandboxConfigFile,
     pub sandbox_python: SandboxPythonConfigFile,
     pub ptc: PtcConfigFile,
+    pub web: WebConfigFile,
 }
 
 mod apply;
@@ -183,6 +184,11 @@ pub(crate) fn merge(base: AgentConfig, over: AgentConfig) -> AgentConfig {
         sandbox: merge_sandbox(base.sandbox, over.sandbox),
         sandbox_python: merge_sandbox_python(base.sandbox_python, over.sandbox_python),
         ptc: merge_ptc(base.ptc, over.ptc),
+        web: WebConfigFile {
+            client: pick(base.web.client, over.web.client),
+            native_search: pick(base.web.native_search, over.web.native_search),
+            native_read_url: pick(base.web.native_read_url, over.web.native_read_url),
+        },
     }
 }
 

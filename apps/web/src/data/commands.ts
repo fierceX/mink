@@ -196,7 +196,7 @@ const SIMPLE: Record<string, SimpleCommand> = {
  * draft must survive that, because the user still has to fix it.
  */
 export function parseSlashCommand(input: string): SlashCommand | null {
-  if (!input.startsWith("/")) return null;
+  if (!input.startsWith("/") || isWebRetrievalCommand(input)) return null;
   const trimmed = input.trimEnd();
   if (trimmed === "/goal" || trimmed.startsWith("/goal ")) {
     const args = trimmed.slice("/goal".length).trim();
@@ -223,6 +223,11 @@ export function parseSlashCommand(input: string): SlashCommand | null {
   if (artifact) return { kind: "artifact", id: artifact };
 
   throw new SlashCommandError(trimmed, `未知命令 ${trimmed.split(/\s+/)[0]}，输入 /help 查看可用命令`);
+}
+
+/** These commands submit standalone turns through the normal input endpoint. */
+export function isWebRetrievalCommand(input: string): boolean {
+  return /^\/web-(?:search|fetch)(?:\s|$)/.test(input);
 }
 
 /** True while the draft is being used to type a command rather than prose. */
@@ -261,6 +266,8 @@ const ALL_COMMAND_HINTS: readonly CommandHint[] = [
   { command: "/skills", usage: "/skills", summary: "查看技能", available: true },
   { command: "/help", usage: "/help", summary: "列出可用命令", available: true },
   { command: "/compact", usage: "/compact", summary: "手动压缩上下文", available: true },
+  { command: "/web-search", usage: "/web-search 关键词", summary: "直接搜索网页", available: true },
+  { command: "/web-fetch", usage: "/web-fetch URL", summary: "直接读取网页正文", available: true },
   { command: "/flash", usage: "/flash", summary: "切换到 flash 模型别名", available: true },
   { command: "/pro", usage: "/pro", summary: "切换到 pro 模型别名", available: true },
   { command: "/model", usage: "/model 名称", summary: "切换模型", available: true },

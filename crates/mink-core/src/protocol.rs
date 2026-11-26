@@ -6,6 +6,8 @@ pub enum Event {
     Text(TextEvent),
     Thinking(ThinkingEvent),
     ToolCall(ToolCallEvent),
+    DeepSeekWebProgress(Value),
+    DeepSeekWeb(crate::llm::deepseek_web::DeepSeekWebResponse),
     Usage(UsageEvent),
     UsageUnavailable,
     Stop(StopEvent),

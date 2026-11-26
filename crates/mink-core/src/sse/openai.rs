@@ -32,11 +32,19 @@ pub struct OpenAIParser {
     pending_stop: Option<String>,
     saw_done: bool,
     saw_usage: bool,
+    native_web: bool,
+    web_progress: bool,
+    web_reasoning: String,
+    web_response: Option<crate::llm::deepseek_web::DeepSeekWebResponse>,
 }
 
 impl OpenAIParser {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn enable_deepseek_web(&mut self, enabled: bool) {
+        self.native_web = enabled;
     }
 
     /// Process one raw SSE line (e.g. `data: {"id":"chatcmpl-...",...}`).
@@ -161,7 +169,7 @@ impl OpenAIParser {
 
         let delta = choice.get("delta").cloned().unwrap_or(Value::Null);
         if let Some(content) = delta.get("content").and_then(Value::as_str) {
-            let c = if !self.saw_text {
+            let c = if !self.saw_text && !self.native_web {
                 content.trim_start_matches(['\n', '\r']).to_string()
             } else {
                 content.to_string()
@@ -178,11 +186,18 @@ impl OpenAIParser {
             .and_then(Value::as_str)
             && !reasoning.is_empty()
         {
+            if self.native_web {
+                self.web_reasoning.push_str(reasoning);
+            }
             let had_tag = reasoning.contains("<think>") || reasoning.contains("</think>");
             let reasoning = strip_reasoning_think_tags(reasoning);
             if !reasoning.is_empty() && !(had_tag && reasoning.trim().is_empty()) {
                 emit(Event::Thinking(ThinkingEvent { content: reasoning }))?;
             }
+        }
+
+        if self.native_web {
+            self.read_deepseek_web(&choice, &delta, emit)?;
         }
 
         if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
@@ -257,6 +272,50 @@ impl OpenAIParser {
         Ok(false)
     }
 
+    fn read_deepseek_web(
+        &mut self,
+        choice: &Value,
+        delta: &Value,
+        emit: &mut dyn FnMut(Event) -> Result<()>,
+    ) -> Result<()> {
+        let progress = &choice["server_tool_event"];
+        match progress["type"].as_str() {
+            Some("step_reasoning_done") => self.web_reasoning.clear(),
+            Some("call_started" | "call_completed") => {
+                self.web_progress = true;
+                if let Some(call) = crate::llm::deepseek_web::public_call(&progress["call"]) {
+                    emit(Event::DeepSeekWebProgress(call))?;
+                }
+            }
+            _ => {}
+        }
+        if !choice["finish_reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty())
+        {
+            return Ok(());
+        }
+        let calls = delta
+            .get("server_tool_calls")
+            .filter(|value| !value.is_null());
+        let annotations = delta.get("annotations").filter(|value| !value.is_null());
+        if calls.is_none() && annotations.is_none() && !self.web_progress {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            calls.is_none_or(Value::is_array)
+                && annotations.is_none_or(Value::is_array)
+                && (!self.web_progress || calls.is_some()),
+            "invalid DeepSeek web terminal metadata"
+        );
+        self.web_response = Some(crate::llm::deepseek_web::DeepSeekWebResponse {
+            calls: calls.cloned(),
+            annotations: annotations.cloned(),
+            reasoning: std::mem::take(&mut self.web_reasoning),
+        });
+        Ok(())
+    }
+
     /// Flush pending usage + stop events.
     pub fn flush(&mut self, emit: &mut dyn FnMut(Event) -> Result<()>) -> Result<()> {
         if let Some(usage) = self.pending_usage.take() {
@@ -282,6 +341,9 @@ impl OpenAIParser {
 
     fn prepare_terminal_events(&mut self, emit: &mut dyn FnMut(Event) -> Result<()>) -> Result<()> {
         self.emit_pending(emit)?;
+        if let Some(response) = self.web_response.take() {
+            emit(Event::DeepSeekWeb(response))?;
+        }
         if self.saw_usage {
             self.pending_usage = Some(UsageEvent {
                 input_tokens: self.input_tokens,

@@ -111,14 +111,34 @@ impl ConversationStore {
         thinking: &str,
         calls: &[ToolCallEvent],
     ) -> Result<()> {
+        self.add_assistant_with_web(text, thinking, calls, None)
+            .await
+    }
+
+    pub(crate) async fn add_assistant_with_web(
+        &self,
+        text: &str,
+        thinking: &str,
+        calls: &[ToolCallEvent],
+        web: Option<&crate::llm::deepseek_web::DeepSeekWebResponse>,
+    ) -> Result<()> {
         let mut content = Vec::new();
         content.push(json!({"type":"thinking","thinking":thinking}));
+        if let Some(web) = web {
+            content.push(web.public_block());
+        }
         content.push(json!({"type":"text","text":text}));
         for c in calls {
             content.push(json!({"type":"tool_use","id":c.id,"name":c.name,"input":c.input_json}));
         }
-        self.append_line(&json!({"role":"assistant","content":content}))
-            .await
+        let mut message = json!({"role":"assistant","content":content});
+        if let Some(web) = web
+            && let Some(calls) = &web.calls
+        {
+            message["_mink"][crate::llm::deepseek_web::PRIVATE_FIELD] =
+                json!({"calls": calls, "reasoning_content": web.reasoning});
+        }
+        self.append_line(&message).await
     }
 
     pub async fn add_tool_results(
@@ -595,6 +615,8 @@ pub fn build_tool_call_summary(
             }
         }
         "Glob" | "Grep" => label = fields.get("pattern").cloned().unwrap_or_default(),
+        "WebSearch" => label = fields.get("query").cloned().unwrap_or_default(),
+        "WebFetch" => label = fields.get("url").cloned().unwrap_or_default(),
         "Bash" => {
             label = fields
                 .get("command")

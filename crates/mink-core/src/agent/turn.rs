@@ -24,6 +24,7 @@ struct StreamOutput {
     calls: Vec<ToolCallEvent>,
     stop: String,
     usage: Option<UsageEvent>,
+    web: Option<crate::llm::deepseek_web::DeepSeekWebResponse>,
     /// The round must terminate as a format failure with no accepted
     /// candidate (protocol-damaged attempts already exhausted the window).
     format_abort: Option<String>,
@@ -39,6 +40,7 @@ impl StreamOutput {
             calls: Vec::new(),
             stop: String::new(),
             usage: None,
+            web: None,
             format_abort: Some(detail),
             had_format_error: true,
         }
@@ -157,10 +159,23 @@ impl TurnExecutor {
         ctx: Arc<AgentSharedContext>,
         resolved: crate::config::ResolvedModel,
     ) -> Self {
-        let tools = Arc::new(ToolRunner::new(Arc::new(
-            crate::context::ToolContext::from_shared(&ctx),
-        )));
-        let prefix = crate::agent::prefix::PrefixManager::new(ctx.clone());
+        Self::for_scope(ctx, resolved, None)
+    }
+
+    fn for_scope(
+        ctx: Arc<AgentSharedContext>,
+        resolved: crate::config::ResolvedModel,
+        goal_adjudication: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
+    ) -> Self {
+        let mut tool_context = crate::context::ToolContext::from_shared(&ctx);
+        if let Some(session) = &goal_adjudication {
+            tool_context.goal_adjudication = Some(session.clone());
+        }
+        let tools = Arc::new(ToolRunner::new(Arc::new(tool_context)));
+        let prefix = crate::agent::prefix::PrefixManager::with_native_web(
+            ctx.clone(),
+            goal_adjudication.is_none(),
+        );
         let mut sub_agent_config = ctx.config.clone();
         if let Some(alias) = resolved.alias.as_deref() {
             sub_agent_config
@@ -172,7 +187,7 @@ impl TurnExecutor {
         }
         Self {
             ctx: ctx.clone(),
-            goal_adjudication: None,
+            goal_adjudication,
             model_name: resolved.actual,
             model_alias: resolved.alias,
             tools,
@@ -208,12 +223,7 @@ impl TurnExecutor {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let mut executor = Self::new_for_model(ctx.clone(), active);
-        let mut tools = crate::context::ToolContext::from_shared(&ctx);
-        tools.goal_adjudication = Some(session.clone());
-        executor.tools = Arc::new(ToolRunner::new(Arc::new(tools)));
-        executor.goal_adjudication = Some(session);
-        executor
+        Self::for_scope(ctx, active, Some(session))
     }
 
     fn model_label(&self) -> &str {
@@ -494,6 +504,12 @@ impl TurnExecutor {
 
         let mut turn = 0;
         let mut effects = Vec::new();
+        if self.goal_adjudication.is_none()
+            && let Some((name, argument)) = crate::tools::web::command(user_input)
+        {
+            let decision = self.run_web_command(name, argument, &mut effects).await?;
+            return Ok((decision, effects));
+        }
         let max_turns = self.ctx.max_turns() as usize;
 
         let (mut system_prompt, mut tools_json) = match self.ensure_prefix().await {
@@ -699,10 +715,19 @@ impl TurnExecutor {
                 mut calls,
                 mut stop,
                 usage,
+                web,
                 format_abort,
                 had_format_error: stream_format_error,
             } = stream_output;
             let mut had_format_error = stream_format_error;
+            // Native web usage aggregates several provider-side inference steps.
+            // That sum does not measure the submitted prompt projection.
+            let calibratable_usage = if web.is_some() {
+                self.ctx.stores.compaction.clear_prompt_usage();
+                &None
+            } else {
+                &usage
+            };
 
             if let Some(detail) = format_abort {
                 // Response damage exhausted the format window: the single
@@ -765,9 +790,9 @@ impl TurnExecutor {
                     // Terminal stop: explicit provider error/refusal — the candidate
                     // calls never execute and the content is never re-prompted
                     // as a "format error".
-                    self.persist_assistant(&text, &thinking, &[], &usage)
+                    self.persist_assistant(&text, &thinking, &[], &usage, web.as_ref())
                         .await?;
-                    self.record_agent_calibration(&usage);
+                    self.record_agent_calibration(calibratable_usage);
                     self.local.final_text.push_str(&text);
                     self.local.final_thinking.push_str(&thinking);
                     self.ctx.io.display.render_stop(&stop);
@@ -795,9 +820,9 @@ impl TurnExecutor {
                     // Identity-invalid batch: cannot be paired
                     // reliably. Drop every call; never write an illegal tool
                     // call or invent results for it.
-                    self.persist_assistant(&text, &thinking, &[], &usage)
+                    self.persist_assistant(&text, &thinking, &[], &usage, web.as_ref())
                         .await?;
-                    self.record_agent_calibration(&usage);
+                    self.record_agent_calibration(calibratable_usage);
                     self.local.final_text.push_str(&text);
                     self.local.final_thinking.push_str(&thinking);
                     let diagnostic = format!(
@@ -810,9 +835,9 @@ impl TurnExecutor {
                     // Unconfirmed response: empty/thinking-only body, tool_calls without
                     // calls, or empty/unknown reason — never a silent empty
                     // success, never a text-bearing "success" either.
-                    self.persist_assistant(&text, &thinking, &[], &usage)
+                    self.persist_assistant(&text, &thinking, &[], &usage, web.as_ref())
                         .await?;
-                    self.record_agent_calibration(&usage);
+                    self.record_agent_calibration(calibratable_usage);
                     self.local.final_text.push_str(&text);
                     self.local.final_thinking.push_str(&thinking);
                     let diagnostic = format!(
@@ -823,17 +848,17 @@ impl TurnExecutor {
                     true
                 }
                 RoundKind::Complete => {
-                    self.persist_assistant(&text, &thinking, &[], &usage)
+                    self.persist_assistant(&text, &thinking, &[], &usage, web.as_ref())
                         .await?;
-                    self.record_agent_calibration(&usage);
+                    self.record_agent_calibration(calibratable_usage);
                     self.local.final_text.push_str(&text);
                     self.local.final_thinking.push_str(&thinking);
                     had_format_error
                 }
                 RoundKind::ConsumeCalls => {
-                    self.persist_assistant(&text, &thinking, &calls, &usage)
+                    self.persist_assistant(&text, &thinking, &calls, &usage, web.as_ref())
                         .await?;
-                    self.record_agent_calibration(&usage);
+                    self.record_agent_calibration(calibratable_usage);
                     self.local.final_text.push_str(&text);
                     self.local.final_thinking.push_str(&thinking);
                     // Formal ToolCall display/events are deferred to the
@@ -843,9 +868,10 @@ impl TurnExecutor {
                     // Real tool results are persisted before the single
                     // round-end window commit: an exhausted format budget
                     // must not roll back legal side effects.
-                    had_format_error |= self
+                    let (tool_format_error, _) = self
                         .execute_tools_inner(calls, belief.as_deref_mut(), &mut effects)
                         .await?;
+                    had_format_error |= tool_format_error;
                     if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
                         self.ctx.io.display.render_stop("interrupted");
                         return Ok((TurnDecision::Interrupted, effects));

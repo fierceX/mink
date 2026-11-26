@@ -175,6 +175,13 @@ impl InputInbox {
             if state.active.as_ref() != Some(target) {
                 bail!("target turn no longer accepts guidance");
             }
+            if state.snapshot.entries.iter().any(|entry| {
+                entry.turn_id == *target
+                    && !entry.guidance
+                    && crate::tools::web::command(&entry.input.text).is_some()
+            }) {
+                bail!("a web retrieval turn does not accept guidance");
+            }
             target.clone()
         } else {
             if state.active.is_some() {
@@ -408,6 +415,11 @@ fn validate(input: &HumanInput) -> Result<()> {
     }
     if input.attachment_ids.len() > 8 {
         bail!("max 8 attachments");
+    }
+    if crate::tools::web::command(&input.text).is_some()
+        && (input.target_turn_id.is_some() || !input.attachment_ids.is_empty())
+    {
+        bail!("web retrieval commands require a standalone turn without attachments");
     }
     Ok(())
 }

@@ -183,6 +183,7 @@ export interface MarkdownFileMentions {
  * numbering accumulated in document order while references render.
  */
 export interface MarkdownRenderContext {
+  readonly inertImages?: boolean
   /** Streaming arm: fences highlight incrementally as they grow; TeX (including ```math fences) stays literal until the settled pass. */
   readonly streaming: boolean
   /** Localized fence copy-button labels. */
@@ -623,6 +624,7 @@ function inlineCodeHttpUrl(value: string): string | undefined {
 }
 
 function renderImage(url: string, alt: string, key: Key, context: MarkdownRenderContext): ReactNode {
+  if (context.inertImages) return <span key={key} className={css.imageAlt}>{alt}</span>
   return <MarkdownImage key={`${key}:${url}`} destination={url} alt={alt}
     pathImages={context.pathImages} streaming={context.streaming} inLink={context.inLink === true} />
 }

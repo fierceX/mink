@@ -1,4 +1,5 @@
 pub mod client;
+pub(crate) mod deepseek_web;
 pub mod image_projection;
 #[cfg(test)]
 pub mod mock;

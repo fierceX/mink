@@ -5,6 +5,30 @@ import { Transcript } from './Transcript.tsx'
 
 afterEach(cleanup)
 
+it('shows direct retrieval results and keeps remote images inert', () => {
+  render(<Transcript running={false} processDisplay="concise" items={[
+    { kind: 'user', text: '/web-fetch https://example.test/', key: 'input:1' },
+    {
+      kind: 'tool', key: 'message:2:0', id: 'web1', name: 'WebFetch', color: 'search', view: 'text',
+      summary: 'example.test', input: '{}', success: true,
+      result: '# 来源\n\nSource: https://example.test/\n\n**正文**\n\n![外站图片](https://example.test/track.png)',
+    },
+  ]} />)
+  expect(screen.getByRole('link', { name: '来源' }).getAttribute('href')).toBe('https://example.test/')
+  expect(screen.getByText('正文').tagName).toBe('STRONG')
+  expect(screen.queryByRole('img')).toBeNull()
+})
+
+it('presents native citations at Unicode code point offsets', () => {
+  render(<Transcript running={false} items={[{
+    kind: 'text', text: '🌏正文后文', citations: [{
+      url: 'https://example.test/source', title: '官方来源', start_index: 1, end_index: 3,
+    }],
+  }]} />)
+  expect(screen.getByRole('link', { name: '官方来源' }).getAttribute('href')).toBe('https://example.test/source')
+  expect(screen.getByText('正文')).toBeDefined()
+})
+
 const ITEMS: TranscriptItem[] = [
   { kind: 'user', text: '把工作台重建起来', key: 'input:1' },
   { kind: 'thinking', text: '先看侧栏的节奏。\n再动手。', key: 'live:2' },

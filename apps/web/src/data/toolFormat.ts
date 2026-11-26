@@ -2,12 +2,20 @@
 
 import type { ResultView, ToolColor } from "./types";
 
+export function isProviderWebTool(name: unknown): boolean {
+  return name === "DeepSeekWebSearch" || name === "DeepSeekReadUrl";
+}
+
+export function isWebTool(name: unknown): boolean {
+  return name === "WebSearch" || name === "WebFetch" || isProviderWebTool(name);
+}
+
 /** 工具名 → 语义颜色 */
 export function toolColor(name: string | undefined): ToolColor {
   const n = String(name ?? "");
   if (/^Bash$|^Python/.test(n)) return "exec";
   if (/^Read$|^Write$|^Edit$/.test(n)) return "file";
-  if (/^Glob$|^Grep$/.test(n)) return "search";
+  if (/^Glob$|^Grep$/.test(n) || isWebTool(n)) return "search";
   if (/^TodoRead|^TodoWrite|^TodoAdvance/.test(n)) return "todo";
   if (/^Plan/.test(n)) return "plan";
   if (/^SubAgent$/.test(n)) return "delegate";
@@ -32,6 +40,13 @@ export function toolSummary(name: string | undefined, input: unknown): string {
       return String(raw.pattern ?? "");
     case "Grep":
       return [raw.pattern, raw.path].filter(Boolean).join("  ");
+    case "WebSearch":
+      return String(raw.query ?? "");
+    case "WebFetch":
+    case "DeepSeekReadUrl":
+      return String(raw.url ?? "");
+    case "DeepSeekWebSearch":
+      return [raw.url, raw.pattern, ...(Array.isArray(raw.queries) ? raw.queries : [])].filter(Boolean).join(" · ");
     case "TodoRead":
       return "查看 Todo";
     case "TodoWrite": {
@@ -389,7 +404,7 @@ export function conversationToEvents(raw: Record<string, unknown>): RawEventLike
   const content = raw.content;
   const metadata = (raw._mink ?? {}) as Record<string, unknown>;
   const out: RawEventLike[] = [];
-  const emit = (block: number, event: Record<string, unknown>) => out.push({ ...event, type: String(event.type), seq, conversation_seq: seq, key: `message:${seq}:${block}` });
+  const emit = (block: number | string, event: Record<string, unknown>) => out.push({ ...event, type: String(event.type), seq, conversation_seq: seq, key: `message:${seq}:${block}` });
   if (role === "user" && typeof content === "string") {
     // A goal turn carries a typed `_mink.goal_message`. Recognising the
     // model-visible sentence instead would make every host re-parse English.
@@ -401,6 +416,9 @@ export function conversationToEvents(raw: Record<string, unknown>): RawEventLike
       : { type: raw.internal === true || metadata.internal === true ? "internal_message" : "user_input", content, input_id: metadata.input_id, turn_id: metadata.turn_id, guidance: metadata.guidance, attachment_ids: metadata.attachment_ids, ...(typeof metadata.input_id === "string" ? { key: `input:${metadata.input_id}` } : {}) });
     if (typeof metadata.input_id === "string") out[0].key = `input:${metadata.input_id}`;
   } else if (Array.isArray(content)) {
+    const web = role === "assistant"
+      ? content.find((block) => block?.type === "deepseek_web") as Record<string, unknown> | undefined
+      : undefined;
     content.forEach((c, i) => {
       const block = c as Record<string, unknown>;
       if (role === "user" && block.type === "tool_result") {
@@ -408,8 +426,20 @@ export function conversationToEvents(raw: Record<string, unknown>): RawEventLike
         emit(i, { ...meta, type: "tool_result", tool_use_id: block.tool_use_id, content: block.content ?? "" });
       } else if (role === "assistant") {
         if (block.type === "thinking" && String(block.thinking ?? "").trim()) emit(i, { type: "thinking", content: block.thinking });
-        else if (block.type === "text" && String(block.text ?? "").trim()) emit(i, { type: "text", content: block.text });
+        else if (block.type === "text" && String(block.text ?? "").trim()) emit(i, { type: "text", content: block.text, citations: web?.citations });
         else if (block.type === "tool_use") emit(i, { type: "tool_call", id: block.id, name: block.name, input: block.input ?? {} });
+        else if (block.type === "deepseek_web" && Array.isArray(block.calls)) {
+          block.calls.forEach((entry, j) => {
+            if (!entry || typeof entry !== "object" || typeof entry.id !== "string" || !isProviderWebTool(entry.tool)) return;
+            const key = `${i}:${j}`;
+            emit(key, { type: "tool_call", id: entry.id, name: entry.tool, input: entry.action });
+            emit(key, {
+              type: "tool_result", tool_use_id: entry.id, tool_name: entry.tool,
+              status: { state: entry.status === "completed" ? "succeeded" : "failed" },
+              content: JSON.stringify(entry), result_kind: "search",
+            });
+          });
+        }
       }
     });
   }

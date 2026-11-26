@@ -712,6 +712,12 @@ impl AgentOptions {
         self
     }
 
+    /// Configure independent opt-ins for DeepSeek web retrieval.
+    pub fn with_web_options(mut self, web: crate::runtime::WebOptions) -> Self {
+        self.config.web = web;
+        self
+    }
+
     pub fn with_ptc(mut self, ptc: crate::ptc::PtcConfig) -> Self {
         self.config.ptc = ptc;
         self

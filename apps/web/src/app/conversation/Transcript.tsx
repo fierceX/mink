@@ -9,9 +9,11 @@ import { memo, useMemo, useState } from 'react'
 import { DisclosureRow, IconChevronDownOutlineRegular, MarkdownText, TextShimmer } from '../../ui/primitives/index.ts'
 import { processSummary, projectTurns, type Turn } from '../../data/transcriptProjection.ts'
 import type { ProcessDisplay } from '../settings/preferences.ts'
-import type { ToolItem, TranscriptItem } from '../../data/types.ts'
+import type { ToolItem, TranscriptItem, WebCitation } from '../../data/types.ts'
+import { isWebRetrievalCommand } from '../../data/commands.ts'
 import { MARKDOWN_LABELS } from './labels.ts'
 import { ToolCard } from './tool/ToolCard.tsx'
+import { WebCitations } from './tool/webContent.tsx'
 import { GoalNotice } from './GoalNotice.tsx'
 import { MessageActions } from './MessageActions.tsx'
 import { ArtifactRefs } from './ArtifactRefs.tsx'
@@ -43,9 +45,10 @@ const UserRow = memo(function UserRow({ text }: { text: string }) {
 })
 
 /** Assistant narration: full-width Markdown body. */
-const AssistantRow = memo(function AssistantRow({ text, streaming, usage, onOpenArtifact }: {
+const AssistantRow = memo(function AssistantRow({ text, streaming, usage, onOpenArtifact, citations }: {
   text: string
   streaming: boolean
+  citations?: WebCitation[] | undefined
   /** The turn's recorded usage, when the server reported one. */
   usage?: string | undefined
   onOpenArtifact?: ((id: string) => void) | undefined
@@ -55,6 +58,7 @@ const AssistantRow = memo(function AssistantRow({ text, streaming, usage, onOpen
       <div className={assistantCss.body}>
         <MarkdownText text={text} streaming={streaming} labels={MARKDOWN_LABELS} />
       </div>
+      {citations !== undefined && <WebCitations text={text} citations={citations} />}
       {onOpenArtifact !== undefined && <ArtifactRefs text={text} onOpen={onOpenArtifact} />}
       {/* A streaming answer has no settled chrome yet. */}
       {!streaming && <MessageActions text={text} label="复制回答" info={usage} />}
@@ -109,10 +113,11 @@ const ThinkingRow = memo(function ThinkingRow({ text, running }: { text: string;
 })
 
 /** One process group: the settled/running header plus its tool and think rows. */
-function ProcessGroup({ items, active, defaultOpen, onOpenFile, onOpenArtifact }: {
+function ProcessGroup({ items, active, defaultOpen, onOpenFile, onOpenArtifact, directWeb }: {
   items: TranscriptItem[]
   active: boolean
   defaultOpen: boolean
+  directWeb: boolean
   onOpenFile?: ((path: string) => void) | undefined
   onOpenArtifact?: ((id: string) => void) | undefined
 }) {
@@ -140,6 +145,7 @@ function ProcessGroup({ items, active, defaultOpen, onOpenFile, onOpenArtifact }
             <ToolCard
               key={item.key ?? index}
               item={item}
+              defaultExpanded={directWeb}
               onOpenFile={onOpenFile}
               onOpenArtifact={onOpenArtifact}
             />
@@ -207,6 +213,7 @@ const TurnBlock = memo(function TurnBlock({
   onOpenFile: ((path: string) => void) | undefined
   onOpenArtifact: ((id: string) => void) | undefined
 }) {
+  const directWeb = turn.user?.kind === 'user' && isWebRetrievalCommand(turn.user.text)
   const changed = useMemo(
     () => (onOpenFile === undefined
       ? []
@@ -224,13 +231,14 @@ const TurnBlock = memo(function TurnBlock({
       {turn.segments.map((segment) => {
         if (segment.kind === 'process') {
           // Concise keeps conclusions only: the process rows stay out.
-          if (processDisplay === 'concise') return null
+          if (processDisplay === 'concise' && !directWeb) return null
           return (
             <ProcessGroup
               key={segment.key}
               items={segment.items}
               active={active}
-              defaultOpen={processDisplay === 'detailed'}
+              defaultOpen={directWeb || processDisplay === 'detailed'}
+              directWeb={directWeb}
               onOpenFile={onOpenFile}
               onOpenArtifact={onOpenArtifact}
             />
@@ -242,6 +250,7 @@ const TurnBlock = memo(function TurnBlock({
             <AssistantRow
               key={segment.key}
               text={item.text}
+              citations={item.citations}
               streaming={active}
               usage={usage}
               onOpenArtifact={onOpenArtifact}

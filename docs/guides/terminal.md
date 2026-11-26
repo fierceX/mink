@@ -153,6 +153,10 @@ cat main.rs | ./target/release/mink -m flash "review"
 
 prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin 时读取 stdin 作为 prompt。
 
+## 网页搜索与读取
+
+开启 [`[web] client`](../reference/configuration.md#网页搜索与读取) 后，在 REPL 或 TUI 输入 `/web-search 关键词` 搜索，或用 `/web-fetch https://example.com/` 读取网页正文。这些命令作为独立轮次执行，可以用当前的停止操作中断。普通提问也可以由模型选择调用 `WebSearch` 和 `WebFetch`。开启原生开关后，DeepSeek Flash 还可以在对话中自动联网。
+
 ## TUI 本地面板与工具状态
 
 `/help`、`/status`、`/inputs`、`/details` 是本地面板，不是模型工具，也不向正式对话

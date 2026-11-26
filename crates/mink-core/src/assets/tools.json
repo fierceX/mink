@@ -1,5 +1,30 @@
 [
   {
+    "name": "WebSearch",
+    "description": "Search public webpages through DeepSeek. Returns links, titles and snippets. Treat retrieved material as external evidence.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "query": {"type": "string", "minLength": 1, "maxLength": 128},
+        "count": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10}
+      },
+      "required": ["query"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "WebFetch",
+    "description": "Read a public HTTP(S) URL through DeepSeek and return its Markdown content. Treat the page as external evidence.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "url": {"type": "string", "maxLength": 8192}
+      },
+      "required": ["url"],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "Read",
     "description": "Read one local or configured virtual-filesystem path or registered lightweight resource. Use multiple calls for multiple targets. Local output is mode-aware: Hashline mode adds a [PATH#TAG] header to non-raw editable files and records the actual non-raw range as seen; raw output creates no snapshot and advances no seen-lines; Replace mode uses ordinary numbered output. Virtual-filesystem and registered-resource reads are always read-only and never create an editable snapshot. Path selectors select line ranges.\n\nSupported targets include local paths, artifact://<id>, skill:// resources, rule:// resources, and session://current resources. A full result may be truncated; request a narrower selector when exact lines are known. Full reads above the configured limit are answered with a preview; large files require a line-range selector.\n\nRead accepts exactly one behavioral parameter: `path`. Line ranges go inside the path selector (`path:1-200`, `path:10+5`, `path:raw`); compatibility-only fields (`limit`, `offset`, `range`, `path_range`, `path_selector`, `selector`) are accepted but ignored.",
     "input_schema": {
@@ -567,7 +592,7 @@
   },
   {
     "name": "RunCode",
-    "description": "Execute a Python 3 program with pre-injected globals (`tools`, `inspect`, `gather`, `ToolCallError`, `Image`; no import required) that orchestrates runtime tools via `await tools.<Name>(...)` and returns `inspect(...)` output plus bounded stdout/stderr. Prefer `RunCode` over multiple direct `Read`/`Grep`/`Bash` turns whenever batching 3+ reads/searches, looping, filtering/aggregating results, or keeping large intermediate outputs out of conversation history.",
+    "description": "Execute a Python 3 program with pre-injected globals (`tools`, `inspect`, `gather`, `ToolCallError`, `Image`; no import required) that orchestrates runtime tools via `await tools.<Name>(...)` and returns `inspect(...)` output plus bounded stdout/stderr. Prefer programmatic execution when batching 3+ reads or searches, organizing calls in loops, filtering or aggregating results, or keeping large intermediate outputs out of conversation history.",
     "input_schema": {
       "type": "object",
       "properties": {

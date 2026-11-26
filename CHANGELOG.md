@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 接入 DeepSeek 网页搜索与读取。通过 `[web]` 分别开启独立 Search / Fetch、对话内置搜索和内置读链。终端和 Web 工作台支持 `/web-search`、`/web-fetch`，工作台展示联网状态、网页结果和回答引用。Rust、JSONL 和 Python 宿主可使用同组开关。
+
 - **Python 宿主 Programmatic Tool Calling（PTC / `RunCode`）**：新增 `PtcMode`（`off` 默认 / `tool` / `exclusive`）与 `RunCode` 工具。模型可通过一段顶层 `await` Python 3 程序经 `await tools.<Name>(...)`、`gather(...)`、`inspect(*values)`、`ToolCallError` 与 `Image` 句柄编排工具流水线；默认由受控 `python3` 子进程经独立 FD 3 NDJSON 通道与可选 OS 沙箱运行，开启 `python-sandbox` feature 时支持 WASI CPython 后端；调度桥维护只读滚动并发池与写入/命令串行屏障、子调用配额与 `<parent>:ptc:<n>` 事件，保留 Hashline snapshot、ReadMemo、`TodoAdvance`、多图预算与 `artifact://` 落盘保护；支持 `--ptc`、`MINK_PTC_MODE`、`.minkrc` `[ptc]`、JSONL `options.ptc`、`mink-server` 与 Python `SandboxConfig.ptc_mode` / `ptc_config`。
 
 ## v0.9.1 (2026-11-25)

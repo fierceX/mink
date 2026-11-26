@@ -24,6 +24,7 @@ import { useLatest } from '../data/useLatest.ts'
 import { useModelChoices } from '../data/useModelChoices.ts'
 import { useSessionView } from '../data/useSessionView.ts'
 import { projectName } from '../data/catalogFilter.ts'
+import { isWebRetrievalCommand } from '../data/commands.ts'
 import { SIDEBAR_DEFAULT } from './frame/columns.ts'
 import { AppFrame } from './frame/AppFrame.tsx'
 import { Conversation } from './conversation/Conversation.tsx'
@@ -328,12 +329,13 @@ export function App() {
           { key, id: upload.data.id, name: file.name },
         ])
       }
+      const webCommand = isWebRetrievalCommand(text)
       const input: PendingSubmission = {
         request_id: firstRequestId,
         text,
         target_turn_id: null,
-        attachment_ids: attachmentIds,
-        attachment_snapshot: { known: true, keys: attachmentKeys },
+        attachment_ids: webCommand ? [] : attachmentIds,
+        attachment_snapshot: { known: true, keys: webCommand ? [] : attachmentKeys },
       }
       writePendingSubmission(sessionPendingKey(created), input)
       const submitted = await api.submitInput(created.id, {

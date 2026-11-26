@@ -310,6 +310,11 @@ class SandboxConfig:
     # Working directory
     cwd: Optional[str] = None
 
+    # DeepSeek Search/Fetch and conversation tools
+    web_client: Optional[bool] = None
+    web_native_search: Optional[bool] = None
+    web_native_read_url: Optional[bool] = None
+
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Recursively merge ``override`` into a copy of ``base``.
@@ -944,6 +949,15 @@ class AgentSession:
             ptc["mode"] = self._config.ptc_mode
         if ptc:
             options["ptc"] = ptc
+        web = {
+            key: value for key, value in (
+                ("client", self._config.web_client),
+                ("native_search", self._config.web_native_search),
+                ("native_read_url", self._config.web_native_read_url),
+            ) if value is not None
+        }
+        if web:
+            options["web"] = web
         if extra_options:
             options = _deep_merge(options, extra_options)
         signal = options.get("signal")

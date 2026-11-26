@@ -354,6 +354,27 @@ Agent JSONL `SdkOptions` 和 Python `SandboxConfig` 同样直接暴露 `max_cont
 `validate_runtime_config()` 在 runtime 创建任何 session 文件前执行组合校验。有限窗口下要求
 `context_reserve_tokens < max_context`；热尾部和摘要输出是按可用空间动态收紧的软目标，不做组合硬校验。`max_context=0` 保留禁用自动压缩和本地输入预算限制的语义。
 
+### 网页搜索与读取
+
+CLI、TUI 和 mink-server 从 `.minkrc` 读取以下独立开关。下列配置开启全部功能，三个字段缺省均为 `false`。修改后重新启动或重新创建该运行时。
+
+```toml
+[web]
+client = true
+native_search = true
+native_read_url = true
+```
+
+| 字段 | 用途 |
+| --- | --- |
+| `client` | 开启 `WebSearch`、`WebFetch` 以及 `/web-search`、`/web-fetch`。Mink 通过 DeepSeek 独立接口按需获取结果。工具选择和审批仍适用。 |
+| `native_search` | 在支持该能力的 DeepSeek Flash 对话请求中声明 `deepseek_web_search`。开启思考时采用深度搜索。 |
+| `native_read_url` | 在支持该能力的 DeepSeek Flash 对话请求中声明 `deepseek_read_url`，由模型选择最后一条用户消息里的链接。 |
+
+独立接口固定使用 `https://api.deepseek.com`。模型也走 DeepSeek 官方端点时，优先使用现有的 DeepSeek 模型 API 密钥，其余情况使用 `DEEPSEEK_API_KEY`。对话内置联网使用官方 Chat Completions 端点和实际解析出的 `deepseek-flash`（含兼容模型名）。思考模式下同时声明两个工具时，DeepSeek 采用深度搜索。要保留思考模式和独立读链行为，可只开启 `native_read_url`。独立 Search / Fetch 按成功且有结果的请求计费。 [DeepSeek 联网工具](https://api-docs.deepseek.com/zh-cn/guides/web_tools/) · [DeepSeek 网页搜索与抓取](https://api-docs.deepseek.com/zh-cn/guides/search/)
+
+JSONL 请求使用 `options.web`，字段同 `[web]`。Python `SandboxConfig` 对应 `web_client`、`web_native_search`、`web_native_read_url`。Rust 宿主使用 `AgentOptions::with_web_options(WebOptions { .. })`。
+
 ### 工具审批配置
 
 `ToolConfig` 从启动时解析完成的内部配置派生，随 `ToolContext` 进入工具层：

@@ -104,6 +104,8 @@ static TOOL_REGISTRY: LazyLock<Vec<Box<dyn ToolExec>>> = LazyLock::new(|| {
         Box::new(bash::BashTool),
         Box::new(search::GlobTool),
         Box::new(search::GrepTool),
+        Box::new(super::web::WebSearchTool),
+        Box::new(super::web::WebFetchTool),
         Box::new(TodoReadTool),
         Box::new(TodoWriteTool),
         Box::new(TodoAdvanceTool),

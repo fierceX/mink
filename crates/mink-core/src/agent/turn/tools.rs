@@ -121,16 +121,81 @@ impl super::TurnExecutor {
         thinking: &str,
         calls: &[ToolCallEvent],
         usage: &Option<UsageEvent>,
+        web: Option<&crate::llm::deepseek_web::DeepSeekWebResponse>,
     ) -> Result<()> {
         self.ctx
             .stores
             .store
-            .add_assistant(text, thinking, calls)
+            .add_assistant_with_web(text, thinking, calls, web)
             .await?;
+        if let Some(web) = web {
+            let public = web.public_block();
+            for url in public["citations"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|citation| citation["url"].as_str())
+            {
+                self.ctx
+                    .io
+                    .display
+                    .render_info(&format!("[Web source] {url}"));
+            }
+        }
         if let Some(u) = usage {
             self.ctx.stores.stats.record_usage(u).await;
         }
         Ok(())
+    }
+
+    pub(super) async fn run_web_command(
+        &mut self,
+        name: &str,
+        argument: &str,
+        effects: &mut Vec<TurnEffect>,
+    ) -> Result<TurnDecision> {
+        let failure = |detail: String| TurnDecision::Failed {
+            reason: TurnFailureReason::WebRetrievalFailed,
+            detail,
+        };
+        if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
+            return Ok(TurnDecision::Interrupted);
+        }
+        if !self.ctx.config.web.client {
+            return Ok(failure(
+                "Web Search/Fetch is disabled ([web] client = false).".into(),
+            ));
+        }
+        let (tool, field) = if name == "/web-search" {
+            ("WebSearch", "query")
+        } else {
+            ("WebFetch", "url")
+        };
+        if argument.is_empty() {
+            return Ok(failure(format!("Usage: {name} <{field}>")));
+        }
+        let id = crate::sse::toolcall::unique_call_id("web");
+        let input = serde_json::json!({field: argument}).to_string();
+        let calls = vec![build_tool_call_event(tool, &id, &input)?];
+        let mut tool_context = crate::context::ToolContext::from_shared(&self.ctx);
+        tool_context.human_web_command = true;
+        self.tools = Arc::new(ToolRunner::new(Arc::new(tool_context)));
+        self.ctx.stores.store.add_assistant("", "", &calls).await?;
+        self.announce_tool_calls(&calls);
+        let (_, results) = self.execute_tools_inner(calls, None, effects).await?;
+        if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
+            return Ok(TurnDecision::Interrupted);
+        }
+        let result = results
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("missing web tool result"))?;
+        if result.succeeded() {
+            self.local.final_text = result.content;
+            Ok(TurnDecision::Stop)
+        } else {
+            Ok(failure(result.content))
+        }
     }
 
     /// 执行一轮中的所有工具调用（Phase 3）。
@@ -142,7 +207,7 @@ impl super::TurnExecutor {
         calls: Vec<ToolCallEvent>,
         mut belief: Option<&mut crate::agent::belief::BeliefTracker>,
         effects: &mut Vec<TurnEffect>,
-    ) -> Result<bool> {
+    ) -> Result<(bool, Vec<crate::tools::runner::ToolExecution>)> {
         self.local.tool_call_count += calls.len() as u32;
         let order = self.local.signal_recovery_guard.then(|| {
             calls
@@ -269,7 +334,9 @@ impl super::TurnExecutor {
         self.maybe_append_todo_progress_reminder().await?;
 
         for r in &processed_results {
-            let preview = if r.tool_name == "Edit" {
+            let preview = if r.tool_name == "Edit"
+                || crate::tools::web::command(&self.local.current_user_input).is_some()
+            {
                 r.content.clone()
             } else if r.tool_name == "Read" || r.tool_name == "Write" {
                 first_line(&r.content).to_string() + "\n"
@@ -325,7 +392,7 @@ impl super::TurnExecutor {
                 terminal: None,
             });
         }
-        Ok(had_format_error)
+        Ok((had_format_error, processed_results))
     }
 
     fn observe_todo_progress(&mut self, results: &[crate::tools::runner::ToolExecution]) {
