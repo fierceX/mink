@@ -26,6 +26,7 @@ export type ToolState = 'running' | 'ok' | 'error' | 'stopped'
 /** Pick the variant for a mink tool name. */
 export function toolVariant(name: string): ToolVariant {
   if (/^Bash$|^Python/.test(name)) return 'bash'
+  if (name === 'RunCode') return 'code'
   if (name === 'Read') return 'read'
   if (name === 'Write') return 'write'
   if (name === 'Edit') return 'edit'
@@ -397,6 +398,84 @@ export function planPresentation(item: ToolItem): { transition: string; body: st
   const body = typeof value.data.content === 'string' ? value.data.content : ''
   if (transition === '' && body === '') return null
   return { transition, body }
+}
+
+/** One nested sub-call recorded inside a `RunCode` PTC run. */
+export interface PtcSubCallEntry {
+  id: string
+  toolName: string
+  status: 'succeeded' | 'failed' | 'blocked' | 'interrupted' | 'unknown'
+  durationMs: number
+}
+
+/** Structured `RunCode` (`PtcRun`) card payload parsed from `item.presentation` + `item.input`. */
+export interface PtcRunCard {
+  description: string
+  code: string
+  subCalls: PtcSubCallEntry[]
+  outputTruncated: boolean
+}
+
+function parsePtcSubCallStatus(raw: unknown): PtcSubCallEntry['status'] {
+  if (typeof raw === 'string') {
+    const lower = raw.toLowerCase()
+    if (lower === 'succeeded' || lower === 'failed' || lower === 'blocked' || lower === 'interrupted') {
+      return lower
+    }
+    return 'unknown'
+  }
+  if (typeof raw === 'object' && raw !== null) {
+    const state = (raw as { state?: unknown }).state
+    if (state === 'succeeded' || state === 'failed' || state === 'blocked' || state === 'interrupted') {
+      return state
+    }
+  }
+  return 'unknown'
+}
+
+/**
+ * PTC (`RunCode`) card: parses `ToolPresentation::PtcRun` (`kind: "ptc_run"` / `"PtcRun"`)
+ * together with `code` from `item.input`, returning null on unrecognized shapes so the
+ * generic in/out card remains the safe fallback.
+ */
+export function ptcCard(item: ToolItem): PtcRunCard | null {
+  if (item.name !== 'RunCode') return null
+  const pres = item.presentation as { kind?: unknown; data?: unknown } | undefined
+  if (typeof pres !== 'object' || pres === null) return null
+  if (pres.kind !== 'ptc_run' && pres.kind !== 'PtcRun') return null
+  if (typeof pres.data !== 'object' || pres.data === null) return null
+
+  const data = pres.data as Record<string, unknown>
+  if (typeof data['description'] !== 'string' || !Array.isArray(data['sub_calls'])) return null
+
+  const subCalls: PtcSubCallEntry[] = []
+  for (let i = 0; i < data['sub_calls'].length; i += 1) {
+    const entry = data['sub_calls'][i]
+    if (typeof entry !== 'object' || entry === null) return null
+    const row = entry as Record<string, unknown>
+    if (typeof row['tool_name'] !== 'string' || row['tool_name'] === '') return null
+    const id = typeof row['sub_call_id'] === 'string' && row['sub_call_id'] !== ''
+      ? row['sub_call_id']
+      : `sub-${i + 1}`
+    const durationMs = typeof row['duration_ms'] === 'number' && Number.isFinite(row['duration_ms'])
+      ? row['duration_ms']
+      : 0
+    subCalls.push({
+      id,
+      toolName: row['tool_name'],
+      status: parsePtcSubCallStatus(row['status']),
+      durationMs,
+    })
+  }
+
+  const args = toolArgs(item)
+  const code = argString(args, 'code') ?? ''
+  return {
+    description: data['description'],
+    code,
+    subCalls,
+    outputTruncated: data['output_truncated'] === true,
+  }
 }
 
 /**

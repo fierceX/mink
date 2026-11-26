@@ -568,3 +568,40 @@
   line-height: 18px;
   color: var(--dsw-alias-label-secondary);
 }
+
+.ptcCard {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.ptcTruncated {
+  font-size: 11px;
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.ptcSubCalls {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ptcOutput {
+  margin: 4px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  font-family: var(--ds-font-family-code);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.ptcOutput[data-error] {
+  color: var(--dsw-alias-state-error-primary);
+}

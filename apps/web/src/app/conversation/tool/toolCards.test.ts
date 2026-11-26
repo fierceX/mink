@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ToolItem } from '../../../data/types.ts'
-import { diffCard, readCard, searchCard, toolState, toolVariant } from './toolCards.ts'
+import { diffCard, ptcCard, readCard, searchCard, toolState, toolVariant } from './toolCards.ts'
 
 function tool(overrides: Partial<ToolItem>): ToolItem {
   return {
@@ -23,7 +23,52 @@ describe('toolVariant', () => {
     expect(toolVariant('Write')).toBe('write')
     expect(toolVariant('Edit')).toBe('edit')
     expect(toolVariant('Grep')).toBe('search')
+    expect(toolVariant('RunCode')).toBe('code')
     expect(toolVariant('TodoRead')).toBe('others')
+  })
+})
+
+describe('ptcCard', () => {
+  it('parses PtcRun presentation with code and sub-calls', () => {
+    const card = ptcCard(tool({
+      name: 'RunCode',
+      input: JSON.stringify({ code: 'inspect(await tools.Read(path="a.txt"))', description: 'Read file' }),
+      result: 'hello',
+      presentation: {
+        kind: 'ptc_run',
+        data: {
+          description: 'Read file',
+          output_truncated: true,
+          sub_calls: [
+            {
+              sub_call_id: 'call_1:ptc:1',
+              tool_name: 'Read',
+              status: { state: 'succeeded' },
+              duration_ms: 14,
+            },
+          ],
+        },
+      },
+    }))
+    expect(card).toEqual({
+      description: 'Read file',
+      code: 'inspect(await tools.Read(path="a.txt"))',
+      outputTruncated: true,
+      subCalls: [
+        {
+          id: 'call_1:ptc:1',
+          toolName: 'Read',
+          status: 'succeeded',
+          durationMs: 14,
+        },
+      ],
+    })
+  })
+
+  it('returns null when presentation shape is malformed so ToolCard falls back', () => {
+    expect(ptcCard(tool({ name: 'RunCode', presentation: { kind: 'ptc_run', data: 'bad' } }))).toBeNull()
+    expect(ptcCard(tool({ name: 'RunCode' }))).toBeNull()
+    expect(ptcCard(tool({ name: 'Bash', presentation: { kind: 'ptc_run', data: { description: 'x', sub_calls: [] } } }))).toBeNull()
   })
 })
 

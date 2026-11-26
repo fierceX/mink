@@ -34,6 +34,7 @@ import {
   planPresentation,
   goalReportCard,
   planCard,
+  ptcCard,
   readCard,
   searchCard,
   subAgentCard,
@@ -55,7 +56,7 @@ import css from './ToolRow.module.css'
  * a state dot: the row's state already rides the summary's colour and shimmer.
  */
 function toolIcon(name: string) {
-  if (['Bash', 'Python', 'PythonSandbox'].includes(name)) return <IconApiOutlineRegular size={14} />
+  if (['Bash', 'Python', 'PythonSandbox', 'RunCode'].includes(name)) return <IconApiOutlineRegular size={14} />
   if (name === 'Read') return <IconBrowseOutlineRegular size={14} />
   if (['Edit', 'Write'].includes(name)) return <IconEditOutlineRegular size={14} />
   if (['Grep', 'Glob'].includes(name)) return <IconSearchOutlineRegular size={14} />
@@ -106,6 +107,7 @@ export const ToolCard = memo(function ToolCard({ item, onOpenFile, onOpenArtifac
   const read = variant === 'read' ? readCard(item) : null
   const search = variant === 'search' ? searchCard(item) : null
   const delegation = subAgentCard(item)
+  const ptc = variant === 'code' ? ptcCard(item) : null
   // The legacy card offered both entry points inline: the file the call touched,
   // and the artifact a long result was written to.
   const filePath = filePathOf(item)
@@ -116,8 +118,8 @@ export const ToolCard = memo(function ToolCard({ item, onOpenFile, onOpenArtifac
   const planMeta = planPresentation(item)
   const report = goalReportCard(item)
   const result = item.result ?? null
-  const card = terminal || diff !== null || read !== null || search !== null || result === null ? null : result
-  const expandable = state !== 'running' && (result !== null || read !== null)
+  const card = terminal || diff !== null || read !== null || search !== null || ptc !== null || result === null ? null : result
+  const expandable = state !== 'running' && (result !== null || read !== null || ptc !== null)
   const open = expanded && expandable
   const status = stateStatus(state)
   const totals = useMemo(() => (diff === null ? null : diffTotals(diff.diffs)), [diff])
@@ -287,6 +289,36 @@ export const ToolCard = memo(function ToolCard({ item, onOpenFile, onOpenArtifac
                               <summary>原始结果</summary>
                               <pre className={css.planRawBody}>{item.result}</pre>
                             </details>
+                          )}
+                        </div>
+                      )
+                      : ptc !== null
+                      ? (
+                        <div className={css.ptcCard} data-ptc-card>
+                          <span className={css.reportHead}>
+                            <span className={css.reportKind}>{ptc.description || 'Python PTC'}</span>
+                            <span className={css.reportIteration}>{`${ptc.subCalls.length} sub-calls`}</span>
+                            {ptc.outputTruncated && <span className={css.ptcTruncated}>已截断</span>}
+                          </span>
+                          {ptc.code !== '' && (
+                            <details className={css.planRaw}>
+                              <summary>Python 代码</summary>
+                              <pre className={css.planRawBody}>{ptc.code}</pre>
+                            </details>
+                          )}
+                          {ptc.subCalls.length > 0 && (
+                            <div className={css.ptcSubCalls}>
+                              {ptc.subCalls.map(sub => (
+                                <div key={sub.id} className={css.todoRow} data-status={sub.status}>
+                                  <span className={css.todoContent}>{sub.toolName}</span>
+                                  <span className={css.todoMeta}>{`${sub.durationMs}ms`}</span>
+                                  <span className={css.todoStatus}>{sub.status}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {result !== null && result !== '' && (
+                            <pre className={css.ptcOutput} data-error={state === 'error' || undefined}>{result}</pre>
                           )}
                         </div>
                       )
