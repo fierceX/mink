@@ -763,3 +763,17 @@ fn delegated_scope_is_rendered_only_for_children_and_marks_the_depth_limit() {
     let limited = limited_builder.build_system_prompt().unwrap();
     assert!(limited.contains("Delegation depth 1 of 1; further delegation is unavailable."));
 }
+
+#[test]
+fn hybrid_ptc_mode_emits_ptc_mode_guidance_and_explicit_sdk_signatures() {
+    let mut config = Config::default();
+    config.ptc.mode = crate::ptc::PtcMode::Tool;
+    let prompt = builder_for_config(&["Read", "Glob", "RunCode"], config)
+        .build_system_prompt()
+        .unwrap();
+    assert!(prompt.contains("<ptc-mode>"));
+    assert!(prompt.contains("RunCode"));
+    assert!(!prompt.contains("prefer direct tools"));
+    assert!(prompt.contains("<ptc-sdk>"));
+    assert!(prompt.contains("async def Read(*, path: str"));
+}

@@ -256,6 +256,11 @@ pub fn render_ptc_mode_section(wire_tools: &[ModelTool]) -> String {
     )
 }
 
+/// Render the `<ptc-mode>` directive section for `PtcMode::Tool` (Hybrid mode).
+pub fn render_hybrid_ptc_mode_section() -> String {
+    "`RunCode` is available alongside direct tools for multi-step, batched, or filtered tool orchestration. Use a direct tool for a single trivial read, edit, or command; whenever a task needs 3+ reads/searches, loops, conditional branching, filtering/aggregation, or large intermediate outputs kept out of conversation history, SHOULD consolidate those steps into one `RunCode` call (`await tools.<Name>(...)`) instead of multiple direct turns.".to_string()
+}
+
 /// Render the deterministic `<ptc-sdk>` section for the given programmatic tools.
 ///
 /// Tools are emitted in lexicographic order so unchanged tool surfaces yield
@@ -277,7 +282,7 @@ pub fn render_python_sdk(
         "`RunCode` takes required `code` (Python 3 supporting top-level `await`) and `description` (5-10 words), plus optional `timeout` (seconds; default {default_timeout_secs}s, max {max_timeout_secs}s).\n"
     ));
     if mode == PtcMode::Tool {
-        out.push_str("Routing (Hybrid mode): prefer direct tools (or native parallel multi-tool calls in one turn) for single or simple independent steps. Use `RunCode` for loops, conditional branching, data-dependent chains, filtering/aggregation, or keeping large intermediate outputs out of conversation history. For tools already declared in the direct tool schema, parameter signatures are not repeated below.\n");
+        out.push_str("Routing (Hybrid mode): use a direct tool for a single trivial read/edit/command; whenever a step needs 3+ reads/searches, loops, conditional branching, filtering/aggregation, read-then-edit pipelines, or large intermediate outputs, SHOULD consolidate it into one `RunCode` call and `inspect()` only the summary. For tools already in the direct schema, docstrings are omitted below while parameter signatures are preserved.\n");
     }
     out.push_str("\nInside `RunCode`:\n");
     out.push_str("- `tools`, `inspect`, `gather`, `ToolCallError`, and `Image` are pre-injected globals (no import needed; `from tools import ...` also works).\n");
@@ -288,6 +293,9 @@ pub fn render_python_sdk(
     out.push_str("- Long-running jobs (>5-10 min): launch detached via `await tools.Bash(command=\"nohup <cmd> > run.log 2>&1 < /dev/null &\")` and inspect logs across turns instead of blocking foreground `RunCode`.\n");
     if image_capable {
         out.push_str("- `await tools.Read(path=\"image.png\")` returns an `Image` handle; pass it to `inspect(img)` to attach it to the next model request.\n");
+    }
+    if mode == PtcMode::Tool {
+        out.push_str("\nExample (batch-read, filter, and surface only matching summaries):\n```python\nfiles = (await tools.Glob(pattern=\"src/**/*.rs\"))[\"files\"][:10]\ndocs = await gather(*(tools.Read(path=f) for f in files))\ninspect([(d[\"path\"], d[\"total_lines\"]) for d in docs if \"needle\" in d[\"content\"]])\n```\n");
     }
     out.push_str("\nPython SDK bindings:\n\n```python\n");
     out.push_str("from typing import Any, Awaitable, Literal, TypedDict\n\n");
@@ -302,16 +310,7 @@ pub fn render_python_sdk(
         .map(|tool| tool.metadata.name.as_ref())
         .collect();
     append_active_result_typed_dicts(&active_names, &mut out);
-    let item_dict_tools: Vec<&ModelTool> = if mode == PtcMode::Tool {
-        sorted
-            .iter()
-            .copied()
-            .filter(|tool| !wire_tool_names.contains(tool.metadata.name.as_ref()))
-            .collect()
-    } else {
-        sorted.clone()
-    };
-    let item_param_types = collect_param_item_typed_dicts(&item_dict_tools, &mut out);
+    let item_param_types = collect_param_item_typed_dicts(&sorted, &mut out);
     out.push_str("class tools:\n");
 
     let mut exotic_tools = Vec::new();
@@ -319,20 +318,13 @@ pub fn render_python_sdk(
         let name = tool.metadata.name.as_ref();
         let ret = return_type_for_tool(name, image_capable);
         let dedup_wire = mode == PtcMode::Tool && wire_tool_names.contains(name);
+        let params = render_python_params(name, &tool.schema["input_schema"], &item_param_types);
         if dedup_wire {
             if is_valid_python_ident(name) {
                 out.push_str("    @staticmethod\n");
-                let _ = writeln!(
-                    out,
-                    "    async def {name}(**kwargs: Any) -> {ret}: ...  # args: see {name} schema"
-                );
+                let _ = writeln!(out, "    async def {name}({params}) -> {ret}: ...");
             } else {
-                exotic_tools.push((
-                    name,
-                    "**kwargs: Any".to_string(),
-                    ret,
-                    format!("args: see {name} schema"),
-                ));
+                exotic_tools.push((name, params, ret, String::new()));
             }
             continue;
         }
@@ -342,7 +334,6 @@ pub fn render_python_sdk(
             .and_then(Value::as_str)
             .map(collapse_doc)
             .unwrap_or_default();
-        let params = render_python_params(name, &tool.schema["input_schema"], &item_param_types);
         if is_valid_python_ident(name) {
             out.push_str("    @staticmethod\n");
             let _ = writeln!(out, "    async def {name}({params}) -> {ret}:");
@@ -576,12 +567,10 @@ mod tests {
         );
         assert!(rendered.contains("class ReadResult(TypedDict, total=False):"));
         assert!(!rendered.contains("class BashResult"));
-        assert!(
-            rendered.contains(
-                "async def Read(**kwargs: Any) -> ReadResult: ...  # args: see Read schema"
-            )
-        );
+        assert!(rendered.contains("async def Read(*, path: str) -> ReadResult: ..."));
         assert!(!rendered.contains("Long wire read description"));
+        assert!(!rendered.contains("prefer direct tools"));
+        assert!(rendered.contains("gather(*(tools.Read(path=f)"));
         assert!(rendered.contains("class CustomBatchItemsItem(TypedDict):"));
         assert!(rendered.contains("items: list[CustomBatchItemsItem]"));
         assert!(rendered.contains("Custom SDK-only batch tool."));

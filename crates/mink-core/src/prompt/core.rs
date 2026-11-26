@@ -102,6 +102,18 @@ pub(super) fn append_core_sections(builder: &Builder, document: &mut PromptDocum
                 referenced_tools,
                 consumed_facts: BTreeSet::new(),
             })?;
+        } else if ptc_mode == crate::ptc::PtcMode::Tool
+            && !builder.tool_surface.programmatic_tools().is_empty()
+        {
+            document.push(PromptSection {
+                id: "ptc-mode".into(),
+                tag: "ptc-mode".into(),
+                origin: PromptSectionOrigin::Workflow,
+                content: crate::ptc::sdk::render_hybrid_ptc_mode_section(),
+                name: None,
+                referenced_tools: ["RunCode".to_string()].into_iter().collect(),
+                consumed_facts: BTreeSet::new(),
+            })?;
         }
         if ptc_mode != crate::ptc::PtcMode::Off {
             let programmatic = builder.tool_surface.programmatic_tools();

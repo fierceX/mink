@@ -567,7 +567,7 @@
   },
   {
     "name": "RunCode",
-    "description": "Execute a Python 3 program with pre-injected globals (`tools`, `inspect`, `gather`, `ToolCallError`, `Image`; no import required) that orchestrates runtime tools via `await tools.<Name>(...)` and returns `inspect(...)` output plus bounded stdout/stderr.",
+    "description": "Execute a Python 3 program with pre-injected globals (`tools`, `inspect`, `gather`, `ToolCallError`, `Image`; no import required) that orchestrates runtime tools via `await tools.<Name>(...)` and returns `inspect(...)` output plus bounded stdout/stderr. Prefer `RunCode` over multiple direct `Read`/`Grep`/`Bash` turns whenever batching 3+ reads/searches, looping, filtering/aggregating results, or keeping large intermediate outputs out of conversation history.",
     "input_schema": {
       "type": "object",
       "properties": {
