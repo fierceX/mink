@@ -17,12 +17,12 @@ Rust 发布包为 `mink-core`，库 crate 名为 `mink`。发布包提供可嵌�
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.9.1", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.10.0", default-features = false, features = ["runtime"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
 ```
 
-公开入口为 `mink::prelude`、`mink::runtime`、`mink::sdk_protocol` 和 `mink::ui`。启用
+公开入口为 `mink::prelude`、`mink::runtime`（含 `llm`/`tools`/`vfs`/`ptc`/`goal`/`ui` 分组子模块）和 `mink::sdk_protocol`。启用
 `config-file` feature 后还可使用 `mink::config_file`，它提供与 CLI/server 共用的
 `.minkrc` schema 解析入口。
 
@@ -256,7 +256,7 @@ Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。`mink-core` 发布�
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.9.1", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.10.0", default-features = false, features = ["runtime"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
 ```

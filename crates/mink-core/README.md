@@ -1,6 +1,6 @@
 # mink-core
 
-> 更新日期：2026-10-27
+> 更新日期：2026-11-27
 
 `mink-core` 是对外发布的 Rust 包；库 crate 名为 `mink`。
 
@@ -10,7 +10,7 @@
 
 ## 包内容
 
-- `mink::runtime` / `mink::prelude`：Rust 嵌入式入口，提供唯一 shutdown owner `AgentRuntime`、可克隆 `AgentRuntimeHandle`、异步 `EventSink`、流式事件和 turn outcome。
+- `mink::runtime` / `mink::prelude`：Rust 嵌入式入口，提供唯一 shutdown owner `AgentRuntime`、可克隆 `AgentRuntimeHandle`（含 `handle.goals()` `GoalController`）、分组子模块 `mink::runtime::{llm, tools, vfs, ptc, goal, ui}`、Python 宿主 PTC（`RunCode`）、异步 `EventSink`、流式事件和 turn outcome。
 - `mink::sdk_protocol`：Agent JSONL 协议类型和 SDK 适配。
 - `mink::runtime::session`：只读 session 发现、读取与统一 usage 汇总。
 - `src/agent`、`src/tools`、`src/session`、`src/llm`：Mink 的主循环、工具、持久化和 LLM 流式客户端核心。
@@ -21,7 +21,7 @@
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.9.1", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.10.0", default-features = false, features = ["runtime"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
 ```

@@ -19,6 +19,7 @@ include = [
     "!/src/**/*_tests.rs",
     "!/src/**/tests.rs",
     "!/src/**/tests/**",
+    "!/src/regression.rs",
     "!/src/regression/**",
     "!/src/runtime/builder_tests/**",
     "/skills/**",
