@@ -41,7 +41,7 @@ cargo build --release
 ### 2. Rust 嵌入
 
 ```toml
-# Cargo.toml（需搭配 tokio、anyhow）
+[dependencies]
 mink = { package = "mink-core", version = "0.10.0", default-features = false, features = ["runtime"] }
 ```
 

@@ -117,7 +117,8 @@ serde_json = "1"
         else:
             (project / f'src/bin/example_{index}.rs').write_text(code)
     subprocess.run(['cargo', 'check', '--manifest-path', str(project / 'Cargo.toml'), '--all-targets', '--target-dir', str(ROOT / 'target/doc-examples')], check=True)
-    subprocess.run(['cargo', 'test', '--manifest-path', str(project / 'Cargo.toml'), '--lib', '--target-dir', str(ROOT / 'target/doc-examples')], check=True)
+    if (project / 'src/lib.rs').exists():
+        subprocess.run(['cargo', 'test', '--manifest-path', str(project / 'Cargo.toml'), '--lib', '--target-dir', str(ROOT / 'target/doc-examples')], check=True)
     subprocess.run(['cargo', 'run', '--quiet', '--manifest-path', str(project / 'Cargo.toml'), '--bin', 'doc_tool_schemas', '--target-dir', str(ROOT / 'target/doc-examples'), '--', str(project)], check=True)
     schemas = {mode: {tool['name']: tool['input_schema'] for tool in json.loads((project / f'{mode}.json').read_text())} for mode in ['hashline', 'replace']}
     for file in files:

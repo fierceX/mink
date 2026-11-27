@@ -70,7 +70,7 @@ const index = readFileSync(resolve(root, 'docs/index.html'), 'utf8');
 for (const match of index.matchAll(/(?:src|href)="(assets\/[^"#]+)"/g)) assets.add(match[1]);
 for (const asset of assets) if (!existsSync(resolve(root, 'docs', asset))) errors.push(`missing static asset ${asset}`);
 const replay = JSON.parse(readFileSync(resolve(root,'docs/assets/hero-replay.json'),'utf8'));
-assert.ok(paths.has(replay.meta.caseDoc));
+assert.ok(existsSync(resolve(root, 'docs', replay.meta.caseDoc)));
 if (errors.length) { console.error(errors.join('\n')); process.exitCode = 1; }
 else {
   console.log(`Documentation check passed: ${manifest.length} public entries, ${documents.size} Markdown sources, ${assets.size} static assets.`);
