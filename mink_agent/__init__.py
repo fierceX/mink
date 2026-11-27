@@ -945,8 +945,10 @@ class AgentSession:
             if not isinstance(self._config.ptc_config, dict):
                 raise ValueError("ptc_config must be a dict")
             ptc.update(self._config.ptc_config)
+        if ptc.get("mode") == "hybrid":
+            ptc["mode"] = "tool"
         if self._config.ptc_mode != "off" and "mode" not in ptc:
-            ptc["mode"] = self._config.ptc_mode
+            ptc["mode"] = "tool" if self._config.ptc_mode == "hybrid" else self._config.ptc_mode
         if ptc:
             options["ptc"] = ptc
         web = {
@@ -1061,8 +1063,10 @@ class AgentSession:
             if value > 2**64 - 1:
                 raise ValueError("provider_http_timeout_secs must fit in u64")
         self._validate_recovery_config(cfg)
-        if cfg.ptc_mode not in ("off", "tool", "exclusive"):
-            raise ValueError("ptc_mode must be 'off', 'tool', or 'exclusive'")
+        if cfg.ptc_mode not in ("off", "tool", "hybrid", "exclusive"):
+            raise ValueError("ptc_mode must be 'off', 'tool'/'hybrid', or 'exclusive'")
+        if cfg.ptc_config is not None and not isinstance(cfg.ptc_config, dict):
+            raise ValueError("ptc_config must be a dict")
 
     @staticmethod
     def _validate_recovery_config(cfg: "SandboxConfig") -> None:

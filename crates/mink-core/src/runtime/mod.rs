@@ -26,7 +26,7 @@ pub mod llm {
 pub mod tools {
     pub use super::custom_tools::{
         AgentTool, ToolActivation, ToolCapabilityOffer, ToolDefinition, ToolError,
-        ToolExecutionContext, ToolExecutionMode, ToolOutput,
+        ToolExecutionContext, ToolExecutionMode, ToolOutput, ToolPtcExposure,
     };
     pub use super::options::ToolOptions;
     pub use crate::config::{ToolApprovalMode, ToolApprovalPolicy};
@@ -49,11 +49,15 @@ pub mod vfs {
 }
 
 pub mod ptc {
+    pub use crate::cancel::{CancellationToken, InterruptSignal};
+    #[cfg(feature = "python-sandbox")]
+    pub use crate::ptc::WasiPythonPtcRuntime;
     pub use crate::ptc::{
         PtcBackendKind, PtcBindingDispatcher, PtcBindingError, PtcBindingSuccess, PtcConfig,
         PtcFailureKind, PtcImageDescriptor, PtcMode, PtcOutputItem, PtcRunFailure, PtcRunRequest,
-        PtcRunResult, PtcRunSpec, PtcRuntime,
+        PtcRunResult, PtcRunSpec, PtcRuntime, SubprocessPythonPtcRuntime,
     };
+    pub use crate::tools::extension::ToolPtcExposure;
     pub use crate::ui::{PtcRunDisplay, PtcSubCallDisplay};
 }
 
@@ -68,6 +72,7 @@ pub mod ui {
 }
 
 pub use crate::agent::failure::TurnFailureReason;
+pub use crate::cancel::{CancellationToken, InterruptSignal};
 pub use crate::capabilities::CapabilitySnapshot;
 pub use crate::capabilities::model_capabilities::{
     ImageDetail, ImageInputCapability, ImageLimitsOverrides, OpenAiChatImageUrlLimits,
@@ -91,10 +96,12 @@ pub use crate::llm::client::{
 };
 pub use crate::llm::deepseek_web::DeepSeekWebResponse;
 pub use crate::llm::recovery::{LlmUpstreamError, UpstreamFailureKind};
+#[cfg(feature = "python-sandbox")]
+pub use crate::ptc::WasiPythonPtcRuntime;
 pub use crate::ptc::{
     PtcBackendKind, PtcBindingDispatcher, PtcBindingError, PtcBindingSuccess, PtcConfig,
     PtcFailureKind, PtcImageDescriptor, PtcMode, PtcOutputItem, PtcRunFailure, PtcRunRequest,
-    PtcRunResult, PtcRunSpec, PtcRuntime,
+    PtcRunResult, PtcRunSpec, PtcRuntime, SubprocessPythonPtcRuntime,
 };
 pub use crate::resources::ResourceHandler;
 pub use crate::runtime::extensions::{PostInitContext, PostInitHook, PrefixSource};
@@ -177,7 +184,7 @@ pub fn validate_runtime_limits(
 
 pub use custom_tools::{
     AgentTool, ToolActivation, ToolCapabilityOffer, ToolDefinition, ToolError,
-    ToolExecutionContext, ToolExecutionMode, ToolOutput,
+    ToolExecutionContext, ToolExecutionMode, ToolOutput, ToolPtcExposure,
 };
 pub use sdk_adapter::{
     exit_code_from_turn, final_from_outcome, runtime_skills_from_sdk_request,

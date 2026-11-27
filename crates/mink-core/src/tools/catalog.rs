@@ -177,8 +177,31 @@ impl ToolCatalog {
     }
 }
 
-pub fn validate_tool_config(config: &ToolConfig) -> Result<()> {
-    ToolCatalog::builtin()?.validate_configured_names(config)
+/// Validate configured tool names and approval overrides across both the built-in
+/// catalog and host-registered custom tools.
+pub(crate) fn validate_tool_config_with_custom(
+    config: &ToolConfig,
+    custom_tools: &[crate::tools::extension::RegisteredCustomTool],
+) -> Result<()> {
+    validate_custom_tools(custom_tools)?;
+    let custom_names: BTreeSet<String> = custom_tools
+        .iter()
+        .map(|tool| tool.definition.name.clone())
+        .collect();
+    if let Some(names) = &config.enabled_tools {
+        let mut seen = BTreeSet::new();
+        for name in names {
+            ensure!(seen.insert(name), "duplicate enabled tool '{name}'");
+        }
+    }
+    let mut builtin_config = config.clone();
+    if let Some(names) = &mut builtin_config.enabled_tools {
+        names.retain(|name| !custom_names.contains(name));
+    }
+    builtin_config
+        .tool_approval
+        .retain(|name, _| !custom_names.contains(name));
+    ToolCatalog::builtin()?.validate_configured_names(&builtin_config)
 }
 
 pub(crate) fn validate_custom_tools(

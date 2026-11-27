@@ -17,6 +17,9 @@ pub use runtime::{
     PtcBindingDispatcher, PtcBindingError, PtcBindingSuccess, PtcFailureKind, PtcImageDescriptor,
     PtcOutputItem, PtcRunFailure, PtcRunRequest, PtcRunResult, PtcRunSpec, PtcRuntime,
 };
+pub use subprocess_py::SubprocessPythonPtcRuntime;
+#[cfg(feature = "python-sandbox")]
+pub use wasi_py::WasiPythonPtcRuntime;
 
 /// Activation mode for Programmatic Tool Calling (`RunCode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -27,6 +30,7 @@ pub enum PtcMode {
     Off,
     /// Recommended Hybrid mode: native tools remain directly callable alongside `RunCode`
     /// and a deduplicated `<ptc-sdk>` for loops, filtering, and multi-step orchestration.
+    #[serde(alias = "hybrid")]
     Tool,
     /// Strict/embedded domain mode: wire tools expose `RunCode` + planning/control tools
     /// (`Plan*`, `Todo*`, `Goal*`, `SubAgent`) while workspace/exec tools live inside `RunCode`.
@@ -122,8 +126,96 @@ impl Default for PtcConfig {
 }
 
 impl PtcConfig {
+    /// Create a `PtcConfig` with defaults and the given activation mode.
+    pub fn new(mode: PtcMode) -> Self {
+        Self {
+            mode,
+            ..Self::default()
+        }
+    }
+
+    /// Create a Hybrid (`PtcMode::Tool`) configuration with defaults.
+    pub fn tool() -> Self {
+        Self::new(PtcMode::Tool)
+    }
+
+    /// Create an `Exclusive` (`PtcMode::Exclusive`) configuration with defaults.
+    pub fn exclusive() -> Self {
+        Self::new(PtcMode::Exclusive)
+    }
+
+    pub fn with_mode(mut self, mode: PtcMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn with_backend(mut self, backend: PtcBackendKind) -> Self {
+        self.backend = backend;
+        self
+    }
+
+    pub fn with_python_executable(mut self, executable: impl Into<String>) -> Self {
+        self.python_executable = Some(executable.into());
+        self
+    }
+
+    pub fn with_timeout_secs(mut self, secs: u64) -> Self {
+        self.timeout_secs = secs;
+        self
+    }
+
+    pub fn with_max_timeout_secs(mut self, secs: u64) -> Self {
+        self.max_timeout_secs = secs;
+        self
+    }
+
+    pub fn with_max_parallel_sub_calls(mut self, max: usize) -> Self {
+        self.max_parallel_sub_calls = max;
+        self
+    }
+
+    pub fn with_max_sub_calls_per_minute(mut self, max: usize) -> Self {
+        self.max_sub_calls_per_minute = max;
+        self
+    }
+
+    pub fn with_max_output_bytes(mut self, bytes: usize) -> Self {
+        self.max_output_bytes = bytes;
+        self
+    }
+
+    pub fn with_max_message_bytes(mut self, bytes: usize) -> Self {
+        self.max_message_bytes = bytes;
+        self
+    }
+
+    pub fn with_max_pending_calls(mut self, max: usize) -> Self {
+        self.max_pending_calls = max;
+        self
+    }
+
+    pub fn with_stop_grace_ms(mut self, ms: u64) -> Self {
+        self.stop_grace_ms = ms;
+        self
+    }
+
+    /// Resolve timeout bounds and working directory for a custom [`PtcRuntime::resolve`] implementation.
+    pub fn resolve_run_spec(&self, request: PtcRunRequest) -> Result<PtcRunSpec> {
+        protocol::resolve_timeout_and_cwd(self, request)
+    }
+
     /// Validate PTC configuration bounds and backend prerequisites before creating a session.
     pub fn validate(&self, sandbox_python: &SandboxPythonConfig) -> Result<()> {
+        self.validate_for_runtime(sandbox_python, false)
+    }
+
+    /// Validate PTC configuration bounds, skipping built-in WASI prerequisites when a custom
+    /// [`PtcRuntime`] is supplied by the host.
+    pub fn validate_for_runtime(
+        &self,
+        sandbox_python: &SandboxPythonConfig,
+        has_custom_runtime: bool,
+    ) -> Result<()> {
         if self.timeout_secs < 5 {
             bail!(
                 "ptc.timeout_secs must be at least 5 seconds; got {}",
@@ -157,7 +249,10 @@ impl PtcConfig {
         {
             bail!("ptc.python_executable must not be empty when set");
         }
-        if self.mode != PtcMode::Off && self.backend == PtcBackendKind::WasiPython {
+        if !has_custom_runtime
+            && self.mode != PtcMode::Off
+            && self.backend == PtcBackendKind::WasiPython
+        {
             #[cfg(not(feature = "python-sandbox"))]
             bail!("ptc backend 'wasi_python' requires the 'python-sandbox' feature");
             #[cfg(feature = "python-sandbox")]
@@ -224,5 +319,58 @@ mod tests {
             ..PtcConfig::default()
         };
         assert!(bad_parallel.validate(&sp).is_err());
+    }
+
+    #[test]
+    fn ptc_mode_deserializes_hybrid_alias_and_fluent_builders_round_trip() {
+        let mode: PtcMode = serde_json::from_str("\"hybrid\"").unwrap();
+        assert_eq!(mode, PtcMode::Tool);
+
+        let cfg = PtcConfig::exclusive()
+            .with_mode(PtcMode::Tool)
+            .with_backend(PtcBackendKind::WasiPython)
+            .with_python_executable("python3.12")
+            .with_timeout_secs(45)
+            .with_max_timeout_secs(600)
+            .with_max_parallel_sub_calls(4)
+            .with_max_sub_calls_per_minute(120)
+            .with_max_output_bytes(8_192)
+            .with_max_message_bytes(16_384)
+            .with_max_pending_calls(12)
+            .with_stop_grace_ms(750);
+        assert_eq!(cfg.mode, PtcMode::Tool);
+        assert_eq!(cfg.backend, PtcBackendKind::WasiPython);
+        assert_eq!(cfg.python_executable.as_deref(), Some("python3.12"));
+        assert_eq!(cfg.timeout_secs, 45);
+        assert_eq!(cfg.max_timeout_secs, 600);
+        assert_eq!(cfg.max_parallel_sub_calls, 4);
+        assert_eq!(cfg.max_sub_calls_per_minute, 120);
+        assert_eq!(cfg.max_output_bytes, 8_192);
+        assert_eq!(cfg.max_message_bytes, 16_384);
+        assert_eq!(cfg.max_pending_calls, 12);
+        assert_eq!(cfg.stop_grace_ms, 750);
+
+        // Built-in WASI validation rejects missing wasm_path (or missing feature), while
+        // custom PtcRuntime skips built-in WASI backend prerequisite checks.
+        let sp = SandboxPythonConfig {
+            wasm_path: String::new(),
+            ..SandboxPythonConfig::default()
+        };
+        assert!(cfg.validate(&sp).is_err());
+        assert!(cfg.validate_for_runtime(&sp, true).is_ok());
+
+        let spec = cfg
+            .resolve_run_spec(PtcRunRequest {
+                code: "inspect(1)".into(),
+                cwd: std::path::PathBuf::from("."),
+                tool_names: vec!["Read".into()],
+                timeout_secs: None,
+                cancel: crate::cancel::CancellationToken::new(),
+                interrupt: crate::cancel::InterruptSignal::new(),
+                sandbox: None,
+            })
+            .unwrap();
+        assert_eq!(spec.timeout, std::time::Duration::from_secs(45));
+        assert!(spec.cwd.is_absolute());
     }
 }

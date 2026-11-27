@@ -397,3 +397,117 @@ fn ptc_modes_partition_wire_and_programmatic_surfaces() {
     assert!(narrowed_surface.has_programmatic("Read"));
     assert!(narrowed_surface.has_programmatic("Grep"));
 }
+
+#[test]
+fn custom_tool_ptc_exposure_and_custom_only_enabled_tools_partition_cleanly() {
+    struct StubTool;
+    #[async_trait::async_trait]
+    impl crate::runtime::AgentTool for StubTool {
+        fn definition(&self) -> crate::runtime::ToolDefinition {
+            unreachable!("surface_tests constructs RegisteredCustomTool directly")
+        }
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::runtime::ToolExecutionContext,
+        ) -> std::result::Result<crate::runtime::ToolOutput, crate::runtime::ToolError> {
+            Ok(crate::runtime::ToolOutput::text("ok"))
+        }
+    }
+
+    let make_custom = |name: &str, exposure: crate::tools::extension::ToolPtcExposure| {
+        let def = crate::tools::extension::ToolDefinition::new(
+            name,
+            "custom",
+            serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false}),
+        )
+        .with_ptc_exposure(exposure);
+        crate::tools::extension::RegisteredCustomTool {
+            definition: def,
+            executor: std::sync::Arc::new(StubTool),
+        }
+    };
+
+    let custom_tools = vec![
+        make_custom(
+            "DefaultCustom",
+            crate::tools::extension::ToolPtcExposure::Default,
+        ),
+        make_custom(
+            "DirectCustom",
+            crate::tools::extension::ToolPtcExposure::DirectOnly,
+        ),
+        make_custom(
+            "SdkCustom",
+            crate::tools::extension::ToolPtcExposure::ProgrammaticOnly,
+        ),
+    ];
+
+    // Off mode keeps all three on wire with no programmatic tools.
+    let mut off_cfg = ToolConfig::from_config(&Config::default());
+    off_cfg.enabled_tools = Some(vec![
+        "DefaultCustom".into(),
+        "DirectCustom".into(),
+        "SdkCustom".into(),
+    ]);
+    let off_ctx = ToolResolutionContext::from_runtime(AgentRole::Primary, &off_cfg, false);
+    let off_surface = ModelToolSurface::resolve_with_custom(
+        ToolCatalog::builtin().unwrap(),
+        &off_cfg,
+        &off_ctx,
+        &custom_tools,
+    )
+    .unwrap();
+    assert!(off_surface.has_all(&["DefaultCustom", "DirectCustom", "SdkCustom"]));
+    assert!(!off_surface.has("RunCode"));
+    assert!(off_surface.programmatic_tools().is_empty());
+
+    // Tool (Hybrid) mode: DefaultCustom on both, DirectCustom wire-only, SdkCustom SDK-only, RunCode preserved!
+    let mut tool_cfg = off_cfg.clone();
+    tool_cfg.ptc.mode = crate::ptc::PtcMode::Tool;
+    let tool_ctx = ToolResolutionContext::from_runtime(AgentRole::Primary, &tool_cfg, false);
+    let tool_surface = ModelToolSurface::resolve_with_custom(
+        ToolCatalog::builtin().unwrap(),
+        &tool_cfg,
+        &tool_ctx,
+        &custom_tools,
+    )
+    .unwrap();
+    assert!(tool_surface.has_all(&["RunCode", "DefaultCustom", "DirectCustom"]));
+    assert!(!tool_surface.has("SdkCustom"));
+    assert!(tool_surface.has_programmatic("DefaultCustom"));
+    assert!(tool_surface.has_programmatic("SdkCustom"));
+    assert!(!tool_surface.has_programmatic("DirectCustom"));
+
+    // Exclusive mode: DirectCustom stays on wire alongside RunCode; DefaultCustom & SdkCustom live in RunCode.
+    let mut exc_cfg = off_cfg.clone();
+    exc_cfg.ptc.mode = crate::ptc::PtcMode::Exclusive;
+    let exc_ctx = ToolResolutionContext::from_runtime(AgentRole::Primary, &exc_cfg, false);
+    let exc_surface = ModelToolSurface::resolve_with_custom(
+        ToolCatalog::builtin().unwrap(),
+        &exc_cfg,
+        &exc_ctx,
+        &custom_tools,
+    )
+    .unwrap();
+    assert!(exc_surface.has_all(&["RunCode", "DirectCustom"]));
+    assert!(!exc_surface.has("DefaultCustom"));
+    assert!(!exc_surface.has("SdkCustom"));
+    assert!(exc_surface.has_programmatic("DefaultCustom"));
+    assert!(exc_surface.has_programmatic("SdkCustom"));
+    assert!(!exc_surface.has_programmatic("DirectCustom"));
+
+    // Empty enabled_tools still disables everything including RunCode.
+    let mut empty_cfg = exc_cfg.clone();
+    empty_cfg.enabled_tools = Some(Vec::new());
+    let empty_ctx = ToolResolutionContext::from_runtime(AgentRole::Primary, &empty_cfg, false);
+    let empty_surface = ModelToolSurface::resolve_with_custom(
+        ToolCatalog::builtin().unwrap(),
+        &empty_cfg,
+        &empty_ctx,
+        &custom_tools,
+    )
+    .unwrap();
+    assert!(empty_surface.names().next().is_none());
+    assert!(empty_surface.programmatic_tools().is_empty());
+}

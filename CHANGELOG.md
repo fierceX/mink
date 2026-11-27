@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **PTC 库嵌入参数与扩展面补齐**：
+  - `AgentOptions` 新增单项 PTC 参数设置器（`with_ptc_backend`、`with_ptc_python_executable`、`with_ptc_timeout_secs`、`with_ptc_max_timeout_secs`、`with_ptc_max_parallel_sub_calls`、`with_ptc_max_sub_calls_per_minute`、`with_ptc_max_output_bytes`、`with_ptc_max_message_bytes`、`with_ptc_max_pending_calls`、`with_ptc_stop_grace_ms`），`PtcConfig` 新增流式构造与 `resolve_run_spec()`；`mink::runtime::ptc` 补齐 `CancellationToken`、`InterruptSignal`、`SubprocessPythonPtcRuntime`（及可选 `WasiPythonPtcRuntime`）与 `ToolPtcExposure`。
+  - 新增 `ToolDefinition::with_ptc_exposure(ToolPtcExposure)` 控制自定义工具在 PTC 下的暴露面（`Default` / `DirectOnly` / `ProgrammaticOnly`），修复 `validate_runtime_config` / `build_runtime` 将自定义工具误判为未知工具、仅启用自定义工具时 `ModelToolSurface` 误隐藏 `RunCode` 以及注入自定义 `PtcRuntime` 仍被内置 `WasiPython` 门控拦截的问题；`PtcMode` 与 Python `SandboxConfig.ptc_mode` 统一支持 `"hybrid"` 别名并补齐 Rust/Python 集成文档。
+
 - **架构、公共 API 收敛与性能/边界优化**：
   - **破坏性变更（Rust 嵌入 API）**：将 `AgentRuntimeHandle` / `AgentRuntime` 上的 22+ 个 Goal 控制方法收口为 `handle.goals()` / `runtime.goals()` 返回的 `GoalController<'_>`（同时移除已废弃的直调入口 `create_goal` / `create_and_start_goal`）；新增分组公共子模块 `mink::runtime::{llm, tools, vfs, ptc, goal, ui}`，将 `atomic_replace` / `restrict_private_dir` / `reexec_in_sandbox` 标为 `#[doc(hidden)]`，并将 `mink::prelude` 精简为约 25 个核心嵌入类型。
   - **Edit 边界与统一错误分类**：`Edit`（Hashline / Replace）在读取前增加文件大小预检（`file_write_max_bytes`），`move_file_noclobber` 支持跨文件系统回退拷贝替换，禁止绝对路径后缀回退；对齐 `reqwest::Error` HTTP 状态码与 `llm::recovery::is_retryable_http_status`，取消态 `send_once` 定型为永久错误，Goal 期间普通轮次返回类型化 `RuntimeError::GoalActive`。

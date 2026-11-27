@@ -301,13 +301,16 @@ impl AgentOptions {
     /// This is the same check used by the runtime builder, exposed for hosts
     /// that need to reject layered config before handing it to the runtime.
     pub fn validate_runtime_config(&self) -> anyhow::Result<()> {
-        crate::config::validate_runtime_config(&self.config)?;
-        crate::tools::catalog::validate_tool_config(&crate::context::ToolConfig::from_config(
+        crate::config::validate_runtime_config_with_options(
             &self.config,
-        ))?;
+            self.ptc_runtime.is_some(),
+        )?;
         let custom_tools =
             crate::runtime::custom_tools::freeze_custom_tools(self.custom_tools.clone());
-        crate::tools::catalog::validate_custom_tools(&custom_tools)?;
+        crate::tools::catalog::validate_tool_config_with_custom(
+            &crate::context::ToolConfig::from_config(&self.config),
+            &custom_tools,
+        )?;
         Ok(())
     }
 
@@ -726,6 +729,56 @@ impl AgentOptions {
 
     pub fn with_ptc_mode(mut self, mode: crate::ptc::PtcMode) -> Self {
         self.config.ptc.mode = mode;
+        self
+    }
+
+    pub fn with_ptc_backend(mut self, backend: crate::ptc::PtcBackendKind) -> Self {
+        self.config.ptc.backend = backend;
+        self
+    }
+
+    pub fn with_ptc_python_executable(mut self, executable: impl Into<String>) -> Self {
+        self.config.ptc.python_executable = Some(executable.into());
+        self
+    }
+
+    pub fn with_ptc_timeout_secs(mut self, secs: u64) -> Self {
+        self.config.ptc.timeout_secs = secs;
+        self
+    }
+
+    pub fn with_ptc_max_timeout_secs(mut self, secs: u64) -> Self {
+        self.config.ptc.max_timeout_secs = secs;
+        self
+    }
+
+    pub fn with_ptc_max_parallel_sub_calls(mut self, max: usize) -> Self {
+        self.config.ptc.max_parallel_sub_calls = max;
+        self
+    }
+
+    pub fn with_ptc_max_sub_calls_per_minute(mut self, max: usize) -> Self {
+        self.config.ptc.max_sub_calls_per_minute = max;
+        self
+    }
+
+    pub fn with_ptc_max_output_bytes(mut self, bytes: usize) -> Self {
+        self.config.ptc.max_output_bytes = bytes;
+        self
+    }
+
+    pub fn with_ptc_max_message_bytes(mut self, bytes: usize) -> Self {
+        self.config.ptc.max_message_bytes = bytes;
+        self
+    }
+
+    pub fn with_ptc_max_pending_calls(mut self, max: usize) -> Self {
+        self.config.ptc.max_pending_calls = max;
+        self
+    }
+
+    pub fn with_ptc_stop_grace_ms(mut self, ms: u64) -> Self {
+        self.config.ptc.stop_grace_ms = ms;
         self
     }
 

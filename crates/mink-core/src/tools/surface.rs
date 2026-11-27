@@ -100,6 +100,7 @@ pub enum ToolHiddenReason {
 pub struct ModelTool {
     pub metadata: ToolMetadata,
     pub schema: serde_json::Value,
+    pub(crate) ptc_exposure: crate::tools::extension::ToolPtcExposure,
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +164,7 @@ impl ModelToolSurface {
             .iter()
             .map(|tool| tool.definition.name.clone())
             .collect::<BTreeSet<_>>();
+        let disable_all_tools = config.enabled_tools.as_ref().is_some_and(Vec::is_empty);
         let mut builtin_config = config.clone();
         if let Some(names) = &mut builtin_config.enabled_tools {
             names.retain(|name| !custom_names.contains(name));
@@ -171,7 +173,7 @@ impl ModelToolSurface {
             .tool_approval
             .retain(|name, _| !custom_names.contains(name));
         let (mut all_tools, mut hidden) =
-            Self::resolve_unpartitioned(catalog, &builtin_config, context)?;
+            Self::resolve_unpartitioned(catalog, &builtin_config, context, disable_all_tools)?;
         let whitelist = config.enabled_tools.as_ref();
         for tool in custom_tools {
             let definition = &tool.definition;
@@ -218,7 +220,11 @@ impl ModelToolSurface {
                 }
             }
             let schema = serde_json::json!({"name": definition.name, "description": definition.summary, "input_schema": definition.input_schema});
-            all_tools.push(ModelTool { metadata, schema });
+            all_tools.push(ModelTool {
+                metadata,
+                schema,
+                ptc_exposure: definition.ptc_exposure,
+            });
         }
         let active_names: BTreeSet<String> = all_tools
             .iter()
@@ -245,7 +251,9 @@ impl ModelToolSurface {
         config: &ToolConfig,
         context: &ToolResolutionContext,
     ) -> Result<Self> {
-        let (all_tools, hidden) = Self::resolve_unpartitioned(catalog, config, context)?;
+        let disable_all_tools = config.enabled_tools.as_ref().is_some_and(Vec::is_empty);
+        let (all_tools, hidden) =
+            Self::resolve_unpartitioned(catalog, config, context, disable_all_tools)?;
         Ok(Self::finalize(all_tools, hidden, context.ptc_mode))
     }
 
@@ -253,6 +261,7 @@ impl ModelToolSurface {
         catalog: &ToolCatalog,
         config: &ToolConfig,
         context: &ToolResolutionContext,
+        disable_all_tools: bool,
     ) -> Result<(Vec<ModelTool>, BTreeMap<String, ToolHiddenReason>)> {
         catalog.validate_configured_names(config)?;
         validate_dependency_graph(catalog)?;
@@ -285,7 +294,7 @@ impl ModelToolSurface {
                     hidden.insert(tool.name.clone(), ToolHiddenReason::FeatureUnavailable);
                     continue;
                 }
-                if whitelist.as_ref().is_some_and(|names| names.is_empty()) {
+                if disable_all_tools {
                     hidden.insert(tool.name.clone(), ToolHiddenReason::NotWhitelisted);
                     continue;
                 }
@@ -379,7 +388,11 @@ impl ModelToolSurface {
             .filter(|(_, metadata)| candidates.contains(metadata.name.as_ref()))
             .map(|(tool, metadata)| {
                 let schema = resolved_schema(tool.schema.clone(), metadata.name.as_ref(), config);
-                ModelTool { metadata, schema }
+                ModelTool {
+                    metadata,
+                    schema,
+                    ptc_exposure: crate::tools::extension::ToolPtcExposure::Default,
+                }
             })
             .collect();
         Ok((ordered, hidden))
@@ -394,22 +407,41 @@ impl ModelToolSurface {
         let (ordered, programmatic_ordered) = match ptc_mode {
             crate::ptc::PtcMode::Off => (all_tools, Vec::new()),
             crate::ptc::PtcMode::Tool => {
-                let programmatic = if has_run_code {
-                    all_tools
-                        .iter()
-                        .filter(|t| is_programmatic_eligible(t.metadata.name.as_ref()))
-                        .cloned()
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                (all_tools, programmatic)
+                let mut wire = Vec::new();
+                let mut programmatic = Vec::new();
+                for tool in all_tools {
+                    let eligible = is_programmatic_eligible(tool.metadata.name.as_ref());
+                    match tool.ptc_exposure {
+                        crate::tools::extension::ToolPtcExposure::DirectOnly => {
+                            wire.push(tool);
+                        }
+                        crate::tools::extension::ToolPtcExposure::ProgrammaticOnly => {
+                            if eligible {
+                                if has_run_code {
+                                    programmatic.push(tool);
+                                }
+                            } else {
+                                wire.push(tool);
+                            }
+                        }
+                        crate::tools::extension::ToolPtcExposure::Default => {
+                            if eligible && has_run_code {
+                                programmatic.push(tool.clone());
+                            }
+                            wire.push(tool);
+                        }
+                    }
+                }
+                (wire, programmatic)
             }
             crate::ptc::PtcMode::Exclusive => {
                 let mut wire = Vec::new();
                 let mut programmatic = Vec::new();
                 for tool in all_tools {
-                    if is_programmatic_eligible(tool.metadata.name.as_ref()) {
+                    let eligible = is_programmatic_eligible(tool.metadata.name.as_ref());
+                    let force_direct =
+                        tool.ptc_exposure == crate::tools::extension::ToolPtcExposure::DirectOnly;
+                    if eligible && !force_direct {
                         if has_run_code {
                             programmatic.push(tool);
                         }

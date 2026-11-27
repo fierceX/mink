@@ -37,10 +37,12 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         ptc_runtime,
     } = config;
 
-    crate::config::validate_runtime_config(&config)?;
-    crate::tools::catalog::validate_tool_config(&crate::context::ToolConfig::from_config(&config))?;
+    crate::config::validate_runtime_config_with_options(&config, ptc_runtime.is_some())?;
     let custom_tools = crate::runtime::custom_tools::freeze_custom_tools(custom_tools);
-    crate::tools::catalog::validate_custom_tools(&custom_tools)?;
+    crate::tools::catalog::validate_tool_config_with_custom(
+        &crate::context::ToolConfig::from_config(&config),
+        &custom_tools,
+    )?;
 
     let cancel = CancellationToken::new();
     let event_dispatcher = event_sink.map(EventDispatcher::new);

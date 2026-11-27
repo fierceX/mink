@@ -22,6 +22,18 @@ pub enum ToolActivation {
     ExplicitOnly,
 }
 
+/// Controls where a custom tool is exposed when PTC (`RunCode`) is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolPtcExposure {
+    /// Follow the active `PtcMode` (`Tool` exposes on both wire and `<ptc-sdk>`; `Exclusive` exposes in `<ptc-sdk>`).
+    #[default]
+    Default,
+    /// Always expose on wire only (direct tool calls), even in `PtcMode::Exclusive`; never callable inside `RunCode`.
+    DirectOnly,
+    /// Expose inside `<ptc-sdk>` (`RunCode`) only when PTC is active (falls back to wire when `PtcMode::Off`).
+    ProgrammaticOnly,
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolDefinition {
     pub name: String,
@@ -34,6 +46,7 @@ pub struct ToolDefinition {
     pub discoverable: bool,
     pub storm_exempt: bool,
     pub activation: ToolActivation,
+    pub ptc_exposure: ToolPtcExposure,
     pub hard_dependencies: Vec<String>,
     pub semantic_capabilities: Vec<ToolCapabilityOffer>,
 }
@@ -60,9 +73,15 @@ impl ToolDefinition {
             discoverable: false,
             storm_exempt: false,
             activation: ToolActivation::Enabled,
+            ptc_exposure: ToolPtcExposure::Default,
             hard_dependencies: Vec::new(),
             semantic_capabilities: Vec::new(),
         }
+    }
+
+    pub fn with_ptc_exposure(mut self, exposure: ToolPtcExposure) -> Self {
+        self.ptc_exposure = exposure;
+        self
     }
 }
 

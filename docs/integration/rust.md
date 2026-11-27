@@ -1,6 +1,6 @@
 # Rust 集成
 
-> 更新日期：2026-11-03
+> 更新日期：2026-11-27
 
 进程内 runtime 生命周期与可靠事件。前置：Rust 1.99+。
 
@@ -206,7 +206,34 @@ match outcome.failure {
 | OpenAI | `with_openai_reasoning_effort()` / `with_openai_tool_choice()` / `with_openai_extra_body()` / `with_openai_token_param()` / `with_openai_include_usage()` / `with_provider_http_timeout_secs()` |
 | 多模态 | `with_image_input(ImageInputCapability)` / `with_vision_models(Vec<String>)` / `with_image_limits(ImageLimitsOverrides)` |
 | 能力 | `with_mission_content()` / `with_selected_skills()` / `with_runtime_skill_content()` / `with_skill_discovery_policy()` / `with_resource_handler()` / `with_read_only_file_system()` / `with_resource_session_id()` |
+| PTC | `with_ptc()` / `with_ptc_mode()` / `with_ptc_backend()` / `with_ptc_python_executable()` / `with_ptc_timeout_secs()` / `with_ptc_max_timeout_secs()` / `with_ptc_max_parallel_sub_calls()` / `with_ptc_max_sub_calls_per_minute()` / `with_ptc_max_output_bytes()` / `with_ptc_max_message_bytes()` / `with_ptc_max_pending_calls()` / `with_ptc_stop_grace_ms()` / `with_ptc_runtime()` |
 | 后端 | `with_llm_backend()` / `with_sandbox()` / `with_sandbox_python()` |
+
+### PTC 嵌入
+
+嵌入式服务可通过 `AgentOptions::with_ptc_mode()` + 单项 `with_ptc_*()` 参数或流式构造 `PtcConfig::tool()` / `PtcConfig::exclusive()` 开启 Python PTC（`RunCode`）：
+
+```rust
+use std::sync::Arc;
+use mink::prelude::{AgentOptions, AgentRuntime};
+use mink::runtime::ptc::{PtcBackendKind, PtcMode, ToolPtcExposure};
+use mink::runtime::ToolDefinition;
+
+let rt = AgentRuntime::start(
+    AgentOptions::new("/tmp/mink-session", ".")
+        .with_api_key("sk-...")
+        .with_model("flash")
+        .with_ptc_mode(PtcMode::Tool)
+        .with_ptc_backend(PtcBackendKind::SubprocessPython)
+        .with_ptc_timeout_secs(60)
+        .with_ptc_max_parallel_sub_calls(4)
+        .with_tool(Arc::new(my_tool)),
+).await?;
+```
+
+- 自定义 `AgentTool` 可通过 `ToolDefinition::with_ptc_exposure(...)` 控制暴露面：`ToolPtcExposure::Default`（随 `PtcMode`）、`DirectOnly`（即使 `Exclusive` 也只保留在直调 schema，不进 `<ptc-sdk>`）、`ProgrammaticOnly`（开启 PTC 时仅在 `RunCode` 内暴露）。
+- 需替换执行环境时实现 `mink::runtime::ptc::PtcRuntime` 并通过 `AgentOptions::with_ptc_runtime()` 注入；`mink::runtime::ptc` 同时导出了 `CancellationToken`、`InterruptSignal`、`SubprocessPythonPtcRuntime`（及启用 `python-sandbox` feature 时的 `WasiPythonPtcRuntime`）与 `PtcConfig::resolve_run_spec()` 辅助解析超时与 `cwd`。
+- `RunCode` 的实时工具卡片通过 `AgentEventKind::ToolResult { presentation: Some(ToolPresentation::PtcRun(_)), .. }` 与 `SessionEvent::PtcDispatchStart` / `PtcDispatchEnd` / `PtcRunSummary` 投递。
 
 ### 沙箱
 

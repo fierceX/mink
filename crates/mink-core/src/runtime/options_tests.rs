@@ -201,3 +201,91 @@ fn options_can_override_session_layout() {
         .into_runtime_config();
     assert_eq!(runtime_config.session_layout, SessionLayout::Direct);
 }
+
+#[test]
+fn options_individual_ptc_builders_and_validation_support_embedded_hosts() {
+    struct NoopCustomTool;
+    #[async_trait::async_trait]
+    impl crate::runtime::AgentTool for NoopCustomTool {
+        fn definition(&self) -> crate::runtime::ToolDefinition {
+            crate::runtime::ToolDefinition::new(
+                "DomainQuery",
+                "Query domain records.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            )
+            .with_ptc_exposure(crate::runtime::ToolPtcExposure::ProgrammaticOnly)
+        }
+
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::runtime::ToolExecutionContext,
+        ) -> std::result::Result<crate::runtime::ToolOutput, crate::runtime::ToolError> {
+            Ok(crate::runtime::ToolOutput::text("ok"))
+        }
+    }
+
+    struct NoopPtcRuntime;
+    #[async_trait::async_trait]
+    impl crate::ptc::PtcRuntime for NoopPtcRuntime {
+        fn kind(&self) -> crate::ptc::PtcBackendKind {
+            crate::ptc::PtcBackendKind::WasiPython
+        }
+        fn resolve(
+            &self,
+            req: crate::ptc::PtcRunRequest,
+        ) -> anyhow::Result<crate::ptc::PtcRunSpec> {
+            crate::ptc::PtcConfig::default().resolve_run_spec(req)
+        }
+        async fn run(
+            &self,
+            _spec: crate::ptc::PtcRunSpec,
+            _dispatcher: Arc<dyn crate::ptc::PtcBindingDispatcher>,
+        ) -> anyhow::Result<crate::ptc::PtcRunResult> {
+            Ok(crate::ptc::PtcRunResult {
+                output: Vec::new(),
+                output_truncated: false,
+                error: None,
+            })
+        }
+    }
+
+    let options = AgentOptions::new("/tmp/mink-home", "/tmp/project")
+        .with_ptc_mode(crate::ptc::PtcMode::Tool)
+        .with_ptc_backend(crate::ptc::PtcBackendKind::WasiPython)
+        .with_ptc_python_executable("/usr/bin/python3")
+        .with_ptc_timeout_secs(90)
+        .with_ptc_max_timeout_secs(900)
+        .with_ptc_max_parallel_sub_calls(3)
+        .with_ptc_max_sub_calls_per_minute(180)
+        .with_ptc_max_output_bytes(65_536)
+        .with_ptc_max_message_bytes(32_768)
+        .with_ptc_max_pending_calls(16)
+        .with_ptc_stop_grace_ms(500)
+        .with_ptc_runtime(Arc::new(NoopPtcRuntime))
+        .with_tool(Arc::new(NoopCustomTool))
+        .with_enabled_tools(["DomainQuery".to_string()]);
+
+    options
+        .validate_runtime_config()
+        .expect("custom tool in enabled_tools and custom PtcRuntime must validate cleanly");
+
+    let runtime_config = options.into_runtime_config();
+    let ptc = &runtime_config.config.ptc;
+    assert_eq!(ptc.mode, crate::ptc::PtcMode::Tool);
+    assert_eq!(ptc.backend, crate::ptc::PtcBackendKind::WasiPython);
+    assert_eq!(ptc.python_executable.as_deref(), Some("/usr/bin/python3"));
+    assert_eq!(ptc.timeout_secs, 90);
+    assert_eq!(ptc.max_timeout_secs, 900);
+    assert_eq!(ptc.max_parallel_sub_calls, 3);
+    assert_eq!(ptc.max_sub_calls_per_minute, 180);
+    assert_eq!(ptc.max_output_bytes, 65_536);
+    assert_eq!(ptc.max_message_bytes, 32_768);
+    assert_eq!(ptc.max_pending_calls, 16);
+    assert_eq!(ptc.stop_grace_ms, 500);
+    assert!(runtime_config.ptc_runtime.is_some());
+}

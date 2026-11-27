@@ -1,6 +1,6 @@
 # Python 集成
 
-> 更新日期：2026-10-29
+> 更新日期：2026-11-27
 
 子进程调用、流式接口与磁盘会话复用。
 
@@ -47,6 +47,7 @@ print(result["text"])
 | 路径 | `mink_home` / `session_layout` / `cwd` | session 根目录与布局（SDK 默认 `home`） |
 | 文件系统 | `read_dirs` / `write_dirs` | agent 可读/可写目录 |
 | 工具 | `enabled_tools` | 精确工具选择；`None` 用默认集合，显式列出 `PythonSandbox` 才启用它 |
+| PTC | `ptc_mode` / `ptc_config` | `ptc_mode` 支持 `'off'` / `'tool'`（别名 `'hybrid'`）/ `'exclusive'`；`ptc_config` 透传 `[ptc]` 细粒度字典到 `options.ptc` |
 | Edit | `edit_mode` / `edit_fuzzy_match` / `edit_fuzzy_threshold` / `edit_enforce_seen_lines` | 与 Rust/CLI 相同的双模式配置 |
 | 信号 | `signal_policy` | `"off"` / `"evidence"` / `"state_ops"` / `"restart"` / `"full"` / `None`（继承 `MINK_SIGNAL_POLICY`） |
 | 提示词 | `mission_file` / `mission_content` | MISSION.md 文件或内联内容（二选一，内联避免临时文件） |

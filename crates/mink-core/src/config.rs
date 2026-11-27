@@ -498,7 +498,15 @@ pub fn model_resolver(cfg: &ResolvedConfig) -> ModelResolver {
     ModelResolver::new(&cfg.model_aliases)
 }
 
+#[cfg(test)]
 pub fn validate_runtime_config(cfg: &ResolvedConfig) -> Result<()> {
+    validate_runtime_config_with_options(cfg, false)
+}
+
+pub(crate) fn validate_runtime_config_with_options(
+    cfg: &ResolvedConfig,
+    has_custom_ptc_runtime: bool,
+) -> Result<()> {
     validate_runtime_limits(
         cfg.edit_fuzzy_threshold,
         cfg.max_tokens,
@@ -531,7 +539,8 @@ pub fn validate_runtime_config(cfg: &ResolvedConfig) -> Result<()> {
         bail!("llm_wait_heartbeat_secs must be zero or greater");
     }
     cfg.llm_recovery.validate()?;
-    cfg.ptc.validate(&cfg.sandbox_python)?;
+    cfg.ptc
+        .validate_for_runtime(&cfg.sandbox_python, has_custom_ptc_runtime)?;
     Ok(())
 }
 

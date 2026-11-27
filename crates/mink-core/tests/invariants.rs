@@ -550,3 +550,287 @@ inspect({"count": len(reads), "applied": ed["applied"], "pad": "x" * 16000})
     std::fs::remove_dir_all(home.parent().unwrap())?;
     Ok(())
 }
+
+#[tokio::test]
+async fn ptc_library_embedding_parameters_custom_tools_and_runtime_seams() -> Result<()> {
+    use mink::runtime::ptc::{
+        CancellationToken, InterruptSignal, PtcBackendKind, PtcBindingDispatcher, PtcConfig,
+        PtcMode, PtcOutputItem, PtcRunRequest, PtcRunResult, PtcRunSpec, PtcRuntime,
+        ToolPtcExposure,
+    };
+    use mink::runtime::{
+        AgentEvent, AgentEventKind, AgentTool, EventSink, SessionEvent, SessionEventSink,
+        ToolDefinition, ToolError, ToolExecutionContext, ToolOutput, ui::ToolPresentation,
+    };
+
+    struct LookupRecordTool;
+    #[async_trait::async_trait]
+    impl AgentTool for LookupRecordTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "LookupRecord",
+                "Fetch a structured domain record by id.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                    "required": ["id"],
+                    "additionalProperties": false
+                }),
+            )
+            .with_ptc_exposure(ToolPtcExposure::ProgrammaticOnly)
+        }
+
+        async fn execute(
+            &self,
+            input: Value,
+            _ctx: ToolExecutionContext,
+        ) -> std::result::Result<ToolOutput, ToolError> {
+            let id = input
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ToolError::argument("id is required"))?;
+            Ok(ToolOutput::text(format!("record:{id}"))
+                .with_structured_value(serde_json::json!({"id": id, "score": 42})))
+        }
+    }
+
+    struct DirectNoticeTool;
+    #[async_trait::async_trait]
+    impl AgentTool for DirectNoticeTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "DirectNotice",
+                "Emit a direct-only host notice.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {"msg": {"type": "string"}},
+                    "required": ["msg"],
+                    "additionalProperties": false
+                }),
+            )
+            .with_ptc_exposure(ToolPtcExposure::DirectOnly)
+        }
+
+        async fn execute(
+            &self,
+            input: Value,
+            _ctx: ToolExecutionContext,
+        ) -> std::result::Result<ToolOutput, ToolError> {
+            let msg = input.get("msg").and_then(Value::as_str).unwrap_or("");
+            Ok(ToolOutput::text(format!("noticed:{msg}")))
+        }
+    }
+
+    #[derive(Default)]
+    struct CaptureTurnEvents(Mutex<Vec<AgentEvent>>);
+    #[async_trait::async_trait]
+    impl EventSink for CaptureTurnEvents {
+        async fn on_event(&self, event: AgentEvent) -> std::result::Result<(), String> {
+            self.0.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct CaptureSessionEvents(Mutex<Vec<SessionEvent>>);
+    impl SessionEventSink for CaptureSessionEvents {
+        fn on_session_event(&self, _session_id: &str, event: &SessionEvent) {
+            self.0.lock().unwrap().push(event.clone());
+        }
+    }
+
+    // 1. Embedded Hybrid PTC with individual AgentOptions::with_ptc_* parameters, custom-only
+    //    enabled_tools, ProgrammaticOnly + DirectOnly custom tools, EventSink & SessionEventSink.
+    let (home, cwd) = temp_pair("ptc-embed-params");
+    let turn_sink = Arc::new(CaptureTurnEvents::default());
+    let session_sink = Arc::new(CaptureSessionEvents::default());
+    let backend = Arc::new(ScriptedBackend::new(vec![
+        vec![
+            tool_call(
+                "DirectNotice",
+                "direct_1",
+                serde_json::json!({"msg": "starting"}),
+            ),
+            tool_call(
+                "RunCode",
+                "ptc_embed_1",
+                serde_json::json!({
+                    "code": "rec = await tools.LookupRecord(id='abc')\ninspect(rec['id'], rec['score'])",
+                    "description": "Query custom LookupRecord via PTC"
+                }),
+            ),
+            LlmEvent::Stop(LlmStopEvent {
+                reason: "tool_use".into(),
+            }),
+        ],
+        text_stop("embedded ptc done", "end_turn"),
+    ]));
+
+    let options = AgentOptions::new(&home, &cwd)
+        .with_ptc_mode(PtcMode::Tool)
+        .with_ptc_backend(PtcBackendKind::SubprocessPython)
+        .with_ptc_timeout_secs(30)
+        .with_ptc_max_timeout_secs(120)
+        .with_ptc_max_parallel_sub_calls(4)
+        .with_ptc_max_sub_calls_per_minute(120)
+        .with_ptc_max_output_bytes(32_768)
+        .with_ptc_max_message_bytes(65_536)
+        .with_ptc_max_pending_calls(16)
+        .with_ptc_stop_grace_ms(500)
+        .with_tool(Arc::new(LookupRecordTool))
+        .with_tool(Arc::new(DirectNoticeTool))
+        .with_enabled_tools(["LookupRecord".to_string(), "DirectNotice".to_string()])
+        .with_event_sink(turn_sink.clone())
+        .with_session_event_sink(session_sink.clone())
+        .with_log_events(false)
+        .with_llm_backend(backend.clone());
+
+    options.validate_runtime_config()?;
+    let runtime = AgentRuntime::start(options).await?;
+    let outcome = runtime.run_turn("run embedded ptc").await?;
+    assert!(outcome.error.is_none(), "turn failed: {:?}", outcome.error);
+    assert_eq!(outcome.text, "embedded ptc done");
+
+    let requests = backend.captured();
+    assert_eq!(requests.len(), 2);
+    // Wire has RunCode + DirectNotice, NOT LookupRecord (ProgrammaticOnly).
+    assert!(
+        requests[0]
+            .tools
+            .iter()
+            .any(|t| t["name"].as_str() == Some("RunCode"))
+    );
+    assert!(
+        requests[0]
+            .tools
+            .iter()
+            .any(|t| t["name"].as_str() == Some("DirectNotice"))
+    );
+    assert!(
+        !requests[0]
+            .tools
+            .iter()
+            .any(|t| t["name"].as_str() == Some("LookupRecord"))
+    );
+    // <ptc-sdk> documents LookupRecord and excludes DirectOnly DirectNotice.
+    assert!(
+        requests[0]
+            .system_prompt
+            .contains("async def LookupRecord(*, id: str)")
+    );
+    assert!(!requests[0].system_prompt.contains("async def DirectNotice"));
+
+    let msg_json = serde_json::to_string(&requests[1].messages)?;
+    assert!(msg_json.contains("noticed:starting"), "{msg_json}");
+    assert!(msg_json.contains("abc 42"), "{msg_json}");
+
+    runtime.shutdown().await?;
+
+    {
+        let captured_turn_events = turn_sink.0.lock().unwrap();
+        assert!(captured_turn_events.iter().any(|ev| matches!(
+            &ev.kind,
+            AgentEventKind::ToolResult {
+                tool_name,
+                presentation: Some(ToolPresentation::PtcRun(run)),
+                ..
+            } if tool_name == "RunCode"
+                && run.sub_calls.len() == 1
+                && run.sub_calls[0].tool_name == "LookupRecord"
+        )));
+    }
+
+    {
+        let captured_session_events = session_sink.0.lock().unwrap();
+        assert!(captured_session_events.iter().any(|ev| matches!(
+            ev,
+            SessionEvent::PtcDispatchStart { tool_name, .. } if tool_name == "LookupRecord"
+        )));
+        assert!(captured_session_events.iter().any(|ev| matches!(
+            ev,
+            SessionEvent::PtcDispatchEnd { tool_name, .. } if tool_name == "LookupRecord"
+        )));
+        assert!(captured_session_events.iter().any(|ev| matches!(
+            ev,
+            SessionEvent::PtcRunSummary {
+                sub_call_count: 1,
+                outcome,
+                ..
+            } if outcome == "ok"
+        )));
+    }
+    std::fs::remove_dir_all(home.parent().unwrap())?;
+
+    // 2. Custom PtcRuntime implemented purely from external public mink::runtime::ptc exports,
+    //    including CancellationToken, InterruptSignal, and PtcConfig::resolve_run_spec.
+    struct CustomEchoPtcRuntime {
+        cfg: PtcConfig,
+    }
+    #[async_trait::async_trait]
+    impl PtcRuntime for CustomEchoPtcRuntime {
+        fn kind(&self) -> PtcBackendKind {
+            PtcBackendKind::WasiPython
+        }
+        fn resolve(&self, request: PtcRunRequest) -> Result<PtcRunSpec> {
+            let _cancel: &CancellationToken = &request.cancel;
+            let _interrupt: &InterruptSignal = &request.interrupt;
+            self.cfg.resolve_run_spec(request)
+        }
+        async fn run(
+            &self,
+            _spec: PtcRunSpec,
+            dispatcher: Arc<dyn PtcBindingDispatcher>,
+        ) -> Result<PtcRunResult> {
+            let res = dispatcher
+                .invoke("LookupRecord", serde_json::json!({"id": "custom-rt"}))
+                .await
+                .map_err(|e| anyhow!("dispatch error: {}", e.message))?;
+            Ok(PtcRunResult {
+                output: vec![PtcOutputItem::Text(format!(
+                    "custom:{}",
+                    res.value["id"].as_str().unwrap_or("")
+                ))],
+                output_truncated: false,
+                error: None,
+            })
+        }
+    }
+
+    let (home2, cwd2) = temp_pair("ptc-custom-runtime");
+    let custom_cfg = PtcConfig::exclusive()
+        .with_backend(PtcBackendKind::WasiPython)
+        .with_timeout_secs(20);
+    let backend2 = Arc::new(ScriptedBackend::new(vec![
+        vec![
+            tool_call(
+                "RunCode",
+                "ptc_custom_1",
+                serde_json::json!({"code": "pass", "description": "custom runtime test"}),
+            ),
+            LlmEvent::Stop(LlmStopEvent {
+                reason: "tool_use".into(),
+            }),
+        ],
+        text_stop("custom runtime ok", "end_turn"),
+    ]));
+    let opts2 = AgentOptions::new(&home2, &cwd2)
+        .with_ptc(custom_cfg.clone())
+        .with_ptc_runtime(Arc::new(CustomEchoPtcRuntime { cfg: custom_cfg }))
+        .with_tool(Arc::new(LookupRecordTool))
+        .with_enabled_tools(["LookupRecord".to_string()])
+        .with_llm_backend(backend2.clone());
+    opts2.validate_runtime_config()?;
+    let rt2 = AgentRuntime::start(opts2).await?;
+    let outcome2 = rt2.run_turn("invoke custom runtime").await?;
+    assert!(
+        outcome2.error.is_none(),
+        "custom runtime failed: {:?}",
+        outcome2.error
+    );
+    let reqs2 = backend2.captured();
+    let msg2 = serde_json::to_string(&reqs2[1].messages)?;
+    assert!(msg2.contains("custom:custom-rt"), "{msg2}");
+    rt2.shutdown().await?;
+    std::fs::remove_dir_all(home2.parent().unwrap())?;
+    Ok(())
+}

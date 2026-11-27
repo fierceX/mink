@@ -295,5 +295,62 @@ class ProcessLifecycle(SDKProtocolHarness):
         self.assertIn("closed stdin", str(ctx.exception))
 
 
+class PtcOptionsSerialization(SDKProtocolHarness):
+    def test_hybrid_ptc_mode_and_ptc_config_validate_and_serialize(self):
+        home = tempfile.mkdtemp(dir=self.tmpdir)
+        session = AgentSession(
+            SandboxConfig(
+                mink_home=home,
+                session_layout="isolated",
+                cwd=str(self.tmpdir),
+                sandbox_backend="off",
+                ptc_mode="hybrid",
+                ptc_config={"max_parallel_sub_calls": 4, "timeout_secs": 45},
+            )
+        )
+        try:
+            request = json.loads(session._build_request("hello", None))
+            self.assertEqual(
+                request["options"]["ptc"],
+                {
+                    "mode": "tool",
+                    "max_parallel_sub_calls": 4,
+                    "timeout_secs": 45,
+                },
+            )
+        finally:
+            session.close()
+
+    def test_invalid_ptc_mode_or_non_dict_ptc_config_is_rejected(self):
+        home = tempfile.mkdtemp(dir=self.tmpdir)
+        bad_mode = AgentSession(
+            SandboxConfig(
+                mink_home=home,
+                session_layout="isolated",
+                cwd=str(self.tmpdir),
+                ptc_mode="bogus",
+            )
+        )
+        try:
+            with self.assertRaises(ValueError):
+                bad_mode._build_request("hello", None)
+        finally:
+            bad_mode.close()
+
+        bad_cfg = AgentSession(
+            SandboxConfig(
+                mink_home=home,
+                session_layout="isolated",
+                cwd=str(self.tmpdir),
+                ptc_config="not-a-dict",  # type: ignore[arg-type]
+            )
+        )
+        try:
+            with self.assertRaises(ValueError):
+                bad_cfg._build_request("hello", None)
+        finally:
+            bad_cfg.close()
+
+
 if __name__ == "__main__":
     unittest.main()

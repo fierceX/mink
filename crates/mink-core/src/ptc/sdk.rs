@@ -427,6 +427,7 @@ mod tests {
             metadata: ToolMetadata::new("dummy", ApprovalTier::Read, ToolResultKind::Text)
                 .with_name_for_test(name),
             schema,
+            ptc_exposure: crate::tools::extension::ToolPtcExposure::Default,
         }
     }
 
