@@ -35,7 +35,7 @@ def check(root: Path, tag: str | None = None) -> str:
         require(len(matches) == 1 and matches[0]["version"] == version, f"{name} lock version")
     require(tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"] == version, "Python version")
     index = (root / "docs/index.html").read_text()
-    require(f'v{version} / OPEN SOURCE' in index, "homepage version")
+    require(f'<span class="brand-version">v{version}</span>' in index, "homepage version")
     for file in ["README.md", "crates/mink-core/README.md", "docs/integration/rust.md", "docs/index.html"]:
         examples = re.findall(r'package = "mink-core", version = "([^"]+)"', (root / file).read_text())
         require(examples and set(examples) == {version}, f"installation version: {file}")
