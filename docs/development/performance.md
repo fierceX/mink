@@ -1,6 +1,6 @@
 # 性能与验证
 
-> 更新日期：2026-10-29；维护文档，不进入官网发布产物。
+> 更新日期：2026-11-27；维护文档，不进入官网发布产物。
 
 此页维护测量方法与结果索引。架构说明运行机制，集成页说明 API 契约；性能数字按日期保存在独立记录中，避免随实现说明更新而失去测试环境和版本边界。
 
@@ -8,6 +8,9 @@
 
 | 记录 | 内容与证据 |
 |---|---|
+| [v0.10.0 运行时与 TUI：2026-11-27](benchmarks/v0.10.0-2026-11-27.md) | `v0.10.0`（`f0f53bd`）release `--quick` + `tool_loop_50/request_build_800k` 与 TUI release 基准；标注沙箱限制（`ps_rss_kb=0`、`sandbox_start` 不可用） |
+| [并发 Agent Loop（Mock 后端）：2026-11-27](benchmarks/autoagents-bench-mock-2026-11-27.md) | `mink-core 0.10.0` release、`autoagents_bench` 示例（50 请求 / 10 并发、`llm-only cold` / `tool cold` / `tool warm`）；**Mock 后端测试结果**，不含真实 API 与 HTTP/SSE 开销 |
+| [PTC 模式收益实测：2026-11-27](benchmarks/ptc-modes-2026-11-27.md) | 同一问题下 `off`（3 组）与开启 PTC `tool`（5 组）云 API 均值对比（工具回传 `−76.3%`、非缓存 input `−63.3%`、总 prompt `−56.0%`） |
 | [运行时：2026-10-03](benchmarks/runtime-2026-10-03.md) | Apple M4 Pro 全量矩阵、独立密度测试、部分失败/中断记录；脱敏 JSON 和日志随仓库保存 |
 | [TUI：2026-10-04](benchmarks/tui-2026-10-04.md) | 渲染、可变尾部、PTY/tmux/SSH 输入延迟和正确性检查；保留原维护者的测量口径与限制 |
 | [请求投影重构：2026-10-19](benchmarks/request-projection-2026-10-19.md) | mock backend 的 `tool_loop_20/50` 前后对照；同源 bench 用例在基线 commit 与重构工作树上各跑一次，保留 dirty 标记与单次观测限制 |

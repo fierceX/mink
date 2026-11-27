@@ -1,0 +1,49 @@
+{
+  "source_directory": "target/bench/head",
+  "version": "0.10.0",
+  "recorded_commit": "f0f53bd",
+  "note": "Clean v0.10.0 release-prep commit; runtime benchmarks ran in sandbox (ps_rss_kb=0, sandbox_start blocked). Metrics and diagnostics unchanged.",
+  "files": [
+    {
+      "file": "runtime-f0f53bd-20261127T065023Z.json",
+      "original_sha256": "8e4cbf7bc6e012fd7d6e3137333a31f7ea04b825f237a20db3b690b6666a4c23",
+      "archived_sha256": "5b5ea88b3ff41e07c4c6639c6f789050e0da4c784432fd651f94694b2d9d5f9a",
+      "redactions": [
+        "absolute repository path replaced with <repo>"
+      ]
+    },
+    {
+      "file": "runtime-f0f53bd-20261127T065023Z.txt",
+      "original_sha256": "daa655a7a410cddd6b4fabdaae6699827e1e9944424923f58e8fe41a68ce3462",
+      "archived_sha256": "35aa52343395a08721d7ea76e589e4820d2910f11e899707b921bd232d5dbe0c",
+      "redactions": [
+        "absolute repository path replaced with <repo>"
+      ]
+    },
+    {
+      "file": "runtime-f0f53bd-20261127T065212Z.json",
+      "original_sha256": "f708fda58de8a1de9a6a72f31c7bf330ce11cf196f35b8fdc374378c22398588",
+      "archived_sha256": "f708fda58de8a1de9a6a72f31c7bf330ce11cf196f35b8fdc374378c22398588",
+      "redactions": [
+        "absolute repository path replaced with <repo>"
+      ]
+    },
+    {
+      "file": "runtime-f0f53bd-20261127T065212Z.txt",
+      "original_sha256": "4985ef345f4ef688b3366cc4435b0f61db60d8324341cc496aa7b083eb9a86e0",
+      "archived_sha256": "5631a253e45fc8b4ed15c186554dd0defa3ce5f81685dfb17716d59e1863d830",
+      "redactions": [
+        "absolute repository path replaced with <repo>"
+      ]
+    },
+    {
+      "file": "tui-f0f53bd-20261127.txt",
+      "original_sha256": "b7f220e3d07250c44e0920ce52b702c79222c3ef3c18a49dd2b7b671aa91bafc",
+      "archived_sha256": "81a4ed3f54b83c2d186a58485981acdd8a0d5ec2851573df53046d77253537fb",
+      "redactions": [
+        "absolute repository path replaced with <repo>",
+        "trimmed cargo compilation lines before test output"
+      ]
+    }
+  ]
+}

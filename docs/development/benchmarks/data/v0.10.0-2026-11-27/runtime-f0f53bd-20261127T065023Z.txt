@@ -1,0 +1,44 @@
+# mink runtime benchmark
+# machine:  Apple M4 Pro (12 cores, 24GB)
+# os:       macOS 15.7.7 (kernel 24.6.0)
+# commit:   f0f53bd
+# rustc:    rustc 1.99.0 (b940084d7 2026-09-28)
+# cargo:    cargo 1.99.0 (5f94df478 2026-08-27)
+# rss:      ps_rss_kb (current) + 20ms sampler peak; macOS RSS overstates footprint
+# fd limit: 8192
+# quick:    1
+# reps:     per-case default
+
+   Compiling mink-core v0.10.0 (<repo>/crates/mink-core)
+warning: mink-core@0.10.0: Generated embedded_skills.rs with 4 skills
+    Finished `bench` profile [optimized] target(s) in 57.48s
+     Running benches/runtime_bench.rs (target/release/deps/runtime_bench-73833c1d9fb04021)
+# mink runtime bench | os=macOS 15.7.7 arch=aarch64 cores=12 rss_metric=ps_rss_kb reps=default quick=true
+[case] process_start n=20 p50=3.07ms p95=5.25ms min=2.45 max=5.97 mean=3.33 extra={}
+[case] process_start_cli n=20 p50=3.50ms p95=5.84ms min=2.68 max=221.03 mean=14.59 extra={"binary":"<repo>/target/release/mink"}
+[case] runtime_start n=10 p50=9.17ms p95=12.03ms min=8.02 max=12.03 mean=9.48 extra={}
+[case] session_create n=10 p50=10.12ms p95=37.19ms min=9.05 max=37.19 mean=12.88 extra={}
+[case] idle_1 n=1 p50=34.96ms p95=34.96ms min=34.96 max=34.96 mean=34.96 extra={"create_total_ms":34.965542,"created":1,"delta_per_runtime_kb":0.0,"failure":null,"failure_at":null,"fds_after":17,"fds_before":15,"fds_per_runtime":2.0,"requested":1,"rss_after_kb":0,"rss_before_kb":0,"rss_metric":"ps_rss_kb","rss_peak_kb":0,"shutdown_total_ms":15.513542,"threads_after":0,"threads_before":0}
+[case] idle_100 n=100 p50=35.87ms p95=39.87ms min=31.78 max=42.92 mean=35.78 extra={"create_total_ms":3578.707042,"created":100,"delta_per_runtime_kb":0.0,"failure":null,"failure_at":null,"fds_after":215,"fds_before":15,"fds_per_runtime":2.0,"requested":100,"rss_after_kb":0,"rss_before_kb":0,"rss_metric":"ps_rss_kb","rss_peak_kb":0,"shutdown_total_ms":1842.0559999999998,"threads_after":0,"threads_before":0}
+[case] mock_turn_no_tool n=20 p50=8.90ms p95=10.04ms min=6.92 max=10.05 mean=8.57 extra={"conversation_kb":3.654296875,"events_kb":59.7685546875,"rss_metric":"ps_rss_kb","rss_peak_kb":0,"usage_kb":8.6181640625}
+[case] mock_turn_1_tool n=15 p50=9.08ms p95=10.96ms min=7.88 max=10.99 mean=9.36 extra={"conversation_kb":18.4150390625,"events_kb":70.51953125,"rss_metric":"ps_rss_kb","rss_peak_kb":0}
+[case] tool_loop_20 n=1 p50=30.07ms p95=30.07ms min=30.07 max=30.07 mean=30.07 extra={"ms_per_round":1.5035354,"rounds":20,"rss_metric":"ps_rss_kb","rss_peak_kb":0}
+[case] sse_1k n=1 p50=13.52ms p95=13.52ms min=13.52 max=13.52 mean=13.52 extra={"backlog_dropped":0,"backlog_pending_bytes":0,"chunks":1000,"events_per_sec":74560.11749727723,"received_events":1008,"rss_before_kb":0,"rss_metric":"ps_rss_kb","rss_peak_kb":0,"text_bytes":64000}
+[case] replay_1k n=1 p50=11.21ms p95=11.21ms min=11.21 max=11.21 mean=11.21 extra={"first_turn_ms":11.212875,"messages":1000,"read_ms":0.580167,"rss_before_kb":0,"rss_metric":"ps_rss_kb","rss_peak_kb":0,"start_ms":11.857332999999999}
+[case] replay_10k n=1 p50=33.14ms p95=33.14ms min=33.14 max=33.14 mean=33.14 extra={"first_turn_ms":33.140791,"messages":10000,"read_ms":8.679041,"rss_before_kb":0,"rss_metric":"ps_rss_kb","rss_peak_kb":0,"start_ms":32.304792}
+[case] turns_500 n=500 p50=11.08ms p95=12.96ms min=8.08 max=16.90 mean=11.23 extra={"conversation_kb":81.43359375,"events_kb":639.9736328125,"rss_before_kb":0,"rss_curve":[{"rss_kb":0,"turn":125},{"rss_kb":0,"turn":250},{"rss_kb":0,"turn":375},{"rss_kb":0,"turn":500}],"rss_metric":"ps_rss_kb","rss_peak_kb":0,"total_turns":500,"usage_kb":198.25390625}
+[case] compact_10 n=1 p50=752.30ms p95=752.30ms min=752.30 max=752.30 mean=752.30 extra={"context_state_exists":true,"ms_per_compaction":75.2297667,"ok_turns":53,"rss_metric":"ps_rss_kb","rss_peak_kb":0,"start_ms":34.198583,"summaries":10,"target_compactions":10,"turns_used":53}
+[case] goal_history_0 n=2 p50=21.07ms p95=21.07ms min=19.94 max=21.07 mean=20.51 extra={"archived_goals_before_measurement":0,"measurement":"draft_goal clone, serialization, and durable publish"}
+[case] goal_history_10 n=2 p50=23.12ms p95=23.12ms min=21.53 max=23.12 mean=22.33 extra={"archived_goals_before_measurement":10,"measurement":"draft_goal clone, serialization, and durable publish"}
+[case] concurrent_32 n=32 p50=1170.59ms p95=1278.71ms min=935.85 max=1284.79 mean=1158.90 extra={"concurrency":32,"rss_after_kb":0,"rss_before_kb":0,"rss_metric":"ps_rss_kb","rss_peak_kb":0,"throughput_per_sec":24.840714584514814,"wall_ms":1288.2077080000001}
+[case] concurrent_64 n=64 p50=2548.45ms p95=2892.64ms min=1913.79 max=2899.66 mean=2509.49 extra={"concurrency":64,"rss_after_kb":0,"rss_before_kb":0,"rss_metric":"ps_rss_kb","rss_peak_kb":0,"throughput_per_sec":21.883585454155543,"wall_ms":2924.5664580000002}
+[case] subagent_fanout_2 n=1 p50=87.46ms p95=87.46ms min=87.46 max=87.46 mean=87.46 extra={"requested_subagents":2,"rss_metric":"ps_rss_kb","rss_peak_kb":0,"status":"Ok","subagent_requests":2,"tool_calls":2,"tool_errors":0}
+[case] subagent_fanout_4 n=1 p50=143.78ms p95=143.78ms min=143.78 max=143.78 mean=143.78 extra={"requested_subagents":4,"rss_metric":"ps_rss_kb","rss_peak_kb":0,"status":"Ok","subagent_requests":4,"tool_calls":4,"tool_errors":0}
+[case] sandbox_start n=5 p50=11.07ms p95=21.27ms min=9.71 max=21.27 mean=13.05 extra={"inner_start_p50_ms":0.0,"inner_turn_p50_ms":0.0,"probe_failures":["status=Some(71) stdout=\"\" stderr=\"sandbox-exec: sandbox_apply: Operation not permitted\\n\"","status=Some(71) stdout=\"\" stderr=\"sandbox-exec: sandbox_apply: Operation not permitted\\n\"","status=Some(71) stdout=\"\" stderr=\"sandbox-exec: sandbox_apply: Operation not permitted\\n\""],"probe_requested":5,"probe_successes":0,"sandboxed":false}
+[error] sandbox_start: sandbox probes incomplete: {"inner_start_p50_ms":0.0,"inner_turn_p50_ms":0.0,"probe_failures":["status=Some(71) stdout=\"\" stderr=\"sandbox-exec: sandbox_apply: Operation not permitted\\n\"","status=Some(71) stdout=\"\" stderr=\"sandbox-exec: sandbox_apply: Operation not permitted\\n\"","status=Some(71) stdout=\"\" stderr=\"sandbox-exec: sandbox_apply: Operation not permitted\\n\""],"probe_requested":5,"probe_successes":0,"sandboxed":false}
+[report] <repo>/target/bench/head/runtime-f0f53bd-20261127T065023Z.json
+Error: 1 benchmark case(s) failed; see diagnostics/report
+error: bench failed, to rerun pass `-p mink-core --bench runtime_bench`
+
+Caused by:
+  process didn't exit successfully: `<repo>/target/release/deps/runtime_bench-73833c1d9fb04021 --json <repo>/target/bench/head/runtime-f0f53bd-20261127T065023Z.json --quick --bench` (exit status: 1)

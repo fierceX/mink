@@ -1,0 +1,60 @@
+{
+  "failures": [],
+  "meta": {
+    "arch": "aarch64",
+    "commit": "f0f53bd",
+    "fd_limit": "8192",
+    "kernel": "24.6.0",
+    "logical_cores": 12,
+    "machine": "Apple M4 Pro",
+    "mock_calls": 53,
+    "os": "macOS 15.7.7",
+    "quick": false,
+    "report_version": 2,
+    "reps_override": null,
+    "rss_metric": "ps_rss_kb",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "suite": "mink-core/runtime_bench",
+    "summary_calls": 0,
+    "timestamp_epoch_secs": 1795762332
+  },
+  "samples": [
+    {
+      "case": "tool_loop_50",
+      "extra": {
+        "ms_per_round": 0.8728833399999999,
+        "rounds": 50,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 0
+      },
+      "max": 43.644166999999996,
+      "mean": 43.644166999999996,
+      "min": 43.644166999999996,
+      "n": 1,
+      "p50": 43.644166999999996,
+      "p95": 43.644166999999996,
+      "unit": "ms"
+    },
+    {
+      "case": "request_build_800k",
+      "extra": {
+        "approx_input_tokens": 800000,
+        "history_bytes": 2400000,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 0
+      },
+      "max": 11.416583,
+      "mean": 11.416583,
+      "min": 11.416583,
+      "n": 1,
+      "p50": 11.416583,
+      "p95": 11.416583,
+      "unit": "ms"
+    }
+  ],
+  "selected_cases": [
+    "tool_loop_50",
+    "request_build_800k"
+  ],
+  "skipped_cases": []
+}

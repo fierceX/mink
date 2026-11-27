@@ -1,0 +1,446 @@
+{
+  "failures": [
+    {
+      "case": "sandbox_start",
+      "error": "sandbox probes incomplete: {\"inner_start_p50_ms\":0.0,\"inner_turn_p50_ms\":0.0,\"probe_failures\":[\"status=Some(71) stdout=\\\"\\\" stderr=\\\"sandbox-exec: sandbox_apply: Operation not permitted\\\\n\\\"\",\"status=Some(71) stdout=\\\"\\\" stderr=\\\"sandbox-exec: sandbox_apply: Operation not permitted\\\\n\\\"\",\"status=Some(71) stdout=\\\"\\\" stderr=\\\"sandbox-exec: sandbox_apply: Operation not permitted\\\\n\\\"\"],\"probe_requested\":5,\"probe_successes\":0,\"sandboxed\":false}"
+    }
+  ],
+  "meta": {
+    "arch": "aarch64",
+    "commit": "f0f53bd",
+    "fd_limit": "8192",
+    "kernel": "24.6.0",
+    "logical_cores": 12,
+    "machine": "Apple M4 Pro",
+    "mock_calls": 750,
+    "os": "macOS 15.7.7",
+    "quick": true,
+    "report_version": 2,
+    "reps_override": null,
+    "rss_metric": "ps_rss_kb",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "suite": "mink-core/runtime_bench",
+    "summary_calls": 10,
+    "timestamp_epoch_secs": 1795762301
+  },
+  "samples": [
+    {
+      "case": "process_start",
+      "extra": {},
+      "max": 5.96725,
+      "mean": 3.33019805,
+      "min": 2.452875,
+      "n": 20,
+      "p50": 3.065459,
+      "p95": 5.254334,
+      "unit": "ms"
+    },
+    {
+      "case": "process_start_cli",
+      "extra": {
+        "binary": "<repo>/target/release/mink"
+      },
+      "max": 221.03062500000001,
+      "mean": 14.594914550000002,
+      "min": 2.67975,
+      "n": 20,
+      "p50": 3.5017910000000003,
+      "p95": 5.836125,
+      "unit": "ms"
+    },
+    {
+      "case": "runtime_start",
+      "extra": {},
+      "max": 12.0285,
+      "mean": 9.4781792,
+      "min": 8.019917,
+      "n": 10,
+      "p50": 9.166250000000002,
+      "p95": 12.0285,
+      "unit": "ms"
+    },
+    {
+      "case": "session_create",
+      "extra": {},
+      "max": 37.191874999999996,
+      "mean": 12.883654100000001,
+      "min": 9.054625,
+      "n": 10,
+      "p50": 10.123750000000001,
+      "p95": 37.191874999999996,
+      "unit": "ms"
+    },
+    {
+      "case": "idle_1",
+      "extra": {
+        "create_total_ms": 34.965542,
+        "created": 1,
+        "delta_per_runtime_kb": 0.0,
+        "failure": null,
+        "failure_at": null,
+        "fds_after": 17,
+        "fds_before": 15,
+        "fds_per_runtime": 2.0,
+        "requested": 1,
+        "rss_after_kb": 0,
+        "rss_before_kb": 0,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 0,
+        "shutdown_total_ms": 15.513542,
+        "threads_after": 0,
+        "threads_before": 0
+      },
+      "max": 34.963125,
+      "mean": 34.963125,
+      "min": 34.963125,
+      "n": 1,
+      "p50": 34.963125,
+      "p95": 34.963125,
+      "unit": "ms"
+    },
+    {
+      "case": "idle_100",
+      "extra": {
+        "create_total_ms": 3578.707042,
+        "created": 100,
+        "delta_per_runtime_kb": 0.0,
+        "failure": null,
+        "failure_at": null,
+        "fds_after": 215,
+        "fds_before": 15,
+        "fds_per_runtime": 2.0,
+        "requested": 100,
+        "rss_after_kb": 0,
+        "rss_before_kb": 0,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 0,
+        "shutdown_total_ms": 1842.0559999999998,
+        "threads_after": 0,
+        "threads_before": 0
+      },
+      "max": 42.923375,
+      "mean": 35.78236127999998,
+      "min": 31.776542,
+      "n": 100,
+      "p50": 35.867917,
+      "p95": 39.866792,
+      "unit": "ms"
+    },
+    {
+      "case": "mock_turn_no_tool",
+      "extra": {
+        "conversation_kb": 3.654296875,
+        "events_kb": 59.7685546875,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 0,
+        "usage_kb": 8.6181640625
+      },
+      "max": 10.049707999999999,
+      "mean": 8.57038115,
+      "min": 6.923,
+      "n": 20,
+      "p50": 8.899042,
+      "p95": 10.036667000000001,
+      "unit": "ms"
+    },
+    {
+      "case": "mock_turn_1_tool",
+      "extra": {
+        "conversation_kb": 18.4150390625,
+        "events_kb": 70.51953125,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 0
+      },
+      "max": 10.986208000000001,
+      "mean": 9.364244399999999,
+      "min": 7.877125,
+      "n": 15,
+      "p50": 9.077625000000001,
+      "p95": 10.964875000000001,
+      "unit": "ms"
+    },
+    {
+      "case": "tool_loop_20",
+      "extra": {
+        "ms_per_round": 1.5035354,
+        "rounds": 20,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 0
+      },
+      "max": 30.070708000000003,
+      "mean": 30.070708000000003,
+      "min": 30.070708000000003,
+      "n": 1,
+      "p50": 30.070708000000003,
+      "p95": 30.070708000000003,
+      "unit": "ms"
+    },
+    {
+      "case": "sse_1k",
+      "extra": {
+        "backlog_dropped": 0,
+        "backlog_pending_bytes": 0,
+        "chunks": 1000,
+        "events_per_sec": 74560.11749727723,
+        "received_events": 1008,
+        "rss_before_kb": 0,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 0,
+        "text_bytes": 64000
+      },
+      "max": 13.519292,
+      "mean": 13.519292,
+      "min": 13.519292,
+      "n": 1,
+      "p50": 13.519292,
+      "p95": 13.519292,
+      "unit": "ms"
+    },
+    {
+      "case": "replay_1k",
+      "extra": {
+        "first_turn_ms": 11.212875,
+        "messages": 1000,
+        "read_ms": 0.580167,
+        "rss_before_kb": 0,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 0,
+        "start_ms": 11.857332999999999
+      },
+      "max": 11.212875,
+      "mean": 11.212875,
+      "min": 11.212875,
+      "n": 1,
+      "p50": 11.212875,
+      "p95": 11.212875,
+      "unit": "ms"
+    },
+    {
+      "case": "replay_10k",
+      "extra": {
+        "first_turn_ms": 33.140791,
+        "messages": 10000,
+        "read_ms": 8.679041,
+        "rss_before_kb": 0,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 0,
+        "start_ms": 32.304792
+      },
+      "max": 33.140791,
+      "mean": 33.140791,
+      "min": 33.140791,
+      "n": 1,
+      "p50": 33.140791,
+      "p95": 33.140791,
+      "unit": "ms"
+    },
+    {
+      "case": "turns_500",
+      "extra": {
+        "conversation_kb": 81.43359375,
+        "events_kb": 639.9736328125,
+        "rss_before_kb": 0,
+        "rss_curve": [
+          {
+            "rss_kb": 0,
+            "turn": 125
+          },
+          {
+            "rss_kb": 0,
+            "turn": 250
+          },
+          {
+            "rss_kb": 0,
+            "turn": 375
+          },
+          {
+            "rss_kb": 0,
+            "turn": 500
+          }
+        ],
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 0,
+        "total_turns": 500,
+        "usage_kb": 198.25390625
+      },
+      "max": 16.901708000000003,
+      "mean": 11.225605769999992,
+      "min": 8.081125,
+      "n": 500,
+      "p50": 11.079749999999999,
+      "p95": 12.958499999999999,
+      "unit": "ms"
+    },
+    {
+      "case": "compact_10",
+      "extra": {
+        "context_state_exists": true,
+        "ms_per_compaction": 75.2297667,
+        "ok_turns": 53,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 0,
+        "start_ms": 34.198583,
+        "summaries": 10,
+        "target_compactions": 10,
+        "turns_used": 53
+      },
+      "max": 752.297667,
+      "mean": 752.297667,
+      "min": 752.297667,
+      "n": 1,
+      "p50": 752.297667,
+      "p95": 752.297667,
+      "unit": "ms"
+    },
+    {
+      "case": "goal_history_0",
+      "extra": {
+        "archived_goals_before_measurement": 0,
+        "measurement": "draft_goal clone, serialization, and durable publish"
+      },
+      "max": 21.071917,
+      "mean": 20.5083125,
+      "min": 19.944708,
+      "n": 2,
+      "p50": 21.071917,
+      "p95": 21.071917,
+      "unit": "ms"
+    },
+    {
+      "case": "goal_history_10",
+      "extra": {
+        "archived_goals_before_measurement": 10,
+        "measurement": "draft_goal clone, serialization, and durable publish"
+      },
+      "max": 23.119500000000002,
+      "mean": 22.326167,
+      "min": 21.532834,
+      "n": 2,
+      "p50": 23.119500000000002,
+      "p95": 23.119500000000002,
+      "unit": "ms"
+    },
+    {
+      "case": "concurrent_32",
+      "extra": {
+        "concurrency": 32,
+        "rss_after_kb": 0,
+        "rss_before_kb": 0,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 0,
+        "throughput_per_sec": 24.840714584514814,
+        "wall_ms": 1288.2077080000001
+      },
+      "max": 1284.792042,
+      "mean": 1158.898114625,
+      "min": 935.848542,
+      "n": 32,
+      "p50": 1170.585834,
+      "p95": 1278.71275,
+      "unit": "ms"
+    },
+    {
+      "case": "concurrent_64",
+      "extra": {
+        "concurrency": 64,
+        "rss_after_kb": 0,
+        "rss_before_kb": 0,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 0,
+        "throughput_per_sec": 21.883585454155543,
+        "wall_ms": 2924.5664580000002
+      },
+      "max": 2899.6594999999998,
+      "mean": 2509.48985996875,
+      "min": 1913.792083,
+      "n": 64,
+      "p50": 2548.448708,
+      "p95": 2892.644541,
+      "unit": "ms"
+    },
+    {
+      "case": "subagent_fanout_2",
+      "extra": {
+        "requested_subagents": 2,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 0,
+        "status": "Ok",
+        "subagent_requests": 2,
+        "tool_calls": 2,
+        "tool_errors": 0
+      },
+      "max": 87.4605,
+      "mean": 87.4605,
+      "min": 87.4605,
+      "n": 1,
+      "p50": 87.4605,
+      "p95": 87.4605,
+      "unit": "ms"
+    },
+    {
+      "case": "subagent_fanout_4",
+      "extra": {
+        "requested_subagents": 4,
+        "rss_metric": "ps_rss_kb",
+        "rss_peak_kb": 0,
+        "status": "Ok",
+        "subagent_requests": 4,
+        "tool_calls": 4,
+        "tool_errors": 0
+      },
+      "max": 143.78058399999998,
+      "mean": 143.78058399999998,
+      "min": 143.78058399999998,
+      "n": 1,
+      "p50": 143.78058399999998,
+      "p95": 143.78058399999998,
+      "unit": "ms"
+    },
+    {
+      "case": "sandbox_start",
+      "extra": {
+        "inner_start_p50_ms": 0.0,
+        "inner_turn_p50_ms": 0.0,
+        "probe_failures": [
+          "status=Some(71) stdout=\"\" stderr=\"sandbox-exec: sandbox_apply: Operation not permitted\\n\"",
+          "status=Some(71) stdout=\"\" stderr=\"sandbox-exec: sandbox_apply: Operation not permitted\\n\"",
+          "status=Some(71) stdout=\"\" stderr=\"sandbox-exec: sandbox_apply: Operation not permitted\\n\""
+        ],
+        "probe_requested": 5,
+        "probe_successes": 0,
+        "sandboxed": false
+      },
+      "max": 21.270500000000002,
+      "mean": 13.049541999999999,
+      "min": 9.7105,
+      "n": 5,
+      "p50": 11.068959,
+      "p95": 21.270500000000002,
+      "unit": "ms"
+    }
+  ],
+  "selected_cases": [
+    "process_start",
+    "process_start_cli",
+    "runtime_start",
+    "session_create",
+    "idle_1",
+    "idle_100",
+    "mock_turn_no_tool",
+    "mock_turn_1_tool",
+    "tool_loop_20",
+    "sse_1k",
+    "replay_1k",
+    "replay_10k",
+    "turns_500",
+    "compact_10",
+    "goal_history_0",
+    "goal_history_10",
+    "concurrent_32",
+    "concurrent_64",
+    "subagent_fanout_2",
+    "subagent_fanout_4",
+    "sandbox_start"
+  ],
+  "skipped_cases": []
+}

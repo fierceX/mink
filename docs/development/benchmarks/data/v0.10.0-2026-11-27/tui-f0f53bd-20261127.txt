@@ -1,0 +1,59 @@
+running 3 tests
+test tui::perf_tests::tui_release_benchmark ... messages,width,height,cold_us,warm_p95_us,history_visits,parses
+1000,40,12,4501,33,0,0
+1000,40,40,3087,71,0,0
+1000,80,12,2401,32,0,0
+1000,80,40,2305,84,0,0
+1000,120,12,2054,36,0,0
+1000,120,40,1990,98,0,0
+1000,200,12,1747,47,0,0
+1000,200,40,1796,131,0,0
+10000,40,12,16111,22,0,0
+10000,40,40,15757,44,0,0
+10000,80,12,15662,27,0,0
+10000,80,40,16008,66,0,0
+10000,120,12,15748,34,0,0
+10000,120,40,16046,87,0,0
+10000,200,12,16205,51,0,0
+10000,200,40,16460,143,0,0
+ok
+test tui::perf_tests::tui_release_remaining_tail_benchmark ... remaining_tail,paragraph,update_p95_us=4734,bytes=262360
+remaining_tail,table,update_p95_us=6646,bytes=262516
+remaining_tail,paragraph,update_p95_us=19575,bytes=1048795
+remaining_tail,table,update_p95_us=28131,bytes=1048952
+ok
+test tui::perf_tests::tui_release_stress_benchmark ... detail,40,scroll_mean_us=40,parses=0
+long_code,40,frame_mean_us=66,line_parses=257
+subagents_and_inbox,40,frame_us=146
+detail,80,scroll_mean_us=65,parses=0
+long_code,80,frame_mean_us=112,line_parses=257
+subagents_and_inbox,80,frame_us=185
+detail,120,scroll_mean_us=88,parses=0
+long_code,120,frame_mean_us=163,line_parses=257
+subagents_and_inbox,120,frame_us=228
+detail,200,scroll_mean_us=136,parses=0
+long_code,200,frame_mean_us=249,line_parses=257
+subagents_and_inbox,200,frame_us=324
+signal_backlog,events=10000,age_p95_us=1091,age_max_us=1145
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 311 filtered out; finished in 1.70s
+
+        2.46 real         1.61 user         0.09 sys
+           138215424  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               12799  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  15  voluntary context switches
+                 142  involuntary context switches
+         37837443224  instructions retired
+          6848387148  cycles elapsed
+            26231720  peak memory footprint

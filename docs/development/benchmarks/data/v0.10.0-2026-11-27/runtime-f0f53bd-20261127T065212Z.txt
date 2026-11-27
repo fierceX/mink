@@ -1,0 +1,18 @@
+# mink runtime benchmark
+# machine:  Apple M4 Pro (12 cores, 24GB)
+# os:       macOS 15.7.7 (kernel 24.6.0)
+# commit:   f0f53bd
+# rustc:    rustc 1.99.0 (b940084d7 2026-09-28)
+# cargo:    cargo 1.99.0 (5f94df478 2026-08-27)
+# rss:      ps_rss_kb (current) + 20ms sampler peak; macOS RSS overstates footprint
+# fd limit: 8192
+# quick:    0
+# reps:     per-case default
+
+warning: mink-core@0.10.0: Generated embedded_skills.rs with 4 skills
+    Finished `bench` profile [optimized] target(s) in 0.23s
+     Running benches/runtime_bench.rs (target/release/deps/runtime_bench-73833c1d9fb04021)
+# mink runtime bench | os=macOS 15.7.7 arch=aarch64 cores=12 rss_metric=ps_rss_kb reps=default quick=false
+[case] tool_loop_50 n=1 p50=43.64ms p95=43.64ms min=43.64 max=43.64 mean=43.64 extra={"ms_per_round":0.8728833399999999,"rounds":50,"rss_metric":"ps_rss_kb","rss_peak_kb":0}
+[case] request_build_800k n=1 p50=11.42ms p95=11.42ms min=11.42 max=11.42 mean=11.42 extra={"approx_input_tokens":800000,"history_bytes":2400000,"rss_metric":"ps_rss_kb","rss_peak_kb":0}
+[report] <repo>/target/bench/head/runtime-f0f53bd-20261127T065212Z.json
