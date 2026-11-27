@@ -237,6 +237,8 @@ SubAgent 的执行记录仍在父会话工具结果中展示；其独立 session
 | `output` | `SdkOutputOptions` |
 | `signal` | `SdkSignalOptions` |
 | `recovery` | `SdkRecoveryOptions` |
+| `ptc` | `SdkPtcOptions` |
+| `web` | `SdkWebOptions` |
 
 ### `SdkProviderOptions`
 
@@ -311,6 +313,22 @@ SubAgent 的执行记录仍在父会话工具结果中展示；其独立 session
 | `format_max_errors` | `Option<usize>` |
 | `request_max_retries` | `Option<u32>` |
 | `request_timeout_secs` | `Option<u64>` |
+
+### `SdkPtcOptions`
+
+| 字段 | Rust 类型 |
+|---|---|
+| `mode` | `Option<crate::ptc::PtcMode>` |
+| `backend` | `Option<crate::ptc::PtcBackendKind>` |
+| `python_executable` | `Option<String>` |
+| `timeout_secs` | `Option<u64>` |
+| `max_timeout_secs` | `Option<u64>` |
+| `max_parallel_sub_calls` | `Option<usize>` |
+| `max_sub_calls_per_minute` | `Option<usize>` |
+| `max_output_bytes` | `Option<usize>` |
+| `max_message_bytes` | `Option<usize>` |
+| `max_pending_calls` | `Option<usize>` |
+| `stop_grace_ms` | `Option<u64>` |
 
 ### `SdkInlineSkill`
 

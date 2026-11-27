@@ -57,7 +57,7 @@ fn reading_anchor_survives_sealing_new_output_collapse_resize_and_detail_return(
     };
     state.transcript.lines[0].toggle_collapsed();
     state.invalidate_item(0);
-    state.apply(&TuiSignal::Text("answer\n\nnext".into()));
+    state.apply(TuiSignal::Text("answer\n\nnext".into()));
     state.promote_stable_stream_prefix();
     state.finalize_stream();
     draw(&mut terminal, &mut state);
@@ -135,7 +135,7 @@ fn inline_batches_release_committed_text_and_preserve_the_idle_last_item() {
 #[test]
 fn streaming_long_unclosed_structure_keeps_earlier_text_visible() {
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::Text(format!(
+    state.apply(TuiSignal::Text(format!(
         "```text\nSTART_MARKER\n{}",
         "line\n".repeat(20_000)
     )));
@@ -158,11 +158,11 @@ fn streaming_long_unclosed_structure_keeps_earlier_text_visible() {
 fn incomplete_closing_fence_does_not_disable_incremental_code_layout() {
     let mut state = TuiState::default();
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-    state.apply(&TuiSignal::Text("```text\nfirst\n```".into()));
+    state.apply(TuiSignal::Text("```text\nfirst\n```".into()));
     state.promote_stable_stream_prefix();
     draw(&mut terminal, &mut state);
     assert!(!state.cache.stream_code_closed);
-    state.apply(&TuiSignal::Text("suffix\n".into()));
+    state.apply(TuiSignal::Text("suffix\n".into()));
     state.promote_stable_stream_prefix();
     draw(&mut terminal, &mut state);
     assert!(!state.cache.stream_code_closed);
@@ -224,7 +224,7 @@ fn visual_vertical_movement_preserves_column_and_home_end_are_logical() {
 #[test]
 fn local_panels_do_not_echo_or_seal_model_stream_and_esc_does_not_quit() {
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::Text("open stream".into()));
+    state.apply(TuiSignal::Text("open stream".into()));
     for command in ["/help", "/status", "/inputs", "/details"] {
         state.input.buf = command.into();
         key(&mut state, KeyCode::Enter, KeyModifiers::NONE);
@@ -357,7 +357,7 @@ fn unrelated_subagent_progress_preserves_artifact_layout() {
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     draw(&mut terminal, &mut state);
     let parses = state.cache.detail_parses;
-    state.apply(&TuiSignal::SubAgentStatus {
+    state.apply(TuiSignal::SubAgentStatus {
         session_id: "sub_other".into(),
         status: "running".into(),
         label: None,
@@ -365,7 +365,7 @@ fn unrelated_subagent_progress_preserves_artifact_layout() {
         in_tokens: 0,
         out_tokens: 0,
     });
-    state.apply(&TuiSignal::SubAgentStream {
+    state.apply(TuiSignal::SubAgentStream {
         session_id: "sub_other".into(),
         kind: crate::ui::SubAgentStreamKind::Thinking,
         content: "progress".into(),

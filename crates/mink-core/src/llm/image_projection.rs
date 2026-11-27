@@ -49,18 +49,27 @@ pub(crate) fn previous_image_text(block: &Value) -> String {
 /// message). A compaction cut that drops the assistant message also counts
 /// the surviving reference as unconsumed (safe direction: at most re-sent
 /// once).
-pub(crate) fn project_consumed_attachments(messages: &[Value]) -> Vec<Value> {
-    if !messages
-        .iter()
-        .any(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
-    {
-        // No assistant message yet: every capture is unconsumed.
-        return messages.to_vec();
-    }
-    let last_assistant = messages
+pub(crate) fn project_consumed_attachments(messages: &[Value]) -> std::borrow::Cow<'_, [Value]> {
+    let Some(last_assistant) = messages
         .iter()
         .rposition(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
-        .expect("checked above");
+    else {
+        // No assistant message yet: every capture is unconsumed.
+        return std::borrow::Cow::Borrowed(messages);
+    };
+    let has_consumed_attachment = messages.iter().take(last_assistant).any(|message| {
+        message
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| {
+                blocks.iter().any(|block| {
+                    block.get("type").and_then(Value::as_str) == Some("tool_attachment")
+                })
+            })
+    });
+    if !has_consumed_attachment {
+        return std::borrow::Cow::Borrowed(messages);
+    }
     let mut projected = messages.to_vec();
     for message in projected.iter_mut().take(last_assistant) {
         let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
@@ -74,7 +83,7 @@ pub(crate) fn project_consumed_attachments(messages: &[Value]) -> Vec<Value> {
             *block = serde_json::json!({"type": "text", "text": text});
         }
     }
-    projected
+    std::borrow::Cow::Owned(projected)
 }
 
 /// Materialize every `tool_attachment` block in the request messages.
@@ -637,7 +646,17 @@ mod tests {
             json!({"type": "tool_attachment", "tool_use_id": "a", "url": "image://sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "format": "png", "width": 1, "height": 1, "bytes": 1}),
         ]})];
         let projected = crate::llm::image_projection::project_consumed_attachments(&messages);
+        assert!(matches!(projected, std::borrow::Cow::Borrowed(_)));
         assert_eq!(projected[0]["content"][0]["type"], "tool_attachment");
+
+        let text_history = vec![
+            json!({"role": "user", "content": "hi"}),
+            json!({"role": "assistant", "content": [{"type": "text", "text": "hello"}]}),
+        ];
+        assert!(matches!(
+            crate::llm::image_projection::project_consumed_attachments(&text_history),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]
@@ -663,7 +682,8 @@ mod tests {
             json!({"role": "assistant", "content": [json!({"type": "text", "text": "seen"})]}),
             json!({"role": "user", "content": [attachment_block(&fresh_id, &fresh_bytes)]}),
         ];
-        let mut projected = crate::llm::image_projection::project_consumed_attachments(&messages);
+        let mut projected =
+            crate::llm::image_projection::project_consumed_attachments(&messages).into_owned();
         let display = RecordingDisplay {
             infos: std::sync::Mutex::new(Vec::new()),
         };

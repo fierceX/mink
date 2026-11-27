@@ -97,7 +97,7 @@ fn submit(
 }
 async fn until(
     state: &mut TuiState,
-    rx: &mut mpsc::Receiver<TuiSignal>,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<TuiSignal>,
     condition: impl Fn(&TuiState) -> bool,
 ) {
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -121,7 +121,7 @@ async fn running_enter_uses_current_turn_and_formal_commit_handoff_without_break
     let runtime = AgentRuntime::start(options(&root, backend.clone()))
         .await
         .unwrap();
-    let (signals, mut rx) = mpsc::channel();
+    let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let tx = crate::cli::start_runtime_broker(
         runtime.handle(),
         Arc::new(TuiDisplay::new(signals.clone())),
@@ -212,7 +212,7 @@ async fn running_enter_uses_current_turn_and_formal_commit_handoff_without_break
             .count(),
         1
     );
-    state.apply(&TuiSignal::GuidanceApplied {
+    state.apply(TuiSignal::GuidanceApplied {
         input_id,
         text: "keep the public API".into(),
     });
@@ -272,7 +272,7 @@ async fn interrupted_inputs_survive_reopen_and_only_explicit_resume_runs_them() 
     let runtime = AgentRuntime::start(options(&root, backend.clone()))
         .await
         .unwrap();
-    let (signals, mut rx) = mpsc::channel();
+    let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let tx = crate::cli::start_runtime_broker(
         runtime.handle(),
         Arc::new(TuiDisplay::new(signals.clone())),
@@ -380,8 +380,8 @@ fn round_stop_and_stale_final_cannot_end_an_active_guided_turn() {
         ..Default::default()
     };
     state.arm_task_notification();
-    state.apply(&TuiSignal::Stop);
-    state.apply(&TuiSignal::TurnFinished {
+    state.apply(TuiSignal::Stop);
+    state.apply(TuiSignal::TurnFinished {
         turn_id: "old".into(),
         status: crate::runtime::TurnStatus::Ok,
     });
@@ -404,12 +404,12 @@ async fn asynchronous_admission_preserves_later_draft_and_stop_during_admission(
     let runtime = AgentRuntime::start(options(&root, backend.clone()))
         .await
         .unwrap();
-    let (signals, mut rx) = mpsc::channel();
+    let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let tx = crate::cli::start_runtime_broker(
         runtime.handle(),
         Arc::new(TuiDisplay::new(signals.clone())),
     );
-    let (ui_tx, ui_rx) = mpsc::channel();
+    let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut state = TuiState {
         admission: state::AdmissionState {
             runtime: Some(TuiRuntime {

@@ -90,11 +90,11 @@ fn tui_release_stress_benchmark() {
             state.cache.detail_parses - parses
         );
         state.view = state::View::Main;
-        state.apply(&TuiSignal::Text("```text\nSTART\n".into()));
+        state.apply(TuiSignal::Text("```text\nSTART\n".into()));
         state.promote_stable_stream_prefix();
         let start = Instant::now();
         for _ in 0..256 {
-            state.apply(&TuiSignal::Text("x".repeat(1023) + "\n"));
+            state.apply(TuiSignal::Text("x".repeat(1023) + "\n"));
             state.promote_stable_stream_prefix();
             terminal
                 .draw(|f| render(f, &mut state, TuiMode::Full))
@@ -106,7 +106,7 @@ fn tui_release_stress_benchmark() {
             state.cache.stream_parses
         );
         for n in 0..32 {
-            state.apply(&TuiSignal::SubAgentStatus {
+            state.apply(TuiSignal::SubAgentStatus {
                 session_id: format!("sub_{n}"),
                 status: "running".into(),
                 label: None,
@@ -114,7 +114,7 @@ fn tui_release_stress_benchmark() {
                 in_tokens: 0,
                 out_tokens: 0,
             });
-            state.apply(&TuiSignal::SubAgentStream {
+            state.apply(TuiSignal::SubAgentStream {
                 session_id: format!("sub_{n}"),
                 kind: crate::ui::SubAgentStreamKind::Thinking,
                 content: "thinking\n".repeat(128),
@@ -131,14 +131,13 @@ fn tui_release_stress_benchmark() {
             start.elapsed().as_micros()
         );
     }
-    // Saturate the same bounded forwarding bridge used by the UI, retaining
+    // Saturate the same unbounded signal channel used by the UI, retaining
     // enqueue timestamps to measure backlog age separately from frame work.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
     runtime.block_on(async {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut receiver = async_receiver(rx);
+        let (tx, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let producer = std::thread::spawn(move || {
             for index in 0..10_000 {
                 tx.send((index, Instant::now(), TuiSignal::Text("line\n\n".into())))
@@ -193,7 +192,7 @@ fn tui_release_remaining_tail_benchmark() {
             } else {
                 "word ".repeat(target_bytes / 5)
             };
-            state.apply(&TuiSignal::Text(body));
+            state.apply(TuiSignal::Text(body));
             state.promote_stable_stream_prefix();
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
             terminal
@@ -201,7 +200,7 @@ fn tui_release_remaining_tail_benchmark() {
                 .unwrap();
             let mut samples = Vec::new();
             for _ in 0..20 {
-                state.apply(&TuiSignal::Text(
+                state.apply(TuiSignal::Text(
                     if kind == "table" {
                         "| another | row |\n"
                     } else {

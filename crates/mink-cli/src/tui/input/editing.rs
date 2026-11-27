@@ -23,7 +23,8 @@ pub(crate) fn handle_ctrl_c(
         || state.admission.admission_pending
         || state.admission.runtime.as_ref().is_some_and(|r| {
             r.handle
-                .goal_snapshot()
+                .goals()
+                .snapshot()
                 .is_some_and(|g| g.status == crate::runtime::GoalStatus::Active)
         })
     {
@@ -78,7 +79,7 @@ pub(super) fn request_clipboard_image(state: &mut TuiState) {
     state.async_load.clipboard_started = Some(Instant::now());
     let dir = state.mirrors.attachments_dir.clone();
     let reader = state.async_load.clipboard_reader.clone();
-    std::thread::spawn(move || {
+    crate::tui::spawn_blocking_work(move || {
         let staged = match reader {
             Some(reader) => reader(&dir, &limits),
             None => crate::tui::clipboard::read_clipboard_png(&dir, &limits),

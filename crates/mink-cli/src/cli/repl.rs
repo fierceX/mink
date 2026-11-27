@@ -38,6 +38,7 @@ pub(super) async fn run_interactive(
             }
         })
     };
+    let rt_handle = tokio::runtime::Handle::current();
     let repl_result = tokio::task::spawn_blocking(move || {
         #[cfg_attr(not(feature = "repl"), allow(unused_mut))]
         let mut exit_rx = exit_rx;
@@ -50,7 +51,7 @@ pub(super) async fn run_interactive(
                 Ok(r) => r,
                 Err(_) => {
                     eprintln!("Failed to initialize readline. Running in simple mode.");
-                    simple_stdin_loop(&cmd_tx, exit_rx);
+                    simple_stdin_loop(&rt_handle, &cmd_tx, exit_rx);
                     return;
                 }
             };
@@ -58,7 +59,7 @@ pub(super) async fn run_interactive(
             let _ = rl.load_history(&history_path);
             let history_file = history_path.clone();
 
-            'repl: loop {
+            loop {
                 let line = match rl.readline("> ") {
                     Ok(s) => s.trim_end().to_string(),
                     Err(rustyline::error::ReadlineError::Eof) => break,
@@ -108,19 +109,9 @@ pub(super) async fn run_interactive(
                 {
                     break;
                 }
-                // 轮询等待完成，同时检查中断与退出信号
-                let mut done_rx = done_rx;
-                loop {
-                    match done_rx.try_recv() {
-                        Ok(_) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => break,
-                        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                            if exit_rx.try_recv().is_ok() {
-                                let _ = cmd_tx.send(RuntimeCmd::Exit);
-                                break 'repl;
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                        }
-                    }
+                if wait_for_turn_or_exit(&rt_handle, done_rx, &mut exit_rx) {
+                    let _ = cmd_tx.send(RuntimeCmd::Exit);
+                    break;
                 }
             }
             let _ = rl.save_history(&history_file);
@@ -129,7 +120,7 @@ pub(super) async fn run_interactive(
         {
             let _ = last_interrupt;
             eprintln!("Readline support is disabled; running in simple stdin mode.");
-            simple_stdin_loop(&cmd_tx, exit_rx);
+            simple_stdin_loop(&rt_handle, &cmd_tx, exit_rx);
         }
     })
     .await;
@@ -139,13 +130,27 @@ pub(super) async fn run_interactive(
     Ok(())
 }
 
+fn wait_for_turn_or_exit<T>(
+    rt_handle: &tokio::runtime::Handle,
+    done_rx: oneshot::Receiver<T>,
+    exit_rx: &mut tokio::sync::mpsc::Receiver<()>,
+) -> bool {
+    rt_handle.block_on(async {
+        tokio::select! {
+            _ = done_rx => false,
+            Some(()) = exit_rx.recv() => true,
+        }
+    })
+}
+
 fn simple_stdin_loop(
+    rt_handle: &tokio::runtime::Handle,
     cmd_tx: &mpsc::UnboundedSender<RuntimeCmd>,
     mut exit_rx: tokio::sync::mpsc::Receiver<()>,
 ) {
     use std::io::BufRead;
     let stdin = std::io::stdin();
-    'stdin: for line in stdin.lock().lines() {
+    for line in stdin.lock().lines() {
         if exit_rx.try_recv().is_ok() {
             break;
         }
@@ -167,7 +172,7 @@ fn simple_stdin_loop(
         if line == "exit" || line == "quit" {
             break;
         }
-        let (done_tx, mut done_rx) = oneshot::channel();
+        let (done_tx, done_rx) = oneshot::channel();
         if cmd_tx
             .send(RuntimeCmd::Run {
                 input: line,
@@ -177,17 +182,9 @@ fn simple_stdin_loop(
         {
             break;
         }
-        loop {
-            match done_rx.try_recv() {
-                Ok(_) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => break,
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                    if exit_rx.try_recv().is_ok() {
-                        let _ = cmd_tx.send(RuntimeCmd::Exit);
-                        break 'stdin;
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-            }
+        if wait_for_turn_or_exit(rt_handle, done_rx, &mut exit_rx) {
+            let _ = cmd_tx.send(RuntimeCmd::Exit);
+            break;
         }
         if exit_rx.try_recv().is_ok() {
             break;

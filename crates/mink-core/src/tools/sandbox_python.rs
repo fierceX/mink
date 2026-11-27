@@ -14,10 +14,27 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
-use wasmtime::{Config, Engine, Linker, Module, Store};
+use wasmtime::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::p1::{self, WasiP1Ctx};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
+
+const EPOCH_INTERRUPT_GRACE: Duration = Duration::from_secs(2);
+
+struct WasiStoreState {
+    wasi: WasiP1Ctx,
+    limits: StoreLimits,
+}
+
+fn build_wasi_store_limits(max_memory_mb: usize) -> StoreLimits {
+    if max_memory_mb == 0 {
+        StoreLimitsBuilder::new().build()
+    } else {
+        StoreLimitsBuilder::new()
+            .memory_size(max_memory_mb.saturating_mul(1024 * 1024))
+            .build()
+    }
+}
 
 fn resolve_abs(dir: &str, cwd: &Path) -> PathBuf {
     let p = Path::new(dir);
@@ -161,6 +178,7 @@ fn execute_in_sandbox_detailed(
     cwd: &Path,
     max_output: usize,
     timeout_secs: u64,
+    max_memory_mb: usize,
     interrupt: Option<&AtomicBool>,
 ) -> Result<SandboxExecution> {
     let (engine, module) = load_compiled_wasm(wasm_path)?;
@@ -245,7 +263,11 @@ fn execute_in_sandbox_detailed(
 
     // ── 执行 ──
     let wasi = builder.build_p1();
-    let mut store = Store::new(&engine, wasi);
+    let limits = build_wasi_store_limits(max_memory_mb);
+    let mut store = Store::new(&engine, WasiStoreState { wasi, limits });
+    if max_memory_mb > 0 {
+        store.limiter(|state| &mut state.limits);
+    }
     // Other stores may tick this cached engine. Only this execution's
     // supervisor can ask this store to trap.
     let stop = std::sync::Arc::new(AtomicBool::new(false));
@@ -258,8 +280,8 @@ fn execute_in_sandbox_detailed(
         })
     });
     store.set_epoch_deadline(1);
-    let mut linker: Linker<WasiP1Ctx> = Linker::new(&engine);
-    p1::add_to_linker_sync(&mut linker, |ctx| ctx)?;
+    let mut linker: Linker<WasiStoreState> = Linker::new(&engine);
+    p1::add_to_linker_sync(&mut linker, |ctx| &mut ctx.wasi)?;
 
     let instance = linker.instantiate(&mut store, &module)?;
     let start = instance.get_typed_func::<(), ()>(&mut store, "_start")?;
@@ -296,23 +318,32 @@ fn execute_in_sandbox_detailed(
         }
     };
 
+    let mut thread_exited = result.is_ok();
     if result.is_err() {
         stop.store(true, std::sync::atomic::Ordering::Release);
         // A concurrent callback may already be renewing its deadline.
-        // Keep waking this store until it acknowledges cancellation.
+        // Keep waking this store until it acknowledges cancellation or the
+        // bounded interrupt grace period expires.
+        let interrupt_deadline = std::time::Instant::now() + EPOCH_INTERRUPT_GRACE;
         loop {
             engine.increment_epoch();
             if !matches!(
                 rx.recv_timeout(Duration::from_millis(20)),
                 Err(mpsc::RecvTimeoutError::Timeout)
             ) {
+                thread_exited = true;
+                break;
+            }
+            if std::time::Instant::now() >= interrupt_deadline {
                 break;
             }
         }
     }
-    handle
-        .join()
-        .map_err(|_| anyhow::anyhow!("Python sandbox execution thread panicked"))?;
+    if thread_exited {
+        handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("Python sandbox execution thread panicked"))?;
+    }
 
     // 读取输出
     let stdout = String::from_utf8_lossy(&stdout_pipe.contents()).to_string();
@@ -421,6 +452,7 @@ fn execute_in_sandbox_at(
         cwd,
         max_output,
         timeout_secs,
+        256,
         interrupt,
     )?;
     Ok((exec.stdout, exec.stderr, exec.exit_code))
@@ -514,6 +546,7 @@ impl super::runner::ToolExec for PythonSandboxTool {
             &ctx.cwd,
             ctx.tool_config.tool_result_max_bytes,
             timeout,
+            sp_cfg.max_memory_mb,
             Some(ctx.interrupt.as_ref()),
         )?;
 
@@ -546,6 +579,7 @@ impl super::runner::ToolExec for PythonSandboxTool {
             presentation: None,
             structured_value: None,
             termination: Some(exec.termination),
+            file_summary_metrics: None,
         })
     }
 }

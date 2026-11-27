@@ -121,8 +121,9 @@ pub fn classify_anyhow(err: &anyhow::Error) -> ErrorInfo {
                     ErrorInfo::new(ErrorCategory::Parse, ErrorSeverity::Error, false)
                 }
                 429 => ErrorInfo::new(ErrorCategory::RateLimit, ErrorSeverity::Warning, true),
-                500..=599 => ErrorInfo::new(ErrorCategory::Network, ErrorSeverity::Warning, true),
-                408 => ErrorInfo::new(ErrorCategory::Network, ErrorSeverity::Warning, true),
+                code if crate::llm::recovery::is_retryable_http_status(code) => {
+                    ErrorInfo::new(ErrorCategory::Network, ErrorSeverity::Warning, true)
+                }
                 _ => ErrorInfo::new(ErrorCategory::Internal, ErrorSeverity::Error, false),
             };
         }

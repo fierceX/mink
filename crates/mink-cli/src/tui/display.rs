@@ -3,24 +3,24 @@ use crate::ui::{
     Display, PresentedToolResultDisplay, StatsSnapshot, SubAgentStreamKind, SubAgentStreamSink,
     ToolCallDisplay,
 };
-use std::sync::mpsc;
+use tokio::sync::mpsc;
 
 pub struct TuiDisplay {
-    tx: mpsc::Sender<TuiSignal>,
+    tx: mpsc::UnboundedSender<TuiSignal>,
 }
 
 pub struct TuiSubAgentStreamSink {
-    tx: mpsc::Sender<TuiSignal>,
+    tx: mpsc::UnboundedSender<TuiSignal>,
 }
 
 impl TuiDisplay {
-    pub fn new(tx: mpsc::Sender<TuiSignal>) -> Self {
+    pub fn new(tx: mpsc::UnboundedSender<TuiSignal>) -> Self {
         Self { tx }
     }
 }
 
 impl TuiSubAgentStreamSink {
-    pub fn new(tx: mpsc::Sender<TuiSignal>) -> Self {
+    pub fn new(tx: mpsc::UnboundedSender<TuiSignal>) -> Self {
         Self { tx }
     }
 }

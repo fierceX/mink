@@ -314,6 +314,7 @@ impl BashTool {
                     "timed_out": timed_out,
                 })),
                 termination: Some(termination),
+                file_summary_metrics: None,
             }
         })
     }

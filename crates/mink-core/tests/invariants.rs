@@ -240,19 +240,19 @@ async fn goal_contract_revision_is_a_cas_and_survives_a_reopen() -> Result<()> {
         .await
         .map_err(|e| anyhow!("start: {e}"))?;
     let draft = runtime
-        .handle()
-        .draft_goal(GoalSpec::new("ship the goal"), 3_600)
+        .goals()
+        .draft(GoalSpec::new("ship the goal"), 3_600)
         .map_err(|e| anyhow!("draft: {e}"))?;
     assert!(
         runtime
-            .handle()
-            .confirm_goal(&draft.id, draft.revision + 1)
+            .goals()
+            .confirm(&draft.id, draft.revision + 1)
             .is_err(),
         "a stale revision must not confirm the contract"
     );
     let confirmed = runtime
-        .handle()
-        .confirm_goal(&draft.id, draft.revision)
+        .goals()
+        .confirm(&draft.id, draft.revision)
         .map_err(|e| anyhow!("confirm: {e}"))?;
     assert_eq!(confirmed.status, GoalStatus::Active);
     let sid = runtime.session_info().session_id.clone();
@@ -265,8 +265,8 @@ async fn goal_contract_revision_is_a_cas_and_survives_a_reopen() -> Result<()> {
         .await
         .map_err(|e| anyhow!("reopen: {e}"))?;
     let restored = runtime
-        .handle()
-        .goal_snapshot()
+        .goals()
+        .snapshot()
         .ok_or_else(|| anyhow!("goal missing after reopen"))?;
     assert_eq!(restored.id, confirmed.id);
     assert_eq!(restored.contract_revision, confirmed.contract_revision);
@@ -277,8 +277,8 @@ async fn goal_contract_revision_is_a_cas_and_survives_a_reopen() -> Result<()> {
     // on a state it no longer describes, and the restored revision works.
     assert!(
         runtime
-            .handle()
-            .update_goal_limits(
+            .goals()
+            .update_limits(
                 &restored.id,
                 confirmed.revision,
                 restored.spec.limits.clone()
@@ -287,8 +287,8 @@ async fn goal_contract_revision_is_a_cas_and_survives_a_reopen() -> Result<()> {
         "a revision from before the reopen must be stale"
     );
     let adjusted = runtime
-        .handle()
-        .update_goal_limits(
+        .goals()
+        .update_limits(
             &restored.id,
             restored.revision,
             restored.spec.limits.clone(),

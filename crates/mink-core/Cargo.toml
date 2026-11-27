@@ -16,6 +16,11 @@ include = [
     "/README.md",
     "/LICENSE*",
     "/src/**",
+    "!/src/**/*_tests.rs",
+    "!/src/**/tests.rs",
+    "!/src/**/tests/**",
+    "!/src/regression/**",
+    "!/src/runtime/builder_tests/**",
     "/skills/**",
     "/examples/**",
 ]

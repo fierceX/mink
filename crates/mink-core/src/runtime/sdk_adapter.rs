@@ -1,10 +1,7 @@
 use crate::agent::orchestrator::TurnStatus;
 use crate::capabilities::{CapabilityExposure, RuntimeSkill, SkillDiscoveryPolicy};
 use crate::runtime::TurnOutcome;
-use crate::sdk_protocol::{
-    PROTOCOL_VERSION, SdkCapabilityExposure, SdkFinal, SdkRequest, SdkSkillDiscoveryPolicy,
-    SdkStatus, path_string,
-};
+use crate::sdk_protocol::{PROTOCOL_VERSION, SdkFinal, SdkRequest, SdkStatus, path_string};
 
 pub fn runtime_skills_from_sdk_request(req: &SdkRequest) -> Vec<RuntimeSkill> {
     req.options
@@ -19,37 +16,18 @@ pub fn runtime_skills_from_sdk_request(req: &SdkRequest) -> Vec<RuntimeSkill> {
                 skill.description.clone(),
                 skill.content.clone(),
             )
-            .with_exposure(capability_exposure_from_sdk(
+            .with_exposure(
                 skill
                     .exposure
-                    .unwrap_or(SdkCapabilityExposure::ModelAddressable),
-            ))
+                    .unwrap_or(CapabilityExposure::ModelAddressable),
+            )
             .with_optional_revision(skill.revision.clone())
         })
         .collect()
 }
 
 pub fn skill_discovery_policy_from_sdk_request(req: &SdkRequest) -> Option<SkillDiscoveryPolicy> {
-    req.options
-        .tools
-        .skill_discovery_policy
-        .map(skill_discovery_policy_from_sdk)
-}
-
-fn capability_exposure_from_sdk(exposure: SdkCapabilityExposure) -> CapabilityExposure {
-    match exposure {
-        SdkCapabilityExposure::ModelDiscoverable => CapabilityExposure::ModelDiscoverable,
-        SdkCapabilityExposure::ModelAddressable => CapabilityExposure::ModelAddressable,
-        SdkCapabilityExposure::HostOnly => CapabilityExposure::HostOnly,
-    }
-}
-
-fn skill_discovery_policy_from_sdk(policy: SdkSkillDiscoveryPolicy) -> SkillDiscoveryPolicy {
-    match policy {
-        SdkSkillDiscoveryPolicy::Defaults => SkillDiscoveryPolicy::Defaults,
-        SdkSkillDiscoveryPolicy::RuntimeOnly => SkillDiscoveryPolicy::RuntimeOnly,
-        SdkSkillDiscoveryPolicy::ExplicitOnly => SkillDiscoveryPolicy::ExplicitOnly,
-    }
+    req.options.tools.skill_discovery_policy
 }
 
 pub fn sdk_status_from_turn(status: TurnStatus) -> SdkStatus {

@@ -100,6 +100,43 @@ fn compiled_patterns() -> &'static CompiledPatterns {
                 SignalKind::ToolError,
             ),
             (
+                r"--- FAIL:",
+                0.8,
+                "Go test failure",
+                SignalKind::TestFailure,
+            ),
+            (r"(?:^|\n)panic: ", 0.8, "Go panic", SignalKind::ToolError),
+            (
+                r"undefined: [A-Za-z_][A-Za-z0-9_]*",
+                0.9,
+                "Go compile error",
+                SignalKind::CompileError,
+            ),
+            (
+                r"error TS\d+:",
+                0.9,
+                "TypeScript compilation error",
+                SignalKind::CompileError,
+            ),
+            (
+                r"(?:TypeError|ReferenceError|SyntaxError):",
+                0.8,
+                "JavaScript runtime error",
+                SignalKind::ToolError,
+            ),
+            (
+                r"Exception in thread ",
+                0.8,
+                "Java exception",
+                SignalKind::ToolError,
+            ),
+            (
+                r"error: cannot find symbol",
+                0.9,
+                "Java compilation error",
+                SignalKind::CompileError,
+            ),
+            (
                 r"Permission denied|EACCES",
                 0.5,
                 "Permission denied",

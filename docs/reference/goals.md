@@ -10,13 +10,13 @@ Goal 是 Session 内版本化、有边界的跨 turn 目标：目标形成、执
 
 `/goal` 的子命令为 `confirm` / `refine` / `pause` / `resume` / `cancel` / `clear` / `approve` / `reconcile` / `human` / `verified` / `budget`。参数首词（包括带参数的调用，如 `confrim g12`）与某个子命令只差一次插入、删除、替换或相邻换位时（如 `cancal`、`cancle`、`cance`、`refne`），解析器拒绝并给出建议，不把该词当作目标正文；首词不接近任何子命令的文本（如 `refactor`、`fix the cancal bug`）仍作为正文创建目标。终端与 `apps/web` 两个解析器共用 `crates/mink-cli/src/tui/slash_commands.json` 契约，新增用例两处同时生效。
 
-`draft_goal(spec, duration_secs)` 保存宿主准备好的完整草案；`request_goal_draft(spec, duration_secs)` 从创建时即保存 `draft_ready=false` 的待形成草案，避免生成请求到达前的确认竞争。CLI/Web 默认使用后者，再调用 `generate_goal_draft(feedback)`。它打开普通会话 turn，冻结本轮只读探索权限，允许 Read/Glob/Grep/GoalRead/GoalDraft，禁止执行、工作区写入、普通子代理、自定义工具与自定义资源处理器。模型以 `GoalDraft { draft_id, revision, spec }` 保存 proposal；proposal 不含原始请求、额度或验收方式。每次草案生成开始时 `draft_ready=false`，成功保存后变为 true；只提出澄清问题而未保存有效 proposal 时不能确认。
+`goals().draft(spec, duration_secs)` 保存宿主准备好的完整草案；`goals().request_draft(spec, duration_secs)` 从创建时即保存 `draft_ready=false` 的待形成草案，避免生成请求到达前的确认竞争。CLI/Web 默认使用后者，再调用 `goals().generate_draft(feedback)`。它打开普通会话 turn，冻结本轮只读探索权限，允许 Read/Glob/Grep/GoalRead/GoalDraft，禁止执行、工作区写入、普通子代理、自定义工具与自定义资源处理器。模型以 `GoalDraft { draft_id, revision, spec }` 保存 proposal；proposal 不含原始请求、额度或验收方式。每次草案生成开始时 `draft_ready=false`，成功保存后变为 true；只提出澄清问题而未保存有效 proposal 时不能确认。
 
-`confirm_goal(id, revision)` 是宿主 compare-and-set 操作，不向模型暴露。它核对草案、执行权、配置与预算后发布 active；启用驱动时启动唯一 run。默认 20 个执行 turn、60 分钟从确认时开始；草案讨论不消耗执行轮次，模型调用正常进入会话账单。已确认契约不能由执行模型修改，变更范围需取消并重新形成契约。`cancel_goal_draft` 取消待确认草案并中断在途讨论。
+`goals().confirm(id, revision)` 是宿主 compare-and-set 操作，不向模型暴露。它核对草案、执行权、配置与预算后发布 active；启用驱动时启动唯一 run。默认 20 个执行 turn、60 分钟从确认时开始；草案讨论不消耗执行轮次，模型调用正常进入会话账单。已确认契约不能由执行模型修改，变更范围需取消并重新形成契约。`goals().cancel_draft` 取消待确认草案并中断在途讨论。
 
 状态为 draft/active/paused/blocked/budget_exhausted/completed/cancelled/failed；阶段另存 idle/executing/verifying。completed/cancelled/failed 为终态，一个 Session 最多一个未结束目标。暂停不重置截止时间；调整预算不自动恢复。草案不能通过 pause/resume 绕过确认。取消/完成（以及人工验收之外的终态展示）载入时把遗留的 verifying 归一为 idle；paused/blocked/budget_exhausted/failed 的 verifying 保留，供 resume 重试原审核而不是新开执行轮。普通用户 turn 的压缩不得因无关 Goal 的 review 期限而失败；审核压缩只在 review 会话内检查该预算，宿主 adjudication 在自身批次前后核对。
 
-执行失败与 finished/billing/usage 同次原子发布为 failed，表示本 run 已结束，不自动重试，也不进入完成审核。宿主显式 `resume_goal` 可重试同一目标；无需识别错误字符串或区分历史失败版本。原有 iteration、用量、失败/阻断记录、契约身份和已提交工具交换完整保留，不重放已提交调用，不重置已用轮次或原期限。单个请求的自动重试与格式恢复上限保持不变，显式重试是宿主发起的新 run。
+执行失败与 finished/billing/usage 同次原子发布为 failed，表示本 run 已结束，不自动重试，也不进入完成审核。宿主显式 `goals().resume` 可重试同一目标；无需识别错误字符串或区分历史失败版本。原有 iteration、用量、失败/阻断记录、契约身份和已提交工具交换完整保留，不重放已提交调用，不重置已用轮次或原期限。单个请求的自动重试与格式恢复上限保持不变，显式重试是宿主发起的新 run。
 
 恢复仍核对 ID/revision、运行时故障闩锁、执行退出、环境、容量、未决副作用和预算。当前 runtime 的 Faulted 或持久化闩锁拒绝恢复，须关闭并重新打开会话完成恢复检查；未决副作用需先人工对账。failed 允许调整预算，但调整不会激活；过期或轮数耗尽须显式修改后再 resume。completed/cancelled 不可恢复或改预算；draft 必须确认。清除 failed 会隐藏记录，隐藏操作本身不启动执行。
 
@@ -57,11 +57,11 @@ continue 将缺口与下一步写入下一执行轮尾部。blocked 需要客观
 
 默认审核满足契约后提交 completed，completion basis 为 `agent_reviewed`。`Verifier { id }` 或 `checker_id` 指定宿主检查器，必须稳定身份匹配；单个注册检查器默认关联新草案，多个注册检查器须显式选择。检查器 pass 后且证据未变才提交 `verified`；缺失、不确定或超时不降级。检查器改变审核证据后，在同一执行轮内创建新候选并重新只读审核，不重新执行任务或消耗额外执行轮。已知通过结果绑定检查器返回时的证据版本；版本仍匹配时复用该结果，避免重复执行检查器，证据再变化则失效。
 
-`Human` 在独立审核通过（及配置的检查器通过）后进入 blocked/verifying 等待宿主 `approve_goal`。批准必须提供非空人工说明，并重新核对候选、证据、检查器版本及绝对期限；过期批准拒绝且不修改目标。basis 为 `human_approved`，不能绕过配置的检查器。历史 `model_reported` basis 仅用于旧已结束目标展示。
+`Human` 在独立审核通过（及配置的检查器通过）后进入 blocked/verifying 等待宿主 `goals().approve` / `goals().approve_async`。批准必须提供非空人工说明，并重新核对候选、证据、检查器版本及绝对期限；过期批准拒绝且不修改目标。basis 为 `human_approved`，不能绕过配置的检查器。历史 `model_reported` basis 仅用于旧已结束目标展示。
 
 文件证据限工作目录内的规范路径，artifact://ID 限会话产物。审核者新生成并实际读取的 artifact 经宿主 ArtifactManager 导入父会话并重绑定引用，字节必须与读取时的 SHA-256 一致；继承产物保留身份，不能以子会话副本掩盖父证据变化或缺失。保存每份实际读取证据的 SHA-256；完成提交核对 run、目标身份、契约版本、conversation 序号、取消状态与期限。审核期间保持 turn gate 与宿主容量，任务实际退出前不释放。迟到结果不能改变停止或替换后的目标。
 
-检查器开始前持久保存 pending marker；已知结果先与 checker_records 同次发布，再关闭 marker。即使返回后证据读取失败，已知结果也保持已知并关闭 marker，另以证据错误阻塞，不能伪装成未知副作用。异常或未知结果保留 marker，恢复后必须人工调查并 `reconcile_goal_effects`，不能自动重放未知副作用或合成成功。运行时放弃等待已派发的扩展工具（超时、取消或中断）会终止该 Goal 批次，并在历史与重开后的目标中保留未知副作用。一般有副作用工具也保留既有 marker 协议，Bash/远端操作不承诺 exactly-once。
+检查器开始前持久保存 pending marker；已知结果先与 checker_records 同次发布，再关闭 marker。即使返回后证据读取失败，已知结果也保持已知并关闭 marker，另以证据错误阻塞，不能伪装成未知副作用。异常或未知结果保留 marker，恢复后必须人工调查并 `goals().reconcile_effects`，不能自动重放未知副作用或合成成功。运行时放弃等待已派发的扩展工具（超时、取消或中断）会终止该 Goal 批次，并在历史与重开后的目标中保留未知副作用。一般有副作用工具也保留既有 marker 协议，Bash/远端操作不承诺 exactly-once。
 
 ## 读取、缓存与恢复
 
@@ -77,7 +77,7 @@ core SessionLease 在恢复前获取；停止意图发布失败进入 Stopping �
 
 ## 宿主接口与界面
 
-Rust：draft_goal、request_goal_draft、goal_draft_snapshot、generate_goal_draft、generate_goal_draft_at、confirm_goal、confirm_and_start_goal、cancel_goal_draft；`generate_goal_draft_at` 在同一准入锁内核对 ID/revision 并使旧草案不可确认，陈旧修改在写入和模型请求前拒绝。GoalStore 通过类型化 GoalCommand 统一处理草案创建、替换、确认与取消。保留 goal_snapshot、subscribe_goal、pause/resume/cancel、预算调整、人工批准和副作用对账。旧 create_goal/create_and_start_goal 明确返回协议升级错误。`start_goal_driver` 只启用调度；有容量账本的宿主经 confirm_and_start_goal/resume_and_start_goal 传递 GoalRunLease，执行和退出期间持续占容量，等待人工验收时释放。
+Rust：`handle.goals()` 返回 `GoalController`，提供 `draft`、`request_draft`、`draft_snapshot`、`generate_draft`、`generate_draft_at`、`confirm`、`confirm_and_start`、`cancel_draft`、`snapshot`、`subscribe`、`pause`/`resume`/`cancel`、`update_limits`、`approve`/`approve_async`、`reconcile_effects` 与 `clear`。`generate_draft_at` 在同一准入锁内核对 ID/revision 并使旧草案不可确认，陈旧修改在写入和模型请求前拒绝。GoalStore 通过类型化 GoalCommand 统一处理草案创建、替换、确认与取消。`start_driver` 只启用调度；有容量账本的宿主经 `confirm_and_start`/`resume_and_start` 传递 GoalRunLease，执行和退出期间持续占容量，等待人工验收时释放。
 
 Web：GET `/api/sessions/{id}/goal` 优先读活运行时快照，关闭时回退落盘 current；hidden 归一为 null。POST 同路径要求 `protocol_version:2`，objective、acceptance（agent_reviewed/human/verifier）、max_turns、max_minutes、acceptance_criteria、constraints；默认形成模型草案，宿主准备结构化 `draft_spec` 时可设 `generate:false`。成功返回 draft，尚未启动执行。
 

@@ -689,10 +689,10 @@ pub(crate) struct PickerRequest {
     pub policy: FilePickerPolicy,
 }
 pub(crate) fn start_worker(
-    tx: std::sync::mpsc::Sender<super::state::TuiUiEvent>,
+    tx: tokio::sync::mpsc::UnboundedSender<super::state::TuiUiEvent>,
 ) -> std::sync::mpsc::Sender<PickerRequest> {
     let (requests, rx) = std::sync::mpsc::channel::<PickerRequest>();
-    std::thread::spawn(move || {
+    crate::tui::spawn_blocking_work(move || {
         let mut picker: Option<FilePickerState> = None;
         while let Ok(mut request) = rx.recv() {
             while let Ok(next) = rx.try_recv() {

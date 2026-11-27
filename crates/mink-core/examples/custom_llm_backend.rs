@@ -5,9 +5,10 @@
 
 use anyhow::Result;
 use futures::stream;
-use mink::prelude::{
-    AgentOptions, AgentRuntime, LlmBackend, LlmEvent, LlmEventStream, LlmRequest,
-    LlmRequestFailure, LlmResponseStream, LlmStopEvent, LlmTextEvent, LlmUsageEvent,
+use mink::prelude::{AgentOptions, AgentRuntime};
+use mink::runtime::llm::{
+    LlmBackend, LlmEvent, LlmEventStream, LlmRequest, LlmRequestFailure, LlmResponseStream,
+    LlmStopEvent, LlmTextEvent, LlmUsageEvent,
 };
 use serde_json::Value;
 use std::sync::Arc;

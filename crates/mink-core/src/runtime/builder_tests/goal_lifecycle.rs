@@ -12,14 +12,14 @@ async fn goal_pause_during_request_stops_new_requests_and_preserves_deadline() {
             .await
             .unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver_and_run().unwrap();
+    handle.goals().start_driver_and_run().unwrap();
     let created = handle
         .confirmed_test_goal(GoalSpec::new("do work"))
         .unwrap();
     backend.entered.notified().await;
-    let g = handle.goal_snapshot().unwrap();
-    handle.pause_goal(&g.id, g.revision).unwrap();
-    let paused = tokio::time::timeout(std::time::Duration::from_secs(10), handle.wait_goal())
+    let g = handle.goals().snapshot().unwrap();
+    handle.goals().pause(&g.id, g.revision).unwrap();
+    let paused = tokio::time::timeout(std::time::Duration::from_secs(10), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
@@ -29,7 +29,7 @@ async fn goal_pause_during_request_stops_new_requests_and_preserves_deadline() {
         created.spec.limits.deadline_unix_secs
     );
     assert_eq!(*backend.calls.lock().unwrap(), 1);
-    assert!(handle.pause_goal(&g.id, g.revision).is_err());
+    assert!(handle.goals().pause(&g.id, g.revision).is_err());
     runtime.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
@@ -54,17 +54,18 @@ async fn model_reported_block_needs_consecutive_rounds_before_ending_the_goal() 
             .await
             .unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver_and_run().unwrap();
+    handle.goals().start_driver_and_run().unwrap();
     let created = handle
         .confirmed_test_goal(GoalSpec::new("stuck task"))
         .unwrap();
     let mut limits = created.spec.limits.clone();
     limits.max_turns = 10;
     handle
-        .update_goal_limits(&created.id, created.revision, limits)
+        .goals()
+        .update_limits(&created.id, created.revision, limits)
         .unwrap();
 
-    let goal = tokio::time::timeout(std::time::Duration::from_secs(30), handle.wait_goal())
+    let goal = tokio::time::timeout(std::time::Duration::from_secs(30), handle.goals().wait())
         .await
         .expect("driver must terminate")
         .unwrap();
@@ -123,17 +124,18 @@ async fn audit9_different_blockers_do_not_share_a_streak() {
         .await
         .unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver_and_run().unwrap();
+    handle.goals().start_driver_and_run().unwrap();
     let created = handle
         .confirmed_test_goal(GoalSpec::new("stuck task"))
         .unwrap();
     let mut limits = created.spec.limits.clone();
     limits.max_turns = 10;
     handle
-        .update_goal_limits(&created.id, created.revision, limits)
+        .goals()
+        .update_limits(&created.id, created.revision, limits)
         .unwrap();
 
-    let goal = tokio::time::timeout(std::time::Duration::from_secs(30), handle.wait_goal())
+    let goal = tokio::time::timeout(std::time::Duration::from_secs(30), handle.goals().wait())
         .await
         .expect("driver must terminate")
         .unwrap();
@@ -198,17 +200,18 @@ async fn audit9_continue_clears_the_blocker_streak() {
         .await
         .unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver_and_run().unwrap();
+    handle.goals().start_driver_and_run().unwrap();
     let created = handle
         .confirmed_test_goal(GoalSpec::new("stuck task"))
         .unwrap();
     let mut limits = created.spec.limits.clone();
     limits.max_turns = 4;
     handle
-        .update_goal_limits(&created.id, created.revision, limits)
+        .goals()
+        .update_limits(&created.id, created.revision, limits)
         .unwrap();
 
-    let goal = tokio::time::timeout(std::time::Duration::from_secs(30), handle.wait_goal())
+    let goal = tokio::time::timeout(std::time::Duration::from_secs(30), handle.goals().wait())
         .await
         .expect("driver must terminate")
         .unwrap();
@@ -244,7 +247,7 @@ async fn audit9_blocker_streak_survives_restart() {
         .await
         .unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver_and_run().unwrap();
+    handle.goals().start_driver_and_run().unwrap();
     handle
         .confirmed_test_goal(GoalSpec::new("stuck task"))
         .unwrap();
@@ -254,7 +257,7 @@ async fn audit9_blocker_streak_survives_restart() {
     // goal is still active.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
-        let snapshot = handle.goal_snapshot().unwrap();
+        let snapshot = handle.goals().snapshot().unwrap();
         if snapshot.blocker_rounds >= 2 || snapshot.status == GoalStatus::Blocked {
             break;
         }
@@ -277,8 +280,8 @@ async fn audit9_blocker_streak_survives_restart() {
     .await
     .unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver_and_run().unwrap();
-    let goal = tokio::time::timeout(std::time::Duration::from_secs(30), handle.wait_goal())
+    handle.goals().start_driver_and_run().unwrap();
+    let goal = tokio::time::timeout(std::time::Duration::from_secs(30), handle.goals().wait())
         .await
         .expect("driver must terminate")
         .unwrap();
@@ -303,16 +306,16 @@ async fn audit9_stop_after_commit_is_rejected_without_a_fault() {
     use crate::runtime::*;
     let (runtime, home, cwd, _) = goal_runtime("audit9-commit-first", false, None).await;
     let handle = runtime.handle();
-    handle.start_goal_driver_and_run().unwrap();
+    handle.goals().start_driver_and_run().unwrap();
     handle
         .confirmed_test_goal(GoalSpec::new("produce proof"))
         .unwrap();
-    let completed = tokio::time::timeout(std::time::Duration::from_secs(30), handle.wait_goal())
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(30), handle.goals().wait())
         .await
         .expect("driver must terminate")
         .unwrap();
     assert_eq!(completed.status, GoalStatus::Completed, "{completed:?}");
-    let refused = handle.pause_goal(&completed.id, completed.revision);
+    let refused = handle.goals().pause(&completed.id, completed.revision);
     assert!(
         refused.is_err(),
         "a terminal goal cannot be paused: {refused:?}"
@@ -367,7 +370,7 @@ async fn host_lease_lives_for_exactly_one_run() {
     use crate::runtime::*;
     let (runtime, home, cwd, _) = goal_runtime("goal-lease", false, None).await;
     let handle = runtime.handle();
-    handle.start_goal_driver_and_run().unwrap();
+    handle.goals().start_driver_and_run().unwrap();
     let alive = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let goal = handle
         .confirmed_test_goal_with_lease(
@@ -380,7 +383,7 @@ async fn host_lease_lives_for_exactly_one_run() {
         1,
         "the lease must be held while the run owns scheduling"
     );
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), handle.wait_goal())
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
@@ -412,11 +415,12 @@ async fn resumed_host_activation_carries_its_lease() {
     let goal = handle
         .confirmed_test_goal(GoalSpec::new("produce proof"))
         .unwrap();
-    let paused = handle.pause_goal(&goal.id, goal.revision).unwrap();
-    handle.start_goal_driver_and_run().unwrap();
+    let paused = handle.goals().pause(&goal.id, goal.revision).unwrap();
+    handle.goals().start_driver_and_run().unwrap();
     let alive = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let resumed = handle
-        .resume_and_start_goal(
+        .goals()
+        .resume_and_start(
             &paused.id,
             paused.revision,
             Box::new(CountingLease::new(&alive)),
@@ -424,7 +428,7 @@ async fn resumed_host_activation_carries_its_lease() {
         .unwrap();
     assert_eq!(resumed.status, GoalStatus::Active);
     assert_eq!(alive.load(std::sync::atomic::Ordering::SeqCst), 1);
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), handle.wait_goal())
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
@@ -450,9 +454,10 @@ async fn refused_host_activation_destroys_its_lease() {
     let handle = runtime.handle();
     let alive = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let draft = handle
-        .draft_goal(GoalSpec::new("not started"), 3600)
+        .goals()
+        .draft(GoalSpec::new("not started"), 3600)
         .unwrap();
-    let disabled = handle.confirm_and_start_goal(
+    let disabled = handle.goals().confirm_and_start(
         &draft.id,
         draft.revision,
         Box::new(CountingLease::new(&alive)),
@@ -464,12 +469,12 @@ async fn refused_host_activation_destroys_its_lease() {
         "a refused activation must destroy its lease"
     );
     assert!(
-        handle.goal_snapshot() == Some(draft.clone()),
+        handle.goals().snapshot() == Some(draft.clone()),
         "a refused confirmation must leave the draft unchanged"
     );
     // A run already owning the driver refuses the activation before the
     // contract is touched, and still destroys the lease.
-    handle.start_goal_driver_and_run().unwrap();
+    handle.goals().start_driver_and_run().unwrap();
     {
         let mut control = handle.goal_driver.lock_control();
         control.driver = crate::runtime::goal::DriverState::Running {
@@ -477,7 +482,7 @@ async fn refused_host_activation_destroys_its_lease() {
             goal_id: "g".into(),
         };
     }
-    let busy = handle.confirm_and_start_goal(
+    let busy = handle.goals().confirm_and_start(
         &draft.id,
         draft.revision,
         Box::new(CountingLease::new(&alive)),
@@ -509,7 +514,7 @@ async fn goal_persistence_fault_stops_scheduling_without_restart() {
     use crate::runtime::*;
     let (runtime, home, cwd, backend) = goal_runtime("goal-fault-stop", true, None).await;
     let handle = runtime.handle();
-    handle.start_goal_driver_and_run().unwrap();
+    handle.goals().start_driver_and_run().unwrap();
     let goal = handle
         .confirmed_test_goal(GoalSpec::new("produce proof"))
         .unwrap();
@@ -534,7 +539,7 @@ async fn goal_persistence_fault_stops_scheduling_without_restart() {
     // An unrecoverable failure must stop scheduling: wait_goal returns the
     // runtime fault it could not persist instead of spinning on a disk state
     // that still reads `active`.
-    let waited = tokio::time::timeout(std::time::Duration::from_secs(10), handle.wait_goal())
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(10), handle.goals().wait())
         .await
         .expect("driver must stop after an unrecoverable failure");
     assert!(
@@ -550,7 +555,7 @@ async fn goal_persistence_fault_stops_scheduling_without_restart() {
         "a failed run must not restart while the goal still reads active"
     );
     // A faulted driver refuses new activation instead of pretending to run.
-    assert!(handle.start_goal_driver().is_err());
+    assert!(handle.goals().start_driver().is_err());
     assert!(
         handle
             .confirmed_test_goal(GoalSpec::new("second goal"))
@@ -558,7 +563,8 @@ async fn goal_persistence_fault_stops_scheduling_without_restart() {
     );
     assert_eq!(
         handle
-            .goal_snapshot()
+            .goals()
+            .snapshot()
             .map(|current| (current.id, current.status)),
         Some((goal.id.clone(), GoalStatus::Active)),
         "a fault that cannot be persisted must not fake a failed status"
@@ -645,7 +651,7 @@ fn goal_fault_stop_child() {
     runtime.block_on(async {
         let (runtime, home, cwd, backend) = goal_runtime("goal-fault-child", true, None).await;
         let handle = runtime.handle();
-        handle.start_goal_driver_and_run().unwrap();
+        handle.goals().start_driver_and_run().unwrap();
         handle
             .confirmed_test_goal(GoalSpec::new("produce proof"))
             .unwrap();
@@ -659,9 +665,10 @@ fn goal_fault_stop_child() {
             std::path::Path::new("goal.json"),
             "injected publish failure",
         );
-        let waited = tokio::time::timeout(std::time::Duration::from_secs(10), handle.wait_goal())
-            .await
-            .expect("the fault must stop the driver");
+        let waited =
+            tokio::time::timeout(std::time::Duration::from_secs(10), handle.goals().wait())
+                .await
+                .expect("the fault must stop the driver");
         assert!(waited.is_err(), "the runtime fault must surface");
         assert_eq!(
             handle
@@ -697,12 +704,12 @@ async fn goal_driver_fault_is_stable_and_blocks_reactivation() {
     .await
     .unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver_and_run().unwrap();
+    handle.goals().start_driver_and_run().unwrap();
     let goal = handle
         .confirmed_test_goal(GoalSpec::new("produce proof"))
         .unwrap();
 
-    let waited = tokio::time::timeout(std::time::Duration::from_secs(10), handle.wait_goal())
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(10), handle.goals().wait())
         .await
         .expect("a sink failure must stop the run");
     let error = waited.expect_err("the driver fault must surface");
@@ -726,7 +733,7 @@ async fn goal_driver_fault_is_stable_and_blocks_reactivation() {
     ));
     // ...and reactivation is refused until the session is reopened, even for a
     // goal whose failed status made it replaceable.
-    assert!(handle.start_goal_driver().is_err());
+    assert!(handle.goals().start_driver().is_err());
     assert!(
         handle
             .confirmed_test_goal(GoalSpec::new("replacement"))
@@ -761,7 +768,7 @@ async fn failed_stop_intent_stops_the_run_and_never_reads_as_saved() {
         "injected publish failure",
     );
 
-    let paused = handle.pause_goal(&goal.id, goal.revision);
+    let paused = handle.goals().pause(&goal.id, goal.revision);
     assert!(
         paused.is_err(),
         "a stop intent that cannot be saved must fail"
@@ -780,7 +787,7 @@ async fn failed_stop_intent_stops_the_run_and_never_reads_as_saved() {
         handle.goal_driver.state()
     );
     let pending =
-        tokio::time::timeout(std::time::Duration::from_millis(200), handle.wait_goal()).await;
+        tokio::time::timeout(std::time::Duration::from_millis(200), handle.goals().wait()).await;
     assert!(
         pending.is_err(),
         "the stable fault must not be published before execution exits"
@@ -792,12 +799,12 @@ async fn failed_stop_intent_stops_the_run_and_never_reads_as_saved() {
         &goal.id,
         Some("goal stop intent could not be persisted".into()),
     );
-    let waited = tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_goal())
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(5), handle.goals().wait())
         .await
         .expect("waiters must be woken by the stable fault");
     assert!(waited.is_err());
     // Reactivation is refused while the run is faulted.
-    assert!(handle.start_goal_driver().is_err());
+    assert!(handle.goals().start_driver().is_err());
     runtime.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
@@ -837,11 +844,11 @@ async fn goal_settlement_is_idempotent_and_rejects_conflicting_facts() {
     use crate::session::goal::{ApplyResult, IterationKey, SettlementFacts};
     let (runtime, home, cwd, _) = goal_runtime("goal-settle", false, None).await;
     let handle = runtime.handle();
-    handle.start_goal_driver_and_run().unwrap();
+    handle.goals().start_driver_and_run().unwrap();
     handle
         .confirmed_test_goal(GoalSpec::new("produce proof"))
         .unwrap();
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), handle.wait_goal())
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
@@ -864,7 +871,7 @@ async fn goal_settlement_is_idempotent_and_rejects_conflicting_facts() {
         text: String::new(),
         thinking: String::new(),
     };
-    let before = handle.goal_snapshot().unwrap();
+    let before = handle.goals().snapshot().unwrap();
     let applied = handle
         .goal_ctx
         .stores
@@ -872,7 +879,7 @@ async fn goal_settlement_is_idempotent_and_rejects_conflicting_facts() {
         .settle_iteration(&key, &result, &SettlementFacts::default())
         .unwrap();
     assert_eq!(applied, ApplyResult::AlreadyApplied);
-    let after = handle.goal_snapshot().unwrap();
+    let after = handle.goals().snapshot().unwrap();
     assert_eq!(
         before.revision, after.revision,
         "an idempotent repeat must not bump the revision"
@@ -920,11 +927,11 @@ async fn stale_settlement_fills_history_without_touching_the_replacement() {
     use crate::session::goal::{IterationKey, SettlementFacts};
     let (runtime, home, cwd, _) = goal_runtime("goal-settle-history", false, None).await;
     let handle = runtime.handle();
-    handle.start_goal_driver_and_run().unwrap();
+    handle.goals().start_driver_and_run().unwrap();
     handle
         .confirmed_test_goal(GoalSpec::new("first goal"))
         .unwrap();
-    let first = tokio::time::timeout(std::time::Duration::from_secs(30), handle.wait_goal())
+    let first = tokio::time::timeout(std::time::Duration::from_secs(30), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
@@ -952,7 +959,7 @@ async fn stale_settlement_fills_history_without_touching_the_replacement() {
     let replacement = handle
         .confirmed_test_goal(GoalSpec::new("replacement goal"))
         .unwrap();
-    let before = handle.goal_snapshot().unwrap();
+    let before = handle.goals().snapshot().unwrap();
     assert_eq!(before.id, replacement.id);
     // The archived goal's round settles in history; the replacement is untouched.
     handle
@@ -961,7 +968,7 @@ async fn stale_settlement_fills_history_without_touching_the_replacement() {
         .goal_store
         .settle_iteration(&key, &result, &SettlementFacts::default())
         .expect("archive settlement");
-    let after = handle.goal_snapshot().unwrap();
+    let after = handle.goals().snapshot().unwrap();
     assert_eq!(after.id, replacement.id);
     assert_eq!(after.revision, before.revision);
     assert!(
@@ -978,11 +985,11 @@ async fn identity_bound_updates_never_touch_a_replacement() {
     use crate::runtime::*;
     let (runtime, home, cwd, _) = goal_runtime("goal-update-identity", false, None).await;
     let handle = runtime.handle();
-    handle.start_goal_driver_and_run().unwrap();
+    handle.goals().start_driver_and_run().unwrap();
     handle
         .confirmed_test_goal(GoalSpec::new("first goal"))
         .unwrap();
-    let first = tokio::time::timeout(std::time::Duration::from_secs(30), handle.wait_goal())
+    let first = tokio::time::timeout(std::time::Duration::from_secs(30), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
@@ -1007,7 +1014,7 @@ async fn identity_bound_updates_never_touch_a_replacement() {
         )
         .unwrap();
     assert!(applied.is_none(), "a stale update must apply to nothing");
-    let current = handle.goal_snapshot().unwrap();
+    let current = handle.goals().snapshot().unwrap();
     assert_eq!(current.id, replacement.id);
     assert_eq!(current.status, GoalStatus::Active);
     assert_eq!(current.reason, replacement.reason);
@@ -1027,7 +1034,7 @@ async fn goal_restore_active_requires_explicit_rust_driver_and_paused_stays_paus
             .confirmed_test_goal(GoalSpec::new("produce proof"))
             .unwrap();
         if paused {
-            handle.pause_goal(&goal.id, goal.revision).unwrap();
+            handle.goals().pause(&goal.id, goal.revision).unwrap();
         }
         runtime.shutdown().await.unwrap();
         let backend = Arc::new(GoalReportBackend {
@@ -1044,7 +1051,7 @@ async fn goal_restore_active_requires_explicit_rust_driver_and_paused_stays_paus
         let handle = runtime.handle();
         assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(
-            handle.goal_snapshot().unwrap().status,
+            handle.goals().snapshot().unwrap().status,
             if paused {
                 GoalStatus::Paused
             } else {
@@ -1053,7 +1060,7 @@ async fn goal_restore_active_requires_explicit_rust_driver_and_paused_stays_paus
         );
         // Arming is not starting: a restored active goal must not run until
         // an explicit lifecycle call picks it up.
-        handle.start_goal_driver().unwrap();
+        handle.goals().start_driver().unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(
             backend.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -1061,8 +1068,8 @@ async fn goal_restore_active_requires_explicit_rust_driver_and_paused_stays_paus
             "start_goal_driver must not start a run"
         );
         assert!(!handle.goal_driver.is_active());
-        handle.start_goal_driver_and_run().unwrap();
-        let goal = handle.wait_goal().await.unwrap();
+        handle.goals().start_driver_and_run().unwrap();
+        let goal = handle.goals().wait().await.unwrap();
         assert_eq!(
             goal.status,
             if paused {
@@ -1111,9 +1118,9 @@ async fn audit8_restored_active_goal_starts_only_through_a_leased_resume() {
     .await
     .unwrap();
     let handle = runtime.handle();
-    let restored = handle.goal_snapshot().unwrap();
+    let restored = handle.goals().snapshot().unwrap();
     assert_eq!(restored.status, GoalStatus::Active);
-    handle.start_goal_driver().unwrap();
+    handle.goals().start_driver().unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert_eq!(
         backend.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -1124,7 +1131,8 @@ async fn audit8_restored_active_goal_starts_only_through_a_leased_resume() {
 
     let alive = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let resumed = handle
-        .resume_and_start_goal(
+        .goals()
+        .resume_and_start(
             &goal.id,
             restored.revision,
             Box::new(CountingLease::new(&alive)),
@@ -1132,7 +1140,7 @@ async fn audit8_restored_active_goal_starts_only_through_a_leased_resume() {
         .unwrap();
     assert_eq!(resumed.status, GoalStatus::Active);
     assert_eq!(alive.load(std::sync::atomic::Ordering::SeqCst), 1);
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), handle.wait_goal())
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
@@ -1175,7 +1183,7 @@ async fn audit8_prepublication_stop_failure_stops_the_run() {
         .unwrap()
         .to_path_buf();
     let handle = runtime.handle();
-    handle.start_goal_driver().unwrap();
+    handle.goals().start_driver().unwrap();
     let mut spec = GoalSpec::new("produce proof");
     spec.acceptance = GoalAcceptance::Verifier {
         id: "held-check-v1".into(),
@@ -1190,12 +1198,12 @@ async fn audit8_prepublication_stop_failure_stops_the_run() {
     // The revision moved while the round settled: the stop command must carry
     // the live revision, or a stale-revision rejection (not a publication
     // failure) would be the thing under test.
-    let goal = handle.goal_snapshot().unwrap();
+    let goal = handle.goals().snapshot().unwrap();
     // A publication failure that does not latch the session: the stop intent
     // cannot be stored, but the session is not globally faulted.
     let original = std::fs::metadata(&session_dir).unwrap().permissions();
     std::fs::set_permissions(&session_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
-    let stopped = handle.pause_goal(&goal.id, goal.revision);
+    let stopped = handle.goals().pause(&goal.id, goal.revision);
     std::fs::set_permissions(&session_dir, original).unwrap();
     assert!(stopped.is_err(), "{stopped:?}");
     assert!(
@@ -1213,13 +1221,13 @@ async fn audit8_prepublication_stop_failure_stops_the_run() {
     );
     // The checker still owns the turn gate: the fault is not stable yet.
     let early =
-        tokio::time::timeout(std::time::Duration::from_millis(200), handle.wait_goal()).await;
+        tokio::time::timeout(std::time::Duration::from_millis(200), handle.goals().wait()).await;
     assert!(
         early.is_err(),
         "the fault must wait for the checker to exit"
     );
     verifier.release.notify_one();
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_goal())
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handle.goals().wait())
         .await
         .expect("the settlement must publish the stable fault");
     assert!(outcome.is_err(), "{outcome:?}");
@@ -1231,7 +1239,7 @@ async fn audit8_prepublication_stop_failure_stops_the_run() {
         "the refused pause must leave a stable fault: {:?}",
         handle.goal_driver.state()
     );
-    let current = handle.goal_snapshot().unwrap();
+    let current = handle.goals().snapshot().unwrap();
     assert_eq!(
         current.status,
         GoalStatus::Active,
@@ -1254,16 +1262,17 @@ async fn audit8_activation_without_executor_leaves_no_contract() {
     use crate::runtime::*;
     let (runtime, home, cwd, _) = goal_runtime("audit8-no-executor", false, None).await;
     let handle = runtime.handle();
-    handle.start_goal_driver().unwrap();
+    handle.goals().start_driver().unwrap();
     let alive = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let draft = handle
-        .draft_goal(GoalSpec::new("cannot run"), 3600)
+        .goals()
+        .draft(GoalSpec::new("cannot run"), 3600)
         .unwrap();
     let thread_draft = draft.clone();
     let thread_handle = handle.clone();
     let thread_alive = alive.clone();
     let leased = std::thread::spawn(move || {
-        thread_handle.confirm_and_start_goal(
+        thread_handle.goals().confirm_and_start(
             &thread_draft.id,
             thread_draft.revision,
             Box::new(CountingLease::new(&thread_alive)),
@@ -1277,7 +1286,7 @@ async fn audit8_activation_without_executor_leaves_no_contract() {
         "the refusal names the missing executor: {error}"
     );
     assert!(
-        handle.goal_snapshot() == Some(draft.clone()),
+        handle.goals().snapshot() == Some(draft.clone()),
         "the draft must not change when activation has no executor"
     );
     assert_eq!(alive.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -1292,12 +1301,14 @@ async fn audit8_activation_without_executor_leaves_no_contract() {
     let thread_draft = draft.clone();
     let thread_handle = handle.clone();
     let created = std::thread::spawn(move || {
-        thread_handle.confirm_goal(&thread_draft.id, thread_draft.revision)
+        thread_handle
+            .goals()
+            .confirm(&thread_draft.id, thread_draft.revision)
     })
     .join()
     .unwrap();
     assert!(created.is_err(), "{created:?}");
-    assert_eq!(handle.goal_snapshot(), Some(draft));
+    assert_eq!(handle.goals().snapshot(), Some(draft));
     runtime.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
@@ -1316,7 +1327,7 @@ async fn audit8_failed_stop_waits_for_gate_before_stable_fault() {
     let (runtime, home, cwd, _) =
         goal_runtime("audit8-stop-latch", false, Some(verifier.clone())).await;
     let handle = runtime.handle();
-    handle.start_goal_driver().unwrap();
+    handle.goals().start_driver().unwrap();
     let alive = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut spec = GoalSpec::new("produce proof");
     spec.acceptance = GoalAcceptance::Verifier {
@@ -1331,12 +1342,12 @@ async fn audit8_failed_stop_waits_for_gate_before_stable_fault() {
     )
     .await
     .unwrap();
-    let goal = handle.goal_snapshot().unwrap();
+    let goal = handle.goals().snapshot().unwrap();
     runtime.handle().goal_ctx.stores.persistence_fault.raise(
         std::path::Path::new("goal.json"),
         "audit injected publish failure",
     );
-    assert!(handle.pause_goal(&goal.id, goal.revision).is_err());
+    assert!(handle.goals().pause(&goal.id, goal.revision).is_err());
     assert!(
         matches!(
             handle.goal_driver.state(),
@@ -1347,13 +1358,13 @@ async fn audit8_failed_stop_waits_for_gate_before_stable_fault() {
     );
     assert!(handle.active_turn_id().is_some());
     let early =
-        tokio::time::timeout(std::time::Duration::from_millis(200), handle.wait_goal()).await;
+        tokio::time::timeout(std::time::Duration::from_millis(200), handle.goals().wait()).await;
     assert!(
         early.is_err(),
         "a fault is stable only after execution exits"
     );
     verifier.release.notify_one();
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_goal())
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handle.goals().wait())
         .await
         .expect("waiters must be woken by the stable fault");
     let error = outcome.expect_err("the failed stop intent must surface as a fault");
@@ -1397,7 +1408,7 @@ async fn audit8_stale_stop_revision_does_not_stop_the_run() {
     let (runtime, home, cwd, _) =
         goal_runtime("audit8-stale-stop", false, Some(verifier.clone())).await;
     let handle = runtime.handle();
-    handle.start_goal_driver().unwrap();
+    handle.goals().start_driver().unwrap();
     let alive = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut spec = GoalSpec::new("produce proof");
     spec.acceptance = GoalAcceptance::Verifier {
@@ -1412,8 +1423,8 @@ async fn audit8_stale_stop_revision_does_not_stop_the_run() {
     )
     .await
     .unwrap();
-    let goal = handle.goal_snapshot().unwrap();
-    let stale = handle.pause_goal(&goal.id, goal.revision + 1);
+    let goal = handle.goals().snapshot().unwrap();
+    let stale = handle.goals().pause(&goal.id, goal.revision + 1);
     assert!(stale.is_err(), "{stale:?}");
     assert!(
         matches!(
@@ -1425,7 +1436,7 @@ async fn audit8_stale_stop_revision_does_not_stop_the_run() {
     );
     assert!(handle.active_turn_id().is_some());
     // The run is still stoppable with the live revision.
-    let cancelled = handle.cancel_goal(&goal.id, goal.revision).unwrap();
+    let cancelled = handle.goals().cancel(&goal.id, goal.revision).unwrap();
     assert_eq!(cancelled.status, GoalStatus::Cancelled);
     verifier.release.notify_one();
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
@@ -1455,15 +1466,16 @@ async fn goal_budget_change_updates_the_inflight_absolute_deadline() {
             .unwrap();
     let handle = runtime.handle();
     handle.confirmed_test_goal(GoalSpec::new("work")).unwrap();
-    handle.start_goal_driver_and_run().unwrap();
+    handle.goals().start_driver_and_run().unwrap();
     backend.entered.notified().await;
-    let goal = handle.goal_snapshot().unwrap();
+    let goal = handle.goals().snapshot().unwrap();
     let mut limits = goal.spec.limits.clone();
     limits.deadline_unix_secs = crate::session::goal::goal_now() + 1;
     handle
-        .update_goal_limits(&goal.id, goal.revision, limits)
+        .goals()
+        .update_limits(&goal.id, goal.revision, limits)
         .unwrap();
-    let exhausted = tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_goal())
+    let exhausted = tokio::time::timeout(std::time::Duration::from_secs(5), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
@@ -1533,8 +1545,8 @@ async fn goal_boundary_messages_are_typed_for_hosts() {
     let handle = runtime.handle();
     let spec = GoalSpec::new("ship the parser");
     handle.confirmed_test_goal(spec).unwrap();
-    handle.start_goal_driver_and_run().unwrap();
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait_goal()).await;
+    handle.goals().start_driver_and_run().unwrap();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle.goals().wait()).await;
     // The session directory is under the home, not the working directory.
     let directory = handle
         .session_info()

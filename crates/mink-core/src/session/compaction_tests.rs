@@ -63,6 +63,10 @@ impl LlmBackend for CapturingSummaryBackend {
         "capturing-summary"
     }
 
+    fn supports_cache_projection(&self) -> bool {
+        true
+    }
+
     fn cache_projection(
         &self,
         request: &LlmRequest,
@@ -517,9 +521,8 @@ async fn cache_aligned_summary_uses_dynamic_cap_when_configured_cap_exceeds_wind
             .add_assistant(&format!("progress {index}"), "", &[])
             .await?;
     }
-    let messages = crate::llm::image_projection::project_consumed_attachments(
-        &ctx.stores.store.lines().await?,
-    );
+    let stored_lines = ctx.stores.store.lines().await?;
+    let messages = crate::llm::image_projection::project_consumed_attachments(&stored_lines);
     let system = "stable agent system".to_string();
     let tools = vec![json!({"name":"Read","description":"read"})];
     let resolved = crate::config::model_resolver(&ctx.config).resolve(&ctx.config.model);
@@ -527,7 +530,7 @@ async fn cache_aligned_summary_uses_dynamic_cap_when_configured_cap_exceeds_wind
         model: resolved.actual.clone(),
         system_prompt: arc_str(&system),
         tools: arc_values(tools.clone()),
-        messages: arc_values(messages.clone()),
+        messages: arc_values(messages.to_vec()),
     };
     ctx.stores.compaction.record_agent_request(
         &resolved.actual,
@@ -621,9 +624,8 @@ async fn cache_aligned_summary_reuses_agent_system_tools_and_prefix() -> anyhow:
             .add_assistant(&format!("progress {index}"), "", &[])
             .await?;
     }
-    let messages = crate::llm::image_projection::project_consumed_attachments(
-        &ctx.stores.store.lines().await?,
-    );
+    let stored_lines = ctx.stores.store.lines().await?;
+    let messages = crate::llm::image_projection::project_consumed_attachments(&stored_lines);
     let system = "stable agent system".to_string();
     let tools = vec![json!({"name":"Read","description":"read"})];
     let resolved = crate::config::model_resolver(&ctx.config).resolve(&ctx.config.model);
@@ -631,7 +633,7 @@ async fn cache_aligned_summary_reuses_agent_system_tools_and_prefix() -> anyhow:
         model: resolved.actual.clone(),
         system_prompt: arc_str(&system),
         tools: arc_values(tools.clone()),
-        messages: arc_values(messages.clone()),
+        messages: arc_values(messages.to_vec()),
     };
     ctx.stores.compaction.record_agent_request(
         &resolved.actual,

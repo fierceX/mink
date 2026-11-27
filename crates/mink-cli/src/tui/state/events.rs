@@ -239,7 +239,7 @@ impl TuiState {
     }
     pub(crate) fn show_skills(&mut self) {
         if let Some(tx) = self.async_load.ui_tx.clone() {
-            std::thread::spawn(move || {
+            crate::tui::spawn_blocking_work(move || {
                 let result =
                     crate::local::discoverable_skill_lines().map_err(|error| error.to_string());
                 let _ = tx.send(TuiUiEvent::SkillsLoaded(result));
@@ -281,7 +281,7 @@ impl TuiState {
                 text: "Loading…".into(),
             },
         ));
-        std::thread::spawn(move || {
+        crate::tui::spawn_blocking_work(move || {
             let result = (|| -> anyhow::Result<SubAgentDetail> {
                 let rows = reader
                     .sub_agent(&id)?
@@ -291,26 +291,12 @@ impl TuiState {
                     text: String::new(),
                 };
                 for row in rows {
-                    if row["role"] != "assistant" {
-                        continue;
-                    }
-                    if let Some(blocks) = row["content"].as_array() {
-                        for block in blocks {
-                            match block["type"].as_str() {
-                                Some("text") => {
-                                    if let Some(text) = block["text"].as_str() {
-                                        detail.text.push_str(text);
-                                    }
-                                }
-                                Some("thinking") => {
-                                    if let Some(text) = block["thinking"].as_str() {
-                                        detail.thinking.push_str(text);
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
+                    let (row_thinking, row_text) =
+                        crate::runtime::session::SessionReader::decode_subagent_assistant_output(
+                            &row,
+                        );
+                    detail.thinking.push_str(&row_thinking);
+                    detail.text.push_str(&row_text);
                 }
                 detail.text = sanitize_tui_text(&detail.text);
                 detail.thinking = sanitize_tui_text(&detail.thinking);
@@ -341,7 +327,7 @@ impl TuiState {
                 truncated: false,
             });
             self.view = View::Artifact { scroll: 0 };
-            std::thread::spawn(move || {
+            crate::tui::spawn_blocking_work(move || {
                 let result = manager
                     .read_text_prefix(&id, MAX_ARTIFACT_DETAIL_BYTES)
                     .map(|(content, truncated)| ArtifactDetail {

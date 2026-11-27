@@ -27,6 +27,10 @@ pub(crate) fn execute_replace_edit(
     }
     let path = resolve_replace_target(ctx.cwd, &args.path)?;
     let display_path = display_relative_path(ctx.cwd, &path);
+    let meta = std::fs::metadata(&path)
+        .map_err(|error| anyhow!("Error: cannot read {}: {error}", path.display()))?;
+    let max_bytes = u64::try_from(ctx.file_write_max_bytes).unwrap_or(u64::MAX);
+    ensure!(meta.len() <= max_bytes, "Error: file too large for Edit");
     let original = std::fs::read_to_string(&path)
         .map_err(|error| anyhow!("Error: cannot read {}: {error}", path.display()))?;
     ensure!(
@@ -103,6 +107,9 @@ pub(crate) fn resolve_replace_target(cwd: &Path, authored: &str) -> Result<PathB
     let direct = resolve_tool_path(cwd, authored)?;
     if direct.is_file() {
         return Ok(crate::tools::snapshot::canonical_snapshot_path(&direct));
+    }
+    if Path::new(authored).is_absolute() {
+        bail!("Error: file not found: {authored}");
     }
     let suffix = Path::new(authored)
         .components()

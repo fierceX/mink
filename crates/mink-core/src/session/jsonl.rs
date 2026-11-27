@@ -58,8 +58,26 @@ pub(crate) fn repair_unterminated_tail(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn append_line(path: &Path, line: &[u8], sync: bool) -> Result<()> {
-    repair_unterminated_tail(path)?;
+pub(crate) fn append_line_checked(
+    path: &Path,
+    line: &[u8],
+    sync: bool,
+    tail_repaired: &std::sync::atomic::AtomicBool,
+) -> Result<()> {
+    use std::sync::atomic::Ordering;
+
+    if !tail_repaired.load(Ordering::Acquire) {
+        repair_unterminated_tail(path)?;
+        tail_repaired.store(true, Ordering::Release);
+    }
+    if let Err(error) = write_line_raw(path, line, sync) {
+        tail_repaired.store(false, Ordering::Release);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn write_line_raw(path: &Path, line: &[u8], sync: bool) -> Result<()> {
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     file.write_all(line)?;
     file.flush()?;

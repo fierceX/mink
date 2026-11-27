@@ -253,7 +253,12 @@ impl super::TurnExecutor {
         }
         guarded_results.append(&mut executed_results);
         if let Some(order) = order {
-            guarded_results.sort_by_key(|result| order[&result.tool_use_id]);
+            guarded_results.sort_by_key(|result| {
+                order
+                    .get(&result.tool_use_id)
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
         }
         let results = guarded_results;
 

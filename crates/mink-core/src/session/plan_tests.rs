@@ -360,7 +360,7 @@ fn faulted_session_rejects_plan_writes() {
 fn poisoned_transition_lock_recovers_through_journal_replay() {
     let (root, store) = store("poison-transition");
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _guard = store.transition_lock.lock().unwrap();
+        let _guard = store.inner.transition_lock.lock().unwrap();
         panic!("inject poison");
     }));
 

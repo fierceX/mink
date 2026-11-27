@@ -187,3 +187,85 @@ fn interrupted_tool_produces_no_signal() {
     // 用户主动中断不是模型失败：不得产生 ToolFailed 喂信念。
     assert!(signals.is_empty());
 }
+
+#[test]
+fn detects_go_typescript_and_java_error_patterns() {
+    let mut c = SignalCollector::new();
+    let go_fail = c.collect(
+        "Bash",
+        ToolStatus::Succeeded,
+        "--- FAIL: TestFoo",
+        None,
+        true,
+    );
+    assert!(
+        go_fail
+            .iter()
+            .any(|s| matches!(s.kind, SignalKind::TestFailure))
+    );
+
+    let go_compile = c.collect(
+        "Bash",
+        ToolStatus::Succeeded,
+        "./main.go:5: undefined: foo",
+        None,
+        true,
+    );
+    assert!(
+        go_compile
+            .iter()
+            .any(|s| matches!(s.kind, SignalKind::CompileError))
+    );
+
+    let ts_compile = c.collect(
+        "Bash",
+        ToolStatus::Succeeded,
+        "src/app.ts(1,5): error TS2304: Cannot find name",
+        None,
+        true,
+    );
+    assert!(
+        ts_compile
+            .iter()
+            .any(|s| matches!(s.kind, SignalKind::CompileError))
+    );
+
+    let js_err = c.collect(
+        "Bash",
+        ToolStatus::Succeeded,
+        "TypeError: Cannot read properties of undefined",
+        None,
+        true,
+    );
+    assert!(
+        js_err
+            .iter()
+            .any(|s| matches!(s.kind, SignalKind::ToolError))
+    );
+
+    let java_err = c.collect(
+        "Bash",
+        ToolStatus::Succeeded,
+        "Main.java:3: error: cannot find symbol",
+        None,
+        true,
+    );
+    assert!(
+        java_err
+            .iter()
+            .any(|s| matches!(s.kind, SignalKind::CompileError))
+    );
+
+    let java_exc = c.collect(
+        "Bash",
+        ToolStatus::Succeeded,
+        "Exception in thread \"main\" java.lang.NullPointerException",
+        None,
+        true,
+    );
+    assert!(
+        java_exc
+            .iter()
+            .any(|s| matches!(s.kind, SignalKind::ToolError))
+    );
+}

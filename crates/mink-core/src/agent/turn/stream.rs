@@ -236,7 +236,15 @@ impl super::TurnExecutor {
                     });
                     return Err(anyhow::Error::new(TurnInterrupted));
                 }
-                Err(AttemptFailure::Fatal(error)) => return Err(error),
+                Err(AttemptFailure::Fatal(error)) => {
+                    if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
+                        self.ctx.log_event(crate::events::EventLog::Stop {
+                            reason: "interrupted".into(),
+                        });
+                        return Err(anyhow::Error::new(TurnInterrupted));
+                    }
+                    return Err(error);
+                }
                 Err(AttemptFailure::Timeout) => {
                     let detail = if last_failure.is_empty() {
                         "request deadline exceeded while the request was in flight".to_string()

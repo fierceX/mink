@@ -6,8 +6,8 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -103,12 +103,10 @@ struct PlanTransactionJournal {
 /// like the real request, or history pictures would be counted as visual
 /// tokens after they were already consumed.
 pub fn project_full_request(messages: &[serde_json::Value]) -> Result<Vec<serde_json::Value>> {
-    Ok(crate::llm::image_projection::project_consumed_attachments(
-        messages,
-    ))
+    Ok(crate::llm::image_projection::project_consumed_attachments(messages).into_owned())
 }
 
-pub struct PlanStore {
+struct PlanStoreInner {
     plan_path: PathBuf,
     draft_path: PathBuf,
     journal_path: PathBuf,
@@ -118,363 +116,7 @@ pub struct PlanStore {
     fault: crate::session::persistence::PersistenceFault,
 }
 
-impl PlanStore {
-    pub fn new(plan_path: PathBuf, draft_path: PathBuf) -> Self {
-        let journal_path = plan_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("plan-transaction.json");
-        Self {
-            plan_path,
-            draft_path,
-            journal_path,
-            transition_lock: Mutex::new(()),
-            fault: Default::default(),
-        }
-    }
-
-    /// Attach the session-wide publish-fault latch.
-    pub(crate) fn with_fault(
-        mut self,
-        fault: crate::session::persistence::PersistenceFault,
-    ) -> Self {
-        self.fault = fault;
-        self
-    }
-
-    pub fn set_draft(&self, content: &str, max_bytes: usize) -> Result<()> {
-        let _guard = self
-            .transition_lock
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        self.fault.check()?;
-        self.ensure_no_pending_transaction()?;
-        if content.len() > max_bytes {
-            bail!(
-                "plan draft is too large: {} bytes exceeds limit of {max_bytes} bytes",
-                content.len()
-            );
-        }
-        if content.is_empty() {
-            return match std::fs::remove_file(&self.draft_path) {
-                Ok(()) => crate::session::atomic_file::sync_parent(&self.draft_path),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(error.into()),
-            };
-        }
-        match self.plan_path.try_exists() {
-            Ok(true) => bail!("cannot create a plan draft while a confirmed plan exists"),
-            Ok(false) => {}
-            Err(error) => {
-                return Err(anyhow::anyhow!(
-                    "cannot inspect current plan before saving draft: {error}"
-                ));
-            }
-        }
-        publish_state(&self.draft_path, content.as_bytes(), &self.fault)
-    }
-
-    pub fn confirm(&self) -> Result<String> {
-        let _guard = self
-            .transition_lock
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        self.fault.check()?;
-        self.ensure_no_pending_transaction()?;
-        let draft = match std::fs::read(&self.draft_path) {
-            Ok(draft) => draft,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                bail!("no plan draft found to confirm")
-            }
-            Err(error) => return Err(anyhow::anyhow!("cannot read plan draft: {error}")),
-        };
-        if draft.iter().all(u8::is_ascii_whitespace) {
-            bail!("no plan draft found to confirm");
-        }
-        let content = String::from_utf8(draft)
-            .map_err(|error| anyhow::anyhow!("plan draft is not valid UTF-8: {error}"))?;
-        match self.plan_path.try_exists() {
-            Ok(true) => bail!("a confirmed plan already exists"),
-            Ok(false) => {}
-            Err(error) => {
-                return Err(anyhow::anyhow!(
-                    "cannot inspect current plan before confirmation: {error}"
-                ));
-            }
-        }
-        let transaction = PlanTransaction {
-            id: next_transaction_id(),
-            operation: PlanOperation::Confirm,
-            phase: TransactionPhase::Started,
-            prior_plan: None,
-            prior_draft: Some(content.as_bytes().to_vec()),
-            plan_content: Some(content.as_bytes().to_vec()),
-            tool_use_id: None,
-            tool_result: None,
-            transition: None,
-        };
-        self.push_transaction(&transaction)?;
-        ensure_parent(&self.plan_path)?;
-        if let Err(error) = std::fs::rename(&self.draft_path, &self.plan_path) {
-            let rollback = self.rollback_and_remove(&transaction);
-            return match rollback {
-                Ok(()) => Err(anyhow::anyhow!(
-                    "cannot commit plan draft atomically: {error}"
-                )),
-                Err(rollback) => Err(anyhow::anyhow!(
-                    "cannot commit plan draft atomically: {error}; transaction rollback failed: {rollback:#}"
-                )),
-            };
-        }
-        crate::session::atomic_file::sync_parent(&self.plan_path)?;
-        Ok(content)
-    }
-
-    pub fn clear(&self) -> Result<()> {
-        let _guard = self
-            .transition_lock
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        self.fault.check()?;
-        self.ensure_no_pending_transaction()?;
-        let current = match std::fs::read(&self.plan_path) {
-            Ok(current) => current,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                bail!("no confirmed plan found to clear")
-            }
-            Err(error) => return Err(anyhow::anyhow!("cannot read current plan: {error}")),
-        };
-        if current.iter().all(u8::is_ascii_whitespace) {
-            bail!("no confirmed plan found to clear");
-        }
-        let prior_draft = match std::fs::read(&self.draft_path) {
-            Ok(content) => Some(content),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => {
-                return Err(anyhow::anyhow!(
-                    "cannot read stale plan draft before clearing confirmed plan: {error}"
-                ));
-            }
-        };
-        let transaction = PlanTransaction {
-            id: next_transaction_id(),
-            operation: PlanOperation::Clear,
-            phase: TransactionPhase::Started,
-            prior_plan: Some(current),
-            prior_draft,
-            plan_content: None,
-            tool_use_id: None,
-            tool_result: None,
-            transition: None,
-        };
-        self.push_transaction(&transaction)?;
-        if let Err(error) = std::fs::remove_file(&self.draft_path)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            let rollback = self.rollback_and_remove(&transaction);
-            return match rollback {
-                Ok(()) => Err(anyhow::anyhow!(
-                    "cannot remove stale plan draft before clearing confirmed plan: {error}"
-                )),
-                Err(rollback) => Err(anyhow::anyhow!(
-                    "cannot remove stale plan draft before clearing confirmed plan: {error}; transaction rollback failed: {rollback:#}"
-                )),
-            };
-        }
-        if let Err(error) = std::fs::remove_file(&self.plan_path) {
-            let rollback = self.rollback_and_remove(&transaction);
-            return match rollback {
-                Ok(()) => Err(anyhow::anyhow!("cannot clear confirmed plan: {error}")),
-                Err(rollback) => Err(anyhow::anyhow!(
-                    "cannot clear confirmed plan: {error}; transaction rollback failed: {rollback:#}"
-                )),
-            };
-        }
-        crate::session::atomic_file::sync_parent(&self.plan_path)?;
-        Ok(())
-    }
-
-    /// Attach the durable conversation records to the most recent filesystem
-    /// mutation. Before this point recovery rolls the mutation back; after it,
-    /// recovery completes the result + transition append idempotently.
-    pub(crate) fn bind_transition(&self, result: &mut ToolExecution) -> Result<()> {
-        let Some(operation) = result.plan_command.and_then(PlanOperation::from_command) else {
-            return Ok(());
-        };
-        let _guard = self
-            .transition_lock
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let mut journal = self.load_journal()?;
-        let transaction = journal
-            .transactions
-            .iter_mut()
-            .rev()
-            .find(|transaction| {
-                transaction.operation == operation && transaction.phase == TransactionPhase::Started
-            })
-            .ok_or_else(|| anyhow::anyhow!("missing started plan transaction for {operation:?}"))?;
-
-        let metadata = result.state_metadata.get_or_insert_with(|| json!({}));
-        let object = metadata
-            .as_object_mut()
-            .ok_or_else(|| anyhow::anyhow!("plan tool state metadata must be a JSON object"))?;
-        object.insert(
-            PLAN_TRANSACTION_KEY.to_string(),
-            Value::String(transaction.id.clone()),
-        );
-
-        transaction.phase = TransactionPhase::Bound;
-        transaction.tool_use_id = Some(result.tool_use_id.clone());
-        transaction.tool_result = Some(ConversationStore::tool_results_message(
-            std::slice::from_ref(result),
-        ));
-        transaction.transition = Some(transition_message(
-            result
-                .plan_command
-                .expect("operation came from a plan command"),
-            &transaction.id,
-        )?);
-        self.save_journal(&journal)
-    }
-
-    pub(crate) async fn finish_transition(
-        &self,
-        store: &ConversationStore,
-        tool_use_id: &str,
-        command: PlanCommand,
-    ) -> Result<()> {
-        let operation = PlanOperation::from_command(command)
-            .ok_or_else(|| anyhow::anyhow!("draft updates do not have plan transitions"))?;
-        let transaction = {
-            let _guard = self
-                .transition_lock
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            self.load_journal()?
-                .transactions
-                .into_iter()
-                .find(|transaction| {
-                    transaction.operation == operation
-                        && transaction.phase == TransactionPhase::Bound
-                        && transaction.tool_use_id.as_deref() == Some(tool_use_id)
-                })
-                .ok_or_else(|| {
-                    anyhow::anyhow!("missing bound plan transaction for tool use {tool_use_id}")
-                })?
-        };
-        self.complete_bound_transaction(store, &transaction).await?;
-        self.remove_transaction(&transaction.id)
-    }
-
-    /// Recover unfinished cross-file transitions before any model request.
-    /// Started records have no durable successful tool result and are rolled
-    /// back. Bound records are replayed forward with transaction markers so
-    /// repeated recovery never duplicates conversation messages.
-    pub async fn recover_pending(&self, store: &ConversationStore) -> Result<()> {
-        loop {
-            let transaction = {
-                let _guard = self
-                    .transition_lock
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
-                self.load_journal()?.transactions.into_iter().next()
-            };
-            let Some(transaction) = transaction else {
-                return Ok(());
-            };
-            match transaction.phase {
-                TransactionPhase::Started => {
-                    let _guard = self
-                        .transition_lock
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner());
-                    self.rollback_and_remove(&transaction)?;
-                }
-                TransactionPhase::Bound => {
-                    {
-                        let _guard = self
-                            .transition_lock
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner());
-                        self.apply_transaction(&transaction)?;
-                    }
-                    self.complete_bound_transaction(store, &transaction).await?;
-                    self.remove_transaction(&transaction.id)?;
-                }
-            }
-        }
-    }
-
-    async fn complete_bound_transaction(
-        &self,
-        store: &ConversationStore,
-        transaction: &PlanTransaction,
-    ) -> Result<()> {
-        let tool_result = transaction.tool_result.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "bound plan transaction {} lacks tool result",
-                transaction.id
-            )
-        })?;
-        let transition = transaction.transition.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("bound plan transaction {} lacks transition", transaction.id)
-        })?;
-        let lines = store.lines_lossy_with_warnings(|_| {}).await?;
-        if !has_tool_result_marker(&lines, &transaction.id) {
-            store.append_runtime_message(tool_result.clone()).await?;
-        }
-        // A crashed assistant response may have contained other tool calls.
-        // Pair all of them before inserting the user-role plan transition;
-        // otherwise the transition could split an OpenAI tool-call/result
-        // exchange and make the recovered history invalid.
-        store.repair_dangling_tool_uses().await?;
-        let lines = store.lines_lossy_with_warnings(|_| {}).await?;
-        if !has_transition_marker(&lines, &transaction.id) {
-            // The fsync also makes any preceding batched tool result durable
-            // before the journal record is removed.
-            store
-                .append_runtime_message_durable(transition.clone())
-                .await?;
-        }
-        Ok(())
-    }
-
-    fn push_transaction(&self, transaction: &PlanTransaction) -> Result<()> {
-        let mut journal = self.load_journal()?;
-        journal.transactions.push(transaction.clone());
-        self.save_journal(&journal)
-    }
-
-    fn ensure_no_pending_transaction(&self) -> Result<()> {
-        if self.load_journal()?.transactions.is_empty() {
-            Ok(())
-        } else {
-            bail!("an unfinished plan transition must be recovered before another plan mutation")
-        }
-    }
-
-    fn rollback_and_remove(&self, transaction: &PlanTransaction) -> Result<()> {
-        self.rollback_transaction(transaction)?;
-        self.remove_transaction_locked(&transaction.id)
-    }
-
-    fn remove_transaction(&self, id: &str) -> Result<()> {
-        let _guard = self
-            .transition_lock
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        self.remove_transaction_locked(id)
-    }
-
-    fn remove_transaction_locked(&self, id: &str) -> Result<()> {
-        let mut journal = self.load_journal()?;
-        journal
-            .transactions
-            .retain(|transaction| transaction.id != id);
-        self.save_journal(&journal)
-    }
-
+impl PlanStoreInner {
     fn load_journal(&self) -> Result<PlanTransactionJournal> {
         let bytes = match std::fs::read(&self.journal_path) {
             Ok(bytes) => bytes,
@@ -551,6 +193,413 @@ impl PlanStore {
             "plan draft",
             &self.fault,
         )
+    }
+
+    fn remove_transaction_locked(&self, id: &str) -> Result<()> {
+        let mut journal = self.load_journal()?;
+        journal
+            .transactions
+            .retain(|transaction| transaction.id != id);
+        self.save_journal(&journal)
+    }
+
+    fn remove_transaction(&self, id: &str) -> Result<()> {
+        let _guard = self
+            .transition_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.remove_transaction_locked(id)
+    }
+
+    fn rollback_and_remove(&self, transaction: &PlanTransaction) -> Result<()> {
+        self.rollback_transaction(transaction)?;
+        self.remove_transaction_locked(&transaction.id)
+    }
+
+    fn find_bound_transaction(
+        &self,
+        tool_use_id: &str,
+        operation: PlanOperation,
+    ) -> Result<PlanTransaction> {
+        let _guard = self
+            .transition_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.load_journal()?
+            .transactions
+            .into_iter()
+            .find(|transaction| {
+                transaction.operation == operation
+                    && transaction.phase == TransactionPhase::Bound
+                    && transaction.tool_use_id.as_deref() == Some(tool_use_id)
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("missing bound plan transaction for tool use {tool_use_id}")
+            })
+    }
+
+    fn next_recovery_step(&self) -> Result<Option<PlanTransaction>> {
+        let _guard = self
+            .transition_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(transaction) = self.load_journal()?.transactions.into_iter().next() else {
+            return Ok(None);
+        };
+        match transaction.phase {
+            TransactionPhase::Started => {
+                self.rollback_and_remove(&transaction)?;
+                Ok(Some(transaction))
+            }
+            TransactionPhase::Bound => {
+                self.apply_transaction(&transaction)?;
+                Ok(Some(transaction))
+            }
+        }
+    }
+}
+
+pub struct PlanStore {
+    inner: Arc<PlanStoreInner>,
+}
+
+impl PlanStore {
+    pub fn new(plan_path: PathBuf, draft_path: PathBuf) -> Self {
+        let journal_path = plan_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("plan-transaction.json");
+        Self {
+            inner: Arc::new(PlanStoreInner {
+                plan_path,
+                draft_path,
+                journal_path,
+                transition_lock: Mutex::new(()),
+                fault: Default::default(),
+            }),
+        }
+    }
+
+    /// Attach the session-wide publish-fault latch.
+    pub(crate) fn with_fault(
+        mut self,
+        fault: crate::session::persistence::PersistenceFault,
+    ) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("PlanStore::with_fault must be called before sharing")
+            .fault = fault;
+        self
+    }
+
+    pub fn set_draft(&self, content: &str, max_bytes: usize) -> Result<()> {
+        let _guard = self
+            .inner
+            .transition_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.inner.fault.check()?;
+        self.ensure_no_pending_transaction()?;
+        if content.len() > max_bytes {
+            bail!(
+                "plan draft is too large: {} bytes exceeds limit of {max_bytes} bytes",
+                content.len()
+            );
+        }
+        if content.is_empty() {
+            return match std::fs::remove_file(&self.inner.draft_path) {
+                Ok(()) => crate::session::atomic_file::sync_parent(&self.inner.draft_path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.into()),
+            };
+        }
+        match self.inner.plan_path.try_exists() {
+            Ok(true) => bail!("cannot create a plan draft while a confirmed plan exists"),
+            Ok(false) => {}
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "cannot inspect current plan before saving draft: {error}"
+                ));
+            }
+        }
+        publish_state(
+            &self.inner.draft_path,
+            content.as_bytes(),
+            &self.inner.fault,
+        )
+    }
+
+    pub fn confirm(&self) -> Result<String> {
+        let _guard = self
+            .inner
+            .transition_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.inner.fault.check()?;
+        self.ensure_no_pending_transaction()?;
+        let draft = match std::fs::read(&self.inner.draft_path) {
+            Ok(draft) => draft,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                bail!("no plan draft found to confirm")
+            }
+            Err(error) => return Err(anyhow::anyhow!("cannot read plan draft: {error}")),
+        };
+        if draft.iter().all(u8::is_ascii_whitespace) {
+            bail!("no plan draft found to confirm");
+        }
+        let content = String::from_utf8(draft)
+            .map_err(|error| anyhow::anyhow!("plan draft is not valid UTF-8: {error}"))?;
+        match self.inner.plan_path.try_exists() {
+            Ok(true) => bail!("a confirmed plan already exists"),
+            Ok(false) => {}
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "cannot inspect current plan before confirmation: {error}"
+                ));
+            }
+        }
+        let transaction = PlanTransaction {
+            id: next_transaction_id(),
+            operation: PlanOperation::Confirm,
+            phase: TransactionPhase::Started,
+            prior_plan: None,
+            prior_draft: Some(content.as_bytes().to_vec()),
+            plan_content: Some(content.as_bytes().to_vec()),
+            tool_use_id: None,
+            tool_result: None,
+            transition: None,
+        };
+        self.push_transaction(&transaction)?;
+        ensure_parent(&self.inner.plan_path)?;
+        if let Err(error) = std::fs::rename(&self.inner.draft_path, &self.inner.plan_path) {
+            let rollback = self.rollback_and_remove(&transaction);
+            return match rollback {
+                Ok(()) => Err(anyhow::anyhow!(
+                    "cannot commit plan draft atomically: {error}"
+                )),
+                Err(rollback) => Err(anyhow::anyhow!(
+                    "cannot commit plan draft atomically: {error}; transaction rollback failed: {rollback:#}"
+                )),
+            };
+        }
+        crate::session::atomic_file::sync_parent(&self.inner.plan_path)?;
+        Ok(content)
+    }
+
+    pub fn clear(&self) -> Result<()> {
+        let _guard = self
+            .inner
+            .transition_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.inner.fault.check()?;
+        self.ensure_no_pending_transaction()?;
+        let current = match std::fs::read(&self.inner.plan_path) {
+            Ok(current) => current,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                bail!("no confirmed plan found to clear")
+            }
+            Err(error) => return Err(anyhow::anyhow!("cannot read current plan: {error}")),
+        };
+        if current.iter().all(u8::is_ascii_whitespace) {
+            bail!("no confirmed plan found to clear");
+        }
+        let prior_draft = match std::fs::read(&self.inner.draft_path) {
+            Ok(content) => Some(content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "cannot read stale plan draft before clearing confirmed plan: {error}"
+                ));
+            }
+        };
+        let transaction = PlanTransaction {
+            id: next_transaction_id(),
+            operation: PlanOperation::Clear,
+            phase: TransactionPhase::Started,
+            prior_plan: Some(current),
+            prior_draft,
+            plan_content: None,
+            tool_use_id: None,
+            tool_result: None,
+            transition: None,
+        };
+        self.push_transaction(&transaction)?;
+        if let Err(error) = std::fs::remove_file(&self.inner.draft_path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            let rollback = self.rollback_and_remove(&transaction);
+            return match rollback {
+                Ok(()) => Err(anyhow::anyhow!(
+                    "cannot remove stale plan draft before clearing confirmed plan: {error}"
+                )),
+                Err(rollback) => Err(anyhow::anyhow!(
+                    "cannot remove stale plan draft before clearing confirmed plan: {error}; transaction rollback failed: {rollback:#}"
+                )),
+            };
+        }
+        if let Err(error) = std::fs::remove_file(&self.inner.plan_path) {
+            let rollback = self.rollback_and_remove(&transaction);
+            return match rollback {
+                Ok(()) => Err(anyhow::anyhow!("cannot clear confirmed plan: {error}")),
+                Err(rollback) => Err(anyhow::anyhow!(
+                    "cannot clear confirmed plan: {error}; transaction rollback failed: {rollback:#}"
+                )),
+            };
+        }
+        crate::session::atomic_file::sync_parent(&self.inner.plan_path)?;
+        Ok(())
+    }
+
+    /// Attach the durable conversation records to the most recent filesystem
+    /// mutation. Before this point recovery rolls the mutation back; after it,
+    /// recovery completes the result + transition append idempotently.
+    pub(crate) fn bind_transition(&self, result: &mut ToolExecution) -> Result<()> {
+        let Some(operation) = result.plan_command.and_then(PlanOperation::from_command) else {
+            return Ok(());
+        };
+        let _guard = self
+            .inner
+            .transition_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut journal = self.load_journal()?;
+        let transaction = journal
+            .transactions
+            .iter_mut()
+            .rev()
+            .find(|transaction| {
+                transaction.operation == operation && transaction.phase == TransactionPhase::Started
+            })
+            .ok_or_else(|| anyhow::anyhow!("missing started plan transaction for {operation:?}"))?;
+
+        let metadata = result.state_metadata.get_or_insert_with(|| json!({}));
+        let object = metadata
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("plan tool state metadata must be a JSON object"))?;
+        object.insert(
+            PLAN_TRANSACTION_KEY.to_string(),
+            Value::String(transaction.id.clone()),
+        );
+
+        transaction.phase = TransactionPhase::Bound;
+        transaction.tool_use_id = Some(result.tool_use_id.clone());
+        transaction.tool_result = Some(ConversationStore::tool_results_message(
+            std::slice::from_ref(result),
+        ));
+        transaction.transition = Some(transition_message(
+            result
+                .plan_command
+                .expect("operation came from a plan command"),
+            &transaction.id,
+        )?);
+        self.save_journal(&journal)
+    }
+
+    pub(crate) async fn finish_transition(
+        &self,
+        store: &ConversationStore,
+        tool_use_id: &str,
+        command: PlanCommand,
+    ) -> Result<()> {
+        let operation = PlanOperation::from_command(command)
+            .ok_or_else(|| anyhow::anyhow!("draft updates do not have plan transitions"))?;
+        let inner = self.inner.clone();
+        let tool_use_id_owned = tool_use_id.to_string();
+        let transaction = tokio::task::spawn_blocking(move || {
+            inner.find_bound_transaction(&tool_use_id_owned, operation)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("plan journal lookup task failed: {e}"))??;
+        self.complete_bound_transaction(store, &transaction).await?;
+        let inner = self.inner.clone();
+        let transaction_id = transaction.id;
+        tokio::task::spawn_blocking(move || inner.remove_transaction(&transaction_id))
+            .await
+            .map_err(|e| anyhow::anyhow!("plan journal cleanup task failed: {e}"))?
+    }
+
+    /// Recover unfinished cross-file transitions before any model request.
+    /// Started records have no durable successful tool result and are rolled
+    /// back. Bound records are replayed forward with transaction markers so
+    /// repeated recovery never duplicates conversation messages.
+    pub async fn recover_pending(&self, store: &ConversationStore) -> Result<()> {
+        loop {
+            let inner = self.inner.clone();
+            let Some(transaction) = tokio::task::spawn_blocking(move || inner.next_recovery_step())
+                .await
+                .map_err(|e| anyhow::anyhow!("plan recovery step task failed: {e}"))??
+            else {
+                return Ok(());
+            };
+            if transaction.phase == TransactionPhase::Bound {
+                self.complete_bound_transaction(store, &transaction).await?;
+                let inner = self.inner.clone();
+                let transaction_id = transaction.id;
+                tokio::task::spawn_blocking(move || inner.remove_transaction(&transaction_id))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("plan journal cleanup task failed: {e}"))??;
+            }
+        }
+    }
+
+    async fn complete_bound_transaction(
+        &self,
+        store: &ConversationStore,
+        transaction: &PlanTransaction,
+    ) -> Result<()> {
+        let tool_result = transaction.tool_result.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "bound plan transaction {} lacks tool result",
+                transaction.id
+            )
+        })?;
+        let transition = transaction.transition.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("bound plan transaction {} lacks transition", transaction.id)
+        })?;
+        let lines = store.lines_lossy_with_warnings(|_| {}).await?;
+        if !has_tool_result_marker(&lines, &transaction.id) {
+            store.append_runtime_message(tool_result.clone()).await?;
+        }
+        // A crashed assistant response may have contained other tool calls.
+        // Pair all of them before inserting the user-role plan transition;
+        // otherwise the transition could split an OpenAI tool-call/result
+        // exchange and make the recovered history invalid.
+        store.repair_dangling_tool_uses().await?;
+        let lines = store.lines_lossy_with_warnings(|_| {}).await?;
+        if !has_transition_marker(&lines, &transaction.id) {
+            // The fsync also makes any preceding batched tool result durable
+            // before the journal record is removed.
+            store
+                .append_runtime_message_durable(transition.clone())
+                .await?;
+        }
+        Ok(())
+    }
+
+    fn push_transaction(&self, transaction: &PlanTransaction) -> Result<()> {
+        let mut journal = self.load_journal()?;
+        journal.transactions.push(transaction.clone());
+        self.save_journal(&journal)
+    }
+
+    fn ensure_no_pending_transaction(&self) -> Result<()> {
+        if self.load_journal()?.transactions.is_empty() {
+            Ok(())
+        } else {
+            bail!("an unfinished plan transition must be recovered before another plan mutation")
+        }
+    }
+
+    fn rollback_and_remove(&self, transaction: &PlanTransaction) -> Result<()> {
+        self.inner.rollback_and_remove(transaction)
+    }
+
+    fn load_journal(&self) -> Result<PlanTransactionJournal> {
+        self.inner.load_journal()
+    }
+
+    fn save_journal(&self, journal: &PlanTransactionJournal) -> Result<()> {
+        self.inner.save_journal(journal)
     }
 }
 

@@ -11,7 +11,7 @@ pub(crate) mod sandbox {
 
 pub(crate) mod session {
     pub(crate) mod metadata {
-        pub(crate) use mink::runtime::session::{SessionRecord, title_from_prompt};
+        pub(crate) use mink::runtime::session::SessionRecord;
 
         pub(crate) async fn list_project_sessions(
             home: &std::path::Path,
@@ -34,7 +34,7 @@ pub(crate) mod session {
 
     #[cfg(feature = "tui")]
     pub(crate) mod todo {
-        pub(crate) use mink::runtime::session::{TodoSnapshot, TodoStatus};
+        pub(crate) use mink::runtime::session::TodoStatus;
     }
 }
 

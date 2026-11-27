@@ -698,12 +698,17 @@ impl super::runner::ToolExec for ReadTool {
             // truncated content. Raw reads stay under the raw flag and never
             // satisfy non-raw requests.
             let mut outcome = super::runner::ToolOutcome::text(content.clone());
+            outcome.file_summary_metrics =
+                full_text.as_deref().map(|t| (count_text_lines(t), t.len()));
             if !ctx.bypass_read_memo {
                 outcome.memo_candidate = Some(super::runner::MemoCandidate {
                     path: path.clone(),
                     raw: true,
                     start_line: selection.offset,
                     end_line: memo_end_line(selection.offset, selection.limit, visible_count),
+                    content_hash: full_text
+                        .as_deref()
+                        .map(|t| crate::tools::read_memo::content_hash(t.as_bytes())),
                 });
             }
             let end_line = start_line.saturating_add(visible_count.saturating_sub(1));
@@ -721,6 +726,10 @@ impl super::runner::ToolExec for ReadTool {
         }
         let mut structured_tag: Option<String> = None;
         let mut total_lines_count = start_line.saturating_add(visible_count.saturating_sub(1));
+        let mut precomputed_hash = full_text
+            .as_deref()
+            .map(|t| crate::tools::read_memo::content_hash(t.as_bytes()));
+        let mut file_metrics = full_text.as_deref().map(|t| (count_text_lines(t), t.len()));
         let rendered = match full_text {
             Some(full_text) => {
                 total_lines_count = crate::tools::snapshot::split_content_lines(&full_text).len();
@@ -748,6 +757,8 @@ impl super::runner::ToolExec for ReadTool {
                         <= editable_limit.min(ctx.tool_config.file_write_max_bytes) as u128
                     && let Ok(full) = std::fs::read_to_string(&path)
                 {
+                    precomputed_hash = Some(crate::tools::read_memo::content_hash(full.as_bytes()));
+                    file_metrics = Some((count_text_lines(&full), full.len()));
                     total_lines_count = crate::tools::snapshot::split_content_lines(&full).len();
                     ctx.snapshots
                         .lock()
@@ -763,12 +774,14 @@ impl super::runner::ToolExec for ReadTool {
         // that was truncated or spilled at the runner layer.
         let end_line = start_line.saturating_add(visible_count.saturating_sub(1));
         let mut outcome = super::runner::ToolOutcome::text(rendered);
+        outcome.file_summary_metrics = file_metrics;
         if !ctx.bypass_read_memo {
             outcome.memo_candidate = Some(super::runner::MemoCandidate {
                 path: path.clone(),
                 raw: false,
                 start_line: selection.offset,
                 end_line: memo_end_line(selection.offset, selection.limit, visible_count),
+                content_hash: precomputed_hash,
             });
         }
         outcome.structured_value = Some(serde_json::json!({
@@ -782,6 +795,20 @@ impl super::runner::ToolExec for ReadTool {
             "memo_hit": false,
         }));
         Ok(outcome)
+    }
+}
+
+fn count_text_lines(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        0
+    } else {
+        let newlines = bytes.iter().filter(|&&b| b == b'\n').count();
+        if bytes.ends_with(b"\n") {
+            newlines
+        } else {
+            newlines + 1
+        }
     }
 }
 
@@ -825,6 +852,7 @@ impl super::runner::ToolExec for WriteTool {
             &args.content,
             ctx.tool_config.file_write_max_bytes,
         )?;
+        let write_metrics = Some((count_text_lines(&args.content), args.content.len()));
         if args.content.len() <= (4 * 1024 * 1024usize).min(ctx.tool_config.file_write_max_bytes) {
             let line_count = crate::tools::snapshot::split_content_lines(&args.content).len();
             let snapshot = ctx
@@ -837,6 +865,7 @@ impl super::runner::ToolExec for WriteTool {
                     "{result}\n[{}#{}]",
                     args.path, snapshot.tag
                 ));
+                outcome.file_summary_metrics = write_metrics;
                 outcome.structured_value = Some(serde_json::json!({
                     "path": args.path,
                     "bytes_written": args.content.len(),
@@ -846,6 +875,7 @@ impl super::runner::ToolExec for WriteTool {
             }
         }
         let mut outcome = super::runner::ToolOutcome::text(result);
+        outcome.file_summary_metrics = write_metrics;
         outcome.structured_value = Some(serde_json::json!({
             "path": args.path,
             "bytes_written": args.content.len(),
@@ -1065,21 +1095,7 @@ pub(crate) use replace_edit::execute_replace_edit;
 pub(crate) use replace_edit::resolve_replace_target;
 
 fn tool_outcome(content: String) -> super::runner::ToolOutcome {
-    super::runner::ToolOutcome {
-        conversation_content: String::new(),
-        content,
-        is_bash: false,
-        exit_code: None,
-        success: true,
-        no_mutation: false,
-        memo_candidate: None,
-        diagnostics: Vec::new(),
-        plan_command: None,
-        state_metadata: None,
-        presentation: None,
-        structured_value: None,
-        termination: None,
-    }
+    super::runner::ToolOutcome::text(content)
 }
 
 #[path = "file/image_read.rs"]

@@ -291,6 +291,7 @@ where
                     kind: PtcFailureKind::Timeout,
                     message: msg.clone(),
                 });
+                spec.cancel.cancel();
                 let _ = send_host_msg(&mut ctrl_write, &HostMessage::Revoke { reason: msg }).await;
                 revoked = true;
                 revoke_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(config.stop_grace_ms));

@@ -16,7 +16,8 @@ pub fn try_sandbox_exec(
     exe: &Path,
     args: &[String],
 ) -> Result<Vec<String>, String> {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = std::env::current_dir()
+        .map_err(|e| format!("cannot determine current working directory for sandbox-exec: {e}"))?;
     try_sandbox_exec_in_dir(config, exe, args, &cwd, true)
 }
 
@@ -45,10 +46,10 @@ pub fn try_sandbox_exec_in_dir(
 
 /// Build a sandbox-exec profile (Scheme-like DSL).
 ///
-/// Rule evaluation in sandbox-exec:
-///   - ``(allow ...)`` rules add capabilities
-///   - ``(deny ...)`` rules subtract capabilities
-///   - Deny overrides allow regardless of position
+/// Rule evaluation in sandbox-exec (SBPL):
+///   - More-specific / later matching rules take precedence over earlier broad rules
+///   - Therefore `(allow default)` -> `(deny file-write* (subpath "/"))` ->
+///     explicit `(allow file-write* (subpath "..."))` punches narrow write holes.
 ///
 /// Strategy:
 ///   1. ``(allow default)`` — let everything start normally (TUI, Mach, IOKit etc.)

@@ -112,7 +112,7 @@ async fn send_once_observes_cancel() -> anyhow::Result<()> {
         .send_once(br#"{"ping":true}"#.to_vec(), &cancel)
         .await
         .expect_err("a cancelled request must not be sent");
-    assert_eq!(error.kind(), UpstreamFailureKind::Recoverable);
+    assert_eq!(error.kind(), UpstreamFailureKind::Permanent);
     assert_eq!(error.message(), "request cancelled");
     Ok(())
 }
@@ -297,6 +297,10 @@ struct TrimmingCacheBackend;
 impl LlmBackend for TrimmingCacheBackend {
     fn name(&self) -> &str {
         "trimming-cache"
+    }
+
+    fn supports_cache_projection(&self) -> bool {
+        true
     }
 
     fn cache_projection(

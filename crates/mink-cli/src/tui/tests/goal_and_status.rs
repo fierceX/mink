@@ -131,22 +131,22 @@ fn status_bar_shows_transient_wait_label() {
     let line = build_status_line(&state, 80);
     assert!(!line.contains("·"));
     // 首事件等待阶段（未流式）的心跳同样只进状态栏，不进 transcript。
-    state.apply(&TuiSignal::Info(mink::runtime::llm_wait_heartbeat_message(
+    state.apply(TuiSignal::Info(mink::runtime::llm_wait_heartbeat_message(
         30, 0,
     )));
     assert_eq!(state.transcript.lines.len(), 0);
     assert_eq!(state.stream.stream_status.as_deref(), Some("·30s"));
     // 流式阶段心跳替换更新标签。
-    state.apply(&TuiSignal::Text("hello".into()));
+    state.apply(TuiSignal::Text("hello".into()));
     assert_eq!(state.stream.stream_status, None);
-    state.apply(&TuiSignal::Info(mink::runtime::llm_wait_heartbeat_message(
+    state.apply(TuiSignal::Info(mink::runtime::llm_wait_heartbeat_message(
         60, 45,
     )));
     assert_eq!(state.stream.stream_status.as_deref(), Some("·60s"));
     let line = build_status_line(&state, 80);
     assert!(line.contains("·60s"));
     assert!(line.contains("[generating]"));
-    state.apply(&TuiSignal::Stop);
+    state.apply(TuiSignal::Stop);
     assert_eq!(state.stream.stream_status, None);
 }
 
@@ -389,7 +389,7 @@ fn goal_updated_signal_replaces_state_goal() {
     let mut paused = goal_display();
     paused.status = "paused".into();
     paused.phase = "idle".into();
-    state.apply(&TuiSignal::GoalUpdated(Box::new(paused)));
+    state.apply(TuiSignal::GoalUpdated(Box::new(paused)));
     let goal = state.mirrors.goal.expect("goal retained");
     assert_eq!(goal.status, "paused");
     assert_eq!(goal.phase, "idle");
@@ -566,12 +566,12 @@ fn slash_command_surface_matches_the_shared_contract() {
 #[test]
 fn goal_boundary_cards_render_from_the_structured_payload() {
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::GoalCard(Box::new(goal_message(
+    state.apply(TuiSignal::GoalCard(Box::new(goal_message(
         crate::runtime::GoalMessageKind::Draft,
         0,
         Some("add evidence"),
     ))));
-    state.apply(&TuiSignal::GoalCard(Box::new(goal_message(
+    state.apply(TuiSignal::GoalCard(Box::new(goal_message(
         crate::runtime::GoalMessageKind::Start,
         1,
         None,
@@ -603,7 +603,7 @@ fn goal_boundary_cards_render_from_the_structured_payload() {
 fn clicking_a_goal_card_opens_the_goal_view() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::GoalCard(Box::new(goal_message(
+    state.apply(TuiSignal::GoalCard(Box::new(goal_message(
         crate::runtime::GoalMessageKind::Start,
         1,
         None,
@@ -642,7 +642,7 @@ fn clicking_a_goal_card_opens_the_goal_view() {
 fn goal_card_keyboard_collapses_the_newest_card_and_opens_the_detail() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::GoalCard(Box::new(goal_message(
+    state.apply(TuiSignal::GoalCard(Box::new(goal_message(
         crate::runtime::GoalMessageKind::Start,
         1,
         None,
@@ -683,7 +683,7 @@ fn inline_goal_card_output_is_stable_across_renders() {
 
     // The Inline projection never mints a second item for the same render.
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::GoalCard(Box::new(
+    state.apply(TuiSignal::GoalCard(Box::new(
         item.goal_message.take().unwrap(),
     )));
     let before = state.transcript.lines.len();
@@ -695,7 +695,7 @@ fn inline_goal_card_output_is_stable_across_renders() {
 #[test]
 fn goal_card_fold_and_unfold_render_the_screen_marker() {
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::GoalCard(Box::new(goal_message(
+    state.apply(TuiSignal::GoalCard(Box::new(goal_message(
         crate::runtime::GoalMessageKind::Start,
         1,
         None,
@@ -824,7 +824,7 @@ fn live_goal_card_kinds_render_on_screen() {
         (crate::runtime::GoalMessageKind::Start, 1, None),
         (crate::runtime::GoalMessageKind::Continuation, 2, None),
     ] {
-        state.apply(&TuiSignal::GoalCard(Box::new(goal_message(
+        state.apply(TuiSignal::GoalCard(Box::new(goal_message(
             kind, iteration, feedback,
         ))));
     }

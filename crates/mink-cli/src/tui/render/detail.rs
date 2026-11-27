@@ -63,15 +63,21 @@ pub(crate) fn detail_lines_for_session_with_width(
     };
     let thinking = detail.map(|d| d.thinking.as_str()).unwrap_or("");
     let text = detail.map(|d| d.text.as_str()).unwrap_or("");
+    let width = max_width.max(1);
     let mut all_lines: Vec<Line<'static>> = Vec::new();
-    all_lines.push(Line::from(Span::styled(header, theme::sub_agent())));
+    all_lines.extend(wrap_lines_word(
+        &[Line::from(Span::styled(header, theme::sub_agent()))],
+        width,
+    ));
     all_lines.push(Line::from(""));
 
     if !thinking.is_empty() {
         all_lines.push(Line::from(Span::styled("── Thinking ──", theme::muted())));
-        for raw in thinking.split('\n') {
-            all_lines.push(Line::from(Span::styled(raw.to_string(), theme::muted())));
-        }
+        let thinking_lines: Vec<Line<'static>> = thinking
+            .split('\n')
+            .map(|raw| Line::from(Span::styled(raw.to_string(), theme::muted())))
+            .collect();
+        all_lines.extend(wrap_lines_word(&thinking_lines, width));
         all_lines.push(Line::from(""));
     }
 
@@ -86,7 +92,7 @@ pub(crate) fn detail_lines_for_session_with_width(
     if all_lines.is_empty() {
         all_lines.push(Line::from(Span::styled("(no output)", theme::muted())));
     }
-    wrap_lines_word(&all_lines, max_width.max(1))
+    all_lines
 }
 
 pub(super) fn render_detail_bar(f: &mut Frame, area: Rect) {

@@ -107,7 +107,8 @@ impl OpenAIParser {
             return Ok(false);
         }
 
-        let usage = body.get("usage").cloned().unwrap_or(Value::Null);
+        static NULL_VALUE: Value = Value::Null;
+        let usage = body.get("usage").unwrap_or(&NULL_VALUE);
         if usage.get("prompt_tokens").is_some()
             || usage.get("completion_tokens").is_some()
             || usage.get("cached_tokens").is_some()
@@ -157,8 +158,7 @@ impl OpenAIParser {
             .get("choices")
             .and_then(Value::as_array)
             .and_then(|arr| arr.first())
-            .cloned()
-            .unwrap_or(Value::Null);
+            .unwrap_or(&NULL_VALUE);
 
         if let Some(r) = choice.get("finish_reason").and_then(Value::as_str)
             && !r.is_empty()
@@ -167,7 +167,7 @@ impl OpenAIParser {
             self.stop_reason = r.into();
         }
 
-        let delta = choice.get("delta").cloned().unwrap_or(Value::Null);
+        let delta = choice.get("delta").unwrap_or(&NULL_VALUE);
         if let Some(content) = delta.get("content").and_then(Value::as_str) {
             let c = if !self.saw_text && !self.native_web {
                 content.trim_start_matches(['\n', '\r']).to_string()
@@ -197,7 +197,7 @@ impl OpenAIParser {
         }
 
         if self.native_web {
-            self.read_deepseek_web(&choice, &delta, emit)?;
+            self.read_deepseek_web(choice, delta, emit)?;
         }
 
         if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {

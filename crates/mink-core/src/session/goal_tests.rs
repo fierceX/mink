@@ -703,3 +703,57 @@ fn pause_if_active_is_noop_when_inactive_and_clears_review_stage() {
     assert_eq!(store.snapshot().unwrap().revision, rev);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn publish_omits_redundant_journal_and_load_cleans_legacy_journal() {
+    let (dir, store) = store();
+    let goal = store.create(GoalSpec::new("ship"), "env".into()).unwrap();
+    assert!(
+        !dir.join("goal-transaction.json").exists(),
+        "single-file publish_state must not leave a redundant goal-transaction.json"
+    );
+
+    let legacy_state = State {
+        version: GOAL_FORMAT_VERSION,
+        current: Some(goal.clone()),
+        history: Vec::new(),
+    };
+    std::fs::write(
+        dir.join("goal-transaction.json"),
+        serde_json::to_vec(&legacy_state).unwrap(),
+    )
+    .unwrap();
+    let reloaded = GoalStore::load(&dir, PersistenceFault::default()).unwrap();
+    assert_eq!(reloaded.snapshot().unwrap().id, goal.id);
+    assert!(
+        !dir.join("goal-transaction.json").exists(),
+        "loading a legacy goal-transaction.json must replay and delete it"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn abort_unstarted_iteration_rolls_back_idle_phase_and_entry() {
+    let (dir, store) = store();
+    let goal = store
+        .create(GoalSpec::new("rollback"), "env".into())
+        .unwrap();
+    let started = store.begin_iteration("turn-x", 0).unwrap();
+    assert_eq!(started.phase, GoalPhase::Executing);
+    assert_eq!(started.iterations.len(), 1);
+
+    // Mismatched turn id is ignored cleanly.
+    store
+        .abort_unstarted_iteration(&goal.id, 1, "wrong-turn")
+        .unwrap();
+    assert_eq!(store.snapshot().unwrap().phase, GoalPhase::Executing);
+
+    // Matching unstarted iteration rolls back phase to Idle and pops entry.
+    store
+        .abort_unstarted_iteration(&goal.id, 1, "turn-x")
+        .unwrap();
+    let rolled_back = store.snapshot().unwrap();
+    assert_eq!(rolled_back.phase, GoalPhase::Idle);
+    assert!(rolled_back.iterations.is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -305,7 +305,8 @@ impl AgentOptions {
         crate::tools::catalog::validate_tool_config(&crate::context::ToolConfig::from_config(
             &self.config,
         ))?;
-        let custom_tools = crate::runtime::tools::freeze_custom_tools(self.custom_tools.clone());
+        let custom_tools =
+            crate::runtime::custom_tools::freeze_custom_tools(self.custom_tools.clone());
         crate::tools::catalog::validate_custom_tools(&custom_tools)?;
         Ok(())
     }

@@ -241,6 +241,7 @@ fn merge_sandbox_python(
         wasm_path: pick(base.wasm_path, over.wasm_path),
         stdlib_dir: pick(base.stdlib_dir, over.stdlib_dir),
         timeout: pick(base.timeout, over.timeout),
+        max_memory_mb: pick(base.max_memory_mb, over.max_memory_mb),
         read_dirs: pick(base.read_dirs, over.read_dirs),
         write_dirs: pick(base.write_dirs, over.write_dirs),
         package_dirs: pick(base.package_dirs, over.package_dirs),

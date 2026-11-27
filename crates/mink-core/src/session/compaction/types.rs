@@ -173,7 +173,10 @@ pub(crate) fn estimate_candidate_tokens(
 /// 活跃窗口里是否存在未配对的工具调用/结果（正式历史协议损坏）。
 /// 应急 checkpoint 折叠整段历史，任何未完成交换都必须原样失败而不是被摘录掩盖。
 pub(super) fn unpaired_tool_exchange(messages: &[Value]) -> Option<String> {
-    let mut pending: Vec<String> = Vec::new();
+    use std::collections::{HashMap, VecDeque};
+
+    let mut slots: Vec<Option<String>> = Vec::new();
+    let mut pending_by_id: HashMap<String, VecDeque<usize>> = HashMap::new();
     for message in messages {
         let Some(blocks) = message.get("content").and_then(Value::as_array) else {
             continue;
@@ -185,16 +188,22 @@ pub(super) fn unpaired_tool_exchange(messages: &[Value]) -> Option<String> {
                     if id.is_empty() {
                         return Some("tool call without id".to_string());
                     }
-                    pending.push(id.to_string());
+                    let slot_idx = slots.len();
+                    let owned = id.to_string();
+                    slots.push(Some(owned.clone()));
+                    pending_by_id.entry(owned).or_default().push_back(slot_idx);
                 }
                 Some("tool_result") => {
                     let id = block
                         .get("tool_use_id")
                         .and_then(Value::as_str)
                         .unwrap_or_default();
-                    match pending.iter().position(|pending_id| pending_id == id) {
-                        Some(position) => {
-                            pending.remove(position);
+                    let matched = pending_by_id
+                        .get_mut(id)
+                        .and_then(|indices| indices.pop_front());
+                    match matched {
+                        Some(slot_idx) => {
+                            slots[slot_idx] = None;
                         }
                         None => {
                             return Some(format!("tool result {id} has no matching call"));
@@ -205,8 +214,10 @@ pub(super) fn unpaired_tool_exchange(messages: &[Value]) -> Option<String> {
             }
         }
     }
-    pending
-        .first()
+    slots
+        .into_iter()
+        .flatten()
+        .next()
         .map(|id| format!("tool call {id} has no result"))
 }
 

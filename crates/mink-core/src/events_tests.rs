@@ -242,3 +242,27 @@ fn legacy_sub_agent_events_decode_without_optional_catalog_fields() {
         other => panic!("unexpected event: {other:?}"),
     }
 }
+
+#[test]
+fn goal_updated_serializes_with_expected_type_and_roundtrips() {
+    let dir = std::env::temp_dir().join(format!("mink-events-goal-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = crate::session::goal::GoalStore::load(&dir, Default::default()).unwrap();
+    let snap = store
+        .create(
+            crate::session::goal::GoalSpec::new("ship feature"),
+            "env".into(),
+        )
+        .unwrap();
+    let id = snap.id.clone();
+    let event = EventLog::GoalUpdated {
+        goal: Box::new(snap),
+    };
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(value["type"], "goal_updated");
+    assert_eq!(value["goal"]["id"], id);
+    let roundtrip: EventLog = serde_json::from_value(value).unwrap();
+    assert!(matches!(roundtrip, EventLog::GoalUpdated { goal } if goal.id == id));
+    let _ = std::fs::remove_dir_all(&dir);
+}

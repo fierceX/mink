@@ -39,7 +39,7 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
 
     crate::config::validate_runtime_config(&config)?;
     crate::tools::catalog::validate_tool_config(&crate::context::ToolConfig::from_config(&config))?;
-    let custom_tools = crate::runtime::tools::freeze_custom_tools(custom_tools);
+    let custom_tools = crate::runtime::custom_tools::freeze_custom_tools(custom_tools);
     crate::tools::catalog::validate_custom_tools(&custom_tools)?;
 
     let cancel = CancellationToken::new();
@@ -209,9 +209,10 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
     Ok(AgentRuntime {
         _lease: lease,
         ctx,
-        orch_handle,
+        orch_handle: Some(orch_handle),
         event_display,
         handle,
+        shutdown_called: false,
     })
 }
 

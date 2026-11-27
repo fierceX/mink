@@ -490,7 +490,10 @@ impl GoalReviewSession {
             "report binding is runtime-owned; submit decision and summary instead"
         );
         feedback.validate(&self.goal)?;
-        let expected = feedback.feedback().into_review(&self.goal)?;
+        let expected = feedback
+            .feedback()
+            .ok_or_else(|| anyhow::anyhow!("itemized requirement findings are missing"))?
+            .into_review(&self.goal)?;
         ensure!(
             feedback.verdict == expected.verdict,
             "verdict does not match the requirement findings"

@@ -20,13 +20,18 @@ cli = ''.join(
     for folder in ('crates/mink-cli/src/cli', 'crates/mink-cli/src/config')
     for p in sorted((ROOT / folder).glob('*.rs'))
 )
-config_source = (ROOT / 'crates/mink-core/src/config_file.rs').read_text()
+config_source = (
+    (ROOT / 'crates/mink-core/src/config_file.rs').read_text()
+    + '\n'
+    + (ROOT / 'crates/mink-core/src/config.rs').read_text()
+)
 struct_names = {
     'provider': 'ProviderConfigFile', 'provider.image': 'ImageConfigFile',
     'generation': 'GenerationConfigFile', 'context': 'ContextConfigFile',
     'tools': 'ToolsConfigFile', 'tools.edit': 'EditConfigFile',
     'signal': 'SignalPolicyFile', 'recovery': 'RecoveryConfigFile',
     'sandbox': 'SandboxConfigFile', 'sandbox_python': 'SandboxPythonConfigFile',
+    'ptc': 'PtcConfigFile', 'web': 'WebOptionOverrides',
 }
 server_source = (ROOT / 'crates/mink-server/src/session/config.rs').read_text()
 allowed = {}

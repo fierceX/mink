@@ -64,8 +64,23 @@ pub(crate) fn handle_event_for_mode(
     if !matches!(&ev, Event::Key(key) if matches!(key.code, KeyCode::Up | KeyCode::Down)) {
         state.input.preferred_column = None;
     }
-    let track_draft = matches!(&ev, Event::Key(_))
-        || (matches!(&ev, Event::Paste(_)) && matches!(state.view, View::Main));
+    let track_draft = matches!(state.view, View::Main)
+        && (matches!(ev, Event::Paste(_))
+            || matches!(
+                &ev,
+                Event::Key(key)
+                    if !matches!(
+                        key.code,
+                        KeyCode::Left
+                            | KeyCode::Right
+                            | KeyCode::Home
+                            | KeyCode::End
+                            | KeyCode::PageUp
+                            | KeyCode::PageDown
+                            | KeyCode::Tab
+                            | KeyCode::BackTab
+                    )
+            ));
     let old_cursor = state.input.cursor;
     let old_snapshot =
         track_draft.then(|| (state.input.buf.clone(), state.input.pending_images.clone()));

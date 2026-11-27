@@ -61,7 +61,8 @@ pub trait SkillProvider: Send + Sync {
     fn load_skills(&self, ctx: &LoadContext<'_>) -> Result<Vec<LoadedSkill>>;
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SkillDiscoveryPolicy {
     #[default]
     Defaults,

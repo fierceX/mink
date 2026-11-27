@@ -45,7 +45,48 @@ fn replace_suffix_recovery_rejects_ambiguity() {
             .to_string()
             .contains("ambiguous")
     );
+    let missing_abs = root.join("missing/a/x.rs");
+    assert!(
+        resolve_replace_target(&root, &missing_abs.to_string_lossy())
+            .unwrap_err()
+            .to_string()
+            .contains("file not found"),
+        "missing absolute path must not fall back to suffix matching"
+    );
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn edit_rejects_oversized_file_before_reading() -> anyhow::Result<()> {
+    let shared =
+        crate::regression::test_context_for_agent_with_config("edit-oversized-precheck", |cfg| {
+            cfg.file_write_max_bytes = 8;
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+    let tool_ctx = crate::context::ToolContext::from(shared.as_ref());
+    let file_path = shared.paths.cwd.join("huge.txt");
+    // Write invalid UTF-8 larger than file_write_max_bytes: a metadata precheck
+    // rejects by size instead of decoding the entire file into a String first.
+    std::fs::write(&file_path, [0xffu8; 32])?;
+    let edit_context = tool_ctx.file_edit_context();
+    let replace_err = super::execute_replace_edit(
+        &serde_json::json!({
+            "path": "huge.txt",
+            "edits": [{"old_text": "a", "new_text": "b"}],
+        }),
+        &edit_context,
+    )
+    .expect_err("oversized file must fail before UTF-8 decode");
+    assert!(replace_err.to_string().contains("file too large for Edit"));
+
+    let hashline_err = super::execute_hashline_edit(
+        &serde_json::json!({"input": "[huge.txt#0000]\nPUT 1..1:\n+b"}),
+        &edit_context,
+    )
+    .expect_err("hashline edit must reject oversized file before UTF-8 decode");
+    assert!(hashline_err.to_string().contains("file too large for Edit"));
+    Ok(())
 }
 
 #[test]

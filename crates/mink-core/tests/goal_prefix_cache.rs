@@ -156,15 +156,17 @@ async fn goal_rounds_extend_the_request_prefix_instead_of_rewriting_it() -> Resu
     // A turn before the goal proves that starting a goal appends rather than
     // inserting: the goal state may not appear in front of existing history.
     handle.run_turn("warm up").await?;
-    handle.start_goal_driver_and_run()?;
+    handle.goals().start_driver_and_run()?;
     let mut spec = GoalSpec::new("ship the parser");
     spec.limits.max_turns = 2;
-    let draft = handle.draft_goal(spec, 3600)?;
-    let created = handle.confirm_goal(&draft.id, draft.revision)?;
+    let draft = handle.goals().draft(spec, 3600)?;
+    let created = handle.goals().confirm(&draft.id, draft.revision)?;
     let mut limits = created.spec.limits.clone();
     limits.max_turns = 2;
-    let _ = handle.update_goal_limits(&created.id, created.revision, limits);
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), handle.wait_goal())
+    let _ = handle
+        .goals()
+        .update_limits(&created.id, created.revision, limits);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), handle.goals().wait())
         .await
         .map_err(|_| anyhow!("goal run timed out"))??;
     assert_eq!(outcome.status, GoalStatus::Completed, "{outcome:?}");

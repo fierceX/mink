@@ -54,3 +54,18 @@ fn typed_upstream_errors_classify_by_kind_and_status() {
     assert_eq!(info.category, ErrorCategory::RateLimit);
     assert!(info.recoverable);
 }
+
+#[test]
+fn http_status_classification_matches_recovery_retry_policy() {
+    use crate::llm::recovery::{UpstreamFailureKind, classify_http_status};
+
+    for status in [408u16, 409, 425, 429, 500, 502, 503, 504] {
+        assert_eq!(
+            classify_http_status(status),
+            UpstreamFailureKind::Recoverable
+        );
+    }
+    for status in [501u16, 505, 400, 401, 403, 404, 422] {
+        assert_eq!(classify_http_status(status), UpstreamFailureKind::Permanent);
+    }
+}

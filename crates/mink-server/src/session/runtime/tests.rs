@@ -535,7 +535,8 @@ async fn concurrent_publish_and_publish_goal_preserve_monotonic_stream_sequence(
     let base_goal = runtime
         .goal_handle()
         .unwrap()
-        .draft_goal(
+        .goals()
+        .draft(
             mink::runtime::GoalSpec::new("ordered publish regression"),
             60,
         )

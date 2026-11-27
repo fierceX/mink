@@ -390,7 +390,7 @@ fn file_picker_parent_prefix_allows_sandbox_sibling_root() {
 #[test]
 fn ctrl_v_and_newline_keys_are_ignored_while_the_file_picker_is_open() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (ui_tx, ui_rx) = std::sync::mpsc::channel();
+    let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
     let dir = unique_test_dir("clipboard-overlay");
     let mut state = TuiState {
         mirrors: state::SessionMirrors {

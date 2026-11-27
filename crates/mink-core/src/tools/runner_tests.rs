@@ -37,6 +37,7 @@ async fn successful_display_text_may_start_with_error_prefix() {
             presentation: None,
             structured_value: None,
             failure_source: None,
+            file_summary_metrics: None,
         },
     );
     assert_eq!(result.status, ToolStatus::Succeeded);

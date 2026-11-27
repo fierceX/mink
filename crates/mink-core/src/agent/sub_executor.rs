@@ -342,7 +342,7 @@ impl SubAgentExecutor {
             clone_state: clone_state.clone(),
             armed: true,
         };
-        prepare_child_home_with_cancel(
+        if let Err(error) = prepare_child_home_with_cancel(
             parent_session_dir,
             &child_home,
             fork,
@@ -350,19 +350,35 @@ impl SubAgentExecutor {
             Some(&home_created),
             Some(clone_state),
         )
-        .await?;
+        .await
+        {
+            home_guard.cleanup().await;
+            return Err(error);
+        }
         let parent_lease = parent_ctx
             .stores
             .session_lease
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let child_lease = Arc::new(
-            crate::session::lease::SessionLease::acquire_directory(&child_home)?
-                .with_parent(parent_lease),
-        );
+        let lease_home = child_home.clone();
+        let child_lease = match tokio::task::spawn_blocking(move || {
+            crate::session::lease::SessionLease::acquire_directory(&lease_home)
+        })
+        .await
+        {
+            Ok(Ok(lease)) => Arc::new(lease.with_parent(parent_lease)),
+            Ok(Err(error)) => {
+                home_guard.cleanup().await;
+                return Err(error);
+            }
+            Err(error) => {
+                home_guard.cleanup().await;
+                return Err(anyhow::anyhow!("child session lease task failed: {error}"));
+            }
+        };
 
-        let built = build_agent_context(AgentContextBuild {
+        let built = match build_agent_context(AgentContextBuild {
             goal_review: review.clone(),
             session_lease: Some(child_lease),
             config,
@@ -413,7 +429,14 @@ impl SubAgentExecutor {
                 parent_ctx.tools.ptc_runtime.clone()
             },
         })
-        .await?;
+        .await
+        {
+            Ok(built) => built,
+            Err(error) => {
+                home_guard.cleanup().await;
+                return Err(error);
+            }
+        };
         let child_ctx = built.ctx;
         let label = label
             .map(|label| crate::session::subagent_catalog::sanitize_label(&label, &session_id));
@@ -421,7 +444,7 @@ impl SubAgentExecutor {
             .as_deref()
             .map(|label| format!("Sub-agent: {label}"))
             .unwrap_or_else(|| format!("Sub-agent: {session_id}"));
-        crate::session::metadata::ensure_metadata(
+        if let Err(error) = crate::session::metadata::ensure_metadata(
             &built.paths,
             &parent_ctx.paths.cwd,
             SessionSeed {
@@ -439,7 +462,11 @@ impl SubAgentExecutor {
                 untitled: false,
             },
         )
-        .await?;
+        .await
+        {
+            home_guard.cleanup().await;
+            return Err(error);
+        }
         home_guard.disarm();
         let child_store = child_ctx.stores.store.clone();
 
@@ -462,10 +489,22 @@ impl SubAgentExecutor {
 
     /// Execute the sub-agent with the given prompt.
     pub async fn execute(self, prompt: String) -> SubAgentResult {
-        self.execute_turn(prompt).await
+        self.execute_turn(prompt, None).await
     }
 
-    async fn execute_turn(&self, prompt: String) -> SubAgentResult {
+    pub(crate) async fn execute_with_deadline(
+        self,
+        prompt: String,
+        deadline: Option<tokio::time::Instant>,
+    ) -> SubAgentResult {
+        self.execute_turn(prompt, deadline).await
+    }
+
+    async fn execute_turn(
+        &self,
+        prompt: String,
+        deadline: Option<tokio::time::Instant>,
+    ) -> SubAgentResult {
         // 在 self 被 move 进 run_impl 之前，提取所有权字段
         let started = Instant::now();
         let capture = self.capture.clone();
@@ -474,6 +513,9 @@ impl SubAgentExecutor {
         let child_ctx = self.child_ctx.clone();
 
         let timeout_secs = child_ctx.tools.tool_config.sub_agent_timeout_secs.max(1) as u64;
+        let deadline = deadline.unwrap_or_else(|| {
+            tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs)
+        });
         let cancel = child_ctx.cancel.clone();
         enum RunOutcome {
             Done(Result<(TurnDecision, String, String)>),
@@ -481,7 +523,7 @@ impl SubAgentExecutor {
         }
         let outcome = tokio::select! {
             result = self.run_impl(&prompt) => RunOutcome::Done(result),
-            _ = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)) => {
+            _ = tokio::time::sleep_until(deadline) => {
                 cancel.cancel();
                 RunOutcome::TimedOut
             }
@@ -621,11 +663,14 @@ impl ReviewAgentSession {
         }
     }
     pub(crate) async fn execute(&mut self, prompt: String) -> SubAgentResult {
-        assert!(
-            self.usable,
-            "a failed reviewer cannot be restarted as a new turn"
-        );
-        let result = self.executor.execute_turn(prompt).await;
+        if !self.usable {
+            return SubAgentResult::terminal_unmeasured(
+                SubAgentStatus::Failed,
+                SubAgentStopReason::Error,
+                Some("a failed reviewer cannot be restarted as a new turn".to_string()),
+            );
+        }
+        let result = self.executor.execute_turn(prompt, None).await;
         self.usable = result.status == SubAgentStatus::Succeeded;
         result
     }
@@ -753,7 +798,7 @@ async fn prepare_child_home_with_cancel(
     created: Option<&AtomicBool>,
     clone_state: Option<Arc<std::sync::atomic::AtomicU8>>,
 ) -> Result<()> {
-    if child.exists() {
+    if tokio::fs::try_exists(child).await? {
         bail!("sub-agent home already exists: {}", child.display());
     }
     let child_parent = child
@@ -829,8 +874,7 @@ struct ChildHomeGuard {
     created: Arc<AtomicBool>,
     /// Single atomic ownership state shared with the blocking fork copy:
     /// `CLONE_RUNNING` hands off deletion to the copy closure via CAS to
-    /// `CLONE_ABANDONED`; otherwise `Drop` cleans up (via `spawn_blocking`
-    /// when inside a Tokio runtime).
+    /// `CLONE_ABANDONED`; otherwise `cleanup().await` or `Drop` cleans up.
     clone_state: Arc<std::sync::atomic::AtomicU8>,
     armed: bool,
 }
@@ -839,27 +883,55 @@ impl ChildHomeGuard {
     fn disarm(&mut self) {
         self.armed = false;
     }
+
+    fn take_cleanup_path(&mut self) -> Option<std::path::PathBuf> {
+        if !self.armed {
+            return None;
+        }
+        self.armed = false;
+        if !self.created.load(Ordering::SeqCst) {
+            return None;
+        }
+        if self
+            .clone_state
+            .compare_exchange(
+                CLONE_RUNNING,
+                CLONE_ABANDONED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            return None;
+        }
+        Some(self.path.clone())
+    }
+
+    async fn cleanup(mut self) {
+        if let Some(path) = self.take_cleanup_path() {
+            let _ = tokio::fs::remove_dir_all(&path).await;
+        }
+    }
 }
 
 impl Drop for ChildHomeGuard {
     fn drop(&mut self) {
-        if self.armed && self.created.load(Ordering::SeqCst) {
-            if self
-                .clone_state
-                .compare_exchange(
-                    CLONE_RUNNING,
-                    CLONE_ABANDONED,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                return;
-            }
-            // Perform removal synchronously so callers/timeouts observe the
-            // partial directory already gone the moment setup is dropped.
-            let _ = std::fs::remove_dir_all(&self.path);
+        let Some(path) = self.take_cleanup_path() else {
+            return;
+        };
+        // Explicit Err paths call `cleanup().await`; `Drop` runs only when a
+        // future is cancelled/dropped mid-setup and must leave the directory
+        // removed before returning. Use `block_in_place` on multi-thread Tokio
+        // runtimes so other async tasks on this worker are not starved.
+        if let Ok(handle) = tokio::runtime::Handle::try_current()
+            && handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        {
+            tokio::task::block_in_place(|| {
+                let _ = std::fs::remove_dir_all(&path);
+            });
+            return;
         }
+        let _ = std::fs::remove_dir_all(&path);
     }
 }
 

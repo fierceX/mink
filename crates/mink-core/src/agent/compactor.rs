@@ -143,24 +143,27 @@ impl TurnCompactor {
         // second estimate happen on the below-threshold path.
         let local_tokens = projection.estimated_tokens;
         let source_fingerprint = projection.fingerprint.clone();
-        let projection_request = LlmRequest {
-            purpose: LlmPurpose::Agent,
-            model: target.model.to_string(),
-            model_alias: target.alias.map(str::to_string),
-            api_url: self.ctx.paths.api_url.clone(),
-            api_key: self.ctx.api_key().to_string(),
-            system_prompt: projection.system_prompt.clone(),
-            messages: projection.runtime_projected.clone(),
-            tools: projection.runtime_tools.clone(),
-            max_tokens: crate::session::compaction::effective_max_tokens(&self.ctx.config),
-            cancel: self.ctx.cancel.clone(),
-            verbose: self.ctx.verbose(),
-            display: self.ctx.io.display.clone(),
+        let current_projection = if self.ctx.llm_backend.supports_cache_projection() {
+            let projection_request = LlmRequest {
+                purpose: LlmPurpose::Agent,
+                model: target.model.to_string(),
+                model_alias: target.alias.map(str::to_string),
+                api_url: self.ctx.paths.api_url.clone(),
+                api_key: self.ctx.api_key().to_string(),
+                system_prompt: projection.system_prompt.clone(),
+                messages: projection.runtime_projected.clone(),
+                tools: projection.runtime_tools.clone(),
+                max_tokens: crate::session::compaction::effective_max_tokens(&self.ctx.config),
+                cancel: self.ctx.cancel.clone(),
+                verbose: self.ctx.verbose(),
+                display: self.ctx.io.display.clone(),
+            };
+            self.ctx
+                .llm_backend
+                .cache_projection(&projection_request, projection_request.messages.len())
+        } else {
+            None
         };
-        let current_projection = self
-            .ctx
-            .llm_backend
-            .cache_projection(&projection_request, projection_request.messages.len());
         let (did_compact, detail) = self
             .ctx
             .stores

@@ -156,67 +156,69 @@ impl ToolRunner {
                 error: String,
             },
         }
-        let mut slots = Vec::with_capacity(calls.len());
+        let mut slots: Vec<Option<PreparedSlot>> = Vec::with_capacity(calls.len());
+        let mut read_classifies = Vec::new();
         for call in calls {
+            let idx = slots.len();
             match self.prepare_call(call) {
-                PreparedCall::Immediate(result) => slots.push(PreparedSlot::Immediate(result)),
+                PreparedCall::Immediate(result) => {
+                    slots.push(Some(PreparedSlot::Immediate(result)));
+                }
                 PreparedCall::Execute(call) => {
-                    let slot = if call.name == "Read" {
+                    if call.name == "Read" {
+                        slots.push(None);
                         let path = call
                             .input_json
                             .get("path")
                             .and_then(serde_json::Value::as_str)
                             .unwrap_or("")
                             .to_string();
-                        // Classification may touch the VFS (slow) — run it on
-                        // the blocking pool so async workers are not stalled.
+                        // Classification may touch the VFS (slow) — run concurrently
+                        // on the blocking pool across all Read calls in the batch.
                         let ctx = self.ctx.clone();
-                        let path_for_task = path.clone();
-                        let classified = tokio::task::spawn_blocking(move || {
+                        let join = tokio::task::spawn_blocking(move || {
                             // Invalid path selection keeps the text-path error
                             // surface (e.g. serde unknown-field diagnostics).
                             let selection =
-                                match crate::resources::selector::split_read_path_selection(
-                                    &path_for_task,
-                                ) {
+                                match crate::resources::selector::split_read_path_selection(&path) {
                                     Ok(selection) => selection,
                                     Err(_) => {
                                         return Ok(crate::tools::file::ImageReadKind::NotImage);
                                     }
                                 };
-                            crate::tools::file::classify_image_read(
-                                &ctx,
-                                &path_for_task,
-                                &selection,
-                            )
-                        })
-                        .await;
-                        match classified {
-                            Ok(Ok(kind))
-                                if !matches!(kind, crate::tools::file::ImageReadKind::NotImage) =>
-                            {
-                                PreparedSlot::Image { call, kind }
-                            }
-                            Ok(Ok(_)) => PreparedSlot::Text(call),
-                            // Classification failures must surface as failed
-                            // ToolExecutions, never a silent fallback to the
-                            // text path.
-                            Ok(Err(error)) => PreparedSlot::ClassifyError {
-                                call,
-                                error: format!("{error:#}"),
-                            },
-                            Err(error) => PreparedSlot::ClassifyError {
-                                call,
-                                error: format!("{error:#}"),
-                            },
-                        }
+                            crate::tools::file::classify_image_read(&ctx, &path, &selection)
+                        });
+                        read_classifies.push(async move { (idx, call, join.await) });
                     } else {
-                        PreparedSlot::Text(call)
-                    };
-                    slots.push(slot);
+                        slots.push(Some(PreparedSlot::Text(call)));
+                    }
                 }
             }
         }
+        for (idx, call, classified) in futures::future::join_all(read_classifies).await {
+            let slot = match classified {
+                Ok(Ok(kind)) if !matches!(kind, crate::tools::file::ImageReadKind::NotImage) => {
+                    PreparedSlot::Image { call, kind }
+                }
+                Ok(Ok(_)) => PreparedSlot::Text(call),
+                // Classification failures must surface as failed
+                // ToolExecutions, never a silent fallback to the
+                // text path.
+                Ok(Err(error)) => PreparedSlot::ClassifyError {
+                    call,
+                    error: format!("{error:#}"),
+                },
+                Err(error) => PreparedSlot::ClassifyError {
+                    call,
+                    error: format!("{error:#}"),
+                },
+            };
+            slots[idx] = Some(slot);
+        }
+        let slots: Vec<PreparedSlot> = slots
+            .into_iter()
+            .map(|slot| slot.expect("every call fills a slot"))
+            .collect();
 
         // Phase one, text family: concurrent dispatch (policy gate already
         // passed above, so no second prepare_call).
@@ -744,6 +746,7 @@ async fn execute_custom_raw(
                 presentation: None,
                 structured_value: output.structured_value,
                 failure_source: None,
+                file_summary_metrics: None,
             }
         }
         Err(error) => {
@@ -975,6 +978,7 @@ fn dispatch_tool(
                     presentation: outcome.presentation,
                     structured_value: outcome.structured_value,
                     failure_source: None,
+                    file_summary_metrics: outcome.file_summary_metrics,
                 }
             }
             Err(e) => {

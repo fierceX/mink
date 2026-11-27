@@ -19,6 +19,7 @@ pub struct ConversationStore {
     cache: RwLock<Option<CachedLines>>,
     write_lock: Mutex<()>,
     observer: std::sync::Mutex<Option<CommitObserver>>,
+    tail_repaired: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,14 +54,17 @@ impl ConversationStore {
             cache: RwLock::new(None),
             write_lock: Mutex::new(()),
             observer: std::sync::Mutex::new(None),
+            tail_repaired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
     pub(crate) async fn observe_commits(&self, callback: CommitCallback) -> Result<()> {
         let _guard = self.write_lock.lock().await;
         let path = self.path.clone();
+        let tail_repaired = self.tail_repaired.clone();
         let sequence = tokio::task::spawn_blocking(move || -> Result<usize> {
             crate::session::jsonl::repair_unterminated_tail(&path)?;
+            tail_repaired.store(true, std::sync::atomic::Ordering::Release);
             count_sequence_positions_from_disk(&path)
         })
         .await??;
@@ -445,8 +449,11 @@ impl ConversationStore {
         let mut line = serde_json::to_vec(value)?;
         line.push(b'\n');
         let path = self.path.clone();
-        tokio::task::spawn_blocking(move || crate::session::jsonl::append_line(&path, &line, sync))
-            .await??;
+        let tail_repaired = self.tail_repaired.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::session::jsonl::append_line_checked(&path, &line, sync, &tail_repaired)
+        })
+        .await??;
         // Append to cache instead of invalidating
         let mut cache = self.cache.write().await;
         if let Some(cache) = cache.as_mut() {
@@ -472,6 +479,7 @@ impl ConversationStore {
         let lines = self.lines_lossy_with_warnings(|_| {}).await?;
         let mut pending: Vec<String> = Vec::new();
         let mut resolved: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen_pending: std::collections::HashSet<String> = std::collections::HashSet::new();
         for line in &lines {
             let Some(content) = line.get("content").and_then(serde_json::Value::as_array) else {
                 continue;
@@ -481,7 +489,7 @@ impl ConversationStore {
                     Some("tool_use") => {
                         if let Some(id) = block.get("id").and_then(serde_json::Value::as_str) {
                             let id = id.to_string();
-                            if !resolved.contains(&id) && !pending.contains(&id) {
+                            if !resolved.contains(&id) && seen_pending.insert(id.clone()) {
                                 pending.push(id);
                             }
                         }

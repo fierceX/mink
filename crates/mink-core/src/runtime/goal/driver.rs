@@ -187,7 +187,7 @@ impl AgentRuntimeHandle {
         }
     }
 
-    pub async fn wait_goal(&self) -> RuntimeResult<GoalOutcome> {
+    pub(crate) async fn wait_goal(&self) -> RuntimeResult<GoalOutcome> {
         let mut changes = self.goal_driver.changes.subscribe();
         loop {
             match changes.borrow_and_update().clone() {

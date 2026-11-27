@@ -111,6 +111,7 @@ request_timeout_secs = 30 # 可选：单个逻辑请求的总期限（含全部�
 [sandbox_python]
 wasm_path = "/path/to/python.wasm"
 read_dirs = ["./data"]
+max_memory_mb = 256
 
 [ptc]
 mode = "off"                          # off | tool (hybrid) | exclusive（也可用 MINK_PTC_MODE 或 --ptc）
@@ -663,11 +664,36 @@ macOS `write_dirs`、临时目录和会话存储的写入规则包含字面路�
 | `wasm_path` | `Option<String>` |
 | `stdlib_dir` | `Option<String>` |
 | `timeout` | `Option<u64>` |
+| `max_memory_mb` | `Option<usize>` |
 | `read_dirs` | `Option<Vec<String>>` |
 | `write_dirs` | `Option<Vec<String>>` |
 | `package_dirs` | `Option<Vec<String>>` |
 
 每个存在的 `package_dirs` 目录会挂载到独立的 `/packages/<索引>` 路径，并按配置顺序加入 `PYTHONPATH`；多个目录可同时提供 Python 包。
+
+### `[ptc]`
+
+| 字段 | Rust 解析类型 |
+|---|---|
+| `mode` | `Option<String>` |
+| `backend` | `Option<String>` |
+| `python_executable` | `Option<String>` |
+| `timeout_secs` | `Option<u64>` |
+| `max_timeout_secs` | `Option<u64>` |
+| `max_parallel_sub_calls` | `Option<usize>` |
+| `max_sub_calls_per_minute` | `Option<usize>` |
+| `max_output_bytes` | `Option<usize>` |
+| `max_message_bytes` | `Option<usize>` |
+| `max_pending_calls` | `Option<usize>` |
+| `stop_grace_ms` | `Option<u64>` |
+
+### `[web]`
+
+| 字段 | Rust 解析类型 |
+|---|---|
+| `client` | `Option<bool>` |
+| `native_search` | `Option<bool>` |
+| `native_read_url` | `Option<bool>` |
 
 ## Python 字段索引
 
@@ -732,6 +758,9 @@ macOS `write_dirs`、临时目录和会话存储的写入规则包含字面路�
 | `ptc_mode` | `str` | `'off'` |
 | `ptc_config` | `Optional[dict[str, Any]]` | `None` |
 | `cwd` | `Optional[str]` | `None` |
+| `web_client` | `Optional[bool]` | `None` |
+| `web_native_search` | `Optional[bool]` | `None` |
+| `web_native_read_url` | `Optional[bool]` | `None` |
 
 `mink-server.toml` 的服务监听字段在 `[server]`，默认模型和 Mink home 在 `[agent]`；它与 CLI `--config` 的分组字符串是不同入口。
 

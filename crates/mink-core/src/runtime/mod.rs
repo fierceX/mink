@@ -1,14 +1,71 @@
 mod builder;
 mod config;
 pub(crate) mod context_build;
+#[path = "tools.rs"]
+mod custom_tools;
 mod events;
 mod extensions;
 mod handle;
 mod options;
 mod sdk_adapter;
 pub mod session;
-mod tools;
-pub(crate) use tools::RegisteredCustomTool;
+pub(crate) use custom_tools::RegisteredCustomTool;
+
+pub mod llm {
+    pub use crate::config::LlmRecoveryPolicy;
+    pub use crate::llm::client::{
+        LlmBackend, LlmCacheProjection, LlmCancelToken, LlmErrorEvent, LlmEvent, LlmEventStream,
+        LlmPurpose, LlmRequest, LlmRequestFailure, LlmResponseStream, LlmRetryEvent, LlmStopEvent,
+        LlmTextEvent, LlmThinkingEvent, LlmToolCallEvent, LlmUsageEvent, OpenAiCompatibleBackend,
+        OpenAiCompatibleOptions, TokenParamKind,
+    };
+    pub use crate::llm::deepseek_web::DeepSeekWebResponse;
+    pub use crate::llm::recovery::{LlmUpstreamError, UpstreamFailureKind};
+}
+
+pub mod tools {
+    pub use super::custom_tools::{
+        AgentTool, ToolActivation, ToolCapabilityOffer, ToolDefinition, ToolError,
+        ToolExecutionContext, ToolExecutionMode, ToolOutput,
+    };
+    pub use super::options::ToolOptions;
+    pub use crate::config::{ToolApprovalMode, ToolApprovalPolicy};
+    pub use crate::tools::metadata::{
+        ApprovalTier, ToolBlocker, ToolFailureKind, ToolResultKind, ToolStatus,
+    };
+    pub use crate::tools::semantic_capabilities::{
+        CapabilityAvailability, CapabilityUseScope, ProviderTier, ToolSemanticCapability,
+    };
+}
+
+pub mod vfs {
+    pub use crate::tools::vfs::{
+        ReadOnlyFileSystem, VfsGlobRequest, VfsGlobResult, VfsGrepEntry, VfsGrepRequest,
+        VfsGrepResult, VfsImage, VfsReadRequest, VfsReadResult, VfsScope, format_virtual_glob,
+        format_virtual_grep, normalize_virtual_file_path, normalize_virtual_root,
+        select_virtual_lines, tool_line_count, validate_virtual_glob_request,
+        validate_virtual_grep_request,
+    };
+}
+
+pub mod ptc {
+    pub use crate::ptc::{
+        PtcBackendKind, PtcBindingDispatcher, PtcBindingError, PtcBindingSuccess, PtcConfig,
+        PtcFailureKind, PtcImageDescriptor, PtcMode, PtcOutputItem, PtcRunFailure, PtcRunRequest,
+        PtcRunResult, PtcRunSpec, PtcRuntime,
+    };
+    pub use crate::ui::{PtcRunDisplay, PtcSubCallDisplay};
+}
+
+pub mod ui {
+    pub use crate::ui::{
+        ArtifactDisplay, Display, GoalDisplay, PlanDisplay, PlanTransitionDisplay,
+        PresentedToolResultDisplay, StatsSnapshot, SubAgentStreamKind, SubAgentStreamSink,
+        TodoChangeDisplay, TodoCountsDisplay, TodoDisplay, TodoItemDisplay, TodoStatusDisplay,
+        ToolCallDisplay, ToolPresentation, ToolResultDisplay, llm_wait_heartbeat_message,
+        parse_llm_wait_heartbeat_elapsed,
+    };
+}
 
 pub use crate::agent::failure::TurnFailureReason;
 pub use crate::capabilities::CapabilitySnapshot;
@@ -42,10 +99,11 @@ pub use crate::ptc::{
 pub use crate::resources::ResourceHandler;
 pub use crate::runtime::extensions::{PostInitContext, PostInitHook, PrefixSource};
 /// 同目录临时文件 + rename 的原子替换（session 状态文件共用实现）。
+#[doc(hidden)]
 pub use crate::session::atomic_file::atomic_replace;
-pub use crate::session::attachments::{
-    AttachmentDescriptor, AttachmentStore, restrict_private_dir,
-};
+#[doc(hidden)]
+pub use crate::session::attachments::restrict_private_dir;
+pub use crate::session::attachments::{AttachmentDescriptor, AttachmentStore};
 pub use crate::session::input::{HumanInput, InputInbox, InputReceipt, InputStatus};
 pub use crate::session::paths::SessionLayout;
 pub use crate::tools::image::ImageFormat;
@@ -117,31 +175,33 @@ pub fn validate_runtime_limits(
     )
 }
 
+pub use custom_tools::{
+    AgentTool, ToolActivation, ToolCapabilityOffer, ToolDefinition, ToolError,
+    ToolExecutionContext, ToolExecutionMode, ToolOutput,
+};
 pub use sdk_adapter::{
     exit_code_from_turn, final_from_outcome, runtime_skills_from_sdk_request,
     skill_discovery_policy_from_sdk_request,
-};
-pub use tools::{
-    AgentTool, ToolActivation, ToolCapabilityOffer, ToolDefinition, ToolError,
-    ToolExecutionContext, ToolExecutionMode, ToolOutput,
 };
 
 pub use crate::agent::orchestrator::TurnStatus;
 
 /// CLI-process bootstrap. Embedded applications should configure sandboxing at
 /// their own process boundary instead.
+#[doc(hidden)]
 pub fn reexec_in_sandbox(config: &SandboxConfig, exe: &std::path::Path, args: &[String]) {
     crate::sandbox::reexec_in_sandbox(config, exe, args);
 }
 
 pub use crate::session::lease::SessionLease;
 
-pub(crate) mod goal;
+pub mod goal;
 pub use crate::session::goal::{
     GOAL_MESSAGE_SOURCE, GoalAcceptance, GoalBudget, GoalCompletionBasis, GoalLimits, GoalMessage,
     GoalMessageKind, GoalOutcome, GoalPhase, GoalReport, GoalReportKind, GoalSnapshot, GoalSpec,
     GoalStatus, default_limits as default_goal_limits,
 };
+pub use goal::GoalController;
 pub use goal::{
     CommandGoalVerifier, GoalContinuation, GoalRunLease, GoalVerification, GoalVerificationContext,
     GoalVerificationStatus, GoalVerifier,

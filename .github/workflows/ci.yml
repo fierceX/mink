@@ -18,6 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
           # Vite 8 currently resolves Rolldown 1.2.x, whose native bindings
@@ -86,9 +87,6 @@ jobs:
           MINK_REQUIRE_SANDBOX=1 cargo test -p mink-core --test sandbox_linux -- --nocapture
           MINK_REQUIRE_SANDBOX=1 cargo test -p mink-core --test sandbox_linux -- --nocapture --test-threads=1
       - run: make feature-matrix
-      - name: Install web deps (served React frontend)
-        run: npm ci
-        working-directory: apps/web
 
       - name: Workbench unit lane (served frontend)
         run: |
@@ -110,6 +108,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
           node-version: "22.22.2"
@@ -169,6 +168,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Install Python (for zigbuild)
         uses: actions/setup-python@v5
@@ -237,6 +238,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target || '' }}
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Install Python
         uses: actions/setup-python@v5

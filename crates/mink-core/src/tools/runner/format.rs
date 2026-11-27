@@ -10,6 +10,7 @@ struct DispatchTextInput {
     memo_candidate: Option<MemoCandidate>,
     diagnostics: Vec<String>,
     success: bool,
+    file_summary_metrics: Option<(usize, usize)>,
 }
 
 fn compose_dispatched_text(
@@ -26,6 +27,7 @@ fn compose_dispatched_text(
         memo_candidate,
         diagnostics,
         success,
+        file_summary_metrics,
     } = input;
     if !success && exit_code.is_none() {
         output = format!("Error: {output}");
@@ -47,12 +49,18 @@ fn compose_dispatched_text(
     let summary = if (call.name == "Read" || call.name == "Write") && !is_bash {
         let path_str = call.fields.get("path").map(|s| s.as_str()).unwrap_or("");
         let kind = call.name.as_str();
-        let summary_path = resolve_summary_path(&ctx.cwd, path_str);
-        Some(file_tool_result_summary_sync(
-            kind,
-            path_str,
-            &summary_path.display().to_string(),
-        ))
+        if path_str.is_empty() {
+            Some(kind.to_string())
+        } else if let Some((lines, bytes)) = file_summary_metrics {
+            Some(format!("{kind}({path_str}) [{lines} lines, {bytes} bytes]"))
+        } else {
+            let summary_path = resolve_summary_path(&ctx.cwd, path_str);
+            Some(file_tool_result_summary_sync(
+                kind,
+                path_str,
+                &summary_path.display().to_string(),
+            ))
+        }
     } else {
         None
     };
@@ -76,6 +84,7 @@ fn compose_dispatched_text(
             candidate.raw,
             candidate.start_line,
             candidate.end_line,
+            candidate.content_hash,
         );
     }
     let mutating = crate::tools::runner::tool_registry()
@@ -110,6 +119,7 @@ pub(super) fn format_dispatched_result(
         presentation,
         structured_value: _,
         failure_source,
+        file_summary_metrics,
     } = raw;
     let success = status.is_success();
     let composed = compose_dispatched_text(
@@ -124,6 +134,7 @@ pub(super) fn format_dispatched_result(
             memo_candidate,
             diagnostics,
             success,
+            file_summary_metrics,
         },
     );
     let needs_finalization = plan_command.is_some() || spawns_sub_agent;
@@ -233,6 +244,7 @@ pub(super) fn format_nested_dispatched_result(
         presentation: _,
         structured_value,
         failure_source: _,
+        file_summary_metrics,
     } = raw;
     let success = status.is_success();
     let composed = compose_dispatched_text(
@@ -247,6 +259,7 @@ pub(super) fn format_nested_dispatched_result(
             memo_candidate,
             diagnostics,
             success,
+            file_summary_metrics,
         },
     );
     let rendered_text = if is_bash {
@@ -310,7 +323,12 @@ fn line_count(s: &[u8]) -> usize {
     if s.is_empty() {
         0
     } else {
-        s.iter().filter(|&&c| c == b'\n').count() + 1
+        let newlines = s.iter().filter(|&&c| c == b'\n').count();
+        if s.ends_with(b"\n") {
+            newlines
+        } else {
+            newlines + 1
+        }
     }
 }
 
@@ -530,4 +548,18 @@ pub(super) fn filter_bash_noise(s: &str) -> String {
         out.push(format!("  [previous line repeated {} times]", repeat_count));
     }
     out.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::line_count;
+
+    #[test]
+    fn line_count_does_not_overcount_trailing_newline() {
+        assert_eq!(line_count(b""), 0);
+        assert_eq!(line_count(b"one"), 1);
+        assert_eq!(line_count(b"one\n"), 1);
+        assert_eq!(line_count(b"one\ntwo"), 2);
+        assert_eq!(line_count(b"one\ntwo\n"), 2);
+    }
 }

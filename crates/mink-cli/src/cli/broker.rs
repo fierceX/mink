@@ -105,55 +105,33 @@ pub(super) async fn run_turn_rendered(
 }
 
 #[cfg(feature = "tui")]
-/// The structured goal boundary a committed row carries, if any.
-///
-/// Both the live turn stream and the goal-turn sink use this one decoder, so a
-/// card looks the same however it arrives. Rows other than goal boundaries
-/// return `None` and keep their existing handling.
 pub(super) fn goal_boundary_signal(message: &serde_json::Value) -> Option<crate::tui::TuiSignal> {
-    let metadata = message.get("_mink")?;
-    if let Some(raw) = metadata.get("goal_message") {
-        let parsed: crate::runtime::GoalMessage = serde_json::from_value(raw.clone()).ok()?;
-        return Some(crate::tui::TuiSignal::GoalCard(Box::new(parsed)));
+    match crate::runtime::session::SessionReader::decode_goal_boundary(message)? {
+        crate::runtime::session::GoalBoundaryEvent::Card(parsed) => {
+            Some(crate::tui::TuiSignal::GoalCard(parsed))
+        }
+        crate::runtime::session::GoalBoundaryEvent::Ended { goal_id, revision } => {
+            Some(crate::tui::TuiSignal::GoalEnded { goal_id, revision })
+        }
     }
-    if metadata
-        .get("goal_state_kind")
-        .and_then(serde_json::Value::as_str)
-        == Some("ended")
-    {
-        let goal_id = metadata
-            .get("goal_id")
-            .and_then(serde_json::Value::as_str)?
-            .to_string();
-        let revision = metadata
-            .get("goal_revision")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        return Some(crate::tui::TuiSignal::GoalEnded { goal_id, revision });
-    }
-    None
 }
 
 #[cfg(feature = "tui")]
 async fn render_tui_stream(
     mut stream: crate::runtime::AgentEventStream,
     display: &dyn Display,
-    signals: &std::sync::mpsc::Sender<crate::tui::TuiSignal>,
+    signals: &mpsc::UnboundedSender<crate::tui::TuiSignal>,
 ) -> RuntimeResult<TurnOutcome> {
     let turn_id = stream.turn_id().to_string();
     while let Some(event) = stream.recv().await {
         match event.kind {
             AgentEventKind::ConversationCommitted { message, .. } => {
-                if message["role"] == "user"
-                    && message["_mink"]["guidance"] == true
-                    && let (Some(id), Some(text)) = (
-                        message["_mink"]["input_id"].as_str(),
-                        message["content"].as_str(),
-                    )
+                if let Some(guidance) =
+                    crate::runtime::session::SessionReader::decode_applied_guidance(&message)
                 {
                     let _ = signals.send(crate::tui::TuiSignal::GuidanceApplied {
-                        input_id: id.into(),
-                        text: text.into(),
+                        input_id: guidance.input_id,
+                        text: guidance.text,
                     });
                 } else if let Some(signal) = goal_boundary_signal(&message) {
                     // A goal boundary committed by the normal turn path (draft
@@ -258,11 +236,15 @@ pub(crate) fn start_runtime_broker(
                     let _ = work_tx.send(RuntimeCmd::Goal(command));
                 }
                 RuntimeCmd::Goal(command) => {
-                    let result = crate::local::execute_goal_command(&handle, command).await;
-                    match result {
-                        Ok(message) => control_display.render_info(&message),
-                        Err(error) => control_display.render_error(&error.to_string()),
-                    }
+                    let handle = handle.clone();
+                    let display = control_display.clone();
+                    tokio::spawn(async move {
+                        let result = crate::local::execute_goal_command(&handle, command).await;
+                        match result {
+                            Ok(message) => display.render_info(&message),
+                            Err(error) => display.render_error(&error.to_string()),
+                        }
+                    });
                 }
                 command => {
                     if work_tx.send(command).is_err() {
@@ -279,18 +261,13 @@ pub(super) struct GoalTerminalSink {
     pub(super) turns: bool,
     pub(super) display: Arc<dyn Display>,
     #[cfg(feature = "tui")]
-    pub(super) signals: Option<std::sync::mpsc::Sender<crate::tui::TuiSignal>>,
+    pub(super) signals: Option<mpsc::UnboundedSender<crate::tui::TuiSignal>>,
 }
 #[async_trait::async_trait]
 impl crate::runtime::EventSink for GoalTerminalSink {
     async fn on_event(&self, event: crate::runtime::AgentEvent) -> Result<(), String> {
-        let goal_turn = self.turns
-            && event
-                .turn_id
-                .as_ref()
-                .is_some_and(|id| id.as_str().starts_with("goal:"));
-        let goal_notice =
-            matches!(&event.kind, AgentEventKind::Info { message } if message.starts_with("Goal "));
+        let goal_turn = self.turns && event.turn_id.as_ref().is_some_and(|id| id.is_goal_turn());
+        let goal_notice = event.kind.is_goal_notice();
         // Lifecycle events drive the TUI status marker and detail view, so they
         // pass on the non-turn sink. The turn sink already renders its own
         // notices and must not double-report them.
@@ -329,9 +306,11 @@ impl crate::runtime::EventSink for GoalTerminalSink {
         if let Some(signals) = &self.signals {
             match &event.kind {
                 AgentEventKind::TurnStarted => {
-                    let _ = signals.send(crate::tui::TuiSignal::GoalTurnStarted {
-                        turn_id: event.turn_id.as_ref().unwrap().to_string(),
-                    });
+                    if let Some(turn_id) = &event.turn_id {
+                        let _ = signals.send(crate::tui::TuiSignal::GoalTurnStarted {
+                            turn_id: turn_id.to_string(),
+                        });
+                    }
                 }
                 AgentEventKind::Final { outcome } => {
                     let _ = signals.send(crate::tui::TuiSignal::TurnFinished {
@@ -339,16 +318,13 @@ impl crate::runtime::EventSink for GoalTerminalSink {
                         status: outcome.status,
                     });
                 }
-                AgentEventKind::ConversationCommitted { message, .. }
-                    if message["_mink"]["guidance"] == true =>
-                {
-                    if let (Some(id), Some(text)) = (
-                        message["_mink"]["input_id"].as_str(),
-                        message["content"].as_str(),
-                    ) {
+                AgentEventKind::ConversationCommitted { message, .. } => {
+                    if let Some(guidance) =
+                        crate::runtime::session::SessionReader::decode_applied_guidance(message)
+                    {
                         let _ = signals.send(crate::tui::TuiSignal::GuidanceApplied {
-                            input_id: id.into(),
-                            text: text.into(),
+                            input_id: guidance.input_id,
+                            text: guidance.text,
                         });
                     }
                 }

@@ -86,10 +86,12 @@ async fn main() -> anyhow::Result<()> {
         .await?;
         let handle = runtime.handle();
         let objective = "Create proof.txt whose entire trimmed content is answer: 42";
-        handle.request_goal_draft(GoalSpec::new(objective), 3600)?;
+        handle
+            .goals()
+            .request_draft(GoalSpec::new(objective), 3600)?;
         let start = std::time::Instant::now();
-        let first = handle.generate_goal_draft("").await?;
-        let second = handle.generate_goal_draft("Make the evidence requirement explicitly check the entire file, not a matching substring.").await?;
+        let first = handle.goals().generate_draft("").await?;
+        let second = handle.goals().generate_draft("Make the evidence requirement explicitly check the entire file, not a matching substring.").await?;
         let output = serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"model":model,"method":"real model, two draft discussion turns; no confirmation","cases":[],"draft_formation":{"first_ready":first.draft_ready,"second_ready":second.draft_ready,"contract_valid":second.spec.validate().is_ok(),"original_request_preserved":second.spec.original_request==objective,"still_draft":second.status==GoalStatus::Draft,"execution_rounds":second.iterations.len(),"workspace_unchanged":std::fs::read(cwd.join("proof.txt"))?==proof && std::fs::read_dir(&cwd)?.count()==1,"elapsed_ms":start.elapsed().as_millis()}});
         runtime.shutdown().await?;
         println!("{}", serde_json::to_string(&output)?);
@@ -202,12 +204,12 @@ async fn main() -> anyhow::Result<()> {
         let mut spec = GoalSpec::new(objective);
         spec.limits.max_turns = 3;
         spec.limits.soft_token_limit = Some(500_000);
-        let draft = handle.draft_goal(spec, 180)?;
-        handle.start_goal_driver()?;
-        handle.confirm_goal(&draft.id, draft.revision)?;
+        let draft = handle.goals().draft(spec, 180)?;
+        handle.goals().start_driver()?;
+        handle.goals().confirm(&draft.id, draft.revision)?;
         let start = std::time::Instant::now();
         let outcome =
-            tokio::time::timeout(std::time::Duration::from_secs(200), handle.wait_goal()).await;
+            tokio::time::timeout(std::time::Duration::from_secs(200), handle.goals().wait()).await;
         let item = match outcome {
             Ok(Ok(goal)) => {
                 serde_json::json!({"case":name,"expected_complete":expected,"completed":goal.status==GoalStatus::Completed,"status":goal.status,"basis":goal.completion_basis,"valid_reviews":goal.reviews.len(),"lightweight_continuations":goal.continuations.len(),"review_failure":goal.review_failure_reason.is_some(),"verdicts":goal.reviews.iter().map(|r|r.verdict.clone()).collect::<Vec<_>>(),"elapsed_ms":start.elapsed().as_millis(),"execution_rounds":goal.iterations.len(),"usage":goal.usage})

@@ -201,6 +201,7 @@ pub struct SandboxPythonConfig {
     pub wasm_path: String,
     pub stdlib_dir: String,
     pub timeout: u64,
+    pub max_memory_mb: usize,
     pub read_dirs: Vec<String>,
     pub write_dirs: Vec<String>,
     pub package_dirs: Vec<String>,
@@ -212,6 +213,7 @@ impl Default for SandboxPythonConfig {
             wasm_path: "cpython-wasi/python.wasm".into(),
             stdlib_dir: "cpython-wasi".into(),
             timeout: 30,
+            max_memory_mb: 256,
             read_dirs: Vec::new(),
             write_dirs: Vec::new(),
             package_dirs: Vec::new(),
@@ -507,6 +509,9 @@ pub fn validate_runtime_config(cfg: &ResolvedConfig) -> Result<()> {
         cfg.context_compact_max_output_tokens,
         cfg.max_context_tokens,
     )?;
+    if cfg.tool_timeout_secs <= 0 {
+        bail!("tool_timeout_secs must be greater than 0");
+    }
     if cfg.tool_timeout_max_secs < 5 {
         bail!("tool_timeout_max_secs must be at least 5 seconds");
     }
@@ -515,6 +520,15 @@ pub fn validate_runtime_config(cfg: &ResolvedConfig) -> Result<()> {
     }
     if cfg.sub_agent_max_depth > 3 {
         bail!("sub_agent_max_depth must be between 0 and 3");
+    }
+    if cfg.llm_first_event_timeout_secs < 0 {
+        bail!("llm_first_event_timeout_secs must be zero or greater");
+    }
+    if cfg.llm_idle_timeout_secs < 0 {
+        bail!("llm_idle_timeout_secs must be zero or greater");
+    }
+    if cfg.llm_wait_heartbeat_secs < 0 {
+        bail!("llm_wait_heartbeat_secs must be zero or greater");
     }
     cfg.llm_recovery.validate()?;
     cfg.ptc.validate(&cfg.sandbox_python)?;
@@ -845,5 +859,59 @@ mod validation_tests {
             ..ResolvedConfig::default()
         };
         assert!(validate_runtime_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn validate_runtime_config_rejects_invalid_tool_and_llm_timeouts() {
+        let bad_tool = ResolvedConfig {
+            tool_timeout_secs: 0,
+            ..ResolvedConfig::default()
+        };
+        assert!(
+            validate_runtime_config(&bad_tool)
+                .unwrap_err()
+                .to_string()
+                .contains("tool_timeout_secs")
+        );
+
+        let disabled_stream_timeouts = ResolvedConfig {
+            llm_first_event_timeout_secs: 0,
+            llm_idle_timeout_secs: 0,
+            ..ResolvedConfig::default()
+        };
+        assert!(validate_runtime_config(&disabled_stream_timeouts).is_ok());
+
+        let bad_first_event = ResolvedConfig {
+            llm_first_event_timeout_secs: -1,
+            ..ResolvedConfig::default()
+        };
+        assert!(
+            validate_runtime_config(&bad_first_event)
+                .unwrap_err()
+                .to_string()
+                .contains("llm_first_event_timeout_secs")
+        );
+
+        let bad_idle = ResolvedConfig {
+            llm_idle_timeout_secs: -1,
+            ..ResolvedConfig::default()
+        };
+        assert!(
+            validate_runtime_config(&bad_idle)
+                .unwrap_err()
+                .to_string()
+                .contains("llm_idle_timeout_secs")
+        );
+
+        let bad_heartbeat = ResolvedConfig {
+            llm_wait_heartbeat_secs: -1,
+            ..ResolvedConfig::default()
+        };
+        assert!(
+            validate_runtime_config(&bad_heartbeat)
+                .unwrap_err()
+                .to_string()
+                .contains("llm_wait_heartbeat_secs")
+        );
     }
 }

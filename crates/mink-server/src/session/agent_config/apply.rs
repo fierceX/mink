@@ -218,6 +218,9 @@ pub(super) fn apply_sandbox_python(
     if let Some(v) = file.timeout {
         sandbox_python.timeout = v;
     }
+    if let Some(v) = file.max_memory_mb {
+        sandbox_python.max_memory_mb = v;
+    }
     if let Some(ref v) = file.read_dirs {
         sandbox_python.read_dirs = v.clone();
     }

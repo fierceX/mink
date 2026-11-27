@@ -48,7 +48,7 @@ impl RequestProjection {
         #[cfg(test)]
         BUILD_COUNT.with(|count| count.set(count.get() + 1));
         let mut runtime_projected =
-            crate::llm::image_projection::project_consumed_attachments(messages);
+            crate::llm::image_projection::project_consumed_attachments(messages).into_owned();
         super::deepseek_web::project_replay(&mut runtime_projected, tools);
         let openai_projected = Arc::new(transport::convert_messages_to_openai(
             &runtime_projected,

@@ -178,6 +178,12 @@ pub trait LlmBackend: Send + Sync {
         true
     }
 
+    /// Whether this backend implements [`Self::cache_projection`] and can use
+    /// provider-visible prompt prefix caching across compaction/sub-requests.
+    fn supports_cache_projection(&self) -> bool {
+        false
+    }
+
     /// Return the provider-visible prefix corresponding to the first
     /// `source_prefix_len` source messages. Backends which cannot prove that
     /// boundary mapping retain source compatibility through the default
@@ -444,6 +450,10 @@ impl LlmBackend for OpenAiCompatibleBackend {
             );
         }
         crate::capabilities::model_capabilities::ImageInputCapability::Unsupported
+    }
+
+    fn supports_cache_projection(&self) -> bool {
+        true
     }
 
     fn cache_projection(
@@ -760,7 +770,7 @@ impl AsyncLlClient {
         cancel: &crate::cancel::CancellationToken,
     ) -> std::result::Result<reqwest::Response, LlmUpstreamError> {
         if cancel.is_cancelled() {
-            return Err(LlmUpstreamError::recoverable("request cancelled"));
+            return Err(LlmUpstreamError::permanent("request cancelled"));
         }
         let req = self
             .client
@@ -774,7 +784,7 @@ impl AsyncLlClient {
                 Err(error) => return Err(transport_failure(error)),
             },
             _ = cancel.cancelled() => {
-                return Err(LlmUpstreamError::recoverable("request cancelled"));
+                return Err(LlmUpstreamError::permanent("request cancelled"));
             }
         };
         let status = resp.status().as_u16();

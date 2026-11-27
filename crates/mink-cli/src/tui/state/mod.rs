@@ -190,9 +190,9 @@ pub(crate) struct AsyncLoadState {
     /// When the in-flight clipboard read started. A read that never reports
     /// back (hung `osascript`) must not disable paste for the whole session.
     pub clipboard_started: Option<Instant>,
-    /// Result channel of background clipboard reads (absent in tests that do
-    /// not exercise the async path).
-    pub ui_tx: Option<std::sync::mpsc::Sender<TuiUiEvent>>,
+    /// Result channel of background clipboard and async UI work (absent in
+    /// tests that do not exercise the async path).
+    pub ui_tx: Option<tokio::sync::mpsc::UnboundedSender<TuiUiEvent>>,
     /// Injectable clipboard reader; `None` uses the platform implementation.
     pub clipboard_reader: Option<ClipboardReader>,
 }

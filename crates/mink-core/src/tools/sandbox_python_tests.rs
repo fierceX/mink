@@ -126,6 +126,7 @@ fn unrelated_epoch_ticks_do_not_stop_an_active_sandbox() {
                 &root,
                 1024,
                 10,
+                256,
                 Some(&cancel),
             )
             .unwrap()
@@ -870,7 +871,8 @@ fn detailed_sandbox_execution_reports_non_success_termination_on_timeout_and_can
     synthetic_infinite_loop_wasm(&wasm);
 
     let timed_out =
-        execute_in_sandbox_detailed("", &wasm, &dir, &[], &[], &[], &dir, 1024, 1, None).unwrap();
+        execute_in_sandbox_detailed("", &wasm, &dir, &[], &[], &[], &dir, 1024, 1, 256, None)
+            .unwrap();
     assert_eq!(timed_out.exit_code, None);
     assert_eq!(timed_out.termination, ProcessTermination::TimedOut);
 
@@ -885,11 +887,36 @@ fn detailed_sandbox_execution_reports_non_success_termination_on_timeout_and_can
         &dir,
         1024,
         10,
+        256,
         Some(&interrupt),
     )
     .unwrap();
     assert_eq!(cancelled.exit_code, None);
     assert_eq!(cancelled.termination, ProcessTermination::Interrupted);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn wasi_memory_limit_denies_excessive_growth() {
+    // (module (memory 1) (func (export "_start") (drop (memory.grow (i32.const 32)))))
+    const GROW_WASM: &[u8] = &[
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03,
+        0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x0a, 0x01, 0x06, b'_', b's', b't',
+        b'a', b'r', b't', 0x00, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x41, 0x20, 0x40, 0x00, 0x1a,
+        0x0b,
+    ];
+    let dir = std::env::temp_dir().join(format!("mink-sandbox-memlimit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let wasm = dir.join("grow.wasm");
+    std::fs::write(&wasm, GROW_WASM).unwrap();
+
+    // Limit to 1 MiB (16 wasm pages): growing by 32 pages must fail gracefully
+    // inside StoreLimits without OOMing the host process.
+    let res = execute_in_sandbox_detailed("", &wasm, &dir, &[], &[], &[], &dir, 1024, 5, 1, None)
+        .unwrap();
+    assert_eq!(res.exit_code, Some(0));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

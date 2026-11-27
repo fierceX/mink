@@ -71,9 +71,14 @@ pub(super) fn apply_env_defaults(cfg: &mut CliConfig, defaults: &CliConfig) -> R
     // so [tools] settings in .minkrc/--config outrank them (documented
     // priority: CLI > --config > project .minkrc > user .minkrc > env).
     let parse_env = |name: &str| -> Option<usize> {
-        std::env::var(name)
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
+        let raw = std::env::var(name).ok()?;
+        match raw.parse::<usize>() {
+            Ok(v) => Some(v),
+            Err(error) => {
+                eprintln!("[mink] Warning: ignoring invalid {name}={raw:?}: {error}");
+                None
+            }
+        }
     };
     apply_size_limit_envs(
         cfg,
@@ -257,10 +262,13 @@ pub(super) fn apply_config_sources(
         if let Some(max_turns) = toml_cfg.generation.max_turns {
             cfg.generation.max_turns = max_turns;
         }
-        if let Some(max_context) = &toml_cfg.context.max_context
-            && let Ok(v) = parse_size_bytes(max_context)
-        {
-            cfg.context.max_context_tokens = v;
+        if let Some(max_context) = &toml_cfg.context.max_context {
+            match parse_size_bytes(max_context) {
+                Ok(v) => cfg.context.max_context_tokens = v,
+                Err(error) => {
+                    eprintln!("[mink] Warning: ignoring max_context={max_context:?}: {error}")
+                }
+            }
         }
         if let Some(v) = toml_cfg.tools.max_search_files {
             cfg.tools.max_search_files = v;
@@ -356,7 +364,9 @@ pub(super) fn apply_config_sources(
             match v.as_str() {
                 "human" => cfg.output_format = OutputFormat::Human,
                 "stream-json" => cfg.output_format = OutputFormat::StreamJson,
-                _ => {}
+                _ => eprintln!(
+                    "[mink] Warning: ignoring output_format={v:?}; expected \"human\" or \"stream-json\""
+                ),
             }
         }
         if !cli.skills
@@ -516,6 +526,9 @@ pub(super) fn apply_sandbox_config(
         if let Some(v) = sp.timeout {
             cfg.sandbox_python.timeout = v;
         }
+        if let Some(v) = sp.max_memory_mb {
+            cfg.sandbox_python.max_memory_mb = v;
+        }
         if let Some(ref v) = sp.read_dirs {
             cfg.sandbox_python.read_dirs = v.clone();
         }
@@ -528,11 +541,12 @@ pub(super) fn apply_sandbox_config(
     }
 
     // Also check MINK_LIMITS env var (JSON format) — highest priority after CLI
-    if let Ok(json) = std::env::var("MINK_LIMITS")
-        && let Ok(sb) = serde_json::from_str::<SandboxConfig>(&json)
-        && sb.enabled
-    {
-        cfg.sandbox = sb;
+    if let Ok(json) = std::env::var("MINK_LIMITS") {
+        match serde_json::from_str::<SandboxConfig>(&json) {
+            Ok(sb) if sb.enabled => cfg.sandbox = sb,
+            Ok(_) => {}
+            Err(error) => eprintln!("[mink] Warning: ignoring invalid MINK_LIMITS: {error}"),
+        }
     }
 }
 

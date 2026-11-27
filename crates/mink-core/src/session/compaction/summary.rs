@@ -468,9 +468,11 @@ impl CompactionEngine {
             .clone();
         source_messages.extend(repair_loss.iter().cloned());
         let dynamic_prefix_len = source_messages.len();
-        source_messages.extend(crate::llm::image_projection::project_consumed_attachments(
-            active,
-        ));
+        source_messages.extend(
+            crate::llm::image_projection::project_consumed_attachments(active)
+                .iter()
+                .cloned(),
+        );
         let source_prefix_len = dynamic_prefix_len.saturating_add(cut);
 
         let latest = self
@@ -583,15 +585,11 @@ impl CompactionEngine {
                 else {
                     return Err("aligned_no_practical_output".into());
                 };
-                if summary_input_over_budget(
+                if super::super::compaction_cut::summary_tokens_over_budget(
                     &self.config,
-                    &messages,
-                    &candidate.tools,
-                    &candidate.system_prompt,
+                    aligned_total_tokens,
                     usize::try_from(reserved_output).unwrap_or(0),
-                )
-                .map_err(|error| format!("aligned_estimate_failed:{error}"))?
-                {
+                ) {
                     return Err("aligned_input_over_budget".into());
                 }
                 Ok(SummaryRequestInput {
@@ -626,9 +624,11 @@ impl CompactionEngine {
         // Also present in the fallback (no recent agent request): startup
         // repair losses must reach the summary whichever path is taken.
         history.extend(repair_loss);
-        history.extend(crate::llm::image_projection::project_consumed_attachments(
-            dropped,
-        ));
+        history.extend(
+            crate::llm::image_projection::project_consumed_attachments(dropped)
+                .iter()
+                .cloned(),
+        );
         crate::llm::image_projection::degrade_images_for_summary(&mut history);
         let input_mode = if self.config.context_compact_input_reduction {
             "reduced"

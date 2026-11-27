@@ -313,6 +313,11 @@ impl AgentEventKind {
             _ => None,
         }
     }
+
+    /// Whether this informational notice belongs to the goal lifecycle stream.
+    pub fn is_goal_notice(&self) -> bool {
+        matches!(self, Self::Info { message } if message.starts_with("Goal "))
+    }
 }
 
 pub(crate) struct TurnEventEmitter {

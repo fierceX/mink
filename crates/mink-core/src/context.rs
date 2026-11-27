@@ -354,6 +354,7 @@ impl ToolContext {
         raw: bool,
         start_line: Option<usize>,
         end_line: Option<usize>,
+        precomputed_hash: Option<u64>,
     ) {
         let Ok(meta) = std::fs::metadata(path) else {
             return;
@@ -363,9 +364,15 @@ impl ToolContext {
         };
         let epoch = self.memo_epoch.load(Ordering::SeqCst);
         let mutation = self.memo_mutation.load(Ordering::SeqCst);
-        let content_hash = std::fs::read(path)
-            .ok()
-            .map(|bytes| crate::tools::read_memo::content_hash(&bytes));
+        let content_hash = precomputed_hash.or_else(|| {
+            (meta.len() <= 4 * 1024 * 1024)
+                .then(|| {
+                    std::fs::read(path)
+                        .ok()
+                        .map(|bytes| crate::tools::read_memo::content_hash(&bytes))
+                })
+                .flatten()
+        });
         self.read_memo
             .lock()
             .unwrap_or_else(|error| error.into_inner())

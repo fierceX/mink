@@ -79,11 +79,102 @@ impl State {
     }
 }
 
-pub struct InputInbox {
+struct InputInboxInner {
     path: PathBuf,
     state: Mutex<State>,
     fault: PersistenceFault,
     changes: tokio::sync::watch::Sender<Arc<Vec<InputReceipt>>>,
+}
+
+impl InputInboxInner {
+    fn publish(&self, state: &mut State, snapshot: Snapshot) -> Result<()> {
+        publish_state(&self.path, &serde_json::to_vec(&snapshot)?, &self.fault)?;
+        state.snapshot = snapshot;
+        self.changes
+            .send_replace(Arc::new(outstanding_entries(&state.snapshot)));
+        Ok(())
+    }
+
+    fn prepare_applying(&self) -> Result<Option<InputReceipt>> {
+        self.fault.check()?;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut snapshot = state.snapshot.clone();
+        let Some(entry) = snapshot.entries.iter_mut().find(|e| {
+            e.status == InputStatus::Pending
+                && Some(&e.turn_id) == state.active.as_ref()
+                && (!e.guidance || state.accepts_guidance())
+        }) else {
+            return Ok(None);
+        };
+        entry.status = InputStatus::Applying;
+        entry.revision += 1;
+        let receipt = entry.clone();
+        self.publish(&mut state, snapshot)?;
+        Ok(Some(receipt))
+    }
+
+    fn mark_applied(&self, input_id: &str) -> Result<()> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut snapshot = state.snapshot.clone();
+        let entry = snapshot
+            .entries
+            .iter_mut()
+            .find(|e| e.input_id == input_id)
+            .ok_or_else(|| anyhow::anyhow!("applying input {input_id} missing from inbox"))?;
+        entry.status = InputStatus::Applied;
+        entry.revision += 1;
+        if let Err(error) = self.publish(&mut state, snapshot) {
+            return Err(self.fault.raise(
+                &self.path,
+                format!("input applied but receipt publish failed: {error:#}"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn recover_from_history(&self, history: &[serde_json::Value]) -> Result<()> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut snapshot = state.snapshot.clone();
+        let mut changed = false;
+        for entry in &mut snapshot.entries {
+            if matches!(entry.status, InputStatus::Pending | InputStatus::Applying) {
+                let matches: Vec<_> = history
+                    .iter()
+                    .filter(|m| {
+                        m.pointer("/_mink/input_id")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(&entry.input_id)
+                    })
+                    .collect();
+                if matches.len() > 1 {
+                    bail!("duplicate human input in formal history");
+                }
+                if let Some(message) = matches.first() {
+                    let expected = serde_json::json!({"role":"user","content":entry.input.text,"_mink":{
+                        "input_id":entry.input_id,"turn_id":entry.turn_id,"guidance":entry.guidance,"attachment_ids":entry.input.attachment_ids
+                    }});
+                    if **message != expected {
+                        bail!("human input history does not match applying receipt");
+                    }
+                }
+                entry.status = if matches.is_empty() {
+                    InputStatus::Unapplied
+                } else {
+                    InputStatus::Applied
+                };
+                entry.revision += 1;
+                changed = true;
+            }
+        }
+        if changed {
+            self.publish(&mut state, snapshot)?;
+        }
+        Ok(())
+    }
+}
+
+pub struct InputInbox {
+    inner: Arc<InputInboxInner>,
 }
 impl InputInbox {
     pub(crate) fn load(path: PathBuf, fault: PersistenceFault) -> Result<Self> {
@@ -94,24 +185,23 @@ impl InputInbox {
         };
         let (changes, _) = tokio::sync::watch::channel(Arc::new(outstanding_entries(&snapshot)));
         Ok(Self {
-            changes,
-            path,
-            state: Mutex::new(State {
-                snapshot,
-                active: None,
+            inner: Arc::new(InputInboxInner {
+                changes,
+                path,
+                state: Mutex::new(State {
+                    snapshot,
+                    active: None,
+                }),
+                fault,
             }),
-            fault,
         })
     }
     fn publish(&self, state: &mut State, snapshot: Snapshot) -> Result<()> {
-        publish_state(&self.path, &serde_json::to_vec(&snapshot)?, &self.fault)?;
-        state.snapshot = snapshot;
-        self.changes
-            .send_replace(Arc::new(outstanding_entries(&state.snapshot)));
-        Ok(())
+        self.inner.publish(state, snapshot)
     }
     pub fn entries(&self) -> Vec<InputReceipt> {
-        self.state
+        self.inner
+            .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .snapshot
@@ -121,21 +211,22 @@ impl InputInbox {
     /// Current outstanding inputs and subsequent durable publications. Subscription
     /// and initial snapshot share the admission lock; failed writes never notify.
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Arc<Vec<InputReceipt>>> {
-        let _state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        self.changes.subscribe()
+        let _state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.inner.changes.subscribe()
     }
     pub fn outstanding(&self) -> Vec<InputReceipt> {
-        self.changes.borrow().as_ref().clone()
+        self.inner.changes.borrow().as_ref().clone()
     }
     pub(crate) fn begin_goal_turn(&self, turn_id: &str) -> Result<()> {
-        self.fault.check()?;
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.inner.fault.check()?;
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
         anyhow::ensure!(state.active.is_none(), "input inbox already owns a turn");
         state.active = Some(turn_id.into());
         Ok(())
     }
     pub fn active_turn(&self) -> Option<String> {
-        self.state
+        self.inner
+            .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .active
@@ -143,14 +234,15 @@ impl InputInbox {
     }
 
     pub(crate) fn active_primary(&self) -> Option<InputReceipt> {
-        self.state
+        self.inner
+            .state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .active_primary()
             .cloned()
     }
     pub fn existing(&self, input: &HumanInput) -> Result<Option<InputReceipt>> {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = state
             .snapshot
             .entries
@@ -165,9 +257,9 @@ impl InputInbox {
         Ok(None)
     }
     pub(crate) fn accept(&self, input: HumanInput, new_turn: Option<&str>) -> Result<InputReceipt> {
-        self.fault.check()?;
+        self.inner.fault.check()?;
         validate(&input)?;
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = state
             .snapshot
             .entries
@@ -224,8 +316,8 @@ impl InputInbox {
         Ok(receipt)
     }
     pub fn update(&self, id: &str, revision: u64, text: Option<String>) -> Result<InputReceipt> {
-        self.fault.check()?;
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.inner.fault.check()?;
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut snapshot = state.snapshot.clone();
         let entry = snapshot
             .entries
@@ -250,8 +342,8 @@ impl InputInbox {
         Ok(receipt)
     }
     pub(crate) fn resume(&self, id: &str, revision: u64, turn_id: &str) -> Result<InputReceipt> {
-        self.fault.check()?;
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.inner.fault.check()?;
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.active.is_some() {
             bail!("session is running");
         }
@@ -282,60 +374,38 @@ impl InputInbox {
     ) -> Result<usize> {
         let mut applied = 0;
         loop {
-            self.fault.check()?;
+            self.inner.fault.check()?;
             if interrupted() {
                 return Ok(applied);
             }
-            let receipt = {
-                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                if interrupted() {
-                    return Ok(applied);
-                }
-                let mut snapshot = state.snapshot.clone();
-                let Some(entry) = snapshot.entries.iter_mut().find(|e| {
-                    e.status == InputStatus::Pending
-                        && Some(&e.turn_id) == state.active.as_ref()
-                        && (!e.guidance || state.accepts_guidance())
-                }) else {
-                    return Ok(applied);
-                };
-                entry.status = InputStatus::Applying;
-                entry.revision += 1;
-                let receipt = entry.clone();
-                self.publish(&mut state, snapshot)?;
-                receipt
+            let inner = self.inner.clone();
+            let Some(receipt) = tokio::task::spawn_blocking(move || inner.prepare_applying())
+                .await
+                .map_err(|e| anyhow::anyhow!("input inbox prepare task failed: {e}"))??
+            else {
+                return Ok(applied);
             };
             let message = serde_json::json!({"role":"user", "content":receipt.input.text, "_mink": {
                 "input_id":receipt.input_id, "turn_id":receipt.turn_id, "guidance":receipt.guidance, "attachment_ids":receipt.input.attachment_ids
             }});
             if let Err(error) = store.append_runtime_message_durable(message).await {
-                return Err(self.fault.raise(
-                    &self.path,
+                return Err(self.inner.fault.raise(
+                    &self.inner.path,
                     format!("input history append uncertain: {error:#}"),
                 ));
             }
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let mut snapshot = state.snapshot.clone();
-            let entry = snapshot
-                .entries
-                .iter_mut()
-                .find(|e| e.input_id == receipt.input_id)
-                .expect("applying input remains present");
-            entry.status = InputStatus::Applied;
-            entry.revision += 1;
-            if let Err(error) = self.publish(&mut state, snapshot) {
-                return Err(self.fault.raise(
-                    &self.path,
-                    format!("input applied but receipt publish failed: {error:#}"),
-                ));
-            }
+            let inner = self.inner.clone();
+            let input_id = receipt.input_id;
+            tokio::task::spawn_blocking(move || inner.mark_applied(&input_id))
+                .await
+                .map_err(|e| anyhow::anyhow!("input inbox commit task failed: {e}"))??;
             applied += 1;
         }
     }
     /// Same mutex as admission: either pending work wins or turn completion
     /// closes admission. A late request is never implicitly a new turn.
     pub(crate) fn close_if_empty(&self) -> bool {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
         if state
             .snapshot
             .entries
@@ -348,7 +418,7 @@ impl InputInbox {
         true
     }
     pub(crate) fn finish(&self) -> Result<()> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
         state.active = None;
         let mut snapshot = state.snapshot.clone();
         let mut changed = false;
@@ -366,43 +436,10 @@ impl InputInbox {
     }
     pub(crate) async fn recover(&self, store: &ConversationStore) -> Result<()> {
         let history = ConversationStore::new(store.path().clone()).lines().await?;
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let mut snapshot = state.snapshot.clone();
-        let mut changed = false;
-        for entry in &mut snapshot.entries {
-            if matches!(entry.status, InputStatus::Pending | InputStatus::Applying) {
-                let matches: Vec<_> = history
-                    .iter()
-                    .filter(|m| {
-                        m.pointer("/_mink/input_id")
-                            .and_then(serde_json::Value::as_str)
-                            == Some(&entry.input_id)
-                    })
-                    .collect();
-                if matches.len() > 1 {
-                    bail!("duplicate human input in formal history");
-                }
-                if let Some(message) = matches.first() {
-                    let expected = serde_json::json!({"role":"user","content":entry.input.text,"_mink":{
-                        "input_id":entry.input_id,"turn_id":entry.turn_id,"guidance":entry.guidance,"attachment_ids":entry.input.attachment_ids
-                    }});
-                    if **message != expected {
-                        bail!("human input history does not match applying receipt");
-                    }
-                }
-                entry.status = if matches.is_empty() {
-                    InputStatus::Unapplied
-                } else {
-                    InputStatus::Applied
-                };
-                entry.revision += 1;
-                changed = true;
-            }
-        }
-        if changed {
-            self.publish(&mut state, snapshot)?;
-        }
-        Ok(())
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.recover_from_history(&history))
+            .await
+            .map_err(|e| anyhow::anyhow!("input inbox recover task failed: {e}"))?
     }
 }
 fn outstanding_entries(snapshot: &Snapshot) -> Vec<InputReceipt> {
@@ -544,7 +581,7 @@ mod tests {
         inbox.accept(input("unused", Some("turn")), None).unwrap();
         // Simulate crash after durable append, before applied publication.
         {
-            let mut state = inbox.state.lock().unwrap();
+            let mut state = inbox.inner.state.lock().unwrap();
             let mut snapshot = state.snapshot.clone();
             snapshot.entries[0].status = InputStatus::Applying;
             inbox.publish(&mut state, snapshot).unwrap();

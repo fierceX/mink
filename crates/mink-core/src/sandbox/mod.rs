@@ -243,10 +243,15 @@ pub(crate) fn bwrap_argv(
             cmd.push(parent_str);
         }
     }
-    for d in ["/usr", "/lib", "/etc", "/run"] {
+    for d in ["/usr", "/lib", "/etc"] {
         cmd.push("--ro-bind".into());
         cmd.push(d.to_string());
         cmd.push(d.to_string());
+    }
+    if config.allow_network {
+        cmd.push("--ro-bind-try".into());
+        cmd.push("/run/systemd/resolve".into());
+        cmd.push("/run/systemd/resolve".into());
     }
     // `/lib64` does not exist on all Linux targets (e.g. arm64 Debian/Alpine).
     cmd.push("--ro-bind-try".into());
@@ -344,6 +349,7 @@ pub(crate) fn nsjail_argv(
     mink_home: Option<&str>,
     tmpdir: Option<&str>,
     has_lib64: bool,
+    has_systemd_resolve: bool,
 ) -> Vec<String> {
     let mut cmd: Vec<String> = vec!["nsjail".into(), "--mode".into(), "execve".into()];
 
@@ -354,9 +360,13 @@ pub(crate) fn nsjail_argv(
             cmd.push(format!("{0}:{0}", parent_str));
         }
     }
-    for d in ["/usr", "/lib", "/etc", "/run"] {
+    for d in ["/usr", "/lib", "/etc"] {
         cmd.push("--bindmount_ro".into());
         cmd.push(format!("{0}:{0}", d));
+    }
+    if config.allow_network && has_systemd_resolve {
+        cmd.push("--bindmount_ro".into());
+        cmd.push("/run/systemd/resolve:/run/systemd/resolve".into());
     }
     if has_lib64 {
         cmd.push("--bindmount_ro".into());
@@ -601,6 +611,7 @@ mod tests {
             Some("/home/u/.mink"),
             None,
             false,
+            true,
         );
         let pair_pos =
             |flag: &str, spec: &str| argv.windows(2).position(|w| w[0] == flag && w[1] == spec);
@@ -615,6 +626,18 @@ mod tests {
             !argv.iter().any(|arg| arg == "/lib64:/lib64"),
             "missing /lib64 must not be mounted: {argv:?}"
         );
+        assert!(
+            !argv.iter().any(|arg| arg == "/run:/run"),
+            "entire /run must never be mounted: {argv:?}"
+        );
+        assert!(
+            pair_pos(
+                "--bindmount_ro",
+                "/run/systemd/resolve:/run/systemd/resolve"
+            )
+            .is_some(),
+            "allow_network=true should mount systemd-resolve when present: {argv:?}"
+        );
         assert!(argv.iter().any(|arg| arg == "--keep_env"), "{argv:?}");
         assert!(
             pair_pos("-E", "MINK_SANDBOXED=1").is_some(),
@@ -623,6 +646,32 @@ mod tests {
         assert!(
             argv.iter().any(|arg| arg == "--disable_clone_newnet"),
             "allow_network=true must disable network namespace cloning: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn bwrap_omits_run_and_resolve_when_network_disabled_or_ptc_mode() {
+        let mut cfg = config();
+        cfg.allow_network = false;
+        let argv = bwrap_argv(
+            &cfg,
+            Path::new("/bin/mink"),
+            &["mink".into()],
+            Path::new("/work"),
+            None,
+            None,
+        );
+        assert!(
+            !argv.iter().any(|arg| arg == "/run"),
+            "/run must not be mounted: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|arg| arg == "/run/systemd/resolve"),
+            "resolve dir must not be mounted when allow_network=false: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|arg| arg == "/home/u"),
+            "home=None must not mount $HOME: {argv:?}"
         );
     }
 }

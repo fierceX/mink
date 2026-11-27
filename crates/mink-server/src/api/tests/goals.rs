@@ -563,9 +563,10 @@ pub(super) async fn restored_active_goal_starts_only_through_a_leased_resume() {
             .unwrap();
         let handle = runtime.goal_handle().unwrap();
         let draft = handle
-            .draft_goal(mink::runtime::GoalSpec::new("restore then resume"), 3600)
+            .goals()
+            .draft(mink::runtime::GoalSpec::new("restore then resume"), 3600)
             .unwrap();
-        let goal = handle.confirm_goal(&draft.id, draft.revision).unwrap();
+        let goal = handle.goals().confirm(&draft.id, draft.revision).unwrap();
         assert_eq!(goal.status, mink::runtime::GoalStatus::Active);
         goal
     };

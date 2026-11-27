@@ -360,3 +360,22 @@ fn sdk_recovery_options_fail_closed_on_invalid_values() {
     .unwrap();
     validate_sdk_request(&req).unwrap();
 }
+
+#[test]
+fn validate_sdk_request_rejects_invalid_edit_fuzzy_threshold() {
+    for threshold in [-0.1_f64, 1.5_f64] {
+        let req = parse_agent_jsonl_request(&format!(
+            r#"{{"prompt":"hi","options":{{"tools":{{"edit_fuzzy_threshold":{threshold}}}}}}}"#
+        ))
+        .unwrap();
+        let err = validate_sdk_request(&req).unwrap_err();
+        assert!(err.contains("edit_fuzzy_threshold"), "{err}");
+    }
+    let mut nan_req = SdkRequest::default();
+    nan_req.options.tools.edit_fuzzy_threshold = Some(f64::NAN);
+    assert!(
+        validate_sdk_request(&nan_req)
+            .unwrap_err()
+            .contains("edit_fuzzy_threshold")
+    );
+}

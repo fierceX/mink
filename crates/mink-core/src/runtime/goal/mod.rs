@@ -15,6 +15,14 @@ pub(crate) mod review;
 mod tests;
 mod verification;
 
+pub use crate::session::goal::{
+    GOAL_MESSAGE_SOURCE, GoalAcceptance, GoalBudget, GoalCompletionBasis, GoalDraftSnapshot,
+    GoalLimits, GoalMessage, GoalMessageKind, GoalOutcome, GoalPhase, GoalReport, GoalReportKind,
+    GoalSnapshot, GoalSpec, GoalStatus, default_limits as default_goal_limits,
+};
+pub use crate::session::goal_protocol::*;
+pub use control::GoalController;
+
 /// Maximum wall-clock time for one independent review attempt.
 pub(crate) const GOAL_REVIEW_TIMEOUT_SECS: u64 = 600;
 

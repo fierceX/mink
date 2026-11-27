@@ -17,7 +17,6 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 const SUB_AGENT_ABORT_GRACE_MS: u64 = 250;
-const SUB_AGENT_TICK_MS: u64 = 10;
 /// Maximum concurrently running sub-agents per tool batch. Extras wait for a
 /// permit instead of being rejected; the per-child timeout starts only after
 /// admission.
@@ -37,6 +36,8 @@ pub(crate) struct SubAgentRunSpec {
     pub depth: u32,
     pub cancel: CancellationToken,
     pub phase: Arc<AtomicU8>,
+    /// Unified deadline shared between coordinator and child executor once permit is acquired.
+    pub deadline: Option<tokio::time::Instant>,
     /// Filled by the default runner after the child context exists; custom
     /// runners leave it empty and timeouts then report zero usage.
     pub child_stats: Arc<OnceLock<Arc<crate::session::stats::StatsTracker>>>,
@@ -87,6 +88,14 @@ struct SubAgentLaunch {
 /// there is no second completion counter or completion-order set.
 struct SubAgentBatch {
     pending: BTreeMap<usize, SubAgentLaunch>,
+    finished_notify: Arc<tokio::sync::Notify>,
+}
+
+struct NotifyOnDrop(Arc<tokio::sync::Notify>);
+impl Drop for NotifyOnDrop {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
 }
 
 impl Drop for SubAgentBatch {
@@ -128,6 +137,7 @@ impl SubAgentCoordinator {
             tokio::sync::mpsc::unbounded_channel::<(usize, SubAgentResult)>();
         let mut batch = SubAgentBatch {
             pending: BTreeMap::new(),
+            finished_notify: Arc::new(tokio::sync::Notify::new()),
         };
         let sub_semaphore = Arc::new(tokio::sync::Semaphore::new(SUB_AGENT_BATCH_LIMIT));
 
@@ -207,7 +217,7 @@ impl SubAgentCoordinator {
                 let child_stats = Arc::new(OnceLock::new());
                 let timeout_secs = self.ctx.tools.tool_config.sub_agent_timeout_secs.max(1) as u64;
                 let display = self.ctx.io.display.clone();
-                let spec = SubAgentRunSpec {
+                let mut spec = SubAgentRunSpec {
                     session_id: session_id.clone(),
                     prompt,
                     label: Some(label.clone()),
@@ -216,17 +226,23 @@ impl SubAgentCoordinator {
                     depth,
                     cancel,
                     phase: phase.clone(),
+                    deadline: None,
                     child_stats: child_stats.clone(),
                 };
                 let event_label = label.clone();
                 let event_mode = mode.clone();
                 let event_ctx = self.ctx.clone();
+                let finished_notify = batch.finished_notify.clone();
                 let handle = tokio::spawn(async move {
+                    let _notify_guard = NotifyOnDrop(finished_notify);
                     // Single send point: either the permit path failed with an
                     // already-classified result, or the runner produced one.
                     let sa = match acquire_sub_agent_permit(sub_semaphore, &spec.cancel).await {
                         Ok(permit) => {
                             let started = Instant::now();
+                            let deadline =
+                                tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+                            spec.deadline = Some(deadline);
                             display.render_sub_agent_status_meta(
                                 &sid,
                                 "running",
@@ -255,7 +271,7 @@ impl SubAgentCoordinator {
                             let mut run = Box::pin(run_sub_agent_runner(runner, ctx, spec));
                             let outcome = tokio::select! {
                                 result = &mut run => Some(result),
-                                _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => None,
+                                _ = tokio::time::sleep_until(deadline) => None,
                             };
                             let mut timeout_elapsed = None;
                             let mut sa = match outcome {
@@ -594,20 +610,24 @@ impl SubAgentCoordinator {
     /// Handles stay in `batch.pending` during the grace period so dropping
     /// this future still transfers ownership to `SubAgentBatch::drop`.
     async fn drain_pending(&self, batch: &mut SubAgentBatch) {
-        let deadline = Instant::now() + Duration::from_millis(SUB_AGENT_ABORT_GRACE_MS);
-        while !batch.pending.is_empty() {
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_millis(SUB_AGENT_ABORT_GRACE_MS);
+        loop {
+            let notified = batch.finished_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             batch
                 .pending
                 .retain(|_, launch| !launch.handle.is_finished());
-            if batch.pending.is_empty() || Instant::now() >= deadline {
+            if batch.pending.is_empty() {
                 break;
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            tokio::time::sleep(std::cmp::min(
-                remaining,
-                Duration::from_millis(SUB_AGENT_TICK_MS),
-            ))
-            .await;
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                batch
+                    .pending
+                    .retain(|_, launch| !launch.handle.is_finished());
+                break;
+            }
         }
         // Abort requests are synchronous and no-await: a task that refuses to
         // yield (CPU loop or running spawn_blocking) is not forcibly stopped.
@@ -696,7 +716,9 @@ fn default_sub_agent_runner(config: Config) -> SubAgentRunner {
                         .child_stats
                         .set(executor.context().stores.stats.clone());
                     spec.phase.store(PHASE_RUN, Ordering::SeqCst);
-                    executor.execute(spec.prompt).await
+                    executor
+                        .execute_with_deadline(spec.prompt, spec.deadline)
+                        .await
                 }
                 Err(_error) if cancel.is_cancelled() => SubAgentResult::terminal(
                     SubAgentStatus::Interrupted,

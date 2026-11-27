@@ -446,16 +446,17 @@ pub struct GoalCheckerRecord {
 }
 
 impl GoalReview {
-    pub(crate) fn feedback(&self) -> GoalReviewFeedback {
-        GoalReviewFeedback {
+    pub(crate) fn feedback(&self) -> Option<GoalReviewFeedback> {
+        let original_request = self.original_request.clone()?;
+        Some(GoalReviewFeedback {
             candidate: self.candidate.clone(),
-            original_request: self.original_request.clone().expect("legacy item review"),
+            original_request,
             criteria: self.criteria.clone(),
             constraints: self.constraints.clone(),
             summary: self.summary.clone(),
             next_step: self.next_step.clone(),
             blocker: self.blocker.clone(),
-        }
+        })
     }
 
     pub fn validate(&self, goal: &super::goal::GoalSnapshot) -> Result<()> {

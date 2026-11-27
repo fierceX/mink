@@ -21,7 +21,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::stream;
 use mink::prelude::*;
-use mink::runtime::GoalSpec;
+use mink::runtime::{
+    ContextPolicy, GoalSpec, LlmEvent, LlmPurpose, LlmRequest, LlmResponseStream, LlmStopEvent,
+    LlmTextEvent, LlmThinkingEvent, LlmToolCallEvent, LlmUsageEvent, SandboxConfig,
+};
 use serde_json::json;
 
 static MOCK_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -780,15 +783,20 @@ async fn case_goal_history(history_goals: usize, args: &Args) -> anyhow::Result<
         // Each new draft archives the prior terminal Goal. Seed one extra so
         // the timed mutation starts with the requested number already in history.
         for index in 0..=history_goals {
-            let draft =
-                handle.draft_goal(GoalSpec::new(format!("benchmark goal {index}")), 3_600)?;
-            handle.cancel_goal_draft(&draft.id, draft.revision)?;
+            let draft = handle
+                .goals()
+                .draft(GoalSpec::new(format!("benchmark goal {index}")), 3_600)?;
+            handle.goals().cancel_draft(&draft.id, draft.revision)?;
         }
 
         let start = Instant::now();
-        let measured = handle.draft_goal(GoalSpec::new("measured benchmark goal"), 3_600)?;
+        let measured = handle
+            .goals()
+            .draft(GoalSpec::new("measured benchmark goal"), 3_600)?;
         durations.push(start.elapsed());
-        handle.cancel_goal_draft(&measured.id, measured.revision)?;
+        handle
+            .goals()
+            .cancel_draft(&measured.id, measured.revision)?;
         runtime.shutdown().await?;
         cleanup(&root);
     }

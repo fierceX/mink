@@ -22,6 +22,7 @@ pub struct ArtifactManager {
     index_path: PathBuf,
     counter: AtomicU64,
     index_lock: Mutex<()>,
+    tail_repaired: std::sync::atomic::AtomicBool,
 }
 
 impl ArtifactManager {
@@ -31,6 +32,7 @@ impl ArtifactManager {
             root,
             counter: AtomicU64::new(0),
             index_lock: Mutex::new(()),
+            tail_repaired: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -212,7 +214,12 @@ impl ArtifactManager {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let line = format!("{}\n", serde_json::to_string(record)?);
-        crate::session::jsonl::append_line(&self.index_path, line.as_bytes(), true)
+        crate::session::jsonl::append_line_checked(
+            &self.index_path,
+            line.as_bytes(),
+            true,
+            &self.tail_repaired,
+        )
     }
 
     fn repair_index_tail(&self) -> Result<()> {
@@ -221,7 +228,9 @@ impl ArtifactManager {
             .index_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        crate::session::jsonl::repair_unterminated_tail(&self.index_path)
+        crate::session::jsonl::repair_unterminated_tail(&self.index_path)?;
+        self.tail_repaired.store(true, Ordering::Release);
+        Ok(())
     }
 }
 

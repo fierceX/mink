@@ -18,13 +18,29 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::BufReader;
-use wasmtime::{Linker, Store};
+use wasmtime::{Linker, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::cli::{AsyncStdinStream, AsyncStdoutStream};
 use wasmtime_wasi::p1::{self, WasiP1Ctx};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
 const BOOTSTRAP_PY: &str = include_str!("bootstrap.py");
+const EPOCH_INTERRUPT_GRACE: Duration = Duration::from_secs(2);
+
+struct WasiStoreState {
+    wasi: WasiP1Ctx,
+    limits: StoreLimits,
+}
+
+fn build_wasi_store_limits(max_memory_mb: usize) -> StoreLimits {
+    if max_memory_mb == 0 {
+        StoreLimitsBuilder::new().build()
+    } else {
+        StoreLimitsBuilder::new()
+            .memory_size(max_memory_mb.saturating_mul(1024 * 1024))
+            .build()
+    }
+}
 
 #[derive(Clone)]
 pub struct WasiPythonPtcRuntime {
@@ -167,7 +183,11 @@ impl PtcRuntime for WasiPythonPtcRuntime {
         }
 
         let wasi = builder.build_p1();
-        let mut store = Store::new(&engine, wasi);
+        let limits = build_wasi_store_limits(self.sandbox_python.max_memory_mb);
+        let mut store = Store::new(&engine, WasiStoreState { wasi, limits });
+        if self.sandbox_python.max_memory_mb > 0 {
+            store.limiter(|state| &mut state.limits);
+        }
         let stop = Arc::new(AtomicBool::new(false));
         let store_stop = stop.clone();
         store.epoch_deadline_callback(move |_| {
@@ -178,8 +198,8 @@ impl PtcRuntime for WasiPythonPtcRuntime {
             })
         });
         store.set_epoch_deadline(1);
-        let mut linker: Linker<WasiP1Ctx> = Linker::new(&engine);
-        p1::add_to_linker_sync(&mut linker, |ctx| ctx)?;
+        let mut linker: Linker<WasiStoreState> = Linker::new(&engine);
+        p1::add_to_linker_sync(&mut linker, |ctx| &mut ctx.wasi)?;
 
         let instance = linker.instantiate(&mut store, &module)?;
         let start = instance.get_typed_func::<(), ()>(&mut store, "_start")?;
@@ -200,25 +220,37 @@ impl PtcRuntime for WasiPythonPtcRuntime {
         )
         .await;
 
-        if tokio::time::timeout(Duration::from_millis(300), &mut wasm_done_rx)
+        let mut thread_exited = tokio::time::timeout(Duration::from_millis(300), &mut wasm_done_rx)
             .await
-            .is_err()
-        {
+            .is_ok();
+        if !thread_exited {
             stop.store(true, Ordering::Release);
+            let interrupt_deadline = tokio::time::Instant::now() + EPOCH_INTERRUPT_GRACE;
             loop {
                 engine.increment_epoch();
                 if tokio::time::timeout(Duration::from_millis(20), &mut wasm_done_rx)
                     .await
                     .is_ok()
                 {
+                    thread_exited = true;
+                    break;
+                }
+                if tokio::time::Instant::now() >= interrupt_deadline {
                     break;
                 }
             }
         }
-        let _ = tokio::task::spawn_blocking(move || {
-            let _ = wasm_thread.join();
-        })
-        .await;
+        if thread_exited {
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = wasm_thread.join();
+            })
+            .await;
+        } else {
+            let msg = "WASI PTC guest failed to unwind within epoch interrupt grace period";
+            if outcome.ledger.push_text(msg) {
+                outcome.output_truncated = true;
+            }
+        }
 
         let stderr = String::from_utf8_lossy(&stderr_pipe.contents()).to_string();
         if !stderr.trim().is_empty() && outcome.ledger.push_text(&stderr) {

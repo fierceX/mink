@@ -81,3 +81,22 @@ fn decay_pulls_belief_toward_prior() {
     keep.decay(0.0);
     assert!((keep.belief() - 0.75).abs() < 1e-10);
 }
+
+#[test]
+fn multi_round_decay_does_not_inflate_prior_mass() {
+    let mut bt = BeliefTracker::new(16);
+    for _ in 0..5 {
+        for _ in 0..16 {
+            bt.observe(&[]);
+        }
+        bt.decay(0.6);
+    }
+    for _ in 0..16 {
+        bt.observe(&[sig(SignalKind::ToolError, 1.0)]);
+    }
+    assert!(
+        bt.belief() < 0.30,
+        "after 5 successful rounds + decay, 16 failures must still drop belief below 0.30, got {}",
+        bt.belief()
+    );
+}

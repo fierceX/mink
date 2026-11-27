@@ -23,6 +23,9 @@ impl TurnId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+    pub fn is_goal_turn(&self) -> bool {
+        self.0.starts_with("goal:")
+    }
 }
 
 impl fmt::Display for TurnId {
@@ -286,9 +289,31 @@ impl Drop for AgentEventStream {
 pub struct AgentRuntime {
     pub(crate) ctx: Arc<AgentSharedContext>,
     pub(crate) _lease: Arc<crate::session::lease::SessionLease>,
-    pub(crate) orch_handle: JoinHandle<anyhow::Result<()>>,
+    pub(crate) orch_handle: Option<JoinHandle<anyhow::Result<()>>>,
     pub(crate) event_display: Arc<EventDisplay>,
     pub(crate) handle: AgentRuntimeHandle,
+    pub(crate) shutdown_called: bool,
+}
+
+impl Drop for AgentRuntime {
+    fn drop(&mut self) {
+        if self.shutdown_called {
+            return;
+        }
+        self.handle.goal_driver.disable();
+        self.ctx.cancel.cancel();
+        self.handle.turn_gate.close_and_interrupt();
+        self.handle.goal_driver.close();
+        if let Some(orch_handle) = self.orch_handle.take() {
+            orch_handle.abort();
+        }
+        self.ctx
+            .stores
+            .session_lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+    }
 }
 
 #[derive(Clone)]
@@ -388,6 +413,43 @@ impl AgentRuntimeHandle {
             .admission
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        if let Some(early) = self.check_pre_admission(&input, resume, register, goal_source)? {
+            return Ok((early, None));
+        }
+        let turn_id = self.allocate_turn_id(goal_source.is_some());
+        let permit = self.turn_gate.acquire(turn_id.clone())?;
+        let (source, goal_iteration, inbox_started) = self.prepare_submission_context(
+            &mut input.text,
+            &turn_id,
+            goal_source,
+            goal_draft.as_ref(),
+        )?;
+        let receipt = match self.register_submission_receipt(&input, &turn_id, resume, register) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                self.rollback_unstarted_submission(goal_iteration.as_ref(), inbox_started);
+                return Err(error);
+            }
+        };
+        self.dispatch_turn_stream(
+            input.text,
+            turn_id,
+            permit,
+            source,
+            goal_draft,
+            goal_iteration,
+            inbox_started,
+            receipt,
+        )
+    }
+
+    fn check_pre_admission(
+        &self,
+        input: &crate::runtime::HumanInput,
+        resume: Option<(&str, u64)>,
+        register: bool,
+        goal_source: Option<usize>,
+    ) -> RuntimeResult<Option<crate::runtime::InputReceipt>> {
         if self.is_closed() {
             return Err(RuntimeError::Closed);
         }
@@ -406,20 +468,16 @@ impl AgentRuntimeHandle {
                         && g.phase == crate::session::goal::GoalPhase::Verifying)
             })
         {
-            return Err(RuntimeError::Busy {
-                active_turn_id: TurnId::new(
-                    "goal owns session; pause goal before an independent turn",
-                ),
-            });
+            return Err(RuntimeError::GoalActive);
         }
         if register
             && resume.is_none()
             && let Some(receipt) = self
                 .input_inbox
-                .existing(&input)
+                .existing(input)
                 .map_err(|e| RuntimeError::Command(e.to_string()))?
         {
-            return Ok((receipt, None));
+            return Ok(Some(receipt));
         }
         if input.target_turn_id.is_some() && resume.is_none() {
             if self.turn_gate.interrupt.is_set() {
@@ -427,45 +485,66 @@ impl AgentRuntimeHandle {
             }
             let receipt = self
                 .input_inbox
-                .accept(input, None)
+                .accept(input.clone(), None)
                 .map_err(|e| RuntimeError::Command(e.to_string()))?;
-            return Ok((receipt, None));
+            return Ok(Some(receipt));
         }
+        Ok(None)
+    }
+
+    fn allocate_turn_id(&self, is_goal: bool) -> TurnId {
         let turn_id = self.next_turn_id();
-        let turn_id = if goal_source.is_some() {
+        if is_goal {
             TurnId::new(format!("goal:{turn_id}"))
         } else {
             turn_id
-        };
-        let permit = self.turn_gate.acquire(turn_id.clone())?;
+        }
+    }
+
+    fn prepare_submission_context(
+        &self,
+        input_text: &mut String,
+        turn_id: &TurnId,
+        goal_source: Option<usize>,
+        goal_draft: Option<&crate::session::goal::GoalDraftDiscussion>,
+    ) -> RuntimeResult<(
+        Option<crate::runtime::GoalContinuation>,
+        Option<crate::session::goal::IterationKey>,
+        bool,
+    )> {
         let mut inbox_started = false;
-        let (source, goal_iteration) = if goal_source.is_some() {
+        let (source, goal_iteration) = if let Some(conversation_start) = goal_source {
             let goal = self
                 .goal_ctx
                 .stores
                 .goal_store
-                .begin_iteration(turn_id.as_str(), goal_source.unwrap_or(0))
+                .begin_iteration(turn_id.as_str(), conversation_start)
                 .map_err(|e| RuntimeError::Command(format!("{e:#}")))?;
             let iteration = goal
                 .iterations
                 .last()
                 .map(|registered| registered.iteration)
                 .unwrap_or(0);
-            input.text = crate::session::goal::round_prompt(
+            *input_text = crate::session::goal::round_prompt(
                 &goal,
                 crate::runtime::goal::goal_projection_chars(
                     self.goal_ctx.config.max_context_tokens,
                 ),
             );
-            self.input_inbox
-                .begin_goal_turn(turn_id.as_str())
-                .map_err(|e| RuntimeError::Command(format!("{e:#}")))?;
-            inbox_started = true;
             let key = crate::session::goal::IterationKey {
                 goal_id: goal.id.clone(),
                 iteration,
                 turn_id: turn_id.to_string(),
             };
+            if let Err(err) = self.input_inbox.begin_goal_turn(turn_id.as_str()) {
+                let _ = self.goal_ctx.stores.goal_store.abort_unstarted_iteration(
+                    &key.goal_id,
+                    key.iteration,
+                    &key.turn_id,
+                );
+                return Err(RuntimeError::Command(format!("{err:#}")));
+            }
+            inbox_started = true;
             (
                 Some(crate::runtime::GoalContinuation {
                     goal_id: goal.id,
@@ -477,11 +556,11 @@ impl AgentRuntimeHandle {
         } else {
             (None, None)
         };
-        if let Some(source) = &goal_draft {
+        if let Some(draft) = goal_draft {
             let goal = self
                 .goal_draft_snapshot()
                 .ok_or_else(|| RuntimeError::Command("goal is not a draft".into()))?;
-            if goal.id != source.goal_id || goal.revision != source.revision {
+            if goal.id != draft.goal_id || goal.revision != draft.revision {
                 return Err(RuntimeError::Command(
                     "draft changed before discussion".into(),
                 ));
@@ -491,25 +570,60 @@ impl AgentRuntimeHandle {
                 .map_err(|e| RuntimeError::Command(format!("{e:#}")))?;
             inbox_started = true;
         }
-        let receipt = if !register {
-            Ok(crate::runtime::InputReceipt::transient(
+        Ok((source, goal_iteration, inbox_started))
+    }
+
+    fn register_submission_receipt(
+        &self,
+        input: &crate::runtime::HumanInput,
+        turn_id: &TurnId,
+        resume: Option<(&str, u64)>,
+        register: bool,
+    ) -> RuntimeResult<crate::runtime::InputReceipt> {
+        if !register {
+            return Ok(crate::runtime::InputReceipt::transient(
                 input.clone(),
                 turn_id.as_str(),
-            ))
-        } else {
-            match resume {
-                Some((id, revision)) => self.input_inbox.resume(id, revision, turn_id.as_str()),
-                None => self
-                    .input_inbox
-                    .accept(input.clone(), Some(turn_id.as_str())),
-            }
+            ));
         }
-        .map_err(|e| {
-            if inbox_started {
-                let _ = self.input_inbox.finish();
-            }
-            RuntimeError::Command(e.to_string())
-        })?;
+        match resume {
+            Some((id, revision)) => self.input_inbox.resume(id, revision, turn_id.as_str()),
+            None => self
+                .input_inbox
+                .accept(input.clone(), Some(turn_id.as_str())),
+        }
+        .map_err(|e| RuntimeError::Command(e.to_string()))
+    }
+
+    fn rollback_unstarted_submission(
+        &self,
+        goal_iteration: Option<&crate::session::goal::IterationKey>,
+        inbox_started: bool,
+    ) {
+        if inbox_started {
+            let _ = self.input_inbox.finish();
+        }
+        if let Some(key) = goal_iteration {
+            let _ = self.goal_ctx.stores.goal_store.abort_unstarted_iteration(
+                &key.goal_id,
+                key.iteration,
+                &key.turn_id,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_turn_stream(
+        &self,
+        input: String,
+        turn_id: TurnId,
+        permit: TurnPermit,
+        goal_source: Option<crate::runtime::GoalContinuation>,
+        goal_draft: Option<crate::session::goal::GoalDraftDiscussion>,
+        goal_iteration: Option<crate::session::goal::IterationKey>,
+        inbox_started: bool,
+        receipt: crate::runtime::InputReceipt,
+    ) -> RuntimeResult<(crate::runtime::InputReceipt, Option<AgentEventStream>)> {
         let stream_turn_id = turn_id.clone();
         let (tx, rx) = mpsc::unbounded_channel();
         let progress_budget = crate::runtime::events::ProgressBudget::new(
@@ -522,16 +636,16 @@ impl AgentRuntimeHandle {
         self.event_display.begin_turn(emitter.clone());
         let (done_tx, done_rx) = oneshot::channel();
         if let Err(error) = self.cmd_tx.send(OrchCmd::UserInput {
-            input: input.text,
-            goal_source: source,
+            input,
+            goal_source,
             goal_draft,
-            goal_iteration,
+            goal_iteration: goal_iteration.clone(),
             turn_id: turn_id.clone(),
             emitter: emitter.clone(),
             done: done_tx,
         }) {
             self.event_display.end_turn(&turn_id);
-            let _ = self.input_inbox.finish();
+            self.rollback_unstarted_submission(goal_iteration.as_ref(), inbox_started);
             return Err(RuntimeError::Command(error.to_string()));
         }
         let session = self.session.clone();
@@ -799,43 +913,30 @@ const SHUTDOWN_STAGE_BUDGET: Duration = Duration::from_secs(5);
 /// Wrapping a sync `flush` in `async {}` would not make it cancellable: the
 /// blocking work must own a blocking-pool thread so the async worker stays
 /// responsive and the deadline bounds only the caller's wait.
-async fn flush_stage_blocking<F>(
-    budget: Duration,
-    stage: &str,
-    work: F,
-    failures: &mut Vec<String>,
-    timed_out: &mut bool,
-) where
+async fn flush_stage_blocking<F>(budget: Duration, stage: &str, work: F) -> (Option<String>, bool)
+where
     F: FnOnce() -> anyhow::Result<()> + Send + 'static,
 {
-    flush_stage(
-        budget,
-        stage,
-        async move {
-            tokio::task::spawn_blocking(work)
-                .await
-                .map_err(|error| anyhow::anyhow!("blocking stage task failed: {error}"))?
-        },
-        failures,
-        timed_out,
-    )
-    .await;
+    flush_stage(budget, stage, async move {
+        tokio::task::spawn_blocking(work)
+            .await
+            .map_err(|error| anyhow::anyhow!("blocking stage task failed: {error}"))?
+    })
+    .await
 }
 
 async fn flush_stage<T, E: std::fmt::Display>(
     budget: Duration,
     stage: &str,
     future: impl std::future::Future<Output = Result<T, E>>,
-    failures: &mut Vec<String>,
-    timed_out: &mut bool,
-) {
+) -> (Option<String>, bool) {
     match tokio::time::timeout(budget, future).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(error)) => failures.push(format!("{stage} failed: {error}")),
+        Ok(Ok(_)) => (None, false),
+        Ok(Err(error)) => (Some(format!("{stage} failed: {error}")), false),
         Err(_) => {
             // Pure timeouts must surface as `RuntimeError::ShutdownTimeout`
             // rather than being misclassified as `RuntimeError::Command`.
-            *timed_out = true;
+            (None, true)
         }
     }
 }
@@ -849,6 +950,11 @@ impl AgentRuntime {
 
     pub fn handle(&self) -> AgentRuntimeHandle {
         self.handle.clone()
+    }
+
+    /// Access goal lifecycle and scheduling controls for this session.
+    pub fn goals(&self) -> crate::runtime::GoalController<'_> {
+        self.handle.goals()
     }
 
     pub async fn run_turn(&self, input: impl Into<String>) -> RuntimeResult<TurnOutcome> {
@@ -881,7 +987,8 @@ impl AgentRuntime {
         self.handle.interrupt_current_turn();
     }
 
-    pub async fn shutdown(self) -> RuntimeResult<()> {
+    pub async fn shutdown(mut self) -> RuntimeResult<()> {
+        self.shutdown_called = true;
         self.handle.goal_driver.disable();
         // Cancellation is the runtime's own stop signal and must land before the
         // turn-gate interrupt: an in-flight goal round settles as a pause only
@@ -909,28 +1016,29 @@ impl AgentRuntime {
         self.handle.goal_driver.close();
         let mut failures = Vec::new();
         let mut shutdown_timed_out = turn_timed_out || goal_wait;
-        let mut orchestrator = self.orch_handle;
-        if turn_timed_out {
-            orchestrator.abort();
-            if let Err(error) = orchestrator.await
-                && !error.is_cancelled()
-            {
-                failures.push(format!("orchestrator abort failed: {error}"));
-            }
-        } else {
-            match tokio::time::timeout(Duration::from_secs(5), &mut orchestrator).await {
-                Ok(Ok(Ok(()))) => {}
-                Ok(Ok(Err(error))) => {
-                    failures.push(format!("orchestrator shutdown failed: {error:#}"));
+        if let Some(mut orchestrator) = self.orch_handle.take() {
+            if turn_timed_out {
+                orchestrator.abort();
+                if let Err(error) = orchestrator.await
+                    && !error.is_cancelled()
+                {
+                    failures.push(format!("orchestrator abort failed: {error}"));
                 }
-                Ok(Err(error)) => failures.push(format!("runtime task failed: {error}")),
-                Err(_) => {
-                    shutdown_timed_out = true;
-                    orchestrator.abort();
-                    if let Err(error) = orchestrator.await
-                        && !error.is_cancelled()
-                    {
-                        failures.push(format!("orchestrator abort failed: {error}"));
+            } else {
+                match tokio::time::timeout(Duration::from_secs(5), &mut orchestrator).await {
+                    Ok(Ok(Ok(()))) => {}
+                    Ok(Ok(Err(error))) => {
+                        failures.push(format!("orchestrator shutdown failed: {error:#}"));
+                    }
+                    Ok(Err(error)) => failures.push(format!("runtime task failed: {error}")),
+                    Err(_) => {
+                        shutdown_timed_out = true;
+                        orchestrator.abort();
+                        if let Err(error) = orchestrator.await
+                            && !error.is_cancelled()
+                        {
+                            failures.push(format!("orchestrator abort failed: {error}"));
+                        }
                     }
                 }
             }
@@ -940,39 +1048,31 @@ impl AgentRuntime {
         {
             failures.push(format!("event dispatcher shutdown failed: {error}"));
         }
-        flush_stage(
-            SHUTDOWN_STAGE_BUDGET,
-            "event log flush",
-            self.ctx.flush_event_log(),
-            &mut failures,
-            &mut shutdown_timed_out,
-        )
-        .await;
         let usage = self.ctx.stores.usage.clone();
-        flush_stage_blocking(
-            SHUTDOWN_STAGE_BUDGET,
-            "usage flush",
-            move || usage.flush(),
-            &mut failures,
-            &mut shutdown_timed_out,
-        )
-        .await;
-        flush_stage(
-            SHUTDOWN_STAGE_BUDGET,
-            "stats flush",
-            self.ctx.stores.stats.flush(),
-            &mut failures,
-            &mut shutdown_timed_out,
-        )
-        .await;
-        flush_stage(
-            SHUTDOWN_STAGE_BUDGET,
-            "compaction projection flush",
-            self.ctx.stores.compaction.flush_projection(),
-            &mut failures,
-            &mut shutdown_timed_out,
-        )
-        .await;
+        let (f_events, f_usage, f_stats, f_compaction) = tokio::join!(
+            flush_stage(
+                SHUTDOWN_STAGE_BUDGET,
+                "event log flush",
+                self.ctx.flush_event_log()
+            ),
+            flush_stage_blocking(SHUTDOWN_STAGE_BUDGET, "usage flush", move || usage.flush()),
+            flush_stage(
+                SHUTDOWN_STAGE_BUDGET,
+                "stats flush",
+                self.ctx.stores.stats.flush()
+            ),
+            flush_stage(
+                SHUTDOWN_STAGE_BUDGET,
+                "compaction projection flush",
+                self.ctx.stores.compaction.flush_projection(),
+            ),
+        );
+        for (error, timed_out) in [f_events, f_usage, f_stats, f_compaction] {
+            if let Some(error) = error {
+                failures.push(error);
+            }
+            shutdown_timed_out |= timed_out;
+        }
         self.ctx
             .stores
             .session_lease
@@ -1021,22 +1121,15 @@ mod shutdown_stage_tests {
     async fn default_stage_budget_allows_delayed_blocking_flush() {
         let finished = Arc::new(AtomicBool::new(false));
         let worker_finished = finished.clone();
-        let mut failures = Vec::new();
-        let mut timed_out = false;
-        flush_stage_blocking(
-            SHUTDOWN_STAGE_BUDGET,
-            "delayed blocking flush",
-            move || {
+        let (failure, timed_out) =
+            flush_stage_blocking(SHUTDOWN_STAGE_BUDGET, "delayed blocking flush", move || {
                 std::thread::sleep(Duration::from_millis(300));
                 worker_finished.store(true, Ordering::SeqCst);
                 Ok(())
-            },
-            &mut failures,
-            &mut timed_out,
-        )
-        .await;
-        assert!(!timed_out, "{failures:?}");
-        assert!(failures.is_empty(), "{failures:?}");
+            })
+            .await;
+        assert!(!timed_out, "{failure:?}");
+        assert!(failure.is_none(), "{failure:?}");
         assert!(finished.load(Ordering::SeqCst));
     }
 
@@ -1054,10 +1147,8 @@ mod shutdown_stage_tests {
         let release = Arc::new(AtomicBool::new(false));
         let _guard = ReleaseGuard(release.clone());
         let worker_release = release.clone();
-        let mut failures = Vec::new();
-        let mut timed_out = false;
         let started = std::time::Instant::now();
-        flush_stage_blocking(
+        let (failure, timed_out) = flush_stage_blocking(
             Duration::from_millis(50),
             "blocking unit stage",
             move || {
@@ -1066,8 +1157,6 @@ mod shutdown_stage_tests {
                 }
                 Ok(())
             },
-            &mut failures,
-            &mut timed_out,
         )
         .await;
         assert!(timed_out);
@@ -1077,50 +1166,38 @@ mod shutdown_stage_tests {
             started.elapsed()
         );
         assert!(
-            failures.is_empty(),
-            "pure stage timeout must not push into failures (so shutdown returns ShutdownTimeout): {failures:?}"
+            failure.is_none(),
+            "pure stage timeout must not produce failure (so shutdown returns ShutdownTimeout): {failure:?}"
         );
     }
 
     #[tokio::test]
     async fn stage_timeout_is_bounded_and_reported() {
-        let mut failures = Vec::new();
-        let mut timed_out = false;
         let started = std::time::Instant::now();
-        flush_stage(
-            Duration::from_millis(50),
-            "unit stage",
-            async { futures::future::pending::<anyhow::Result<()>>().await },
-            &mut failures,
-            &mut timed_out,
-        )
+        let (failure, timed_out) = flush_stage(Duration::from_millis(50), "unit stage", async {
+            futures::future::pending::<anyhow::Result<()>>().await
+        })
         .await;
         assert!(timed_out);
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(
-            failures.is_empty(),
-            "pure stage timeout must not push into failures: {failures:?}"
+            failure.is_none(),
+            "pure stage timeout must not produce failure: {failure:?}"
         );
     }
 
     #[tokio::test]
     async fn stage_errors_are_collected_without_timeout_flag() {
-        let mut failures = Vec::new();
-        let mut timed_out = false;
-        flush_stage(
-            Duration::from_millis(50),
-            "unit stage",
-            async { Err::<(), _>(anyhow::anyhow!("injected failure")) },
-            &mut failures,
-            &mut timed_out,
-        )
+        let (failure, timed_out) = flush_stage(Duration::from_millis(50), "unit stage", async {
+            Err::<(), _>(anyhow::anyhow!("injected failure"))
+        })
         .await;
         assert!(!timed_out);
         assert!(
-            failures
-                .iter()
-                .any(|line| line.contains("injected failure")),
-            "{failures:?}"
+            failure
+                .as_deref()
+                .is_some_and(|line| line.contains("injected failure")),
+            "{failure:?}"
         );
     }
 }

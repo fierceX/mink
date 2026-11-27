@@ -4,13 +4,12 @@
 //! embedding application and uses only the public VFS hook.
 
 use anyhow::{Result, anyhow, bail};
-use mink::prelude::{
-    AgentOptions, AgentRuntime, ReadOnlyFileSystem, VfsGlobRequest, VfsGlobResult, VfsGrepEntry,
-    VfsGrepRequest, VfsGrepResult, VfsReadRequest, VfsReadResult, VfsScope,
-};
-use mink::runtime::{
-    normalize_virtual_file_path, normalize_virtual_root, select_virtual_lines, tool_line_count,
-    validate_virtual_glob_request, validate_virtual_grep_request,
+use mink::prelude::{AgentOptions, AgentRuntime};
+use mink::runtime::vfs::{
+    ReadOnlyFileSystem, VfsGlobRequest, VfsGlobResult, VfsGrepEntry, VfsGrepRequest, VfsGrepResult,
+    VfsReadRequest, VfsReadResult, VfsScope, normalize_virtual_file_path, normalize_virtual_root,
+    select_virtual_lines, tool_line_count, validate_virtual_glob_request,
+    validate_virtual_grep_request,
 };
 use redb::{Database, ReadableDatabase, TableDefinition};
 use regex::Regex;

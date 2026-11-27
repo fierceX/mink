@@ -130,12 +130,13 @@ async fn host_agent_retries_rejected_conclusions_after_prose_only_independent_re
     .await
     .unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver().unwrap();
+    handle.goals().start_driver().unwrap();
     let draft = handle
-        .draft_goal(GoalSpec::new("deliver proof"), 3600)
+        .goals()
+        .draft(GoalSpec::new("deliver proof"), 3600)
         .unwrap();
-    handle.confirm_goal(&draft.id, draft.revision).unwrap();
-    let completed = tokio::time::timeout(std::time::Duration::from_secs(20), handle.wait_goal())
+    handle.goals().confirm(&draft.id, draft.revision).unwrap();
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
@@ -194,9 +195,10 @@ async fn blocked_review_fixture() -> (AgentRuntime, AgentRuntimeHandle, PathBuf,
     .unwrap();
     let handle = runtime.handle();
     let draft = handle
-        .draft_goal(GoalSpec::new("obtain external input"), 3600)
+        .goals()
+        .draft(GoalSpec::new("obtain external input"), 3600)
         .unwrap();
-    handle.confirm_goal(&draft.id, draft.revision).unwrap();
+    handle.goals().confirm(&draft.id, draft.revision).unwrap();
     let executing = handle
         .goal_ctx
         .stores
@@ -290,7 +292,7 @@ async fn settled_review_recovery_preserves_next_execution_phase() {
         .goal_store
         .recover(&goal.environment, &[], 0)
         .unwrap();
-    let recovered = handle.goal_snapshot().unwrap();
+    let recovered = handle.goals().snapshot().unwrap();
     close_fixture(runtime, &handle, root).await;
     assert_eq!(
         recovered.phase,
@@ -393,7 +395,7 @@ async fn host_conclusion_tool_is_scoped_and_rejections_preserve_goal_state() {
         "a conclusion rejection is not a damaged model format"
     );
     assert!(session.submitted_conclusion().is_none());
-    assert_eq!(handle.goal_snapshot().unwrap(), goal);
+    assert_eq!(handle.goals().snapshot().unwrap(), goal);
     close_fixture(runtime, &handle, root).await;
 }
 
@@ -410,13 +412,14 @@ async fn goal_confirmation_rejects_a_missing_host_submission_tool_before_activat
     let runtime = AgentRuntime::start(options).await.unwrap();
     let handle = runtime.handle();
     let draft = handle
-        .draft_goal(GoalSpec::new("requires a host conclusion"), 3600)
+        .goals()
+        .draft(GoalSpec::new("requires a host conclusion"), 3600)
         .unwrap();
-    let refused = handle.confirm_goal(&draft.id, draft.revision);
+    let refused = handle.goals().confirm(&draft.id, draft.revision);
     assert!(
         matches!(refused,Err(RuntimeError::Configuration(ref error)) if error.contains("GoalReview"))
     );
-    assert_eq!(handle.goal_snapshot().unwrap(), draft);
+    assert_eq!(handle.goals().snapshot().unwrap(), draft);
     runtime.shutdown().await.unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -424,7 +427,7 @@ async fn goal_confirmation_rejects_a_missing_host_submission_tool_before_activat
 #[tokio::test]
 async fn host_conclusion_verdict_must_match_requirement_findings() {
     let (runtime, handle, root, goal) = blocked_review_fixture().await;
-    let mut feedback = goal.reviews[0].feedback();
+    let mut feedback = goal.reviews[0].feedback().unwrap();
 
     let blocked = feedback.clone().into_review(&goal).unwrap();
     assert_eq!(blocked.verdict, GoalReviewVerdict::Blocked);
@@ -469,7 +472,7 @@ async fn review_token_limit_stops_new_provider_requests() {
         })
         .unwrap();
     handle.accept_goal(1, verifying).await.unwrap();
-    let after = handle.goal_snapshot().unwrap();
+    let after = handle.goals().snapshot().unwrap();
     let requests = handle.goal_ctx.stores.usage.all_records().unwrap().len();
     close_fixture(runtime, &handle, root).await;
     assert_eq!(after.status, GoalStatus::BudgetExhausted);
@@ -543,16 +546,16 @@ async fn host_adjudication_is_not_admitted_after_review_spends_soft_token_limit(
     .await
     .unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver().unwrap();
+    handle.goals().start_driver().unwrap();
     let mut spec = GoalSpec::new("stop reviewer continuations at the token soft limit");
     spec.limits.soft_token_limit = Some(10);
-    let draft = handle.draft_goal(spec, 3600).unwrap();
-    handle.confirm_goal(&draft.id, draft.revision).unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(20), handle.wait_goal())
+    let draft = handle.goals().draft(spec, 3600).unwrap();
+    handle.goals().confirm(&draft.id, draft.revision).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
-    let after = handle.goal_snapshot().unwrap();
+    let after = handle.goals().snapshot().unwrap();
     runtime.shutdown().await.unwrap();
     std::fs::remove_dir_all(root).unwrap();
 
@@ -582,7 +585,7 @@ async fn cached_review_replay_does_not_count_another_execution_round() {
     let (runtime, handle, root, _) = blocked_review_fixture().await;
     let mut counts = vec![1];
     for _ in 0..2 {
-        let current = handle.goal_snapshot().unwrap();
+        let current = handle.goals().snapshot().unwrap();
         let verifying = handle
             .goal_ctx
             .stores
@@ -593,9 +596,9 @@ async fn cached_review_replay_does_not_count_another_execution_round() {
             })
             .unwrap();
         handle.accept_goal(1, verifying).await.unwrap();
-        counts.push(handle.goal_snapshot().unwrap().blocker_rounds);
+        counts.push(handle.goals().snapshot().unwrap().blocker_rounds);
     }
-    let after = handle.goal_snapshot().unwrap();
+    let after = handle.goals().snapshot().unwrap();
     close_fixture(runtime, &handle, root).await;
     assert_eq!(counts, vec![1, 1, 1]);
     assert_eq!(after.iterations.len(), 1);
@@ -663,12 +666,12 @@ async fn lightweight_continue_on_last_round_preserves_decision_without_full_revi
     .await
     .unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver().unwrap();
+    handle.goals().start_driver().unwrap();
     let mut spec = GoalSpec::new("Implement a deliverable");
     spec.limits.max_turns = 1;
-    let draft = handle.draft_goal(spec, 3600).unwrap();
-    handle.confirm_goal(&draft.id, draft.revision).unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.wait_goal())
+    let draft = handle.goals().draft(spec, 3600).unwrap();
+    handle.goals().confirm(&draft.id, draft.revision).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
@@ -726,7 +729,7 @@ async fn goal_state_control_matrix_preserves_terminal_and_retry_boundaries() {
                 .unwrap();
             let (actual, expected) = match action {
                 "resume" => (
-                    handle.resume_goal(&goal.id, goal.revision),
+                    handle.goals().resume(&goal.id, goal.revision),
                     matches!(
                         status,
                         GoalStatus::Active
@@ -737,25 +740,27 @@ async fn goal_state_control_matrix_preserves_terminal_and_retry_boundaries() {
                     ),
                 ),
                 "budget" => (
-                    handle.update_goal_limits(&goal.id, goal.revision, goal.spec.limits.clone()),
+                    handle
+                        .goals()
+                        .update_limits(&goal.id, goal.revision, goal.spec.limits.clone()),
                     !matches!(status, GoalStatus::Completed | GoalStatus::Cancelled),
                 ),
                 "pause" => (
-                    handle.pause_goal(&goal.id, goal.revision),
+                    handle.goals().pause(&goal.id, goal.revision),
                     !status.is_terminal() && status != GoalStatus::Draft,
                 ),
                 "cancel" => (
-                    handle.cancel_goal(&goal.id, goal.revision),
+                    handle.goals().cancel(&goal.id, goal.revision),
                     !status.is_terminal(),
                 ),
                 "clear" => (
-                    handle.clear_goal(&goal.id, goal.revision),
+                    handle.goals().clear(&goal.id, goal.revision),
                     status.is_terminal(),
                 ),
                 _ => unreachable!(),
             };
             assert_eq!(actual.is_ok(), expected, "{status:?}/{action}: {actual:?}");
-            let current = handle.goal_snapshot().unwrap();
+            let current = handle.goals().snapshot().unwrap();
             assert_eq!(current.id, goal.id);
             assert_eq!(current.spec, goal.spec);
             assert_eq!(current.iterations, goal.iterations);
@@ -806,12 +811,12 @@ async fn failed_goal_retries_after_restart_and_explicit_budget_adjustment() {
     };
     let runtime = AgentRuntime::start(options()).await.unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver().unwrap();
+    handle.goals().start_driver().unwrap();
     let mut spec = GoalSpec::new("Implement deliverable");
     spec.limits.max_turns = 2;
-    let draft = handle.draft_goal(spec, 3600).unwrap();
-    handle.confirm_goal(&draft.id, draft.revision).unwrap();
-    let failed = tokio::time::timeout(std::time::Duration::from_secs(20), handle.wait_goal())
+    let draft = handle.goals().draft(spec, 3600).unwrap();
+    handle.goals().confirm(&draft.id, draft.revision).unwrap();
+    let failed = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
@@ -832,8 +837,8 @@ async fn failed_goal_retries_after_restart_and_explicit_budget_adjustment() {
         .await
         .unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver().unwrap();
-    let old = handle.goal_snapshot().unwrap();
+    handle.goals().start_driver().unwrap();
+    let old = handle.goals().snapshot().unwrap();
     assert_eq!(
         old.status,
         GoalStatus::Failed,
@@ -853,18 +858,21 @@ async fn failed_goal_retries_after_restart_and_explicit_budget_adjustment() {
         .unwrap();
     assert!(
         handle
-            .resume_goal(&pending.id, pending.revision)
+            .goals()
+            .resume(&pending.id, pending.revision)
             .unwrap_err()
             .to_string()
             .contains("reconciliation")
     );
     assert!(
         handle
-            .reconcile_goal_effects(&pending.id, pending.revision, String::new())
+            .goals()
+            .reconcile_effects(&pending.id, pending.revision, String::new())
             .is_err()
     );
     let old = handle
-        .reconcile_goal_effects(
+        .goals()
+        .reconcile_effects(
             &pending.id,
             pending.revision,
             "Investigated: no unknown remote effects remain".into(),
@@ -872,7 +880,8 @@ async fn failed_goal_retries_after_restart_and_explicit_budget_adjustment() {
         .unwrap();
     assert_eq!(old.status, GoalStatus::Failed);
     let rejected = handle
-        .resume_goal(&old.id, old.revision)
+        .goals()
+        .resume(&old.id, old.revision)
         .unwrap_err()
         .to_string();
     assert!(
@@ -880,7 +889,8 @@ async fn failed_goal_retries_after_restart_and_explicit_budget_adjustment() {
         "{rejected}"
     );
     let adjusted = handle
-        .update_goal_limits(&old.id, old.revision, failed.spec.limits.clone())
+        .goals()
+        .update_limits(&old.id, old.revision, failed.spec.limits.clone())
         .unwrap();
     assert_eq!(
         adjusted.status,
@@ -890,11 +900,14 @@ async fn failed_goal_retries_after_restart_and_explicit_budget_adjustment() {
     assert_eq!(adjusted.iterations, failed.iterations);
     assert_eq!(adjusted.usage_records, failed.usage_records);
     assert!(
-        handle.resume_goal(&adjusted.id, old.revision).is_err(),
+        handle.goals().resume(&adjusted.id, old.revision).is_err(),
         "stale retries must be rejected"
     );
-    handle.resume_goal(&adjusted.id, adjusted.revision).unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.wait_goal())
+    handle
+        .goals()
+        .resume(&adjusted.id, adjusted.revision)
+        .unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
@@ -948,13 +961,13 @@ async fn resume_phase_matrix_allows_last_round_review_without_an_extra_execution
                     Ok(())
                 })
                 .unwrap();
-            let resumed = handle.resume_goal(&goal.id, goal.revision);
+            let resumed = handle.goals().resume(&goal.id, goal.revision);
             assert_eq!(
                 resumed.is_ok(),
                 phase == GoalPhase::Verifying,
                 "{status:?}/{phase:?}: {resumed:?}"
             );
-            let current = handle.goal_snapshot().unwrap();
+            let current = handle.goals().snapshot().unwrap();
             assert_eq!(current.iterations, goal.iterations);
             assert_eq!(current.spec.limits, goal.spec.limits);
             if let Ok(resumed) = resumed {
@@ -1054,26 +1067,28 @@ async fn execution_failure_classes_stop_automatically_but_allow_explicit_retry()
         .await
         .unwrap();
         let handle = runtime.handle();
-        handle.start_goal_driver().unwrap();
+        handle.goals().start_driver().unwrap();
         let mut spec = GoalSpec::new("Implement deliverable");
         spec.limits.max_turns = 2;
-        let draft = handle.draft_goal(spec, 3600).unwrap();
-        handle.confirm_goal(&draft.id, draft.revision).unwrap();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.wait_goal())
-            .await
-            .unwrap()
-            .unwrap();
+        let draft = handle.goals().draft(spec, 3600).unwrap();
+        handle.goals().confirm(&draft.id, draft.revision).unwrap();
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(result.status, GoalStatus::Failed, "{kind:?}: {result:?}");
         assert_eq!(
             backend.execution_calls.load(Ordering::SeqCst),
             2,
             "failure must stop automatic execution"
         );
-        handle.resume_goal(&result.id, result.revision).unwrap();
-        let retried = tokio::time::timeout(std::time::Duration::from_secs(20), handle.wait_goal())
-            .await
-            .unwrap()
-            .unwrap();
+        handle.goals().resume(&result.id, result.revision).unwrap();
+        let retried =
+            tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(retried.status, GoalStatus::BudgetExhausted, "{retried:?}");
         assert_eq!(retried.iterations.len(), 2);
         assert_eq!(retried.iterations[0], result.iterations[0]);
@@ -1193,12 +1208,12 @@ async fn descriptive_blocker_identity_ignores_wording_and_round_conclusion_artif
     .await
     .unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver().unwrap();
+    handle.goals().start_driver().unwrap();
     let mut spec = GoalSpec::new("Obtain operator approval");
     spec.limits.max_turns = 3;
-    let draft = handle.draft_goal(spec, 3600).unwrap();
-    handle.confirm_goal(&draft.id, draft.revision).unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.wait_goal())
+    let draft = handle.goals().draft(spec, 3600).unwrap();
+    handle.goals().confirm(&draft.id, draft.revision).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
@@ -1274,7 +1289,7 @@ async fn simple_conclusion_cannot_complete_without_independent_evidence() {
     assert_eq!(review.verdict, GoalReviewVerdict::NeedsWork);
     assert!(review.original_request.is_none() && review.criteria.is_empty());
     assert_eq!(
-        handle.goal_snapshot().unwrap(),
+        handle.goals().snapshot().unwrap(),
         current,
         "submission mailbox does not mutate GoalStore"
     );
@@ -1343,12 +1358,13 @@ async fn simple_completion_retries_semantic_rejection_and_keeps_descriptive_evid
     .await
     .unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver().unwrap();
+    handle.goals().start_driver().unwrap();
     let draft = handle
-        .draft_goal(GoalSpec::new("deliver proof"), 3600)
+        .goals()
+        .draft(GoalSpec::new("deliver proof"), 3600)
         .unwrap();
-    handle.confirm_goal(&draft.id, draft.revision).unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.wait_goal())
+    handle.goals().confirm(&draft.id, draft.revision).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
@@ -1430,12 +1446,12 @@ async fn simple_host_conclusion_continues_after_screening_and_inspection() {
     .await
     .unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver().unwrap();
+    handle.goals().start_driver().unwrap();
     let mut spec = GoalSpec::new("Implement deliverable");
     spec.limits.max_turns = 3;
-    let draft = handle.draft_goal(spec, 3600).unwrap();
-    handle.confirm_goal(&draft.id, draft.revision).unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.wait_goal())
+    let draft = handle.goals().draft(spec, 3600).unwrap();
+    handle.goals().confirm(&draft.id, draft.revision).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
@@ -1547,12 +1563,12 @@ async fn third_repeated_continue_inspects_in_same_reviewer_and_counts_once() {
     .await
     .unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver().unwrap();
+    handle.goals().start_driver().unwrap();
     let mut spec = GoalSpec::new("Implement deliverable");
     spec.limits.max_turns = 3;
-    let draft = handle.draft_goal(spec, 3600).unwrap();
-    handle.confirm_goal(&draft.id, draft.revision).unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.wait_goal())
+    let draft = handle.goals().draft(spec, 3600).unwrap();
+    handle.goals().confirm(&draft.id, draft.revision).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
@@ -1671,13 +1687,13 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
             .success
     );
     assert_eq!(
-        handle.goal_snapshot().unwrap(),
+        handle.goals().snapshot().unwrap(),
         current,
         "mailbox does not publish parent state"
     );
     handle.commit_goal_continue(1, proposal.clone(), 0).unwrap();
     handle.commit_goal_continue(1, proposal, 0).unwrap();
-    let after = handle.goal_snapshot().unwrap();
+    let after = handle.goals().snapshot().unwrap();
     assert_eq!(after.continuations.len(), 1);
     assert_eq!(after.continuation_rounds, 1);
     assert!(after.reviews.is_empty());
@@ -1688,7 +1704,7 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
         .goal_store
         .recover(&after.environment, &[], 0)
         .unwrap();
-    let restored = handle.goal_snapshot().unwrap();
+    let restored = handle.goals().snapshot().unwrap();
     assert_eq!(restored.phase, GoalPhase::Idle);
     assert_eq!(restored.continuation_rounds, 1);
     assert!(matches!(
@@ -1705,7 +1721,7 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
         })
         .unwrap();
     handle.accept_goal(1, replay).await.unwrap();
-    let replayed = handle.goal_snapshot().unwrap();
+    let replayed = handle.goals().snapshot().unwrap();
     assert_eq!(replayed.phase, GoalPhase::Idle);
     assert_eq!(replayed.continuation_rounds, 1);
     assert_eq!(replayed.continuations.len(), 1);
@@ -1792,12 +1808,12 @@ async fn restart_reuses_successful_screening_report_and_retries_only_host() {
     let options = || AgentOptions::new(root.join("home"), &cwd).with_llm_backend(backend.clone());
     let runtime = AgentRuntime::start(options()).await.unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver().unwrap();
+    handle.goals().start_driver().unwrap();
     let mut spec = GoalSpec::new("Implement deliverable");
     spec.limits.max_turns = 1;
-    let draft = handle.draft_goal(spec, 3600).unwrap();
-    handle.confirm_goal(&draft.id, draft.revision).unwrap();
-    let blocked = tokio::time::timeout(std::time::Duration::from_secs(20), handle.wait_goal())
+    let draft = handle.goals().draft(spec, 3600).unwrap();
+    handle.goals().confirm(&draft.id, draft.revision).unwrap();
+    let blocked = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
@@ -1814,10 +1830,13 @@ async fn restart_reuses_successful_screening_report_and_retries_only_host() {
         .await
         .unwrap();
     let handle = reopened.handle();
-    handle.start_goal_driver().unwrap();
-    let current = handle.goal_snapshot().unwrap();
-    handle.resume_goal(&current.id, current.revision).unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.wait_goal())
+    handle.goals().start_driver().unwrap();
+    let current = handle.goals().snapshot().unwrap();
+    handle
+        .goals()
+        .resume(&current.id, current.revision)
+        .unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
@@ -1959,12 +1978,13 @@ async fn a_live_execution_refuses_a_replacement_until_it_settles() {
     .await
     .unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver().unwrap();
+    handle.goals().start_driver().unwrap();
     let draft = handle
-        .draft_goal(GoalSpec::new("hold the execution"), 3600)
+        .goals()
+        .draft(GoalSpec::new("hold the execution"), 3600)
         .unwrap();
     let entered = backend.entered.notified();
-    handle.confirm_goal(&draft.id, draft.revision).unwrap();
+    handle.goals().confirm(&draft.id, draft.revision).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(10), entered)
         .await
         .expect("the execution request must reach the backend");
@@ -1973,16 +1993,23 @@ async fn a_live_execution_refuses_a_replacement_until_it_settles() {
     // a replacement can be neither drafted nor confirmed, and no late reply can
     // be attributed to a goal that did not start it.
     let busy = handle
-        .draft_goal(GoalSpec::new("replacement"), 3600)
+        .goals()
+        .draft(GoalSpec::new("replacement"), 3600)
         .unwrap_err();
     assert!(matches!(busy, RuntimeError::Busy { .. }), "{busy:?}");
-    let stale = handle.confirm_goal(&draft.id, draft.revision).unwrap_err();
+    let stale = handle
+        .goals()
+        .confirm(&draft.id, draft.revision)
+        .unwrap_err();
     assert!(matches!(stale, RuntimeError::Busy { .. }), "{stale:?}");
 
     // Cancelling stops the run; the held execution is released and the run
     // settles by itself instead of retrying.
-    let current = handle.goal_snapshot().unwrap();
-    let cancelled = handle.cancel_goal(&current.id, current.revision).unwrap();
+    let current = handle.goals().snapshot().unwrap();
+    let cancelled = handle
+        .goals()
+        .cancel(&current.id, current.revision)
+        .unwrap();
     assert_eq!(cancelled.status, GoalStatus::Cancelled);
     assert_eq!(
         cancelled.phase,
@@ -1990,7 +2017,7 @@ async fn a_live_execution_refuses_a_replacement_until_it_settles() {
         "a cancelled goal must not stay verifying"
     );
     backend.release.notify_one();
-    let settled = tokio::time::timeout(std::time::Duration::from_secs(10), handle.wait_goal())
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(10), handle.goals().wait())
         .await
         .expect("the run must settle after its execution exits")
         .unwrap();
@@ -2026,12 +2053,12 @@ async fn interrupt_during_an_active_round_pauses_without_admitting_another() {
     .await
     .unwrap();
     let handle = runtime.handle();
-    handle.start_goal_driver().unwrap();
+    handle.goals().start_driver().unwrap();
     let mut spec = GoalSpec::new("interrupt the only round");
     spec.limits.max_turns = 1;
-    let draft = handle.draft_goal(spec, 3600).unwrap();
+    let draft = handle.goals().draft(spec, 3600).unwrap();
     let entered = backend.entered.notified();
-    handle.confirm_goal(&draft.id, draft.revision).unwrap();
+    handle.goals().confirm(&draft.id, draft.revision).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(10), entered)
         .await
         .expect("the execution request must reach the backend");
@@ -2039,14 +2066,14 @@ async fn interrupt_during_an_active_round_pauses_without_admitting_another() {
     // The run is scheduled and the goal is still `active`: the interrupt is
     // set while execution owns the turn.
     assert_eq!(
-        handle.goal_snapshot().unwrap().status,
+        handle.goals().snapshot().unwrap().status,
         GoalStatus::Active,
         "the goal must still be active when the interrupt is set"
     );
     handle.goal_ctx.interrupt.trigger();
     backend.release.notify_one();
 
-    let settled = tokio::time::timeout(std::time::Duration::from_secs(10), handle.wait_goal())
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(10), handle.goals().wait())
         .await
         .expect("an interrupt must settle the run instead of spinning")
         .unwrap();
@@ -2197,14 +2224,16 @@ async fn confirm_goal_with_disabled_driver_outside_tokio_does_not_fault_driver()
     // Call `confirm_goal` from a plain OS thread with no Tokio runtime context
     // while the goal driver has not been enabled yet.
     let sync_handle = handle.clone();
-    let confirmed = std::thread::spawn(move || sync_handle.confirm_goal(&draft.id, draft.revision))
-        .join()
-        .expect("sync thread")
-        .expect("confirm_goal must succeed when driver is disabled outside Tokio");
+    let confirmed =
+        std::thread::spawn(move || sync_handle.goals().confirm(&draft.id, draft.revision))
+            .join()
+            .expect("sync thread")
+            .expect("confirm_goal must succeed when driver is disabled outside Tokio");
     assert_eq!(confirmed.status, GoalStatus::Active);
     // Subsequent control operations must still work (driver must not be Faulted).
     let paused = handle
-        .pause_goal(&confirmed.id, confirmed.revision)
+        .goals()
+        .pause(&confirmed.id, confirmed.revision)
         .unwrap();
     assert_eq!(paused.status, GoalStatus::Paused);
     close_fixture(runtime, &handle, root).await;

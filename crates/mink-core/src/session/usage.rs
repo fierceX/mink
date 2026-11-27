@@ -148,6 +148,7 @@ pub struct UsageJournal {
     write_lock: Mutex<()>,
     active_turn: Mutex<Option<ActiveTurn>>,
     summary: Mutex<UsageSummary>,
+    tail_repaired: std::sync::atomic::AtomicBool,
 }
 
 impl UsageJournal {
@@ -171,6 +172,7 @@ recovering salvageable records",
             write_lock: Mutex::new(()),
             active_turn: Mutex::new(None),
             summary: Mutex::new(summary),
+            tail_repaired: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -264,8 +266,8 @@ recovering salvageable records",
         let mut line = serde_json::to_vec(record)?;
         line.push(b'\n');
         // 单缓冲区追加（含换行）：序列化/写文件半途失败留下的无换行尾行
-        // 由下一次 append 前的修复处理，不会粘坏后续记录。
-        crate::session::jsonl::append_line(&self.path, &line, false)?;
+        // 由首个/异常后的修复处理，不会粘坏后续记录。
+        crate::session::jsonl::append_line_checked(&self.path, &line, false, &self.tail_repaired)?;
         let mut summary = self
             .summary
             .lock()

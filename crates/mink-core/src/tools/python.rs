@@ -180,6 +180,7 @@ impl super::runner::ToolExec for PythonTool {
             presentation: None,
             structured_value: None,
             termination: Some(termination),
+            file_summary_metrics: None,
         })
     }
 }

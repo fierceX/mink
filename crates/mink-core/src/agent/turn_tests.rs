@@ -212,6 +212,32 @@ async fn abort_replan_success_clears_signal_recovery_guard() {
     assert!(decision.is_none());
     assert!(!executor.local.signal_recovery_guard);
     assert!(!executor.local.guard_bypassed);
+    assert_eq!(executor.local.warning_count, 0);
+    assert_eq!(executor.local.guard_blocks, 0);
+}
+
+#[tokio::test]
+async fn signal_recovery_guard_resets_guard_blocks_on_allowed_inspection() {
+    let ctx = crate::regression::test_context_for_agent("guard-blocks-reset")
+        .await
+        .unwrap();
+    let mut executor = TurnExecutor::new(ctx);
+    executor.local.signal_recovery_guard = true;
+    executor.local.guard_blocks = 2;
+
+    let read_call = crate::protocol::ToolCallEvent {
+        id: "read-1".into(),
+        name: "Read".into(),
+        input_json: serde_json::json!({"path": "Cargo.toml"}),
+        fields: Default::default(),
+        parse_error: None,
+        raw_arguments_digest: None,
+    };
+    let (allowed, blocked) = executor.apply_signal_recovery_guard(vec![read_call]);
+    assert_eq!(allowed.len(), 1);
+    assert!(blocked.is_empty());
+    assert!(!executor.local.signal_recovery_guard);
+    assert_eq!(executor.local.guard_blocks, 0);
 }
 
 #[tokio::test]

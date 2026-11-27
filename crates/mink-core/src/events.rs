@@ -298,6 +298,9 @@ pub enum EventLog {
     Stop {
         reason: String,
     },
+    GoalUpdated {
+        goal: Box<crate::session::goal::GoalSnapshot>,
+    },
     Retry,
     Error {
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -16,29 +16,13 @@ pub mod sdk_protocol;
 /// tool, session, and LLM modules remain implementation details shared by the
 /// CLI binaries and the library runtime.
 pub mod prelude {
-    pub use crate::runtime::session::{
-        TokenUsage, UsageKind, UsageRecord, UsageStatus, UsageSummary,
-    };
+    pub use crate::runtime::goal::GoalController;
     pub use crate::runtime::{
         AgentEvent, AgentEventKind, AgentEventStream, AgentOptions, AgentRuntime,
-        AgentRuntimeHandle, AgentTool, ApprovalTier, CapabilityExposure, CompactOutcome,
-        ContextPolicy, EditMode, EventSink, GenerationOptions, LlmBackend, LlmCacheProjection,
-        LlmCancelToken, LlmErrorEvent, LlmEvent, LlmEventStream, LlmPurpose, LlmRecoveryPolicy,
-        LlmRequest, LlmRequestFailure, LlmResponseStream, LlmRetryEvent, LlmStopEvent,
-        LlmTextEvent, LlmThinkingEvent, LlmToolCallEvent, LlmUpstreamError, LlmUsageEvent,
-        LoadedSkill, ModelResolver, OpenAiCompatibleBackend, OpenAiCompatibleOptions, OutputFormat,
-        PostInitContext, PostInitHook, PrefixSource, ProviderOptions, PtcBackendKind,
-        PtcBindingDispatcher, PtcBindingError, PtcBindingSuccess, PtcConfig, PtcFailureKind,
-        PtcImageDescriptor, PtcMode, PtcOutputItem, PtcRunDisplay, PtcRunFailure, PtcRunRequest,
-        PtcRunResult, PtcRunSpec, PtcRuntime, PtcSubCallDisplay, ReadOnlyFileSystem, ResolvedModel,
-        ResourceHandler, RuntimeError, RuntimeSkill, SandboxConfig, SandboxPythonConfig,
-        SessionEvent, SessionEventBatch, SessionEventSink, SessionInfo, SessionLayout,
-        SessionPolicy, SignalPolicy, SkillCapability, SkillDiscoveryPolicy, SkillLoadContext,
-        SkillProvider, SourceLevel, SourceMeta, TokenParamKind, ToolActivation, ToolApprovalMode,
-        ToolApprovalPolicy, ToolCapabilityOffer, ToolDefinition, ToolError, ToolExecutionContext,
-        ToolExecutionMode, ToolOptions, ToolOutput, ToolSemanticCapability, TurnFailureReason,
-        TurnId, TurnOutcome, TurnStatus, UpstreamFailureKind, VfsGlobRequest, VfsGlobResult,
-        VfsGrepEntry, VfsGrepRequest, VfsGrepResult, VfsReadRequest, VfsReadResult, VfsScope,
+        AgentRuntimeHandle, AgentTool, CompactOutcome, EventSink, LlmBackend, ModelSwitchOutcome,
+        OpenAiCompatibleBackend, RuntimeError, RuntimeResult, SessionEvent, SessionEventSink,
+        SessionInfo, SessionPolicy, SessionReader, ToolError, ToolOutput, TurnFailureReason,
+        TurnId, TurnOutcome, TurnStatus,
     };
 }
 

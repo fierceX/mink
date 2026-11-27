@@ -231,11 +231,12 @@ impl CompactionEngine {
     pub async fn active_messages(&self) -> Result<Vec<Value>> {
         let state = self.current_state()?;
         let mut messages = self.store.lines_from(state.active_start).await?;
-        self.prepend_dynamic_checkpoints(&mut messages, &state)?;
+        self.prepend_dynamic_checkpoints_async(&mut messages, &state)
+            .await?;
         Ok(messages)
     }
 
-    fn prepend_dynamic_checkpoints(
+    async fn prepend_dynamic_checkpoints_async(
         &self,
         messages: &mut Vec<Value>,
         state: &CompactionState,
@@ -243,10 +244,33 @@ impl CompactionEngine {
         if state.active_start == 0 {
             return Ok(());
         }
-        let mut checkpoints = self.checkpoint_prefix(&state.summary)?;
+        let mut checkpoints = self.checkpoint_prefix_async(&state.summary).await?;
         checkpoints.append(messages);
         *messages = checkpoints;
         Ok(())
+    }
+
+    async fn checkpoint_prefix_async(&self, summary: &str) -> Result<Vec<Value>> {
+        let mut checkpoints = Vec::new();
+        if !summary.trim().is_empty() {
+            checkpoints.push(compacted_summary_message(summary));
+        }
+        if let Some(plan) = read_active_plan_checkpoint_async(
+            &self.summary_path,
+            derived_display_tokens(&self.config),
+        )
+        .await?
+        {
+            checkpoints.push(plan);
+        }
+        if let Some(goals) = &self.goal_store
+            && let Some(checkpoint) = goals.checkpoint(
+                crate::runtime::goal::goal_projection_chars(self.config.max_context_tokens),
+            )?
+        {
+            checkpoints.push(checkpoint);
+        }
+        Ok(checkpoints)
     }
 
     /// 动态 checkpoint 前缀（摘要 + 权威 plan/goal 派生片段）。权威投影与候选验收必须共用

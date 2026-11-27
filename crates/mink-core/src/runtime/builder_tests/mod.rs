@@ -1506,8 +1506,8 @@ impl AgentRuntimeHandle {
             .deadline_unix_secs
             .saturating_sub(crate::session::goal::goal_now())
             .max(1);
-        let draft = self.draft_goal(spec, duration)?;
-        self.confirm_goal(&draft.id, draft.revision)
+        let draft = self.goals().draft(spec, duration)?;
+        self.goals().confirm(&draft.id, draft.revision)
     }
     fn confirmed_test_goal_with_lease(
         &self,
@@ -1530,8 +1530,9 @@ impl AgentRuntimeHandle {
             .deadline_unix_secs
             .saturating_sub(crate::session::goal::goal_now())
             .max(1);
-        let draft = self.draft_goal(spec, duration)?;
-        self.confirm_and_start_goal(&draft.id, draft.revision, lease)
+        let draft = self.goals().draft(spec, duration)?;
+        self.goals()
+            .confirm_and_start(&draft.id, draft.revision, lease)
     }
 }
 

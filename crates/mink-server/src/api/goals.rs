@@ -144,7 +144,7 @@ pub(super) async fn create_goal(
     spec.constraints = body.constraints.clone();
     spec.acceptance = match body.acceptance.as_str() {
         "human" => mink::runtime::GoalAcceptance::Human,
-        "verifier" => match handle.goal_verifier_ids().into_iter().next() {
+        "verifier" => match handle.goals().verifier_ids().into_iter().next() {
             Some(id) => mink::runtime::GoalAcceptance::Verifier { id },
             None => return ApiResponse::err(409, "no goal verifier is configured"),
         },
@@ -160,7 +160,7 @@ pub(super) async fn create_goal(
         spec.suggested_actions = draft.suggested_actions.clone();
         spec.acceptance_criteria = spec.criteria.iter().map(|c| c.outcome.clone()).collect();
     }
-    spec.checker_id = handle.goal_verifier_ids().into_iter().next();
+    spec.checker_id = handle.goals().verifier_ids().into_iter().next();
     let mut limits = spec.limits.clone();
     if let Some(turns) = body.max_turns {
         limits.max_turns = turns;
@@ -193,7 +193,8 @@ pub(super) async fn create_goal(
     // before the driver is armed, so a refused create never starts a goal the
     // request was not about.
     if handle
-        .goal_snapshot()
+        .goals()
+        .snapshot()
         .is_some_and(|goal| !goal.status.is_terminal())
     {
         return ApiResponse::err(409, "session already has an unfinished goal");
@@ -208,9 +209,9 @@ pub(super) async fn create_goal(
     };
     let duration_secs = body.max_minutes.unwrap_or(60).saturating_mul(60);
     let proposed = if body.generate == Some(false) {
-        handle.draft_goal(spec, duration_secs)
+        handle.goals().draft(spec, duration_secs)
     } else {
-        handle.request_goal_draft(spec, duration_secs)
+        handle.goals().request_draft(spec, duration_secs)
     };
     let draft = match proposed {
         Ok(draft) => draft,
@@ -245,7 +246,8 @@ async fn generate_draft(
         // Keep both guards with the worker even if the HTTP client disconnects.
         let _guards = (operation, lease);
         handle
-            .generate_goal_draft_at_with_timeout(&id, revision, &feedback, Some(timeout))
+            .goals()
+            .generate_draft_at_with_timeout(&id, revision, &feedback, Some(timeout))
             .await
     });
     match task.await {
@@ -353,7 +355,7 @@ pub(super) async fn goal_action(
             soft_token_limit: None,
         },
     };
-    let current = match handle.goal_snapshot() {
+    let current = match handle.goals().snapshot() {
         Some(goal) => goal,
         None => return ApiResponse::err(404, "session has no goal"),
     };
@@ -380,7 +382,7 @@ pub(super) async fn goal_action(
                 Ok(guard) => guard,
                 Err(error) => return registry_error(error),
             };
-            let current = match handle.goal_snapshot() {
+            let current = match handle.goals().snapshot() {
                 Some(goal) => goal,
                 None => return ApiResponse::err(404, "session has no goal"),
             };
@@ -410,7 +412,7 @@ pub(super) async fn goal_action(
             state
                 .registry
                 .mark_goal_draining(&id, query.project.as_deref());
-            handle.pause_goal(&current.id, revision)
+            handle.goals().pause(&current.id, revision)
         }
         "confirm" | "resume" => {
             // A reopened session starts with scheduling disabled, so an
@@ -436,31 +438,42 @@ pub(super) async fn goal_action(
                 Ok(lease) => lease,
                 Err(error) => return registry_error(error),
             };
-            if let Err(error) = handle.start_goal_driver() {
+            if let Err(error) = handle.goals().start_driver() {
                 // The lease is dropped here: the driver could not be armed.
                 return ApiResponse::err(409, format!("{error}"));
             }
             if action == "confirm" {
-                handle.confirm_and_start_goal(&current.id, revision, Box::new(lease))
+                handle
+                    .goals()
+                    .confirm_and_start(&current.id, revision, Box::new(lease))
             } else {
-                handle.resume_and_start_goal(&current.id, revision, Box::new(lease))
+                handle
+                    .goals()
+                    .resume_and_start(&current.id, revision, Box::new(lease))
             }
         }
         "cancel" => {
             state
                 .registry
                 .mark_goal_draining(&id, query.project.as_deref());
-            handle.cancel_goal(&current.id, revision)
+            handle.goals().cancel(&current.id, revision)
         }
-        "clear" => handle.clear_goal(&current.id, revision),
-        "approve" => handle.approve_goal(
+        "clear" => handle.goals().clear(&current.id, revision),
+        "approve" => {
+            handle
+                .goals()
+                .approve_async(
+                    &current.id,
+                    revision,
+                    vec![body.evidence.unwrap_or_default()],
+                )
+                .await
+        }
+        "reconcile" => handle.goals().reconcile_effects(
             &current.id,
             revision,
-            vec![body.evidence.unwrap_or_default()],
+            body.evidence.unwrap_or_default(),
         ),
-        "reconcile" => {
-            handle.reconcile_goal_effects(&current.id, revision, body.evidence.unwrap_or_default())
-        }
         "budget" => {
             let mut limits = current.spec.limits.clone();
             if let Some(turns) = body.max_turns {
@@ -472,7 +485,7 @@ pub(super) async fn goal_action(
             if let Some(limit) = body.soft_token_limit {
                 limits.soft_token_limit = limit;
             }
-            handle.update_goal_limits(&current.id, revision, limits)
+            handle.goals().update_limits(&current.id, revision, limits)
         }
         other => return ApiResponse::err(404, format!("unknown goal action {other}")),
     };

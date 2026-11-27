@@ -36,6 +36,24 @@ pub struct GoalStore {
 }
 
 impl GoalStore {
+    fn clear_journal(journal: &Path, fault: &PersistenceFault) -> Result<()> {
+        match std::fs::remove_file(journal) {
+            Ok(()) => {
+                if let Err(error) = crate::session::atomic_file::sync_parent(journal) {
+                    return Err(fault.raise(
+                        journal,
+                        format!("goal journal cleanup sync failed: {error:#}"),
+                    ));
+                }
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => {
+                Err(fault.raise(journal, format!("goal journal cleanup failed: {error:#}")))
+            }
+        }
+    }
+
     pub(crate) fn load(directory: &Path, fault: PersistenceFault) -> Result<Self> {
         let path = directory.join("goal.json");
         let journal = directory.join("goal-transaction.json");
@@ -76,6 +94,7 @@ impl GoalStore {
                 goal.normalize_phase();
             }
             publish_state(&path, &serde_json::to_vec(&pending)?, &fault)?;
+            Self::clear_journal(&journal, &fault)?;
             state = pending;
         }
         ensure!(
@@ -120,6 +139,7 @@ impl GoalStore {
                 format!("goal journal committed, snapshot publication failed: {error:#}"),
             ));
         }
+        Self::clear_journal(&self.journal, &self.fault)?;
         *state = next;
         self.changes.send_replace(state.current.clone());
         Ok(())
@@ -544,6 +564,28 @@ impl GoalStore {
             });
             Ok(())
         })
+    }
+
+    /// Roll back an iteration record that failed before reaching the orchestrator.
+    pub(crate) fn abort_unstarted_iteration(
+        &self,
+        goal_id: &str,
+        iteration: u32,
+        turn_id: &str,
+    ) -> Result<()> {
+        self.update(|g| {
+            if g.id == goal_id
+                && g.phase == GoalPhase::Executing
+                && g.iterations.last().is_some_and(|last| {
+                    last.iteration == iteration && last.turn_id == turn_id && !last.finished
+                })
+            {
+                g.iterations.pop();
+                g.phase = GoalPhase::Idle;
+            }
+            Ok(())
+        })?;
+        Ok(())
     }
 
     /// Associate the running iteration with the turn that bills it.

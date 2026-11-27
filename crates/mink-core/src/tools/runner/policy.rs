@@ -43,6 +43,7 @@ pub(super) struct ToolExecOutput {
     pub(super) presentation: Option<ToolPresentation>,
     pub(super) structured_value: Option<serde_json::Value>,
     pub(super) failure_source: Option<ToolFailureSource>,
+    pub(super) file_summary_metrics: Option<(usize, usize)>,
 }
 
 impl ToolExecOutput {
@@ -71,6 +72,7 @@ impl ToolExecOutput {
             presentation: None,
             structured_value: None,
             failure_source: None,
+            file_summary_metrics: None,
         }
     }
 }

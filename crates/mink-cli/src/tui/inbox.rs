@@ -56,7 +56,7 @@ impl TuiState {
                 .admission
                 .runtime
                 .as_ref()
-                .expect("TUI runtime")
+                .ok_or_else(|| anyhow::anyhow!("TUI runtime unavailable"))?
                 .signals
                 .clone();
             tx.send(RuntimeCmd::RenderTuiStream { stream, signals })
@@ -91,7 +91,13 @@ impl TuiState {
         if tx.is_closed() {
             anyhow::bail!("Runtime channel closed; draft kept.")
         }
-        let runtime = &self.admission.runtime.as_ref().expect("TUI runtime").handle;
+        let runtime = self
+            .admission
+            .runtime
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("TUI runtime unavailable"))?
+            .handle
+            .clone();
         let request_id = format!(
             "tui-{:x}",
             std::time::SystemTime::now()
@@ -119,6 +125,7 @@ impl TuiState {
                 })
                 .collect(),
         };
+        let draft = self.input.draft_snapshot();
         if let Some(ui_tx) = self.async_load.ui_tx.clone() {
             self.admission.admission_pending = true;
             self.admission.admission_cancelled = false;
@@ -127,12 +134,8 @@ impl TuiState {
             }
             self.viewport.auto_scroll = true;
             self.viewport.anchor = None;
-            let runtime = runtime.clone();
-            let handle = tokio::runtime::Handle::current();
             let tx = tx.clone();
-            let draft = self.input.draft_snapshot();
-            std::thread::spawn(move || {
-                let _entered = handle.enter();
+            crate::tui::spawn_blocking_work(move || {
                 let result = runtime
                     .stream_input(input)
                     .map_err(|e| format!("Input rejected: {e}"));
@@ -147,33 +150,13 @@ impl TuiState {
             });
             return Ok(());
         }
-        let (receipt, stream) = runtime.stream_input(input)?;
-        self.accept_stream(&receipt, stream, tx)?;
-        if !receipt.guidance {
-            self.finalize_stream();
-            let shown = if web_command {
-                self.input.buf.clone()
-            } else {
-                display_user_input(&self.input.buf, &self.input.pending_images)
-            };
-            self.push_line(TranscriptItem::new(
-                format!("> {shown}"),
-                TranscriptKind::Info,
-            ));
-        }
-        if !self.input.buf.is_empty() {
-            let entry = self.input.buf.clone();
-            self.input.push_history(entry);
-        }
-        self.input.buf.clear();
-        self.input.cursor = 0;
-        if !web_command {
-            self.input.pending_images.clear();
-        }
-        self.input.history_idx = None;
-        self.admission.input_notice = None;
-        self.input.undo.clear();
-        self.input.redo.clear();
+        let result = runtime.stream_input(input)?;
+        self.finish_admission(AdmissionResult {
+            draft,
+            result: Ok(result),
+            tx: tx.clone(),
+            action: AdmissionAction::Submit,
+        });
         self.viewport.auto_scroll = true;
         self.viewport.anchor = None;
         Ok(())
@@ -280,7 +263,11 @@ impl TuiState {
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
     ) -> anyhow::Result<()> {
-        let (id, revision) = self.admission.edit_input.clone().expect("edit target");
+        let (id, revision) = self
+            .admission
+            .edit_input
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("no input selected for editing"))?;
         let runtime = self
             .admission
             .runtime
@@ -292,7 +279,7 @@ impl TuiState {
         if let Some(ui_tx) = self.async_load.ui_tx.clone() {
             self.admission.admission_pending = true;
             let tx = tx.clone();
-            std::thread::spawn(move || {
+            crate::tui::spawn_blocking_work(move || {
                 let result = runtime
                     .input_inbox()
                     .update(&id, revision, Some(draft.buf.clone()))
@@ -369,10 +356,8 @@ impl TuiState {
                     }
                     let tx = tx.clone();
                     let draft = self.input.draft_snapshot();
-                    let handle = tokio::runtime::Handle::current();
                     let id = id.clone();
-                    std::thread::spawn(move || {
-                        let _entered = handle.enter();
+                    crate::tui::spawn_blocking_work(move || {
                         let result = if resume {
                             runtime
                                 .resume_input(&id, receipt.revision)
@@ -387,7 +372,7 @@ impl TuiState {
                         let _ = ui_tx.send(super::state::TuiUiEvent::Admission(Box::new(
                             AdmissionResult {
                                 draft,
-                                result: result.map_err(|e| e.to_string()),
+                                result,
                                 tx,
                                 action: if resume {
                                     AdmissionAction::Resume
@@ -399,6 +384,7 @@ impl TuiState {
                     });
                     return Ok(());
                 }
+                let draft = self.input.draft_snapshot();
                 if matches!(command, SlashCommand::Resume(_)) {
                     if self.stream.active_turn_id.is_some()
                         || self.stream.work_state.is_working()
@@ -406,16 +392,23 @@ impl TuiState {
                     {
                         anyhow::bail!("Cannot resume while working or disconnected.")
                     }
-                    let (receipt, stream) = runtime.resume_input(id, receipt.revision)?;
-                    self.accept_stream(&receipt, stream, tx)?;
-                    self.finalize_stream();
-                    self.push_line(TranscriptItem::new(
-                        format!("> {}", compact_user_input_for_display(&receipt.input.text)),
-                        TranscriptKind::Info,
-                    ));
+                    let result = runtime.resume_input(id, receipt.revision)?;
+                    self.finish_admission(AdmissionResult {
+                        draft,
+                        result: Ok(result),
+                        tx: tx.clone(),
+                        action: AdmissionAction::Resume,
+                    });
+                    self.viewport.auto_scroll = true;
+                    self.viewport.anchor = None;
                 } else {
-                    runtime.input_inbox().update(id, receipt.revision, None)?;
-                    self.refresh_inputs();
+                    let receipt = runtime.input_inbox().update(id, receipt.revision, None)?;
+                    self.finish_admission(AdmissionResult {
+                        draft,
+                        result: Ok((receipt, None)),
+                        tx: tx.clone(),
+                        action: AdmissionAction::Update,
+                    });
                 }
             }
             _ => unreachable!("inbox command"),

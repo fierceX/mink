@@ -32,7 +32,20 @@ pub use signal::TuiSignal;
 #[derive(Clone)]
 pub struct TuiRuntime {
     pub handle: crate::runtime::AgentRuntimeHandle,
-    pub signals: std::sync::mpsc::Sender<TuiSignal>,
+    pub signals: tokio::sync::mpsc::UnboundedSender<TuiSignal>,
+}
+
+/// Runs blocking TUI background work on Tokio's blocking pool when inside a
+/// runtime, falling back to an OS thread for synchronous unit tests.
+pub(crate) fn spawn_blocking_work<F>(work: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn_blocking(work);
+    } else {
+        std::thread::spawn(work);
+    }
 }
 
 use crate::cli::RuntimeCmd;
@@ -47,12 +60,12 @@ use replay::load_session;
 use signal::drain_signals;
 use state::{TuiState, short_cwd_label};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 pub async fn run_tui(
     mode: TuiMode,
-    sig_rx: mpsc::Receiver<TuiSignal>,
+    sig_rx: mpsc::UnboundedReceiver<TuiSignal>,
     orch_tx: tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
     session: &crate::runtime::SessionInfo,
     initial_model: &str,
@@ -71,7 +84,7 @@ pub async fn run_tui(
 }
 
 async fn run_full_tui(
-    sig_rx: mpsc::Receiver<TuiSignal>,
+    sig_rx: mpsc::UnboundedReceiver<TuiSignal>,
     orch_tx: tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
     session: &crate::runtime::SessionInfo,
     initial_model: &str,
@@ -109,7 +122,7 @@ async fn run_full_tui(
 }
 
 async fn run_inline_tui(
-    sig_rx: mpsc::Receiver<TuiSignal>,
+    sig_rx: mpsc::UnboundedReceiver<TuiSignal>,
     orch_tx: tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
     session: &crate::runtime::SessionInfo,
     initial_model: &str,
@@ -163,7 +176,7 @@ async fn run_inline_tui(
 
 async fn tui_main_loop(
     terminal: &mut ratatui::DefaultTerminal,
-    sig_rx: mpsc::Receiver<TuiSignal>,
+    mut sig_rx: mpsc::UnboundedReceiver<TuiSignal>,
     runtime: (tokio::sync::mpsc::UnboundedSender<RuntimeCmd>, TuiRuntime),
     mode: TuiMode,
     session: &crate::runtime::SessionInfo,
@@ -172,7 +185,18 @@ async fn tui_main_loop(
 ) -> anyhow::Result<()> {
     let (orch_tx, runtime) = runtime;
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let (ui_tx, ui_rx) = mpsc::channel::<state::TuiUiEvent>();
+    let session_dir = session
+        .events_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    let reader_for_limits = crate::runtime::session::SessionReader::new(&session_dir);
+    let initial_image_input =
+        tokio::task::spawn_blocking(move || reader_for_limits.read_image_limits())
+            .await
+            .ok()
+            .flatten();
+    let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<state::TuiUiEvent>();
     let mut state = TuiState {
         async_load: state::AsyncLoadState {
             loading_history: true,
@@ -180,15 +204,11 @@ async fn tui_main_loop(
             ..Default::default()
         },
         mirrors: state::SessionMirrors {
-            session_dir: session
-                .events_path
-                .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .to_path_buf(),
+            session_dir,
             cwd_label: short_cwd_label(),
             artifacts_dir: session.artifacts_dir.clone(),
             attachments_dir: attachments_dir(session),
-            image_input: load_image_limits(session),
+            image_input: initial_image_input,
             model: initial_model.to_string(),
             ..Default::default()
         },
@@ -200,7 +220,7 @@ async fn tui_main_loop(
         ..Default::default()
     };
     let snapshot = session.clone();
-    std::thread::spawn(move || {
+    spawn_blocking_work(move || {
         let loaded = replay::load_session_history(&snapshot.events_path);
         let mut history = TuiState {
             transcript: state::TranscriptState {
@@ -217,8 +237,6 @@ async fn tui_main_loop(
         });
     });
     state.refresh_inputs();
-    let mut sig_rx = async_receiver(sig_rx);
-    let mut ui_rx = async_receiver(ui_rx);
     let mut events = crossterm::event::EventStream::new();
     use futures::StreamExt;
     let mut saved_inline_terminal = None;
@@ -231,7 +249,7 @@ async fn tui_main_loop(
             if let Some(runtime) = &state.admission.runtime {
                 // UI and input wiring are ready: enable scheduling and pick up
                 // a goal the previous session left active.
-                runtime.handle.start_goal_driver_and_run()?;
+                runtime.handle.goals().start_driver_and_run()?;
             }
             goal_driver_started = true;
         }
@@ -346,20 +364,6 @@ fn process_signal_batch(
     (changed, immediate)
 }
 
-/// Preserve reliable ordering while waking the async loop from Display's sync API.
-/// Bounded forwarding prevents a second unbounded progress queue.
-fn async_receiver<T: Send + 'static>(rx: mpsc::Receiver<T>) -> tokio::sync::mpsc::Receiver<T> {
-    let (tx, receiver) = tokio::sync::mpsc::channel(1024);
-    std::thread::spawn(move || {
-        while let Ok(event) = rx.recv() {
-            if tx.blocking_send(event).is_err() {
-                break;
-            }
-        }
-    });
-    receiver
-}
-
 /// Whether this process pushed the progressive keyboard enhancement flags.
 /// The panic hook and the restore guards share it so neither emits a stray pop
 /// on a terminal that never enabled the protocol.
@@ -450,21 +454,6 @@ fn attachments_dir(session: &crate::runtime::SessionInfo) -> std::path::PathBuf 
         .unwrap_or_default()
 }
 
-/// Read the frozen image capability from the session snapshot. A missing or
-/// text-only snapshot disables clipboard paste (fail closed).
-fn load_image_limits(
-    session: &crate::runtime::SessionInfo,
-) -> Option<crate::runtime::OpenAiChatImageUrlLimits> {
-    #[derive(serde::Deserialize)]
-    struct Snapshot {
-        image_input: crate::runtime::ImageInputCapability,
-    }
-    let dir = session.events_path.parent()?;
-    let raw = std::fs::read_to_string(dir.join("model-capabilities.json")).ok()?;
-    let snapshot: Snapshot = serde_json::from_str(&raw).ok()?;
-    snapshot.image_input.limits().cloned()
-}
-
 fn preferred_inline_height() -> u16 {
     crossterm::terminal::size()
         .map(|(_, height)| height.saturating_sub(4).clamp(8, 12))
@@ -511,47 +500,43 @@ fn sync_inline_terminal_mode(
 }
 
 fn load_persisted_state(session: &crate::runtime::SessionInfo, state: &mut TuiState) {
-    use crate::session::todo::{TodoSnapshot, TodoStatus};
+    use crate::session::todo::TodoStatus;
     use crate::ui::{
         PlanDisplay, PlanTransitionDisplay, TodoCountsDisplay, TodoDisplay, TodoItemDisplay,
         TodoStatusDisplay,
     };
 
-    let plan = std::fs::read_to_string(&session.plan_draft_path)
-        .ok()
-        .filter(|content| !content.trim().is_empty())
+    let Some(dir) = session.events_path.parent() else {
+        return;
+    };
+    let snapshot = crate::runtime::session::SessionReader::new(dir).read_ui_snapshot();
+    state.mirrors.plan = snapshot
+        .plan_draft
         .map(|content| PlanDisplay {
             transition: PlanTransitionDisplay::DraftSaved,
             content: Some(content),
         })
         .or_else(|| {
-            std::fs::read_to_string(&session.plan_path)
-                .ok()
-                .filter(|content| !content.trim().is_empty())
-                .map(|content| PlanDisplay {
-                    transition: PlanTransitionDisplay::Confirmed,
-                    content: Some(content),
-                })
+            snapshot.plan_active.map(|content| PlanDisplay {
+                transition: PlanTransitionDisplay::Confirmed,
+                content: Some(content),
+            })
         });
-    state.mirrors.plan = plan;
 
     // Read-only goal mirror: a resumed session must show its unfinished goal
     // in the status bar before the driver emits anything.
-    state.mirrors.goal = mink::runtime::session::read_goal_snapshot(&session.goal_path())
+    state.mirrors.goal = snapshot
+        .goal
         .as_ref()
         .map(crate::ui::GoalDisplay::from)
         .filter(|goal| !goal.hidden);
 
-    let Ok(bytes) = std::fs::read(&session.todos_path) else {
-        state.mirrors.todos = None;
-        return;
-    };
-    let Ok(snapshot) = serde_json::from_slice::<TodoSnapshot>(&bytes) else {
+    let Some(todos) = snapshot.todos else {
         state.mirrors.todos = None;
         return;
     };
     let (pending, in_progress, completed) =
-        snapshot
+        todos
             .items
             .iter()
             .fold((0, 0, 0), |counts, item| match item.status {
@@ -560,13 +545,13 @@ fn load_persisted_state(session: &crate::runtime::SessionInfo, state: &mut TuiSt
                 TodoStatus::Completed => (counts.0, counts.1, counts.2 + 1),
             });
     state.mirrors.todos = Some(TodoDisplay {
-        revision: snapshot.revision,
+        revision: todos.revision,
         counts: TodoCountsDisplay {
             pending,
             in_progress,
             completed,
         },
-        items: snapshot
+        items: todos
             .items
             .into_iter()
             .map(|item| TodoItemDisplay {

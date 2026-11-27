@@ -31,6 +31,7 @@ pub struct MemoCandidate {
     pub raw: bool,
     pub start_line: Option<usize>,
     pub end_line: Option<usize>,
+    pub content_hash: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -55,6 +56,9 @@ pub struct ToolOutcome {
     /// Structured process termination, set by command tools (Bash/Python).
     /// Runner failure classification prefers this over output text.
     pub(crate) termination: Option<crate::tools::process::ProcessTermination>,
+    /// Optional `(line_count, byte_count)` precomputed by Read/Write tools to
+    /// skip a redundant disk re-read when rendering the summary header.
+    pub file_summary_metrics: Option<(usize, usize)>,
 }
 
 impl ToolOutcome {
@@ -73,6 +77,7 @@ impl ToolOutcome {
             presentation: None,
             structured_value: None,
             termination: None,
+            file_summary_metrics: None,
         }
     }
 

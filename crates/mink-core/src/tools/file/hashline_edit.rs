@@ -8,9 +8,46 @@ use similar::TextDiff;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-fn move_file_noclobber(source: &Path, destination: &Path, replacement: Option<&str>) -> Result<()> {
+fn is_cross_device_error(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::CrossesDevices {
+        return true;
+    }
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(libc::EXDEV) {
+        return true;
+    }
+    false
+}
+
+fn publish_moved_file(source: &Path, destination: &Path, replacement: Option<&str>) -> Result<()> {
     use std::io::Write as _;
 
+    let source_permissions = std::fs::metadata(source)
+        .map(|metadata| metadata.permissions())
+        .ok();
+    let (mut file, temporary) =
+        stage_temp_file(destination, "mink-move", source_permissions.is_some())?;
+    let operation = (|| -> Result<()> {
+        if let Some(permissions) = source_permissions {
+            file.set_permissions(permissions)?;
+        }
+        if let Some(content) = replacement {
+            file.write_all(content.as_bytes())?;
+        } else {
+            let mut src = std::fs::File::open(source)?;
+            std::io::copy(&mut src, &mut file)?;
+        }
+        file.sync_all()?;
+        // hard_link is the portable no-clobber publication primitive used
+        // here: it fails if destination appeared after preflight.
+        std::fs::hard_link(&temporary, destination)?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&temporary);
+    operation
+}
+
+fn move_file_noclobber(source: &Path, destination: &Path, replacement: Option<&str>) -> Result<()> {
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
     ensure!(
@@ -19,27 +56,14 @@ fn move_file_noclobber(source: &Path, destination: &Path, replacement: Option<&s
         destination.display()
     );
 
-    if let Some(content) = replacement {
-        let source_permissions = std::fs::metadata(source)
-            .map(|metadata| metadata.permissions())
-            .ok();
-        let (mut file, temporary) =
-            stage_temp_file(destination, "mink-move", source_permissions.is_some())?;
-        let operation = (|| -> Result<()> {
-            if let Some(permissions) = source_permissions {
-                file.set_permissions(permissions)?;
-            }
-            file.write_all(content.as_bytes())?;
-            file.sync_all()?;
-            // hard_link is the portable no-clobber publication primitive used
-            // here: it fails if destination appeared after preflight.
-            std::fs::hard_link(&temporary, destination)?;
-            Ok(())
-        })();
-        let _ = std::fs::remove_file(&temporary);
-        operation?;
-    } else {
-        std::fs::hard_link(source, destination)?;
+    if replacement.is_some() {
+        publish_moved_file(source, destination, replacement)?;
+    } else if let Err(error) = std::fs::hard_link(source, destination) {
+        if is_cross_device_error(&error) {
+            publish_moved_file(source, destination, None)?;
+        } else {
+            return Err(error.into());
+        }
     }
 
     if let Err(error) = std::fs::remove_file(source) {
@@ -120,6 +144,16 @@ pub(crate) fn execute_hashline_edit(
             canonical.display()
         );
         store.begin_noop_attempt(&canonical, &args.input);
+        let meta = std::fs::metadata(&canonical)
+            .map_err(|error| anyhow!("Error: cannot read {}: {error}", canonical.display()))?;
+        let max_bytes = u64::try_from(ctx.file_write_max_bytes).unwrap_or(u64::MAX);
+        ensure!(
+            meta.len() <= max_bytes,
+            "Error: file too large for Edit ({} bytes > {} bytes): {}",
+            meta.len(),
+            ctx.file_write_max_bytes,
+            canonical.display()
+        );
         let original = std::fs::read_to_string(&canonical)
             .map_err(|error| anyhow!("Error: cannot read {}: {error}", canonical.display()))?;
         ensure!(

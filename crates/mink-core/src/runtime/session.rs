@@ -106,6 +106,76 @@ pub struct SessionUsage {
     pub last_context_tokens: u64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum GoalBoundaryEvent {
+    Card(Box<crate::session::goal::GoalMessage>),
+    Ended { goal_id: String, revision: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedGuidanceEvent {
+    pub input_id: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum TranscriptEntry {
+    User {
+        text: String,
+        guidance: bool,
+    },
+    GoalCard(Box<crate::session::goal::GoalMessage>),
+    GoalEnded {
+        goal_id: String,
+        revision: u64,
+    },
+    Thinking(String),
+    Text(String),
+    ToolCall {
+        id: String,
+        name: String,
+        summary: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: Option<String>,
+        tool_name: String,
+        content: String,
+        status: Option<crate::tools::metadata::ToolStatus>,
+        exit_code: Option<i32>,
+        result_kind: crate::tools::metadata::ToolResultKind,
+        presentation: Option<crate::ui::ToolPresentation>,
+        artifacts: Vec<crate::ui::ArtifactDisplay>,
+    },
+    WebSource(String),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionUiSnapshot {
+    pub image_input: Option<crate::capabilities::model_capabilities::OpenAiChatImageUrlLimits>,
+    pub plan_draft: Option<String>,
+    pub plan_active: Option<String>,
+    pub goal: Option<GoalSnapshot>,
+    pub todos: Option<TodoSnapshot>,
+}
+
+fn is_internal_conversation_row(row: &serde_json::Value) -> bool {
+    if row["internal"] == true {
+        return true;
+    }
+    let metadata = &row["_mink"];
+    if metadata["internal"] == true {
+        return true;
+    }
+    metadata.get("todo_state_kind").is_some()
+        || metadata.get("plan_transaction_id").is_some()
+        || metadata.get("goal_state_kind").is_some()
+        || metadata
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|source| source.starts_with("goal_"))
+}
+
 impl SessionReader {
     /// Remove provider replay metadata before publishing a conversation row.
     pub fn redact_provider_replay(message: &mut serde_json::Value) {
@@ -360,6 +430,327 @@ impl SessionReader {
         crate::session::todo::TodoStore::load(self.directory.join("todos.json"))
             .map(|store| store.snapshot())
     }
+
+    /// Whether a committed conversation row contains structures that only
+    /// `conversation.jsonl` carries (guidance, goal boundaries, native web calls).
+    pub fn row_needs_conversation_replay(row: &serde_json::Value) -> bool {
+        let metadata = &row["_mink"];
+        metadata["guidance"] == true
+            || metadata.get("goal_message").is_some()
+            || metadata.get("goal_state_kind").is_some()
+            || row["content"]
+                .as_array()
+                .is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "deepseek_web"))
+    }
+
+    /// Decode a goal boundary carried on a committed conversation row, if any.
+    pub fn decode_goal_boundary(row: &serde_json::Value) -> Option<GoalBoundaryEvent> {
+        let metadata = row.get("_mink")?;
+        if let Some(raw) = metadata.get("goal_message") {
+            let parsed: crate::session::goal::GoalMessage =
+                serde_json::from_value(raw.clone()).ok()?;
+            return Some(GoalBoundaryEvent::Card(Box::new(parsed)));
+        }
+        if metadata
+            .get("goal_state_kind")
+            .and_then(serde_json::Value::as_str)
+            == Some("ended")
+        {
+            let goal_id = metadata
+                .get("goal_id")
+                .and_then(serde_json::Value::as_str)?
+                .to_string();
+            let revision = metadata
+                .get("goal_revision")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            return Some(GoalBoundaryEvent::Ended { goal_id, revision });
+        }
+        None
+    }
+
+    /// Decode an applied human guidance row from a committed conversation message.
+    pub fn decode_applied_guidance(row: &serde_json::Value) -> Option<AppliedGuidanceEvent> {
+        if row["role"] != "user" || row["_mink"]["guidance"] != true {
+            return None;
+        }
+        let input_id = row["_mink"]["input_id"].as_str()?.to_string();
+        let text = row["content"].as_str()?.to_string();
+        Some(AppliedGuidanceEvent { input_id, text })
+    }
+
+    /// Decode one committed conversation row into typed transcript entries.
+    pub fn decode_conversation_row(row: &serde_json::Value) -> Vec<TranscriptEntry> {
+        let mut entries = Vec::new();
+        if row["role"] == "user"
+            && let Some(text) = row["content"].as_str()
+        {
+            if let Some(boundary) = Self::decode_goal_boundary(row) {
+                match boundary {
+                    GoalBoundaryEvent::Card(message) => {
+                        entries.push(TranscriptEntry::GoalCard(message));
+                    }
+                    GoalBoundaryEvent::Ended { goal_id, revision } => {
+                        entries.push(TranscriptEntry::GoalEnded { goal_id, revision });
+                    }
+                }
+            } else if !is_internal_conversation_row(row) {
+                entries.push(TranscriptEntry::User {
+                    text: text.to_string(),
+                    guidance: row["_mink"]["guidance"] == true,
+                });
+            }
+        }
+        if let Some(blocks) = row["content"].as_array() {
+            let mut citations: Option<&Vec<serde_json::Value>> = None;
+            for block in blocks {
+                match block["type"].as_str() {
+                    Some("thinking") if row["role"] == "assistant" => {
+                        entries.push(TranscriptEntry::Thinking(
+                            block["thinking"].as_str().unwrap_or_default().to_string(),
+                        ));
+                    }
+                    Some("text") if row["role"] == "assistant" => {
+                        entries.push(TranscriptEntry::Text(
+                            block["text"].as_str().unwrap_or_default().to_string(),
+                        ));
+                    }
+                    Some("tool_use") if row["role"] == "assistant" => {
+                        let name = block["name"].as_str().unwrap_or_default().to_string();
+                        let id = block["id"].as_str().unwrap_or_default().to_string();
+                        let input = block["input"].clone();
+                        let summary = crate::session::store::build_tool_summary_from_json(
+                            &name,
+                            &serde_json::json!({ "input": &input }),
+                        );
+                        entries.push(TranscriptEntry::ToolCall {
+                            id,
+                            name,
+                            summary,
+                            input,
+                        });
+                    }
+                    Some("deepseek_web") if row["role"] == "assistant" => {
+                        for call in block["calls"].as_array().into_iter().flatten() {
+                            let (Some(id), Some(name)) =
+                                (call["id"].as_str(), call["tool"].as_str())
+                            else {
+                                continue;
+                            };
+                            let action = call["action"].clone();
+                            let summary = crate::session::store::build_tool_summary_from_json(
+                                name,
+                                &serde_json::json!({ "input": &action }),
+                            );
+                            entries.push(TranscriptEntry::ToolCall {
+                                id: id.to_string(),
+                                name: name.to_string(),
+                                summary,
+                                input: action,
+                            });
+                            let status = match call["status"].as_str() {
+                                Some("completed") => {
+                                    Some(crate::tools::metadata::ToolStatus::Succeeded)
+                                }
+                                Some("failed") => Some(crate::tools::metadata::ToolStatus::Failed(
+                                    crate::tools::metadata::ToolFailureKind::Unknown,
+                                )),
+                                _ => None,
+                            };
+                            entries.push(TranscriptEntry::ToolResult {
+                                tool_use_id: Some(id.to_string()),
+                                tool_name: name.to_string(),
+                                content: serde_json::to_string_pretty(call).unwrap_or_default(),
+                                status,
+                                exit_code: None,
+                                result_kind: crate::tools::metadata::ToolResultKind::Search,
+                                presentation: None,
+                                artifacts: Vec::new(),
+                            });
+                        }
+                        citations = block["citations"].as_array();
+                    }
+                    Some("tool_result") => {
+                        let metadata = &block["_mink"];
+                        let tool_name = metadata["tool_name"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
+                        let tool_use_id = block["tool_use_id"]
+                            .as_str()
+                            .or_else(|| metadata["tool_use_id"].as_str())
+                            .map(str::to_string);
+                        let content = block["content"].as_str().unwrap_or_default().to_string();
+                        let status = metadata
+                            .get("status")
+                            .cloned()
+                            .and_then(|v| serde_json::from_value(v).ok());
+                        let exit_code = metadata
+                            .get("exit_code")
+                            .and_then(serde_json::Value::as_i64)
+                            .and_then(|v| i32::try_from(v).ok());
+                        let result_kind = metadata
+                            .get("result_kind")
+                            .cloned()
+                            .and_then(|v| serde_json::from_value(v).ok())
+                            .unwrap_or(crate::tools::metadata::ToolResultKind::Text);
+                        let presentation = metadata
+                            .get("presentation")
+                            .cloned()
+                            .and_then(|v| serde_json::from_value(v).ok());
+                        let artifacts = metadata
+                            .get("artifacts")
+                            .cloned()
+                            .and_then(|v| serde_json::from_value(v).ok())
+                            .unwrap_or_default();
+                        entries.push(TranscriptEntry::ToolResult {
+                            tool_use_id,
+                            tool_name,
+                            content,
+                            status,
+                            exit_code,
+                            result_kind,
+                            presentation,
+                            artifacts,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            for citation in citations.into_iter().flatten() {
+                if let Some(url) = citation["url"].as_str() {
+                    entries.push(TranscriptEntry::WebSource(format!("[Web source] {url}")));
+                }
+            }
+        }
+        entries
+    }
+
+    /// Extract `(thinking, text)` from a child sub-agent assistant conversation row.
+    pub fn decode_subagent_assistant_output(row: &serde_json::Value) -> (String, String) {
+        if row["role"] != "assistant" {
+            return (String::new(), String::new());
+        }
+        let mut thinking = String::new();
+        let mut text = String::new();
+        if let Some(blocks) = row["content"].as_array() {
+            for block in blocks {
+                match block["type"].as_str() {
+                    Some("text") => {
+                        if let Some(chunk) = block["text"].as_str() {
+                            text.push_str(chunk);
+                        }
+                    }
+                    Some("thinking") => {
+                        if let Some(chunk) = block["thinking"].as_str() {
+                            thinking.push_str(chunk);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        (thinking, text)
+    }
+
+    /// Read the frozen image input limits from `model-capabilities.json`, if present.
+    pub fn read_image_limits(
+        &self,
+    ) -> Option<crate::capabilities::model_capabilities::OpenAiChatImageUrlLimits> {
+        #[derive(serde::Deserialize)]
+        struct Snapshot {
+            image_input: crate::capabilities::model_capabilities::ImageInputCapability,
+        }
+        let raw = std::fs::read_to_string(self.directory.join("model-capabilities.json")).ok()?;
+        let snapshot: Snapshot = serde_json::from_str(&raw).ok()?;
+        snapshot.image_input.limits().cloned()
+    }
+
+    /// Read persisted UI mirrors (image limits, plan draft/active, goal, todos)
+    /// without exposing internal session filenames to consumers.
+    pub fn read_ui_snapshot(&self) -> SessionUiSnapshot {
+        let image_input = self.read_image_limits();
+        let plan_draft = std::fs::read_to_string(self.directory.join("plan.draft"))
+            .ok()
+            .filter(|content| !content.trim().is_empty());
+        let plan_active = std::fs::read_to_string(self.directory.join("plan.md"))
+            .ok()
+            .filter(|content| !content.trim().is_empty());
+        let goal = crate::session::goal::read_snapshot(&self.directory.join("goal.json"));
+        let todos = self.todo().ok();
+        SessionUiSnapshot {
+            image_input,
+            plan_draft,
+            plan_active,
+            goal,
+            todos,
+        }
+    }
+
+    /// Lazily derive and persist a session title in `session.json` from the first
+    /// non-internal user prompt in `conversation.jsonl` if no title exists yet.
+    pub async fn ensure_title(&self) -> Result<Option<String>> {
+        use tokio::io::AsyncBufReadExt as _;
+
+        let metadata_path = self.directory.join("session.json");
+        let conversation_path = self.directory.join("conversation.jsonl");
+        let Ok(metadata_text) = tokio::fs::read_to_string(&metadata_path).await else {
+            return Ok(None);
+        };
+        let Ok(mut metadata) = serde_json::from_str::<serde_json::Value>(&metadata_text) else {
+            return Ok(None);
+        };
+        if metadata
+            .get("title")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| !t.is_empty())
+        {
+            return Ok(None);
+        }
+        let Ok(file) = tokio::fs::File::open(&conversation_path).await else {
+            return Ok(None);
+        };
+        let mut reader = tokio::io::BufReader::new(file);
+        let mut line = String::new();
+        let title = loop {
+            line.clear();
+            let n = reader.read_line(&mut line).await?;
+            if n == 0 {
+                return Ok(None);
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(msg) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+            if msg.get("role").and_then(|v| v.as_str()) != Some("user")
+                || is_internal_conversation_row(&msg)
+            {
+                continue;
+            }
+            let Some(content) = msg.get("content").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if let Some(title) = crate::session::metadata::title_from_prompt(content) {
+                break title;
+            }
+        };
+        metadata["title"] = serde_json::Value::String(title.clone());
+        let now = time::OffsetDateTime::now_utc();
+        let fmt = time::format_description::well_known::Rfc3339;
+        metadata["updated_at"] = serde_json::Value::String(now.format(&fmt).unwrap_or_default());
+        if let Ok(text) = serde_json::to_string_pretty(&metadata) {
+            let payload = format!("{text}\n");
+            let path = metadata_path;
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = crate::session::atomic_file::atomic_replace(&path, payload.as_bytes());
+            })
+            .await;
+        }
+        Ok(Some(title))
+    }
 }
 
 pub fn title_from_prompt(prompt: &str) -> Option<String> {
@@ -602,6 +993,62 @@ mod reader_tests {
         std::fs::write(&path, "{broken}\n").unwrap();
         assert!(reader.conversation_turns(1, 1, true, None).is_err());
         assert!(reader.sub_agent("../escape").is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn typed_projection_helpers_decode_ui_snapshot_and_ensure_title() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-reader-typed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("session.json"),
+            r#"{"id":"s1","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","cwd":"/tmp"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("conversation.jsonl"),
+            concat!(
+                "{\"role\":\"user\",\"content\":\"internal checkpoint\",\"internal\":true}\n",
+                "{\"role\":\"user\",\"content\":\"ship typed session reader\"}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("plan.draft"), "1. design\n2. verify\n").unwrap();
+
+        let reader = SessionReader::new(&dir);
+        let snapshot = reader.read_ui_snapshot();
+        assert_eq!(
+            snapshot.plan_draft.as_deref(),
+            Some("1. design\n2. verify\n")
+        );
+        assert!(snapshot.plan_active.is_none());
+
+        let derived = reader.ensure_title().await.unwrap();
+        assert_eq!(derived.as_deref(), Some("ship typed session reader"));
+        let updated: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("session.json")).unwrap())
+                .unwrap();
+        assert_eq!(updated["title"], "ship typed session reader");
+
+        let guidance_row = serde_json::json!({
+            "role": "user",
+            "content": "adjust scope",
+            "_mink": { "guidance": true, "input_id": "in-1" }
+        });
+        assert_eq!(
+            SessionReader::decode_applied_guidance(&guidance_row),
+            Some(AppliedGuidanceEvent {
+                input_id: "in-1".into(),
+                text: "adjust scope".into(),
+            })
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

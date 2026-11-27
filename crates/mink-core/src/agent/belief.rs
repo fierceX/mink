@@ -58,6 +58,9 @@ impl BeliefTracker {
 
     /// 喂入一次工具调用的所有信号，更新窗口 + α/β
     pub fn observe(&mut self, signals: &[Signal]) {
+        if self.window_size == 0 {
+            return;
+        }
         let obs = Observation::from_signals(signals);
 
         if self.window.len() >= self.window_size
@@ -86,11 +89,19 @@ impl BeliefTracker {
 
     /// 回拉 factor 比例，替代硬重置——跨轮重复失败可累积升级，单次偶然失败
     /// 自然消退。factor = 0 等价于完全重置，factor = 1 不衰减。
+    /// 将总权重归一化回先验质量，防止跨多轮后先验质量膨胀导致后续失败无法拉低信念。
     pub fn decay(&mut self, factor: f64) {
-        let (alpha_prior, beta_prior) = (self.alpha_prior, self.beta_prior);
-        let (a, b) = (self.alpha_sum, self.beta_sum);
-        self.alpha_sum = a * factor + alpha_prior * (1.0 - factor);
-        self.beta_sum = b * factor + beta_prior * (1.0 - factor);
+        let factor = factor.clamp(0.0, 1.0);
+        let prior_mass = self.alpha_prior + self.beta_prior;
+        let target_belief = if prior_mass > 0.0 {
+            let current_belief = self.belief();
+            let prior_belief = self.alpha_prior / prior_mass;
+            current_belief * factor + prior_belief * (1.0 - factor)
+        } else {
+            0.5
+        };
+        self.alpha_sum = target_belief * prior_mass;
+        self.beta_sum = (1.0 - target_belief) * prior_mass;
         self.window.clear();
     }
 }

@@ -152,21 +152,9 @@ pub struct SdkInlineSkill {
     pub revision: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SdkCapabilityExposure {
-    ModelDiscoverable,
-    ModelAddressable,
-    HostOnly,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SdkSkillDiscoveryPolicy {
-    Defaults,
-    RuntimeOnly,
-    ExplicitOnly,
-}
+pub use crate::capabilities::{
+    CapabilityExposure as SdkCapabilityExposure, SkillDiscoveryPolicy as SdkSkillDiscoveryPolicy,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -315,7 +303,9 @@ pub fn validate_sdk_request(req: &SdkRequest) -> Result<(), String> {
                 .to_string(),
         );
     }
-    let format_window_size = recovery.format_window_size.unwrap_or(10);
+    let format_window_size = recovery
+        .format_window_size
+        .unwrap_or_else(|| crate::config::LlmRecoveryPolicy::default().format_window_size);
     if let Some(max_errors) = recovery.format_max_errors
         && max_errors >= format_window_size
     {
@@ -386,6 +376,14 @@ pub fn validate_sdk_request(req: &SdkRequest) -> Result<(), String> {
         && tool_timeout_max < 5
     {
         return Err("invalid SDK request: tool_timeout_max must be at least 5".to_string());
+    }
+    if let Some(threshold) = tools.edit_fuzzy_threshold
+        && (!threshold.is_finite() || !(0.0..=1.0).contains(&threshold))
+    {
+        return Err(
+            "invalid SDK request: edit_fuzzy_threshold must be a finite number in 0.0..=1.0"
+                .to_string(),
+        );
     }
     if let Some(sub_agent_timeout) = tools.sub_agent_timeout
         && sub_agent_timeout <= 0

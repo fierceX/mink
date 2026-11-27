@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **架构、公共 API 收敛与性能/边界优化**：
+  - **破坏性变更（Rust 嵌入 API）**：将 `AgentRuntimeHandle` / `AgentRuntime` 上的 22+ 个 Goal 控制方法收口为 `handle.goals()` / `runtime.goals()` 返回的 `GoalController<'_>`（同时移除已废弃的直调入口 `create_goal` / `create_and_start_goal`）；新增分组公共子模块 `mink::runtime::{llm, tools, vfs, ptc, goal, ui}`，将 `atomic_replace` / `restrict_private_dir` / `reexec_in_sandbox` 标为 `#[doc(hidden)]`，并将 `mink::prelude` 精简为约 25 个核心嵌入类型。
+  - **Edit 边界与统一错误分类**：`Edit`（Hashline / Replace）在读取前增加文件大小预检（`file_write_max_bytes`），`move_file_noclobber` 支持跨文件系统回退拷贝替换，禁止绝对路径后缀回退；对齐 `reqwest::Error` HTTP 状态码与 `llm::recovery::is_retryable_http_status`，取消态 `send_once` 定型为永久错误，Goal 期间普通轮次返回类型化 `RuntimeError::GoalActive`。
+  - **配置与核心热路径**：补齐 `tool_timeout_secs`、`llm_*_timeout_secs`（`>= 0`，`0` 为禁用）、`llm_wait_heartbeat_secs` 与 `edit_fuzzy_threshold` 启动校验，消除 `SdkSkillDiscoveryPolicy`/`SdkCapabilityExposure` 重复枚举与 CLI 配置层静默吞错；实现 `OpenAiRequestBody` 流式零拷贝序列化、`project_consumed_attachments` `Cow::Borrowed` 快速路径、`summary_tokens_over_budget` 预算复用、O(n) 工具配对修复、`AppendOnce` 尾换行单次修复、多图/文本 `Read` `file_summary_metrics` 跳过磁盘重读与多 `Read` 并发图片分类；Goal 迭代预注册增加 `abort_unstarted_iteration` 回滚、`shutdown()` 4 路 flush 并发执行、`SessionLease::drop` 显式 `flock` 解锁与 typed `EventLog::GoalUpdated`。
+  - **信号、子代理与 CLI/TUI 优化**：补齐 `guard_blocks`/`warning_count` 重置与 Go/TypeScript/Java 编译/运行报错模式；子代理 `drain_pending` 改用 `Notify` + `timeout_at` 并统一协调器与执行器截止时间；REPL 等待改用 `tokio::select!`、历史回放卸载至 `spawn_blocking`、broker 异步派生非阻塞 Goal 控制命令、`TuiState::apply` 按值消费并修复缺失 `sub_detail` 的 `SubAgentOutput` 丢失、缩窄光标移动时的草稿克隆与 `sub_agent_detail_lines` 折行。
+  - **工程化**：`crates/mink-core/Cargo.toml` 排除包内测试专用文件，CI 增加 `Swatinem/rust-cache@v2` 并去除重复 `npm ci`，根 `AGENTS.md` 瘦身至 10 KiB 内并将子系统不变式下沉至 `crates/mink-core/AGENTS.md`、`crates/mink-cli/AGENTS.md` 与 `apps/web/AGENTS.md`。
+
+- **沙箱、核心生命周期与 CLI/TUI 加固**：
+  - `[sandbox_python]` 新增 `max_memory_mb`（默认 `256`）限制 `WasiSandboxPython` 与 WASI PTC 实例线性内存，并在中断后设 2 秒有界收尾；PTC 调度桥将父级中止与 `run_cancel` 联动并把 `Bash`/`Python` 子调用超时收紧到剩余运行预算；Linux `bwrap`/`nsjail` 移除了无条件 `/run` 挂载（仅按需挂载 `/run/systemd/resolve`），PTC 子进程不挂载 `$HOME`，并在启用沙箱时拒绝 `MINK_HOME == $HOME`。
+  - `AgentRuntime::Drop` 在未显式调用 `shutdown()` 时自动清理会话租约；修复 `BeliefTracker::decay` 多轮衰减后放大 `prior_mass` 的偏差；`GoalStore` 成功发布快照与重放历史事务日志后清理 `goal-transaction.json`；`session::init` 改用原子追加打开文件，消除四处核心路径生产 panic（`GoalReview::feedback`、`ToolRunner` 排序索引、`guidance.validate` 与子代理不可用状态）。
+  - 异步与跨层架构收敛：`InputInbox`/`PlanStore` 改为异步卸载持久化，`CompactionEngine` 异步读取活跃计划摘要，Read memo 复用已读内容哈希，Goal 审核校验移出 `admission` 锁；在 `SessionReader` 提供类型化投影读接口并统一 CLI/TUI 消费；TUI `TuiSignal` / `TuiUiEvent` 改为原生 Tokio `unbounded_channel`（移除转发 OS 线程），后台 IO 卸载到 `spawn_blocking`，CLI 消除重复配置解析。
+
 - 原生联网声明由用户开关决定。关闭原生联网时，在预算估算前移除阅读签名。直接搜索和读取遵循已提交的输入修订，读链截断后的恢复请求携带目标 URL，TUI 恢复原生联网历史。
 
 - 接入 DeepSeek 网页搜索与读取。通过 `[web]` 分别开启独立 Search / Fetch、对话内置搜索和内置读链。终端和 Web 工作台支持 `/web-search`、`/web-fetch`，工作台展示联网状态、网页结果和回答引用。Rust、JSONL 和 Python 宿主可使用同组开关。

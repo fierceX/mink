@@ -84,6 +84,7 @@ enabled_tools = ["Read", "Write", "Bash", "PythonSandbox"]
 wasm_path = "cpython-wasi/python.wasm"
 stdlib_dir = "cpython-wasi"
 timeout = 30
+max_memory_mb = 256
 read_dirs = ["./data"]
 write_dirs = ["./output"]
 package_dirs = ["./packages"]

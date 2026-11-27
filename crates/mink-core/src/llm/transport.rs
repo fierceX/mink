@@ -81,48 +81,113 @@ pub(crate) fn build_openai_body_from_converted(
     tool_choice: Option<&Value>,
     extra_body: &BTreeMap<String, Value>,
 ) -> Result<Vec<u8>> {
-    let mut openai_messages: Vec<Value> = vec![];
-    if !system_prompt.is_empty() {
-        openai_messages.push(json!({"role":"system","content":system_prompt}));
-    }
-    openai_messages.extend_from_slice(messages);
+    use serde::Serialize;
+    use serde::ser::{SerializeMap, SerializeSeq};
 
-    let mut body = json!({
-        "model": model,
-        "stream": true,
-        "messages": openai_messages,
-    });
-    match options.token_param {
-        TokenParamKind::MaxTokens => body["max_tokens"] = json!(max_tokens),
-        TokenParamKind::MaxCompletionTokens => body["max_completion_tokens"] = json!(max_tokens),
-    }
-    if options.include_usage {
-        body["stream_options"] = json!({"include_usage": true});
-    }
-    if options.send_reasoning_effort
-        && let Some(reasoning_effort) = &options.reasoning_effort
-    {
-        body["reasoning_effort"] = json!(reasoning_effort);
-    }
-    if let Some(parallel_tool_calls) = options.parallel_tool_calls {
-        body["parallel_tool_calls"] = json!(parallel_tool_calls);
+    struct SystemMessage<'a>(&'a str);
+    impl Serialize for SystemMessage<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut map = serializer.serialize_map(Some(2))?;
+            map.serialize_entry("role", "system")?;
+            map.serialize_entry("content", self.0)?;
+            map.end()
+        }
     }
 
-    if let Some(body_obj) = body.as_object_mut() {
-        for (key, value) in extra_body {
-            if is_reserved_body_key(key) {
-                continue;
+    struct PrefixedMessages<'a> {
+        system_prompt: &'a str,
+        messages: &'a [Value],
+    }
+    impl Serialize for PrefixedMessages<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let has_sys = !self.system_prompt.is_empty();
+            let mut seq =
+                serializer.serialize_seq(Some(self.messages.len() + usize::from(has_sys)))?;
+            if has_sys {
+                seq.serialize_element(&SystemMessage(self.system_prompt))?;
             }
-            body_obj.insert(key.clone(), value.clone());
-        }
-    }
-    if !tools.is_empty() {
-        body["tools"] = Value::Array(tools.to_vec());
-        if let Some(tool_choice) = tool_choice {
-            body["tool_choice"] = tool_choice.clone();
+            for msg in self.messages {
+                seq.serialize_element(msg)?;
+            }
+            seq.end()
         }
     }
 
+    struct StreamOptions {
+        include_usage: bool,
+    }
+    impl Serialize for StreamOptions {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut map = serializer.serialize_map(Some(1))?;
+            map.serialize_entry("include_usage", &self.include_usage)?;
+            map.end()
+        }
+    }
+
+    struct OpenAiRequestBody<'a> {
+        model: &'a str,
+        messages: PrefixedMessages<'a>,
+        max_tokens: i32,
+        options: &'a OpenAiCompatibleOptions,
+        tools: &'a [Value],
+        tool_choice: Option<&'a Value>,
+        extra_body: &'a BTreeMap<String, Value>,
+    }
+    impl Serialize for OpenAiRequestBody<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut map = serializer.serialize_map(None)?;
+            map.serialize_entry("model", self.model)?;
+            map.serialize_entry("stream", &true)?;
+            map.serialize_entry("messages", &self.messages)?;
+            match self.options.token_param {
+                TokenParamKind::MaxTokens => map.serialize_entry("max_tokens", &self.max_tokens)?,
+                TokenParamKind::MaxCompletionTokens => {
+                    map.serialize_entry("max_completion_tokens", &self.max_tokens)?
+                }
+            }
+            if self.options.include_usage {
+                map.serialize_entry(
+                    "stream_options",
+                    &StreamOptions {
+                        include_usage: true,
+                    },
+                )?;
+            }
+            if self.options.send_reasoning_effort
+                && let Some(reasoning_effort) = &self.options.reasoning_effort
+            {
+                map.serialize_entry("reasoning_effort", reasoning_effort)?;
+            }
+            if let Some(parallel_tool_calls) = self.options.parallel_tool_calls {
+                map.serialize_entry("parallel_tool_calls", &parallel_tool_calls)?;
+            }
+            for (key, value) in self.extra_body {
+                if !is_reserved_body_key(key) {
+                    map.serialize_entry(key, value)?;
+                }
+            }
+            if !self.tools.is_empty() {
+                map.serialize_entry("tools", self.tools)?;
+                if let Some(tool_choice) = self.tool_choice {
+                    map.serialize_entry("tool_choice", tool_choice)?;
+                }
+            }
+            map.end()
+        }
+    }
+
+    let body = OpenAiRequestBody {
+        model,
+        messages: PrefixedMessages {
+            system_prompt,
+            messages,
+        },
+        max_tokens,
+        options,
+        tools,
+        tool_choice,
+        extra_body,
+    };
     Ok(serde_json::to_vec(&body)?)
 }
 

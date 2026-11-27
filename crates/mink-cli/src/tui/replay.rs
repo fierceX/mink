@@ -24,9 +24,15 @@ pub(crate) fn load_session_history(events_path: &Path) -> LoadedHistory {
             true,
             None,
         )
-        && rows.iter().any(needs_conversation_rows)
+        && rows
+            .iter()
+            .any(crate::runtime::session::SessionReader::row_needs_conversation_replay)
     {
-        return build_history_from_events(&conversation_events(&rows));
+        let entries: Vec<_> = rows
+            .iter()
+            .flat_map(crate::runtime::session::SessionReader::decode_conversation_row)
+            .collect();
+        return build_history_from_transcript(&entries);
     }
     if !events_path.exists() {
         return LoadedHistory {
@@ -59,177 +65,110 @@ pub(crate) fn load_session(events_path: &Path) -> Vec<TranscriptItem> {
     load_session_history(events_path).lines
 }
 
-/// Whether a committed row carries something only conversation rows can show.
-///
-/// goals live in committed rows: the boundary card (`_mink.goal_message`), the
-/// terminal facts row (`goal_state_kind`) and the round prompt all exist only
-/// there. Guidance has the same property.
-fn needs_conversation_rows(row: &serde_json::Value) -> bool {
-    let metadata = &row["_mink"];
-    metadata["guidance"] == true
-        || metadata.get("goal_message").is_some()
-        || metadata.get("goal_state_kind").is_some()
-        || row["content"]
-            .as_array()
-            .is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "deepseek_web"))
-}
-
-/// What one committed row means to the transcript.
-#[derive(Debug, PartialEq, Eq)]
-enum RowKind {
-    /// A human row (or guidance) rendered as user input.
-    User {
-        guidance: bool,
-    },
-    /// A runtime-internal row with no transcript representation.
-    Internal,
-    GoalCard(Box<crate::runtime::GoalMessage>),
-    GoalEnded {
-        goal_id: String,
-        revision: u64,
-    },
-}
-
-/// Classify a committed row by its structured metadata, never by its prose.
-fn classify_row(row: &serde_json::Value) -> RowKind {
-    let metadata = &row["_mink"];
-    if let Some(raw) = metadata.get("goal_message")
-        && let Ok(message) = serde_json::from_value::<crate::runtime::GoalMessage>(raw.clone())
-    {
-        return RowKind::GoalCard(Box::new(message));
-    }
-    if metadata
-        .get("goal_state_kind")
-        .and_then(serde_json::Value::as_str)
-        == Some("ended")
-    {
-        return RowKind::GoalEnded {
-            goal_id: metadata["goal_id"].as_str().unwrap_or_default().to_string(),
-            revision: metadata["goal_revision"].as_u64().unwrap_or(0),
-        };
-    }
-    if is_internal_row(row) {
-        return RowKind::Internal;
-    }
-    RowKind::User {
-        guidance: metadata["guidance"] == true,
+fn push_user_line(state: &mut TuiState, text: &str, guidance: bool) {
+    state.finalize_stream();
+    let display_input = if guidance {
+        format!("[Added to context] {text}")
+    } else {
+        text.to_string()
+    };
+    // 粘贴图片的 marker 只保留 `[image]`，避免恢复会话时回显绝对路径。
+    let compacted = compact_user_input_for_display(&display_input);
+    let preview = truncate_display(first_line(&compacted), 77);
+    if !preview.is_empty() {
+        state.push_line(TranscriptItem::new(
+            format!("> {preview}"),
+            TranscriptKind::Info,
+        ));
     }
 }
 
-/// Whether a row is runtime-internal.
-///
-/// Some families carry an explicit `internal` flag; others are identified by
-/// their runtime-owned metadata (`todo_state_kind`, `plan_transaction_id`,
-/// goal state rows, `source: goal_*`). None of them is a human turn.
-fn is_internal_row(row: &serde_json::Value) -> bool {
-    if row["internal"] == true {
-        return true;
-    }
-    let metadata = &row["_mink"];
-    if metadata["internal"] == true {
-        return true;
-    }
-    metadata.get("todo_state_kind").is_some()
-        || metadata.get("plan_transaction_id").is_some()
-        || metadata.get("goal_state_kind").is_some()
-        || metadata
-            .get("source")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|source| source.starts_with("goal_"))
-}
-
-fn conversation_events(rows: &[serde_json::Value]) -> Vec<serde_json::Value> {
-    use serde_json::json;
-    let mut events = Vec::new();
-    for row in rows {
-        if row["role"] == "user"
-            && let Some(text) = row["content"].as_str()
-        {
-            match classify_row(row) {
-                RowKind::GoalCard(message) => events.push(json!({
-                    "type": "goal_card",
-                    "goal": message,
-                })),
-                RowKind::GoalEnded { goal_id, revision } => events.push(json!({
-                    "type": "goal_ended",
-                    "goal_id": goal_id,
-                    "revision": revision,
-                })),
-                // Checkpoints, todo syncs, plan transitions and adjudication
-                // prompts are runtime-internal: they are neither user prose nor
-                // transcript cards.
-                RowKind::Internal => {}
-                RowKind::User { guidance } => {
-                    let content = if guidance {
-                        format!("[Added to context] {text}")
-                    } else {
-                        text.to_string()
-                    };
-                    events.push(json!({"type":"user_input","content":content}));
-                }
-            }
-        }
-        if let Some(blocks) = row["content"].as_array() {
-            let mut citations = None;
-            for block in blocks {
-                let mut event = block.clone();
-                match block["type"].as_str() {
-                    Some("thinking") if row["role"] == "assistant" => {
-                        event["content"] = block["thinking"].clone();
-                    }
-                    Some("text") if row["role"] == "assistant" => {
-                        event["content"] = block["text"].clone();
-                    }
-                    Some("tool_use") if row["role"] == "assistant" => {
-                        event["type"] = "tool_call".into();
-                    }
-                    Some("deepseek_web") if row["role"] == "assistant" => {
-                        append_web_calls(&mut events, block);
-                        citations = block["citations"].as_array();
-                        continue;
-                    }
-                    Some("tool_result") => {
-                        if let Some(metadata) = block["_mink"].as_object() {
-                            event.as_object_mut().unwrap().extend(metadata.clone());
-                            event["name"] = block["_mink"]["tool_name"].clone();
-                        }
-                    }
-                    _ => continue,
-                }
-                events.push(event);
-            }
-            for citation in citations.into_iter().flatten() {
-                if let Some(url) = citation["url"].as_str() {
-                    events
-                        .push(json!({"type":"web_source","content":format!("[Web source] {url}")}));
+fn finalize_loaded_history(mut state: TuiState) -> LoadedHistory {
+    state.finalize_stream();
+    for item in &mut state.transcript.lines {
+        if !item.sealed {
+            item.sealed = true;
+            if item.kind == TranscriptKind::Tool {
+                item.tool_status = None;
+                if item.text.starts_with("[tool]") {
+                    item.text
+                        .push_str("\nResult unavailable in the persisted event log.");
                 }
             }
         }
     }
-    events
+    LoadedHistory {
+        lines: state.transcript.lines,
+        sub_agent_lines: state.transcript.sub_agents.line_by_session,
+    }
 }
 
-fn append_web_calls(events: &mut Vec<serde_json::Value>, block: &serde_json::Value) {
-    use serde_json::json;
-    for call in block["calls"].as_array().into_iter().flatten() {
-        let (Some(id), Some(name)) = (call["id"].as_str(), call["tool"].as_str()) else {
-            continue;
-        };
-        events.push(json!({"type":"tool_call","id":id,"name":name,"input":call["action"]}));
-        let status = match call["status"].as_str() {
-            Some("completed") => json!({"state":"succeeded"}),
-            Some("failed") => json!({"state":"failed","reason":"unknown"}),
-            _ => serde_json::Value::Null,
-        };
-        events.push(json!({
-            "type":"tool_result",
-            "tool_use_id":id,
-            "name":name,
-            "result_kind":"search",
-            "status":status,
-            "content":serde_json::to_string_pretty(call).unwrap_or_default()
-        }));
+fn build_history_from_transcript(
+    entries: &[crate::runtime::session::TranscriptEntry],
+) -> LoadedHistory {
+    use crate::runtime::session::TranscriptEntry;
+    let mut state = TuiState::default();
+    for entry in entries {
+        match entry {
+            TranscriptEntry::GoalCard(message) => {
+                state.apply(TuiSignal::GoalCard(message.clone()));
+            }
+            TranscriptEntry::GoalEnded { goal_id, revision } => {
+                state.apply(TuiSignal::GoalEnded {
+                    goal_id: goal_id.clone(),
+                    revision: *revision,
+                });
+            }
+            TranscriptEntry::WebSource(source) => {
+                state.finalize_stream();
+                state.apply(TuiSignal::Info(source.clone()));
+            }
+            TranscriptEntry::User { text, guidance } => {
+                push_user_line(&mut state, text, *guidance);
+            }
+            TranscriptEntry::Thinking(content) => {
+                state.apply(TuiSignal::Thinking(content.clone()));
+            }
+            TranscriptEntry::Text(content) => {
+                state.apply(TuiSignal::Text(content.clone()));
+            }
+            TranscriptEntry::ToolCall {
+                id,
+                name,
+                summary,
+                input,
+            } => {
+                state.apply(TuiSignal::ToolCall {
+                    tool_use_id: (!id.is_empty()).then(|| id.clone()),
+                    tool_name: name.clone(),
+                    summary: summary.clone(),
+                    input: (!input.is_null()).then(|| input.clone()),
+                });
+            }
+            TranscriptEntry::ToolResult {
+                tool_use_id,
+                tool_name,
+                content,
+                status,
+                exit_code,
+                result_kind,
+                presentation,
+                artifacts,
+            } => {
+                state.apply(TuiSignal::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    tool_name: tool_name.clone(),
+                    content: content.clone(),
+                    status: *status,
+                    exit_code: *exit_code,
+                    result_kind: *result_kind,
+                    presentation: presentation.clone(),
+                    artifacts: artifacts.clone(),
+                });
+            }
+        }
     }
+    finalize_loaded_history(state)
 }
 
 fn load_recent_turn_events(file: std::fs::File) -> Vec<serde_json::Value> {
@@ -271,33 +210,6 @@ fn load_recent_turn_events(file: std::fs::File) -> Vec<serde_json::Value> {
 fn build_history_from_events(events: &[serde_json::Value]) -> LoadedHistory {
     let mut state = TuiState::default();
     for evt in events {
-        match crate::replay::event_type(evt) {
-            // Boundary rows produced by `conversation_events`; they carry the
-            // structured payload through the same reducer the live path uses.
-            "goal_card" => {
-                if let Ok(message) =
-                    serde_json::from_value::<crate::runtime::GoalMessage>(evt["goal"].clone())
-                {
-                    state.apply(&TuiSignal::GoalCard(Box::new(message)));
-                }
-                continue;
-            }
-            "goal_ended" => {
-                state.apply(&TuiSignal::GoalEnded {
-                    goal_id: evt["goal_id"].as_str().unwrap_or_default().to_string(),
-                    revision: evt["revision"].as_u64().unwrap_or(0),
-                });
-                continue;
-            }
-            "web_source" => {
-                state.finalize_stream();
-                state.apply(&TuiSignal::Info(
-                    crate::replay::event_content(evt).to_string(),
-                ));
-                continue;
-            }
-            _ => {}
-        }
         let kind = crate::replay::classify_event(evt);
         let c = crate::replay::event_content(evt);
         match kind {
@@ -306,24 +218,13 @@ fn build_history_from_events(events: &[serde_json::Value]) -> LoadedHistory {
             ReplayEventKind::PrefixSnapshot
             | ReplayEventKind::Ignored
             | ReplayEventKind::GoalLifecycle => {}
-            ReplayEventKind::UserInput => {
-                state.finalize_stream();
-                // 粘贴图片的 marker 只保留 `[image]`，避免恢复会话时回显绝对路径。
-                let compacted = compact_user_input_for_display(c);
-                let preview = truncate_display(first_line(&compacted), 77);
-                if !preview.is_empty() {
-                    state.push_line(TranscriptItem::new(
-                        format!("> {preview}"),
-                        TranscriptKind::Info,
-                    ));
-                }
-            }
-            ReplayEventKind::Thinking => state.apply(&TuiSignal::Thinking(c.to_string())),
-            ReplayEventKind::Text => state.apply(&TuiSignal::Text(c.to_string())),
+            ReplayEventKind::UserInput => push_user_line(&mut state, c, false),
+            ReplayEventKind::Thinking => state.apply(TuiSignal::Thinking(c.to_string())),
+            ReplayEventKind::Text => state.apply(TuiSignal::Text(c.to_string())),
             ReplayEventKind::ToolCall => {
                 let name = crate::replay::event_name(evt);
                 let summary = crate::replay::build_tool_summary(name, evt);
-                state.apply(&TuiSignal::ToolCall {
+                state.apply(TuiSignal::ToolCall {
                     tool_use_id: evt
                         .get("id")
                         .and_then(serde_json::Value::as_str)
@@ -341,7 +242,7 @@ fn build_history_from_events(events: &[serde_json::Value]) -> LoadedHistory {
                 let label = evt["label"].as_str().map(str::to_string);
                 let stop_reason = evt["stop_reason"].as_str().map(str::to_string);
                 if !session_id.is_empty() {
-                    state.apply(&TuiSignal::SubAgentStatus {
+                    state.apply(TuiSignal::SubAgentStatus {
                         session_id: session_id.to_string(),
                         status: status.to_string(),
                         label,
@@ -367,7 +268,7 @@ fn build_history_from_events(events: &[serde_json::Value]) -> LoadedHistory {
                     .cloned()
                     .and_then(|value| serde_json::from_value::<ToolResultKind>(value).ok())
                     .unwrap_or(ToolResultKind::Text);
-                state.apply(&TuiSignal::ToolResult {
+                state.apply(TuiSignal::ToolResult {
                     tool_use_id: evt
                         .get("tool_use_id")
                         .and_then(serde_json::Value::as_str)
@@ -389,28 +290,12 @@ fn build_history_from_events(events: &[serde_json::Value]) -> LoadedHistory {
             }
             ReplayEventKind::Error => {
                 let msg = crate::replay::event_message(evt);
-                state.apply(&TuiSignal::Error(msg.to_string()));
+                state.apply(TuiSignal::Error(msg.to_string()));
             }
             ReplayEventKind::AssistantMessage | ReplayEventKind::Unknown => {}
         }
     }
-    state.finalize_stream();
-    for item in &mut state.transcript.lines {
-        if !item.sealed {
-            item.sealed = true;
-            if item.kind == TranscriptKind::Tool {
-                item.tool_status = None;
-                if item.text.starts_with("[tool]") {
-                    item.text
-                        .push_str("\nResult unavailable in the persisted event log.");
-                }
-            }
-        }
-    }
-    LoadedHistory {
-        lines: state.transcript.lines,
-        sub_agent_lines: state.transcript.sub_agents.line_by_session,
-    }
+    finalize_loaded_history(state)
 }
 
 #[cfg(test)]
@@ -425,7 +310,7 @@ mod tests {
 
     #[test]
     fn web_history_restores_calls_and_sources_from_conversation() {
-        let rows = vec![serde_json::json!({"role":"assistant","content":[
+        let rows = [serde_json::json!({"role":"assistant","content":[
             {"type":"deepseek_web","calls":[{
                 "id":"web1", "tool":"DeepSeekReadUrl",
                 "action":{"type":"read_link","url":"https://example.test/"},
@@ -433,8 +318,15 @@ mod tests {
             }],"citations":[{"url":"https://example.test/","title":"source","start_index":0,"end_index":6}]},
             {"type":"text","text":"answer"}
         ]})];
-        assert!(rows.iter().any(needs_conversation_rows));
-        let loaded = build_history_from_events(&conversation_events(&rows));
+        assert!(
+            rows.iter()
+                .any(crate::runtime::session::SessionReader::row_needs_conversation_replay)
+        );
+        let entries: Vec<_> = rows
+            .iter()
+            .flat_map(crate::runtime::session::SessionReader::decode_conversation_row)
+            .collect();
+        let loaded = build_history_from_transcript(&entries);
         assert!(
             loaded
                 .lines
@@ -560,7 +452,11 @@ mod tests {
                 "_mink":{"internal":true,"goal_id":"goal-1","goal_revision":9,"goal_state_kind":"ended"}
             }),
         ];
-        let items = build_lines_from_events(&conversation_events(&rows));
+        let entries: Vec<_> = rows
+            .iter()
+            .flat_map(crate::runtime::session::SessionReader::decode_conversation_row)
+            .collect();
+        let items = build_history_from_transcript(&entries).lines;
         let text = items
             .iter()
             .map(|item| item.text.clone())
@@ -622,7 +518,7 @@ mod status_tests {
             ToolStatus::Interrupted,
         ] {
             let mut live = TuiState::default();
-            live.apply(&TuiSignal::ToolResult {
+            live.apply(TuiSignal::ToolResult {
                 tool_use_id: Some("call".into()),
                 tool_name: "Bash".into(),
                 content: "body".into(),

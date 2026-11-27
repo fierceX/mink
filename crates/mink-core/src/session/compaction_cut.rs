@@ -154,6 +154,27 @@ pub(crate) fn net_benefit_sufficient(trigger: &str, before: usize, after: usize)
     }
 }
 
+fn format_active_plan_checkpoint(content: &str, allowance_tokens: usize) -> Option<Value> {
+    // 额度覆盖完整块：先扣掉 <active-plan-checkpoint> 包装再分配正文额度。
+    let wrapper = "<active-plan-checkpoint>\n\n</active-plan-checkpoint>";
+    let inner_tokens = if allowance_tokens == usize::MAX {
+        usize::MAX
+    } else {
+        allowance_tokens
+            .saturating_mul(3)
+            .saturating_sub(wrapper.len())
+            / 3
+    };
+    let content = bounded_derived_text(content.trim(), inner_tokens);
+    (!content.is_empty()).then(|| {
+        json!({
+            "role": "user",
+            "internal": true,
+            "content": format!("<active-plan-checkpoint>\n{content}\n</active-plan-checkpoint>"),
+        })
+    })
+}
+
 pub(crate) fn read_active_plan_checkpoint(
     summary_path: &Path,
     allowance_tokens: usize,
@@ -169,24 +190,25 @@ pub(crate) fn read_active_plan_checkpoint(
             ));
         }
     };
-    // 额度覆盖完整块：先扣掉 <active-plan-checkpoint> 包装再分配正文额度。
-    let wrapper = "<active-plan-checkpoint>\n\n</active-plan-checkpoint>";
-    let inner_tokens = if allowance_tokens == usize::MAX {
-        usize::MAX
-    } else {
-        allowance_tokens
-            .saturating_mul(3)
-            .saturating_sub(wrapper.len())
-            / 3
+    Ok(format_active_plan_checkpoint(&content, allowance_tokens))
+}
+
+pub(crate) async fn read_active_plan_checkpoint_async(
+    summary_path: &Path,
+    allowance_tokens: usize,
+) -> Result<Option<Value>> {
+    let plan_path = summary_path.with_file_name("plan.md");
+    let content = match tokio::fs::read_to_string(&plan_path).await {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "cannot read active plan checkpoint {}: {error}",
+                plan_path.display()
+            ));
+        }
     };
-    let content = bounded_derived_text(content.trim(), inner_tokens);
-    Ok((!content.is_empty()).then(|| {
-        json!({
-            "role": "user",
-            "internal": true,
-            "content": format!("<active-plan-checkpoint>\n{content}\n</active-plan-checkpoint>"),
-        })
-    }))
+    Ok(format_active_plan_checkpoint(&content, allowance_tokens))
 }
 
 /// 摘要请求的输出低于该值时不具备实用性：直接转应急，而不是发送几乎必然被截断的
@@ -208,6 +230,18 @@ pub(crate) fn summary_output_cap(config: &Config, input_tokens: usize) -> Option
     Some(i32::try_from(cap).unwrap_or(i32::MAX))
 }
 
+pub(crate) fn summary_tokens_over_budget(
+    config: &Config,
+    input_tokens: usize,
+    reserved_output: usize,
+) -> bool {
+    if config.max_context_tokens == 0 {
+        return false;
+    }
+    let input_limit = config.max_context_tokens.saturating_sub(reserved_output);
+    input_tokens > input_limit
+}
+
 /// 摘要输入是否超出 `窗口 - reserved_output`。`reserved_output` 由调用方按路径选择：
 /// 缓存对齐候选按配置输出上限判断（装不下就退化到专用摘要路径），降噪/原始路径只需
 /// 为一个有实用价值的最小输出留位置，具体 cap 由 [`summary_output_cap`] 动态给出。
@@ -223,8 +257,11 @@ pub(crate) fn summary_input_over_budget(
     }
     let input_tokens =
         crate::llm::transport::estimate_openai_context_tokens(messages, tools, system_prompt)?;
-    let input_limit = config.max_context_tokens.saturating_sub(reserved_output);
-    Ok(input_tokens > input_limit)
+    Ok(summary_tokens_over_budget(
+        config,
+        input_tokens,
+        reserved_output,
+    ))
 }
 
 pub(crate) fn message_hashes(messages: &[Value]) -> Vec<[u8; 32]> {

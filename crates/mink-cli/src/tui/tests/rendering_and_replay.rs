@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn tui_display_detail_uses_full_tool_result_content() {
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let display = TuiDisplay::new(tx);
 
     display.render_tool_result(&crate::ui::PresentedToolResultDisplay {
@@ -19,7 +19,7 @@ fn tui_display_detail_uses_full_tool_result_content() {
         artifacts: &[],
     });
 
-    match rx.recv().unwrap() {
+    match rx.try_recv().unwrap() {
         TuiSignal::ToolResult {
             tool_name, content, ..
         } => {
@@ -90,8 +90,8 @@ fn load_session_replays_recent_turns() {
 fn apply_switches_stream_kinds_and_collapses_thinking() {
     let mut state = TuiState::default();
 
-    state.apply(&TuiSignal::Thinking("think".into()));
-    state.apply(&TuiSignal::Text("answer".into()));
+    state.apply(TuiSignal::Thinking("think".into()));
+    state.apply(TuiSignal::Text("answer".into()));
 
     assert_eq!(state.transcript.lines.len(), 1);
     assert_eq!(
@@ -108,7 +108,7 @@ fn apply_switches_stream_kinds_and_collapses_thinking() {
 #[test]
 fn sub_agent_meta_label_and_stop_reason_are_visible() {
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::SubAgentStatus {
+    state.apply(TuiSignal::SubAgentStatus {
         session_id: "sub_1".into(),
         status: "running".into(),
         label: Some("review diff".into()),
@@ -117,7 +117,7 @@ fn sub_agent_meta_label_and_stop_reason_are_visible() {
         out_tokens: 0,
     });
     assert!(state.transcript.lines[0].text.contains("review diff"));
-    state.apply(&TuiSignal::SubAgentStatus {
+    state.apply(TuiSignal::SubAgentStatus {
         session_id: "sub_1".into(),
         status: "ok".into(),
         label: Some("review diff".into()),
@@ -132,7 +132,7 @@ fn sub_agent_meta_label_and_stop_reason_are_visible() {
 #[test]
 fn sub_agent_output_invalidates_updated_line_cache() {
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::SubAgentStatus {
+    state.apply(TuiSignal::SubAgentStatus {
         session_id: "sub_1".into(),
         status: "launched".into(),
         label: None,
@@ -143,7 +143,7 @@ fn sub_agent_output_invalidates_updated_line_cache() {
     state.transcript.lines[0].cached_lines = Some(vec![Line::from("stale")]);
     state.cache.rebuild_next = None;
 
-    state.apply(&TuiSignal::SubAgentOutput {
+    state.apply(TuiSignal::SubAgentOutput {
         session_id: "sub_1".into(),
         status: "ok".into(),
         label: None,
@@ -165,7 +165,7 @@ fn sub_agent_output_invalidates_updated_line_cache() {
 #[test]
 fn sub_agent_status_updates_existing_line() {
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::SubAgentStatus {
+    state.apply(TuiSignal::SubAgentStatus {
         session_id: "sub_1".into(),
         status: "launched".into(),
         label: None,
@@ -176,7 +176,7 @@ fn sub_agent_status_updates_existing_line() {
     state.transcript.lines[0].cached_lines = Some(vec![Line::from("stale")]);
     state.cache.rebuild_next = None;
 
-    state.apply(&TuiSignal::SubAgentStatus {
+    state.apply(TuiSignal::SubAgentStatus {
         session_id: "sub_1".into(),
         status: "running".into(),
         label: None,
@@ -195,7 +195,7 @@ fn sub_agent_status_updates_existing_line() {
 #[test]
 fn sub_agent_terminal_status_clears_active_state() {
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::SubAgentStatus {
+    state.apply(TuiSignal::SubAgentStatus {
         session_id: "sub_1".into(),
         status: "launched".into(),
         label: None,
@@ -204,7 +204,7 @@ fn sub_agent_terminal_status_clears_active_state() {
         out_tokens: 0,
     });
 
-    state.apply(&TuiSignal::SubAgentStatus {
+    state.apply(TuiSignal::SubAgentStatus {
         session_id: "sub_1".into(),
         status: "timed_out".into(),
         label: None,
@@ -238,7 +238,7 @@ fn user_task_stop_emits_completion_notification() {
     ));
     assert!(state.take_task_notification().is_none());
 
-    state.apply(&TuiSignal::Stop);
+    state.apply(TuiSignal::Stop);
 
     let notification = state.take_task_notification().unwrap();
     assert_eq!(notification.kind, TaskNotificationKind::Completed);
@@ -260,7 +260,7 @@ fn user_task_error_emits_failure_notification() {
         &tx,
     ));
 
-    state.apply(&TuiSignal::Error("network timeout".into()));
+    state.apply(TuiSignal::Error("network timeout".into()));
 
     let notification = state.take_task_notification().unwrap();
     assert_eq!(notification.kind, TaskNotificationKind::Failed);
@@ -280,7 +280,7 @@ fn local_help_does_not_emit_completion_notification() {
         &tx,
     ));
 
-    state.apply(&TuiSignal::Stop);
+    state.apply(TuiSignal::Stop);
 
     assert!(state.take_task_notification().is_none());
 }
@@ -299,7 +299,7 @@ fn compact_stop_emits_completion_notification() {
     ));
     assert_eq!(state.stream.work_state, WorkState::Compacting);
 
-    state.apply(&TuiSignal::Stop);
+    state.apply(TuiSignal::Stop);
 
     let notification = state.take_task_notification().unwrap();
     assert_eq!(notification.kind, TaskNotificationKind::Completed);
@@ -314,10 +314,10 @@ fn compact_error_then_stop_is_visible_and_restores_input() {
         },
         ..TuiState::default()
     };
-    state.apply(&TuiSignal::Error(
+    state.apply(TuiSignal::Error(
         "Compact failed: compaction interrupted".into(),
     ));
-    state.apply(&TuiSignal::Stop);
+    state.apply(TuiSignal::Stop);
 
     assert_eq!(state.stream.work_state, WorkState::Idle);
     assert!(state.transcript.lines.iter().any(|line| {
@@ -328,7 +328,7 @@ fn compact_error_then_stop_is_visible_and_restores_input() {
 #[test]
 fn duplicate_sub_agent_output_does_not_drift_active_state() {
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::SubAgentStatus {
+    state.apply(TuiSignal::SubAgentStatus {
         session_id: "sub_1".into(),
         status: "launched".into(),
         label: None,
@@ -347,12 +347,43 @@ fn duplicate_sub_agent_output_does_not_drift_active_state() {
         in_tokens: 1,
         out_tokens: 2,
     };
-    state.apply(&output);
-    state.apply(&output);
+    state.apply(output.clone());
+    state.apply(output);
 
     assert!(state.transcript.sub_agents.active_sessions.is_empty());
     assert_eq!(state.stream.work_state, WorkState::WaitingModel);
     assert_eq!(state.transcript.lines.len(), 1);
+}
+
+#[test]
+fn sub_agent_output_initializes_sub_detail_when_missing() {
+    let mut state = TuiState::default();
+    state.apply(TuiSignal::SubAgentStatus {
+        session_id: "sub_missing_detail".into(),
+        status: "ok".into(),
+        label: Some("worker".into()),
+        stop_reason: None,
+        in_tokens: 0,
+        out_tokens: 0,
+    });
+    assert!(state.transcript.lines[0].sub_detail.is_none());
+
+    state.apply(TuiSignal::SubAgentOutput {
+        session_id: "sub_missing_detail".into(),
+        status: "ok".into(),
+        label: Some("worker".into()),
+        stop_reason: None,
+        thinking: "trace".into(),
+        text: "final answer".into(),
+        in_tokens: 10,
+        out_tokens: 20,
+    });
+    let detail = state.transcript.lines[0]
+        .sub_detail
+        .as_ref()
+        .expect("sub_detail must be initialized by SubAgentOutput");
+    assert_eq!(detail.thinking, "trace");
+    assert_eq!(detail.text, "final answer");
 }
 
 #[test]
@@ -411,7 +442,7 @@ fn collapsed_summary_marks_truncated_tool_result() {
 fn tool_result_signal_preserves_tool_name_for_summaries() {
     let mut state = TuiState::default();
 
-    state.apply(&TuiSignal::ToolResult {
+    state.apply(TuiSignal::ToolResult {
         tool_use_id: None,
         tool_name: "Edit".into(),
         content: "changed file".into(),
@@ -430,7 +461,7 @@ fn tool_result_signal_preserves_tool_name_for_summaries() {
 #[test]
 fn structured_tool_result_updates_the_running_transcript_item() {
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::ToolCall {
+    state.apply(TuiSignal::ToolCall {
         tool_use_id: Some("call-1".into()),
         tool_name: "PlanDraft".into(),
         summary: "PlanDraft".into(),
@@ -443,7 +474,7 @@ fn structured_tool_result_updates_the_running_transcript_item() {
         transition: crate::ui::PlanTransitionDisplay::DraftSaved,
         content: Some("1. inspect\n2. implement".into()),
     });
-    state.apply(&TuiSignal::ToolResult {
+    state.apply(TuiSignal::ToolResult {
         tool_use_id: Some("call-1".into()),
         tool_name: "PlanDraft".into(),
         content: "Plan draft saved.".into(),
@@ -468,7 +499,7 @@ fn tool_result_with_mismatched_id_does_not_merge_by_tool_name() {
     use crate::ui::{TodoChangeDisplay, TodoCountsDisplay, TodoDisplay, ToolPresentation};
 
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::ToolCall {
+    state.apply(TuiSignal::ToolCall {
         tool_use_id: Some("call-1".into()),
         tool_name: "TodoAdvance".into(),
         summary: "TodoAdvance(2 transitions @r1)".into(),
@@ -484,7 +515,7 @@ fn tool_result_with_mismatched_id_does_not_merge_by_tool_name() {
         items: Vec::new(),
         changes: vec![TodoChangeDisplay::Activated { id: "T0001".into() }],
     });
-    state.apply(&TuiSignal::ToolResult {
+    state.apply(TuiSignal::ToolResult {
         tool_use_id: Some("provider-call-1".into()),
         tool_name: "TodoAdvance".into(),
         content: "<todo-event>raw protocol</todo-event>".into(),
@@ -520,13 +551,13 @@ fn tool_result_with_mismatched_id_does_not_merge_by_tool_name() {
 #[test]
 fn reused_tool_id_updates_the_latest_unsealed_call() {
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::ToolCall {
+    state.apply(TuiSignal::ToolCall {
         tool_use_id: Some("call-1".into()),
         tool_name: "Read".into(),
         summary: "Read(old)".into(),
         input: None,
     });
-    state.apply(&TuiSignal::ToolResult {
+    state.apply(TuiSignal::ToolResult {
         tool_use_id: Some("call-1".into()),
         tool_name: "Read".into(),
         content: "old result".into(),
@@ -537,13 +568,13 @@ fn reused_tool_id_updates_the_latest_unsealed_call() {
         artifacts: Vec::new(),
     });
     state.transcript.inline.committed = 1;
-    state.apply(&TuiSignal::ToolCall {
+    state.apply(TuiSignal::ToolCall {
         tool_use_id: Some("call-1".into()),
         tool_name: "Read".into(),
         summary: "Read(new)".into(),
         input: None,
     });
-    state.apply(&TuiSignal::ToolResult {
+    state.apply(TuiSignal::ToolResult {
         tool_use_id: Some("call-1".into()),
         tool_name: "Read".into(),
         content: "new result".into(),
@@ -718,16 +749,16 @@ fn full_tui_restores_mouse_toggle_for_collapsible_cards() {
 #[test]
 fn info_during_streaming_non_heartbeat_is_deferred_until_stream_ends() {
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::Text("first".into()));
-    state.apply(&TuiSignal::Info("Retrying (1/3)...".into()));
+    state.apply(TuiSignal::Text("first".into()));
+    state.apply(TuiSignal::Info("Retrying (1/3)...".into()));
     assert!(state.stream.streaming);
     assert_eq!(state.transcript.lines.len(), 0);
     assert_eq!(
         state.transcript.pending_infos.as_slice(),
         &["Retrying (1/3)...".to_string()]
     );
-    state.apply(&TuiSignal::Text("second".into()));
-    state.apply(&TuiSignal::Stop);
+    state.apply(TuiSignal::Text("second".into()));
+    state.apply(TuiSignal::Stop);
     assert_eq!(state.transcript.lines.len(), 2);
     assert_eq!(state.transcript.lines[0].kind, TranscriptKind::StreamText);
     assert_eq!(state.transcript.lines[1].kind, TranscriptKind::Info);
@@ -756,7 +787,7 @@ fn committed_boundary_stops_at_the_first_live_item() {
 #[test]
 fn tool_call_headers_sanitize_name_and_summary_and_keep_input() {
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::ToolCall {
+    state.apply(TuiSignal::ToolCall {
         tool_use_id: Some("call-1".into()),
         tool_name: "Ba\x1b]0;pwned\x07sh".into(),
         summary: "cmd \x1b[31mred".into(),
@@ -773,14 +804,14 @@ fn tool_call_headers_sanitize_name_and_summary_and_keep_input() {
 #[test]
 fn terminal_signal_seals_orphan_tool_calls() {
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::ToolCall {
+    state.apply(TuiSignal::ToolCall {
         tool_use_id: Some("call-1".into()),
         tool_name: "Bash".into(),
         summary: "Bash(test)".into(),
         input: None,
     });
 
-    state.apply(&TuiSignal::Error("connection failed".into()));
+    state.apply(TuiSignal::Error("connection failed".into()));
 
     assert!(state.transcript.lines[0].sealed);
     assert_eq!(state.transcript.lines[0].tool_status, None);
@@ -837,7 +868,7 @@ fn inline_keeps_the_final_item_in_the_viewport_until_new_work_starts() {
 #[test]
 fn sub_agent_detail_tracks_session_after_output_update() {
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::SubAgentStatus {
+    state.apply(TuiSignal::SubAgentStatus {
         session_id: "sub_1".into(),
         status: "launched".into(),
         label: None,
@@ -850,7 +881,7 @@ fn sub_agent_detail_tracks_session_after_output_update() {
         scroll: 0,
     };
 
-    state.apply(&TuiSignal::SubAgentOutput {
+    state.apply(TuiSignal::SubAgentOutput {
         session_id: "sub_1".into(),
         status: "ok".into(),
         label: None,
@@ -929,7 +960,7 @@ fn render_clamps_invalid_cursor_and_repairs_missing_cache() {
 fn tui_display_preserves_tool_call_and_title_fields() {
     use crate::ui::{StatsSnapshot, ToolCallDisplay};
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let display = TuiDisplay::new(tx);
 
     let input = serde_json::json!({"path": "a.rs"});
@@ -939,7 +970,7 @@ fn tui_display_preserves_tool_call_and_title_fields() {
         summary: "Read a.rs",
         input: Some(&input),
     });
-    match rx.recv().unwrap() {
+    match rx.try_recv().unwrap() {
         TuiSignal::ToolCall {
             tool_use_id,
             tool_name,
@@ -965,7 +996,7 @@ fn tui_display_preserves_tool_call_and_title_fields() {
         belief: 0.75,
     };
     display.render_title_update("flash", &stats);
-    match rx.recv().unwrap() {
+    match rx.try_recv().unwrap() {
         TuiSignal::TitleUpdate(model, delivered) => {
             assert_eq!(model, "flash");
             assert_eq!(delivered.current_turn_count, stats.current_turn_count);
@@ -986,8 +1017,8 @@ fn tui_display_preserves_tool_call_and_title_fields() {
 #[test]
 fn streaming_text_strips_ansi_escape_split_across_chunks() {
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::Text("hello \x1b[".into()));
-    state.apply(&TuiSignal::Text("31mworld\x1b[0m!".into()));
+    state.apply(TuiSignal::Text("hello \x1b[".into()));
+    state.apply(TuiSignal::Text("31mworld\x1b[0m!".into()));
     state.finalize_stream();
     let combined: String = state
         .transcript

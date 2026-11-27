@@ -1599,18 +1599,19 @@ async fn goal_deadline_interrupts_pending_request_and_cancel_is_terminal() {
     let mut spec = GoalSpec::new("work");
     spec.limits.deadline_unix_secs = crate::session::goal::goal_now() + 3;
     handle.confirmed_test_goal(spec).unwrap();
-    handle.start_goal_driver_and_run().unwrap();
-    let goal = tokio::time::timeout(std::time::Duration::from_secs(10), handle.wait_goal())
+    handle.goals().start_driver_and_run().unwrap();
+    let goal = tokio::time::timeout(std::time::Duration::from_secs(10), handle.goals().wait())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(goal.status, GoalStatus::BudgetExhausted);
     assert_eq!(*backend.calls.lock().unwrap(), 1);
-    let cancelled = handle.cancel_goal(&goal.id, goal.revision).unwrap();
+    let cancelled = handle.goals().cancel(&goal.id, goal.revision).unwrap();
     assert_eq!(cancelled.status, GoalStatus::Cancelled);
     assert!(
         handle
-            .resume_goal(&cancelled.id, cancelled.revision)
+            .goals()
+            .resume(&cancelled.id, cancelled.revision)
             .is_err()
     );
     runtime.shutdown().await.unwrap();

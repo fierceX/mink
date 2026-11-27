@@ -17,63 +17,17 @@ pub(super) async fn auto_set_session_title(session: &crate::runtime::SessionInfo
 }
 
 /// 从 conversation.jsonl 首条真实 user 消息生成标题并原子写回 session.json。
-/// 已有非空标题时不动。此前该逻辑在 auto_set_session_title 与
-/// resolve_session_title 各实现一份且都是非原子写。
+/// 已有非空标题时不动。
 pub(super) async fn derive_and_persist_title(
     metadata_path: &Path,
-    conversation_path: &Path,
+    _conversation_path: &Path,
 ) -> Option<String> {
-    use tokio::io::AsyncBufReadExt as _;
-
-    let metadata_text = tokio::fs::read_to_string(metadata_path).await.ok()?;
-    let mut metadata: serde_json::Value = serde_json::from_str(&metadata_text).ok()?;
-    if metadata
-        .get("title")
-        .and_then(|v| v.as_str())
-        .is_some_and(|t| !t.is_empty())
-    {
-        return None;
-    }
-    let file = tokio::fs::File::open(conversation_path).await.ok()?;
-    let mut reader = tokio::io::BufReader::new(file);
-    let mut line = String::new();
-    let title = loop {
-        line.clear();
-        let n = reader.read_line(&mut line).await.ok()?;
-        if n == 0 {
-            return None;
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(msg) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-            continue;
-        };
-        if msg.get("role").and_then(|v| v.as_str()) != Some("user") {
-            continue;
-        }
-        let Some(content) = msg.get("content").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if let Some(title) = crate::session::metadata::title_from_prompt(content) {
-            break title;
-        }
-    };
-    metadata["title"] = serde_json::Value::String(title.clone());
-    let now = time::OffsetDateTime::now_utc();
-    let fmt = time::format_description::well_known::Rfc3339;
-    metadata["updated_at"] = serde_json::Value::String(now.format(&fmt).unwrap_or_default());
-    if let Ok(text) = serde_json::to_string_pretty(&metadata) {
-        // Cosmetic title write-back: best-effort, never fails the run.
-        let path = metadata_path.to_path_buf();
-        let payload = format!("{text}\n");
-        let _ = tokio::task::spawn_blocking(move || {
-            let _ = mink::runtime::atomic_replace(&path, payload.as_bytes());
-        })
-        .await;
-    }
-    Some(title)
+    let session_dir = metadata_path.parent()?;
+    crate::runtime::session::SessionReader::new(session_dir)
+        .ensure_title()
+        .await
+        .ok()
+        .flatten()
 }
 
 pub(super) fn list_skills() {

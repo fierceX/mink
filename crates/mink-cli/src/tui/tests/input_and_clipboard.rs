@@ -273,7 +273,7 @@ fn new_user_input_is_appended_after_the_open_stream() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut state = TuiState::default();
 
-    state.apply(&TuiSignal::Text("previous answer".into()));
+    state.apply(TuiSignal::Text("previous answer".into()));
     assert!(state.stream.streaming);
 
     state.input.buf = "next question".into();
@@ -298,7 +298,7 @@ fn new_user_input_is_appended_after_the_open_stream() {
     );
 
     // A late Stop must not move the previous answer behind the new input.
-    state.apply(&TuiSignal::Stop);
+    state.apply(TuiSignal::Stop);
     let texts: Vec<&str> = state
         .transcript
         .lines
@@ -312,7 +312,7 @@ fn new_user_input_is_appended_after_the_open_stream() {
 #[test]
 fn ctrl_v_stages_clipboard_image_and_queues_it() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (ui_tx, ui_rx) = std::sync::mpsc::channel();
+    let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
     let dir = unique_test_dir("clipboard-stage");
     let mut state = TuiState {
         mirrors: state::SessionMirrors {
@@ -335,8 +335,7 @@ fn ctrl_v_stages_clipboard_image_and_queues_it() {
     ));
     assert!(state.async_load.clipboard_started.is_some());
 
-    let event = ui_rx
-        .recv_timeout(std::time::Duration::from_secs(10))
+    let event = recv_ui_event_timeout(&mut ui_rx, std::time::Duration::from_secs(10))
         .expect("clipboard worker must report back");
     state.apply_ui_event(event);
 
@@ -352,7 +351,7 @@ fn ctrl_v_stages_clipboard_image_and_queues_it() {
 #[test]
 fn super_v_also_requests_clipboard_image() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (ui_tx, ui_rx) = std::sync::mpsc::channel();
+    let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
     let dir = unique_test_dir("clipboard-super");
     let mut state = TuiState {
         mirrors: state::SessionMirrors {
@@ -374,8 +373,7 @@ fn super_v_also_requests_clipboard_image() {
         &tx,
     ));
 
-    let event = ui_rx
-        .recv_timeout(std::time::Duration::from_secs(10))
+    let event = recv_ui_event_timeout(&mut ui_rx, std::time::Duration::from_secs(10))
         .expect("Super+V must trigger the clipboard worker");
     state.apply_ui_event(event);
 
@@ -386,7 +384,7 @@ fn super_v_also_requests_clipboard_image() {
 #[test]
 fn stale_clipboard_read_allows_a_retry() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (ui_tx, ui_rx) = std::sync::mpsc::channel();
+    let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
     let dir = unique_test_dir("clipboard-stale");
     let mut state = TuiState {
         mirrors: state::SessionMirrors {
@@ -411,8 +409,7 @@ fn stale_clipboard_read_allows_a_retry() {
         &tx,
     ));
 
-    let event = ui_rx
-        .recv_timeout(std::time::Duration::from_secs(10))
+    let event = recv_ui_event_timeout(&mut ui_rx, std::time::Duration::from_secs(10))
         .expect("a stale in-flight read must not block a retry");
     state.apply_ui_event(event);
     assert_eq!(state.input.pending_images.len(), 1);
@@ -422,7 +419,7 @@ fn stale_clipboard_read_allows_a_retry() {
 #[test]
 fn ctrl_v_without_image_capability_reports_and_queues_nothing() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (ui_tx, _ui_rx) = std::sync::mpsc::channel();
+    let (ui_tx, _ui_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut state = TuiState {
         mirrors: state::SessionMirrors {
             image_input: None,
@@ -562,7 +559,7 @@ fn failed_send_keeps_text_and_queued_images() {
 #[test]
 fn unrepresentable_attachment_path_fails_closed() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (ui_tx, ui_rx) = std::sync::mpsc::channel();
+    let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
     let root = unique_test_dir("clipboard-quote");
     let mut state = TuiState {
         mirrors: state::SessionMirrors {
@@ -583,8 +580,7 @@ fn unrepresentable_attachment_path_fails_closed() {
         &mut state,
         &tx,
     ));
-    let event = ui_rx
-        .recv_timeout(std::time::Duration::from_secs(10))
+    let event = recv_ui_event_timeout(&mut ui_rx, std::time::Duration::from_secs(10))
         .expect("clipboard worker must report back");
     state.apply_ui_event(event);
 
@@ -624,10 +620,10 @@ fn chip_lines_truncate_to_requested_rows() {
 fn load_image_limits_reads_frozen_snapshot() {
     let dir = unique_test_dir("capabilities");
     std::fs::create_dir_all(&dir).unwrap();
-    let info = session_info(&dir);
+    let reader = crate::runtime::session::SessionReader::new(&dir);
 
     assert!(
-        load_image_limits(&info).is_none(),
+        reader.read_image_limits().is_none(),
         "missing snapshot fails closed"
     );
 
@@ -637,7 +633,7 @@ fn load_image_limits_reads_frozen_snapshot() {
         serde_json::json!({"image_input": supported}).to_string(),
     )
     .unwrap();
-    assert!(load_image_limits(&info).is_some());
+    assert!(reader.read_image_limits().is_some());
 
     let unsupported = mink::runtime::ImageInputCapability::Unsupported;
     std::fs::write(
@@ -646,7 +642,7 @@ fn load_image_limits_reads_frozen_snapshot() {
     )
     .unwrap();
     assert!(
-        load_image_limits(&info).is_none(),
+        reader.read_image_limits().is_none(),
         "text-only snapshot fails closed"
     );
 

@@ -1013,11 +1013,41 @@ fn image_input_toml_on_and_off_parse() {
 
 #[test]
 fn image_input_env_vars_apply_and_files_outrank() {
-    // env layer: MINK_IMAGE_INPUT / MINK_VISION_MODELS
-    unsafe {
-        std::env::set_var("MINK_IMAGE_INPUT", "off");
-        std::env::set_var("MINK_VISION_MODELS", "m1, m2 ,m3");
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
+    impl EnvGuard {
+        fn set(pairs: &[(&'static str, &str)]) -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let mut saved = Vec::with_capacity(pairs.len());
+            for (k, v) in pairs {
+                saved.push((*k, std::env::var_os(k)));
+                unsafe {
+                    std::env::set_var(k, v);
+                }
+            }
+            Self { saved, _lock: lock }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, prev) in self.saved.iter().rev() {
+                unsafe {
+                    match prev {
+                        Some(v) => std::env::set_var(k, v),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+        }
+    }
+
+    let _env = EnvGuard::set(&[
+        ("MINK_IMAGE_INPUT", "off"),
+        ("MINK_VISION_MODELS", "m1, m2 ,m3"),
+    ]);
     let mut cfg = CliConfig::default();
     apply_env_defaults(&mut cfg, &CliConfig::default()).unwrap();
     assert!(matches!(
@@ -1039,11 +1069,6 @@ fn image_input_env_vars_apply_and_files_outrank() {
         ),
         "file layer must outrank env"
     );
-
-    unsafe {
-        std::env::remove_var("MINK_IMAGE_INPUT");
-        std::env::remove_var("MINK_VISION_MODELS");
-    }
 }
 
 #[test]

@@ -38,9 +38,20 @@ impl super::TurnExecutor {
         if let crate::agent::recovery_policy::RecoveryFirstCallDecision::Blocked(guidance) =
             decision
         {
-            guidance
-                .validate(&self.ctx.tools.tool_surface)
-                .expect("RecoveryPolicy emitted an inactive tool reference");
+            let guidance_content = match guidance.validate(&self.ctx.tools.tool_surface) {
+                Ok(()) => guidance.content,
+                Err(error) => {
+                    self.ctx
+                        .log_event(crate::events::EventLog::SignalRecoveryGuard {
+                            action: "invalid_guidance_fallback".into(),
+                            tool: first.name.clone(),
+                            tool_use_id: first.id.clone(),
+                            reason: format!("{error:#}"),
+                            guard_blocks: self.local.guard_blocks,
+                        });
+                    "Please inspect the current state directly before continuing.".to_string()
+                }
+            };
             let max_blocks = self.ctx.config.signal.guard_max_blocks;
             if self.local.guard_blocks < max_blocks {
                 self.local.guard_blocks += 1;
@@ -49,25 +60,26 @@ impl super::TurnExecutor {
                         action: "blocked_non_inspection".into(),
                         tool: first.name.clone(),
                         tool_use_id: first.id.clone(),
-                        reason: guidance.content.clone(),
+                        reason: guidance_content.clone(),
                         guard_blocks: self.local.guard_blocks,
                     });
                 let blocked: Vec<crate::tools::runner::ToolExecution> = std::iter::once(first)
                     .chain(iter)
-                    .map(|call| blocked_by_signal_recovery(call, guidance.content.clone()))
+                    .map(|call| blocked_by_signal_recovery(call, guidance_content.clone()))
                     .collect();
                 return (known_format, blocked);
             }
             // 连续拦截达到 guard_max_blocks：绕过守卫放行调用，并强制下一次
             // 决策注入证据。事件 action 与实际行为保持一致（bypassed 而非 blocked）。
             self.local.signal_recovery_guard = false;
+            self.local.guard_blocks = 0;
             self.local.guard_bypassed = true;
             self.ctx
                 .log_event(crate::events::EventLog::SignalRecoveryGuard {
                     action: "bypassed_max_blocks".into(),
                     tool: first.name.clone(),
                     tool_use_id: first.id.clone(),
-                    reason: guidance.content.clone(),
+                    reason: guidance_content,
                     guard_blocks: self.local.guard_blocks,
                 });
             let mut allowed = known_format;
@@ -77,6 +89,7 @@ impl super::TurnExecutor {
         }
 
         self.local.signal_recovery_guard = false;
+        self.local.guard_blocks = 0;
         let mut allowed = known_format;
         allowed.push(first);
         allowed.extend(iter);
@@ -355,6 +368,8 @@ impl super::TurnExecutor {
                         replanned = self.run_replan(b).await?.is_some();
                         if replanned {
                             bt.reset();
+                            self.local.warning_count = 0;
+                            self.local.guard_blocks = 0;
                         }
                     }
                     // 恢复守卫降级为状态门：仅在 Warning 级启用且未成功重规划时。
@@ -371,6 +386,8 @@ impl super::TurnExecutor {
                         // 策略重启成功：重置信念并继续本轮（新证据基线）。
                         // 同时清除恢复守卫和绕过标记，避免旧计划被上一次的守卫继续拦截。
                         bt.reset();
+                        self.local.warning_count = 0;
+                        self.local.guard_blocks = 0;
                         self.local.signal_recovery_guard = false;
                         self.local.guard_bypassed = false;
                         self.ctx.io.display.render_info(&format!(
@@ -415,7 +432,7 @@ impl super::TurnExecutor {
                                 .into(),
                     }));
                 }
-                _ => {}
+                crate::agent::decision::Decision::None => {}
             }
         }
         Ok(None)

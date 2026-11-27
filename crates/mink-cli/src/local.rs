@@ -307,25 +307,22 @@ pub(crate) async fn execute_goal_command(
     let created = match &command {
         GoalCommand::Create(text) | GoalCommand::Human(text) | GoalCommand::Verified(text) => {
             let mut spec = GoalSpec::new(text.clone());
+            let goals = handle.goals();
             if matches!(command, GoalCommand::Human(_)) {
                 spec.acceptance = GoalAcceptance::Human;
             }
             if matches!(command, GoalCommand::Verified(_)) {
                 spec.acceptance = GoalAcceptance::Verifier {
-                    id: handle
-                        .goal_verifier_ids()
-                        .into_iter()
-                        .next()
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("set MINK_GOAL_CHECK to configure a terminal checker")
-                        })?,
+                    id: goals.verifier_ids().into_iter().next().ok_or_else(|| {
+                        anyhow::anyhow!("set MINK_GOAL_CHECK to configure a terminal checker")
+                    })?,
                 };
             }
-            if let Some(id) = handle.goal_verifier_ids().into_iter().next() {
+            if let Some(id) = goals.verifier_ids().into_iter().next() {
                 spec.checker_id = Some(id);
             }
-            handle.request_goal_draft(spec, 3600)?;
-            let draft = handle.generate_goal_draft("").await?;
+            goals.request_draft(spec, 3600)?;
+            let draft = goals.generate_draft("").await?;
             return Ok(format!(
                 "Goal draft {} revision {} awaiting confirmation.\n{}\nConfirm this exact version: /goal confirm {} {}",
                 draft.id,
@@ -336,7 +333,7 @@ pub(crate) async fn execute_goal_command(
             ));
         }
         GoalCommand::Refine(feedback) => {
-            let draft = handle.generate_goal_draft(feedback).await?;
+            let draft = handle.goals().generate_draft(feedback).await?;
             return Ok(format!(
                 "Goal draft {} revision {}\n{}\nConfirm: /goal confirm {} {}",
                 draft.id,
@@ -346,13 +343,14 @@ pub(crate) async fn execute_goal_command(
                 draft.revision
             ));
         }
-        GoalCommand::Confirm { id, revision } => Some(handle.confirm_goal(id, *revision)?),
+        GoalCommand::Confirm { id, revision } => Some(handle.goals().confirm(id, *revision)?),
         _ => None,
     };
     let g = match created {
         Some(g) => g,
         None => {
-            let Some(g) = handle.goal_snapshot() else {
+            let goals = handle.goals();
+            let Some(g) = goals.snapshot() else {
                 return Ok("No goal.".into());
             };
             match command {
@@ -360,18 +358,18 @@ pub(crate) async fn execute_goal_command(
                     return Ok("No current goal; ended goal history retained.".into());
                 }
                 GoalCommand::Status => g,
-                GoalCommand::Pause => handle.pause_goal(&g.id, g.revision)?,
-                GoalCommand::Resume => handle.resume_goal(&g.id, g.revision)?,
-                GoalCommand::Cancel => handle.cancel_goal(&g.id, g.revision)?,
+                GoalCommand::Pause => goals.pause(&g.id, g.revision)?,
+                GoalCommand::Resume => goals.resume(&g.id, g.revision)?,
+                GoalCommand::Cancel => goals.cancel(&g.id, g.revision)?,
                 GoalCommand::Clear => {
-                    handle.clear_goal(&g.id, g.revision)?;
+                    goals.clear(&g.id, g.revision)?;
                     return Ok("Goal display cleared; history retained.".into());
                 }
                 GoalCommand::Reconcile(evidence) => {
-                    handle.reconcile_goal_effects(&g.id, g.revision, evidence)?
+                    goals.reconcile_effects(&g.id, g.revision, evidence)?
                 }
                 GoalCommand::Approve(evidence) => {
-                    handle.approve_goal(&g.id, g.revision, vec![evidence])?
+                    goals.approve(&g.id, g.revision, vec![evidence])?
                 }
                 GoalCommand::Budget {
                     turns,
@@ -384,7 +382,7 @@ pub(crate) async fn execute_goal_command(
                         (time::OffsetDateTime::now_utc().unix_timestamp().max(0) as u64)
                             .saturating_add(minutes.saturating_mul(60));
                     limits.soft_token_limit = tokens;
-                    handle.update_goal_limits(&g.id, g.revision, limits)?
+                    goals.update_limits(&g.id, g.revision, limits)?
                 }
                 _ => unreachable!(),
             }

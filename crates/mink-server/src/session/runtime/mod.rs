@@ -157,7 +157,7 @@ impl SessionRuntime {
         // goal must be visible in the first snapshot without a state read. A
         // cleared (hidden) goal is seeded as null, exactly like every later
         // publication normalizes it.
-        let goal = runtime.handle().goal_snapshot().filter(|goal| !goal.hidden);
+        let goal = runtime.goals().snapshot().filter(|goal| !goal.hidden);
         let has_older = rows
             .first()
             .and_then(|r| r.get("seq"))
@@ -192,8 +192,8 @@ impl SessionRuntime {
         ));
         // Subscribe before the runtime is moved into state: the watch channel
         // carries every later lifecycle change and replays the current value.
-        let mut goal_updates = runtime.handle().subscribe_goal();
-        let mut goal_turns = runtime.handle().subscribe_goal_turns();
+        let mut goal_updates = runtime.goals().subscribe();
+        let mut goal_turns = runtime.goals().subscribe_turns();
         let projection = Arc::new(Mutex::new(projection));
         let _ = goal_projection.set(projection.clone());
         let state = Arc::new(Mutex::new(RuntimeState {
@@ -336,7 +336,10 @@ impl SessionRuntime {
     /// Live goal snapshot, falling back to the persisted file when no runtime
     /// is open so a closed session still reports what it left behind.
     pub fn goal_snapshot(&self) -> Option<mink::runtime::GoalSnapshot> {
-        if let Some(goal) = self.goal_handle().and_then(|handle| handle.goal_snapshot()) {
+        if let Some(goal) = self
+            .goal_handle()
+            .and_then(|handle| handle.goals().snapshot())
+        {
             return Some(goal);
         }
         self.persisted_goal()

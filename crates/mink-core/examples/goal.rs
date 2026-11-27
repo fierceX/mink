@@ -9,16 +9,17 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     let handle = runtime.handle();
-    let mut changes = handle.subscribe_goal();
+    let goals = handle.goals();
+    let mut changes = goals.subscribe();
     let initial = changes.borrow_and_update().clone();
     println!("Initial goal: {initial:?}");
     // Enable scheduling; only explicit confirmation starts the run.
-    handle.start_goal_driver()?;
-    let _draft = handle.request_goal_draft(
+    goals.start_driver()?;
+    let _draft = goals.request_draft(
         GoalSpec::new("Inspect this project and save findings to findings.md"),
         3600,
     )?;
-    let draft = handle.generate_goal_draft("").await?;
+    let draft = goals.generate_draft("").await?;
     println!(
         "Confirm draft {} revision {}:\n{}",
         draft.id,
@@ -29,12 +30,12 @@ async fn main() -> anyhow::Result<()> {
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
     if answer.trim() != draft.revision.to_string() || !draft.draft_ready {
-        handle.cancel_goal_draft(&draft.id, draft.revision)?;
+        goals.cancel_draft(&draft.id, draft.revision)?;
         runtime.shutdown().await?;
         return Ok(());
     }
-    handle.confirm_goal(&draft.id, draft.revision)?;
-    let outcome = handle.wait_goal().await?;
+    goals.confirm(&draft.id, draft.revision)?;
+    let outcome = goals.wait().await?;
     println!(
         "Goal {:?}; completion basis {:?}",
         outcome.status, outcome.completion_basis

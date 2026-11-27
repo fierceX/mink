@@ -2,50 +2,197 @@
 
 use super::*;
 
+/// Scoped controller for Goal contract lifecycle, leases, review and execution waiting.
+#[derive(Clone, Copy)]
+pub struct GoalController<'a> {
+    handle: &'a AgentRuntimeHandle,
+}
+
 impl AgentRuntimeHandle {
-    pub fn goal_verifier_ids(&self) -> Vec<String> {
-        self.goal_driver
+    /// Access goal lifecycle and scheduling controls for this session.
+    pub fn goals(&self) -> GoalController<'_> {
+        GoalController { handle: self }
+    }
+}
+
+impl<'a> GoalController<'a> {
+    pub fn verifier_ids(&self) -> Vec<String> {
+        self.handle
+            .goal_driver
             .verifiers
             .iter()
             .map(|v| v.id().to_string())
             .collect()
     }
-    pub fn goal_snapshot(&self) -> Option<GoalSnapshot> {
-        self.goal_ctx.stores.goal_store.snapshot()
+    pub fn snapshot(&self) -> Option<GoalSnapshot> {
+        self.handle.goal_snapshot()
     }
-    pub fn subscribe_goal(&self) -> tokio::sync::watch::Receiver<Option<GoalSnapshot>> {
-        self.goal_ctx.stores.goal_store.subscribe()
-    }
-    /// Retired direct activation. Hosts must explicitly confirm a durable draft.
-    pub fn create_goal(&self, _spec: GoalSpec) -> RuntimeResult<GoalSnapshot> {
-        Err(RuntimeError::Command(
-            "goal protocol upgraded; use draft_goal then confirm_goal".into(),
-        ))
-    }
-    pub fn create_and_start_goal(
-        &self,
-        _spec: GoalSpec,
-        _lease: Box<dyn GoalRunLease>,
-    ) -> RuntimeResult<GoalSnapshot> {
-        Err(RuntimeError::Command(
-            "goal protocol upgraded; use confirm_and_start_goal".into(),
-        ))
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Option<GoalSnapshot>> {
+        self.handle.subscribe_goal()
     }
     /// Save a host-prepared contract, still requiring explicit confirmation.
-    pub fn draft_goal(
-        &self,
-        spec: GoalSpec,
-        duration_secs: u64,
-    ) -> RuntimeResult<GoalDraftSnapshot> {
-        self.draft_goal_inner(spec, duration_secs, true)
+    pub fn draft(&self, spec: GoalSpec, duration_secs: u64) -> RuntimeResult<GoalDraftSnapshot> {
+        self.handle.draft_goal_inner(spec, duration_secs, true)
     }
     /// Save a request awaiting model decomposition; not confirmable yet.
-    pub fn request_goal_draft(
+    pub fn request_draft(
         &self,
         spec: GoalSpec,
         duration_secs: u64,
     ) -> RuntimeResult<GoalDraftSnapshot> {
-        self.draft_goal_inner(spec, duration_secs, false)
+        self.handle.draft_goal_inner(spec, duration_secs, false)
+    }
+    pub fn draft_snapshot(&self) -> Option<GoalDraftSnapshot> {
+        self.handle.goal_draft_snapshot()
+    }
+    pub fn cancel_draft(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
+        self.handle
+            .goal_control(id, revision, GoalTransition::CancelDraft, true)
+    }
+    pub fn confirm(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
+        self.handle.confirm_goal_inner(id, revision, None)
+    }
+    pub fn confirm_and_start(
+        &self,
+        id: &str,
+        revision: u64,
+        lease: Box<dyn GoalRunLease>,
+    ) -> RuntimeResult<GoalSnapshot> {
+        self.handle.confirm_goal_inner(id, revision, Some(lease))
+    }
+    /// Read-only exploration and proposal generation; no activation occurs.
+    pub async fn generate_draft(&self, feedback: &str) -> RuntimeResult<GoalDraftSnapshot> {
+        let current = self
+            .draft_snapshot()
+            .ok_or_else(|| RuntimeError::Command("no goal draft".into()))?;
+        self.generate_draft_at(&current.id, current.revision, feedback)
+            .await
+    }
+    /// Refine exactly the draft version the host displayed, rejecting stale requests.
+    pub async fn generate_draft_at(
+        &self,
+        id: &str,
+        revision: u64,
+        feedback: &str,
+    ) -> RuntimeResult<GoalDraftSnapshot> {
+        self.generate_draft_at_with_timeout(id, revision, feedback, None)
+            .await
+    }
+    /// Cancel this draft's turn at the host deadline and await its exit before returning.
+    pub async fn generate_draft_at_with_timeout(
+        &self,
+        id: &str,
+        revision: u64,
+        feedback: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> RuntimeResult<GoalDraftSnapshot> {
+        self.handle
+            .generate_goal_draft_at_with_timeout_inner(id, revision, feedback, timeout)
+            .await
+    }
+    pub fn pause(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
+        self.handle
+            .goal_control(id, revision, GoalTransition::Pause, true)
+    }
+    pub fn cancel(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
+        self.handle
+            .goal_control(id, revision, GoalTransition::Cancel, true)
+    }
+    pub fn resume(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
+        self.handle.resume_goal_inner(id, revision, None)
+    }
+    /// Resume a goal and hand its run a host-managed capacity lease.
+    pub fn resume_and_start(
+        &self,
+        id: &str,
+        revision: u64,
+        lease: Box<dyn GoalRunLease>,
+    ) -> RuntimeResult<GoalSnapshot> {
+        self.handle.resume_goal_inner(id, revision, Some(lease))
+    }
+    pub fn update_limits(
+        &self,
+        id: &str,
+        revision: u64,
+        limits: GoalLimits,
+    ) -> RuntimeResult<GoalSnapshot> {
+        limits.validate().map_err(command_error)?;
+        self.handle
+            .goal_control(id, revision, GoalTransition::UpdateLimits { limits }, false)
+    }
+    /// Explicit host reconciliation after investigating an unknown side effect.
+    /// Does not synthesize tool results or automatically resume execution.
+    pub fn reconcile_effects(
+        &self,
+        id: &str,
+        revision: u64,
+        evidence: String,
+    ) -> RuntimeResult<GoalSnapshot> {
+        self.handle.goal_control(
+            id,
+            revision,
+            GoalTransition::ReconcileEffects { evidence },
+            false,
+        )
+    }
+    pub fn clear(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
+        self.handle
+            .goal_control(id, revision, GoalTransition::Clear, false)
+    }
+    pub fn approve(
+        &self,
+        id: &str,
+        revision: u64,
+        evidence: Vec<String>,
+    ) -> RuntimeResult<GoalSnapshot> {
+        self.handle.approve_goal_inner(id, revision, evidence)
+    }
+    pub async fn approve_async(
+        &self,
+        id: &str,
+        revision: u64,
+        evidence: Vec<String>,
+    ) -> RuntimeResult<GoalSnapshot> {
+        self.handle
+            .approve_goal_async_inner(id, revision, evidence)
+            .await
+    }
+    /// Watch whether a goal turn is currently executing.
+    pub fn subscribe_turns(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.handle.goal_driver.turn_active.subscribe()
+    }
+    /// Enable goal scheduling. Rust starts with scheduling disabled.
+    ///
+    /// Arming a driver never starts a run. Hosts that account for execution
+    /// capacity start runs through [`Self::confirm_and_start`] /
+    /// [`Self::resume_and_start`], so every run they start carries its
+    /// lease; lifecycle hosts without a capacity ledger use
+    /// [`Self::start_driver_and_run`] to pick up a restored `active` goal.
+    pub fn start_driver(&self) -> RuntimeResult<()> {
+        self.handle.start_goal_driver_inner()
+    }
+    /// Enable scheduling and start a run for the current `active` goal.
+    ///
+    /// Call after UI subscriptions and input wiring. This is the lifecycle
+    /// host's entry: it arms the driver and, if a goal was restored as
+    /// `active`, starts exactly one run for it. Hosts that own execution
+    /// capacity must not use this: their runs are started by
+    /// [`Self::confirm_and_start`] / [`Self::resume_and_start`].
+    pub fn start_driver_and_run(&self) -> RuntimeResult<()> {
+        self.start_driver()?;
+        self.handle.schedule_goal()
+    }
+    pub async fn wait(&self) -> RuntimeResult<GoalOutcome> {
+        self.handle.wait_goal().await
+    }
+}
+
+impl AgentRuntimeHandle {
+    pub(crate) fn goal_snapshot(&self) -> Option<GoalSnapshot> {
+        self.goal_ctx.stores.goal_store.snapshot()
+    }
+    pub(crate) fn subscribe_goal(&self) -> tokio::sync::watch::Receiver<Option<GoalSnapshot>> {
+        self.goal_ctx.stores.goal_store.subscribe()
     }
     fn draft_goal_inner(
         &self,
@@ -101,23 +248,9 @@ impl AgentRuntimeHandle {
         self.announce_goal(&goal);
         Ok(goal)
     }
-    pub fn goal_draft_snapshot(&self) -> Option<GoalDraftSnapshot> {
+    pub(crate) fn goal_draft_snapshot(&self) -> Option<GoalDraftSnapshot> {
         self.goal_snapshot()
             .filter(|g| g.status == GoalStatus::Draft)
-    }
-    pub fn cancel_goal_draft(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
-        self.goal_control(id, revision, GoalTransition::CancelDraft, true)
-    }
-    pub fn confirm_goal(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
-        self.confirm_goal_inner(id, revision, None)
-    }
-    pub fn confirm_and_start_goal(
-        &self,
-        id: &str,
-        revision: u64,
-        lease: Box<dyn GoalRunLease>,
-    ) -> RuntimeResult<GoalSnapshot> {
-        self.confirm_goal_inner(id, revision, Some(lease))
     }
     fn confirm_goal_inner(
         &self,
@@ -170,27 +303,8 @@ impl AgentRuntimeHandle {
         }
         Ok(goal)
     }
-    /// Read-only exploration and proposal generation; no activation occurs.
-    pub async fn generate_goal_draft(&self, feedback: &str) -> RuntimeResult<GoalDraftSnapshot> {
-        let current = self
-            .goal_draft_snapshot()
-            .ok_or_else(|| RuntimeError::Command("no goal draft".into()))?;
-        self.generate_goal_draft_at(&current.id, current.revision, feedback)
-            .await
-    }
-    /// Refine exactly the draft version the host displayed, rejecting stale requests.
-    pub async fn generate_goal_draft_at(
-        &self,
-        id: &str,
-        revision: u64,
-        feedback: &str,
-    ) -> RuntimeResult<GoalDraftSnapshot> {
-        self.generate_goal_draft_at_with_timeout(id, revision, feedback, None)
-            .await
-    }
 
-    /// Cancel this draft's turn at the host deadline and await its exit before returning.
-    pub async fn generate_goal_draft_at_with_timeout(
+    async fn generate_goal_draft_at_with_timeout_inner(
         &self,
         id: &str,
         revision: u64,
@@ -281,26 +395,6 @@ impl AgentRuntimeHandle {
         self.announce_goal(&draft);
         Ok(draft)
     }
-    pub fn pause_goal(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
-        self.goal_control(id, revision, GoalTransition::Pause, true)
-    }
-    pub fn cancel_goal(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
-        self.goal_control(id, revision, GoalTransition::Cancel, true)
-    }
-    pub fn resume_goal(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
-        self.resume_goal_inner(id, revision, None)
-    }
-
-    /// Resume a goal and hand its run a host-managed capacity lease.
-    pub fn resume_and_start_goal(
-        &self,
-        id: &str,
-        revision: u64,
-        lease: Box<dyn GoalRunLease>,
-    ) -> RuntimeResult<GoalSnapshot> {
-        self.resume_goal_inner(id, revision, Some(lease))
-    }
-
     fn resume_goal_inner(
         &self,
         id: &str,
@@ -341,34 +435,36 @@ impl AgentRuntimeHandle {
         }
         Ok(())
     }
-    pub fn update_goal_limits(
+    fn prepare_approve_transition(
         &self,
-        id: &str,
-        revision: u64,
-        limits: GoalLimits,
-    ) -> RuntimeResult<GoalSnapshot> {
-        limits.validate().map_err(command_error)?;
-        self.goal_control(id, revision, GoalTransition::UpdateLimits { limits }, false)
+        goal: &GoalSnapshot,
+        evidence: Vec<String>,
+    ) -> Result<GoalTransition> {
+        ensure!(
+            goal.spec.acceptance == GoalAcceptance::Human
+                && goal.status == GoalStatus::Blocked
+                && goal.phase == GoalPhase::Verifying
+                && goal
+                    .reviews
+                    .last()
+                    .is_some_and(|r| r.verdict == GoalReviewVerdict::Satisfied),
+            "no pending human acceptance"
+        );
+        let evidence_versions = self.validate_review_evidence(goal)?;
+        let checker_evidence_valid = if goal.spec.checker_id.is_some() {
+            self.checker_snapshot_matches(goal)?
+        } else {
+            false
+        };
+        Ok(GoalTransition::Approve {
+            evidence,
+            evidence_versions,
+            checker_evidence_valid,
+            now_unix_secs: goal_now(),
+        })
     }
-    /// Explicit host reconciliation after investigating an unknown side effect.
-    /// Does not synthesize tool results or automatically resume execution.
-    pub fn reconcile_goal_effects(
-        &self,
-        id: &str,
-        revision: u64,
-        evidence: String,
-    ) -> RuntimeResult<GoalSnapshot> {
-        self.goal_control(
-            id,
-            revision,
-            GoalTransition::ReconcileEffects { evidence },
-            false,
-        )
-    }
-    pub fn clear_goal(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
-        self.goal_control(id, revision, GoalTransition::Clear, false)
-    }
-    pub fn approve_goal(
+
+    fn approve_goal_inner(
         &self,
         id: &str,
         revision: u64,
@@ -381,31 +477,54 @@ impl AgentRuntimeHandle {
                 "human approval requires evidence".into(),
             ));
         }
+        let snapshot = self
+            .goal_snapshot()
+            .filter(|g| g.id == id && g.revision == revision)
+            .ok_or_else(|| RuntimeError::Command("no pending human acceptance".into()))?;
+        let transition = self
+            .prepare_approve_transition(&snapshot, evidence)
+            .map_err(|e| RuntimeError::Command(format!("{e:#}")))?;
         self.goal_control_with(
             id,
             revision,
-            |g| {
-                ensure!(
-                    g.spec.acceptance == GoalAcceptance::Human
-                        && g.status == GoalStatus::Blocked
-                        && g.phase == GoalPhase::Verifying
-                        && g.reviews
-                            .last()
-                            .is_some_and(|r| r.verdict == GoalReviewVerdict::Satisfied),
-                    "no pending human acceptance"
-                );
-                let evidence_versions = self.validate_review_evidence(g)?;
-                let checker_evidence_valid = if g.spec.checker_id.is_some() {
-                    self.checker_snapshot_matches(g)?
-                } else {
-                    false
-                };
-                Ok(GoalTransition::Approve {
-                    evidence: evidence.clone(),
-                    evidence_versions,
-                    checker_evidence_valid,
-                    now_unix_secs: goal_now(),
-                })
+            move |g| {
+                ensure!(g.revision == snapshot.revision, "stale goal revision");
+                Ok(transition)
+            },
+            false,
+            false,
+        )
+    }
+
+    async fn approve_goal_async_inner(
+        &self,
+        id: &str,
+        revision: u64,
+        evidence: Vec<String>,
+    ) -> RuntimeResult<GoalSnapshot> {
+        if evidence.is_empty() || evidence.iter().any(|item| item.trim().is_empty()) {
+            return Err(RuntimeError::Command(
+                "human approval requires evidence".into(),
+            ));
+        }
+        let snapshot = self
+            .goal_snapshot()
+            .filter(|g| g.id == id && g.revision == revision)
+            .ok_or_else(|| RuntimeError::Command("no pending human acceptance".into()))?;
+        let handle = self.clone();
+        let snap_for_hash = snapshot.clone();
+        let transition = tokio::task::spawn_blocking(move || {
+            handle.prepare_approve_transition(&snap_for_hash, evidence)
+        })
+        .await
+        .map_err(|e| RuntimeError::Command(format!("goal approval verification task failed: {e}")))?
+        .map_err(|e| RuntimeError::Command(format!("{e:#}")))?;
+        self.goal_control_with(
+            id,
+            revision,
+            move |g| {
+                ensure!(g.revision == snapshot.revision, "stale goal revision");
+                Ok(transition)
             },
             false,
             false,
@@ -572,12 +691,14 @@ impl AgentRuntimeHandle {
                 });
         }
         self.goal_ctx
-            .log_raw_event(serde_json::json!({"type":"goal_updated","goal":goal}));
+            .log_event(crate::events::EventLog::GoalUpdated {
+                goal: Box::new(goal.clone()),
+            });
         if let Some(stage) = goal.review_stage {
             let label = match stage {
-                GoalReviewStage::Screening => "判断是否需要验收",
-                GoalReviewStage::Inspecting => "检查完成证据",
-                GoalReviewStage::Adjudicating => "宿主提交结论",
+                GoalReviewStage::Screening => "screening completion",
+                GoalReviewStage::Inspecting => "inspecting evidence",
+                GoalReviewStage::Adjudicating => "adjudicating review",
             };
             self.goal_ctx
                 .io
@@ -593,34 +714,11 @@ impl AgentRuntimeHandle {
             goal.completion_basis
         ));
     }
-    /// Watch whether a goal turn is currently executing.
-    pub fn subscribe_goal_turns(&self) -> tokio::sync::watch::Receiver<bool> {
-        self.goal_driver.turn_active.subscribe()
-    }
 
-    /// Enable goal scheduling. Rust starts with scheduling disabled.
-    ///
-    /// Arming a driver never starts a run. Hosts that account for execution
-    /// capacity start runs through [`Self::create_and_start_goal`] /
-    /// [`Self::resume_and_start_goal`], so every run they start carries its
-    /// lease; lifecycle hosts without a capacity ledger use
-    /// [`Self::start_goal_driver_and_run`] to pick up a restored `active` goal.
-    pub fn start_goal_driver(&self) -> RuntimeResult<()> {
+    fn start_goal_driver_inner(&self) -> RuntimeResult<()> {
         self.ensure_goal_activation_allowed()?;
         self.goal_driver.lock_control().enabled = true;
         Ok(())
-    }
-
-    /// Enable scheduling and start a run for the current `active` goal.
-    ///
-    /// Call after UI subscriptions and input wiring. This is the lifecycle
-    /// host's entry: it arms the driver and, if a goal was restored as
-    /// `active`, starts exactly one run for it. Hosts that own execution
-    /// capacity must not use this: their runs are started by
-    /// [`Self::create_and_start_goal`] / [`Self::resume_and_start_goal`].
-    pub fn start_goal_driver_and_run(&self) -> RuntimeResult<()> {
-        self.start_goal_driver()?;
-        self.schedule_goal()
     }
 
     /// Refuse activation when the driver already stopped for good.

@@ -153,6 +153,7 @@ pub struct SandboxPythonConfigFile {
     pub wasm_path: Option<String>,
     pub stdlib_dir: Option<String>,
     pub timeout: Option<u64>,
+    pub max_memory_mb: Option<usize>,
     pub read_dirs: Option<Vec<String>>,
     pub write_dirs: Option<Vec<String>>,
     pub package_dirs: Option<Vec<String>>,

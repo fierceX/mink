@@ -7,6 +7,13 @@ pub struct SessionLease {
     _file: File,
     _parent: Option<std::sync::Arc<SessionLease>>,
 }
+impl Drop for SessionLease {
+    fn drop(&mut self) {
+        // Explicit unlock releases the open file description lock even if a
+        // concurrent fork/exec briefly inherited the descriptor before CLOEXEC.
+        let _ = fs2::FileExt::unlock(&self._file);
+    }
+}
 impl SessionLease {
     pub fn acquire_directory(directory: &Path) -> Result<Self> {
         std::fs::create_dir_all(directory)?;

@@ -388,10 +388,16 @@ impl AgentRuntimeHandle {
                 .filter(|r| r.candidate == candidate)
                 .cloned();
             let (review, reads, expected_conversation_seq) = if let Some(review) = existing {
-                if !self
-                    .validate_review_evidence(&goal)
-                    .is_ok_and(|v| v == goal.evidence_versions)
-                {
+                let handle_for_validate = self.clone();
+                let goal_for_validate = goal.clone();
+                let valid = tokio::task::spawn_blocking(move || {
+                    handle_for_validate
+                        .validate_review_evidence(&goal_for_validate)
+                        .is_ok_and(|v| v == goal_for_validate.evidence_versions)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("review evidence task failed: {e}"))?;
+                if !valid {
                     // A known checker result may have been published just before a
                     // crash or pause. Re-audit; never replay unknown checker effects.
                     if !goal.pending_effects.is_empty() {
@@ -669,10 +675,16 @@ impl AgentRuntimeHandle {
                     })?;
                     return Ok(());
                 }
-                if !self
-                    .validate_review_evidence(&goal)
-                    .is_ok_and(|v| v == goal.evidence_versions)
-                {
+                let handle_for_validate = self.clone();
+                let goal_for_validate = goal.clone();
+                let valid = tokio::task::spawn_blocking(move || {
+                    handle_for_validate
+                        .validate_review_evidence(&goal_for_validate)
+                        .is_ok_and(|v| v == goal_for_validate.evidence_versions)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("review evidence task failed: {e}"))?;
+                if !valid {
                     let Some(next) = self.restart_goal_review(run_id, &goal)? else {
                         return Ok(());
                     };
@@ -680,7 +692,34 @@ impl AgentRuntimeHandle {
                     continue;
                 }
             }
+            struct ReviewPrecheck {
+                revision: u64,
+                evidence: Vec<(String, String)>,
+                checker_ok: bool,
+            }
             let conversation_seq = self.goal_ctx.stores.store.committed_len().await?;
+            let precheck = if let Some(snap) = self.goal_snapshot() {
+                let handle_for_precheck = self.clone();
+                let has_checker = checker.is_some();
+                Some(
+                    tokio::task::spawn_blocking(move || -> Result<ReviewPrecheck> {
+                        let evidence = handle_for_precheck.validate_review_evidence(&snap)?;
+                        let checker_ok =
+                            !has_checker || handle_for_precheck.checker_snapshot_matches(&snap)?;
+                        Ok(ReviewPrecheck {
+                            revision: snap.revision,
+                            evidence,
+                            checker_ok,
+                        })
+                    })
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("review completion precheck task failed: {e}")
+                    })??,
+                )
+            } else {
+                None
+            };
             self.apply_if_run_scheduled(run_id, || {
                 let Some(current) = self.goal_snapshot() else {
                     return Ok(());
@@ -692,10 +731,14 @@ impl AgentRuntimeHandle {
                 {
                     return Ok(());
                 }
+                let Some(ref checked) = precheck else {
+                    anyhow::bail!("candidate changed before completion");
+                };
                 ensure!(
                     conversation_seq == current.acceptance_conversation_seq
-                        && self.validate_review_evidence(&current)? == current.evidence_versions
-                        && (checker.is_none() || self.checker_snapshot_matches(&current)?),
+                        && current.revision == checked.revision
+                        && checked.evidence == current.evidence_versions
+                        && checked.checker_ok,
                     "candidate changed before completion"
                 );
                 let completed = self.goal_ctx.stores.goal_store.transition(

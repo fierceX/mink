@@ -17,10 +17,12 @@ pub async fn init_session_base_at(
     ensure_dir(&paths.session_dir).await?;
     ensure_dir(&paths.artifacts).await?;
 
-    for f in [&paths.conversation, &paths.events, &paths.summary] {
-        if !f.exists() {
-            tokio::fs::File::create(f).await?;
-        }
+    for f in [&paths.events, &paths.summary] {
+        tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(f)
+            .await?;
     }
 
     let store = Arc::new(ConversationStore::new(paths.conversation.clone()));

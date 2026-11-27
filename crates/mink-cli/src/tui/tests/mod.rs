@@ -14,7 +14,8 @@ use crate::tui::render::{
     transcript_item_lines, visible_lines,
 };
 use crate::tui::state::{
-    ActiveOverlay, CollapsePolicy, TranscriptItem, TranscriptKind, TuiState, View, WorkState,
+    ActiveOverlay, CollapsePolicy, TranscriptItem, TranscriptKind, TuiState, TuiUiEvent, View,
+    WorkState,
 };
 use crate::ui::GoalDisplay;
 
@@ -66,29 +67,30 @@ fn fake_clipboard_reader() -> crate::tui::state::ClipboardReader {
     )
 }
 
-fn session_info(dir: &std::path::Path) -> mink::runtime::SessionInfo {
-    mink::runtime::SessionInfo {
-        session_id: "s".into(),
-        session_ref: "s".into(),
-        is_new: true,
-        home: dir.to_path_buf(),
-        cwd: dir.to_path_buf(),
-        events_path: dir.join("events.jsonl"),
-        conversation_path: dir.join("conversation.jsonl"),
-        artifacts_dir: dir.join("artifacts"),
-        summary_path: dir.join("summary.md"),
-        usage_path: dir.join("usage.jsonl"),
-        plan_path: dir.join("plan.md"),
-        plan_draft_path: dir.join("plan.draft"),
-        todos_path: dir.join("todos.json"),
-    }
-}
-
 fn line_text(line: &Line<'static>) -> String {
     line.spans
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>()
+}
+
+fn recv_ui_event_timeout(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<TuiUiEvent>,
+    timeout: std::time::Duration,
+) -> Option<TuiUiEvent> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match rx.try_recv() {
+            Ok(event) => return Some(event),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return None,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
 }
 
 fn goal_display() -> GoalDisplay {

@@ -312,7 +312,7 @@ fn malformed_table_separator_falls_back_to_plain_lines() {
 #[test]
 fn inline_stream_promotes_complete_markdown_blocks_before_stop() {
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::Text(
+    state.apply(TuiSignal::Text(
         "first paragraph\n\nsecond paragraph".into(),
     ));
 
@@ -362,18 +362,18 @@ data/demo/material/
     let (head, tail) = text.split_at(split);
 
     let mut state = TuiState::default();
-    state.apply(&TuiSignal::Text(head.into()));
-    state.apply(&TuiSignal::Info(mink::runtime::llm_wait_heartbeat_message(
+    state.apply(TuiSignal::Text(head.into()));
+    state.apply(TuiSignal::Info(mink::runtime::llm_wait_heartbeat_message(
         30, 0,
     )));
     // 心跳不打断流：尚未落入 transcript，状态栏标签就位。
     assert!(state.stream.streaming);
     assert_eq!(state.transcript.lines.len(), 0);
     assert_eq!(state.stream.stream_status.as_deref(), Some("·30s"));
-    state.apply(&TuiSignal::Text(tail.into()));
+    state.apply(TuiSignal::Text(tail.into()));
     // 新内容到达后等待标签清除。
     assert_eq!(state.stream.stream_status, None);
-    state.apply(&TuiSignal::Stop);
+    state.apply(TuiSignal::Stop);
 
     // 最终 transcript：完整文本一条，心跳不落盘（瞬态状态）。
     assert_eq!(state.transcript.lines.len(), 1);

@@ -8,7 +8,7 @@
 use super::runtime::{
     PtcBindingDispatcher, PtcBindingError, PtcBindingSuccess, PtcImageDescriptor,
 };
-use crate::cancel::CancellationToken;
+use crate::cancel::{CancellationToken, InterruptSignal};
 use crate::context::ToolContext;
 use crate::events::EventLog;
 use crate::protocol::ToolCallEvent;
@@ -29,6 +29,8 @@ pub struct PtcDispatchBridge {
     ctx: Arc<ToolContext>,
     parent_call_id: String,
     run_cancel: CancellationToken,
+    run_interrupt: InterruptSignal,
+    cancel_watcher: Option<tokio::task::JoinHandle<()>>,
     run_deadline: Instant,
     max_sub_calls: usize,
     sub_call_limit_label: String,
@@ -38,6 +40,14 @@ pub struct PtcDispatchBridge {
     active_dispatches: Arc<AtomicUsize>,
     drained_notify: Arc<Notify>,
     state: Mutex<BridgeState>,
+}
+
+impl Drop for PtcDispatchBridge {
+    fn drop(&mut self) {
+        if let Some(handle) = self.cancel_watcher.take() {
+            handle.abort();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -76,10 +86,32 @@ impl PtcDispatchBridge {
     ) -> Self {
         let mut bridge_ctx = (*ctx).clone();
         bridge_ctx.bypass_read_memo = true;
+        let run_interrupt = InterruptSignal::new();
+        if ctx.interrupt.is_set() || run_cancel.is_cancelled() {
+            run_interrupt.trigger();
+        }
+        let cancel_watcher = tokio::runtime::Handle::try_current().ok().map(|handle| {
+            let watcher_cancel = run_cancel.clone();
+            let watcher_parent_interrupt = ctx.interrupt.clone();
+            let watcher_run_interrupt = run_interrupt.clone();
+            handle.spawn(async move {
+                tokio::select! {
+                    _ = watcher_cancel.cancelled() => {
+                        watcher_run_interrupt.trigger();
+                    }
+                    _ = watcher_parent_interrupt.notified() => {
+                        watcher_run_interrupt.trigger();
+                        watcher_cancel.cancel();
+                    }
+                }
+            })
+        });
         Self {
             ctx: Arc::new(bridge_ctx),
             parent_call_id: parent_call_id.into(),
             run_cancel,
+            run_interrupt,
+            cancel_watcher,
             run_deadline: Instant::now() + std::time::Duration::from_secs(3600),
             max_sub_calls: max_sub_calls.max(1),
             sub_call_limit_label: sub_call_limit_label.into(),
@@ -99,6 +131,7 @@ impl PtcDispatchBridge {
 
     /// Abort any queued work and wait until every started nested dispatch has settled.
     pub async fn drain(&self) {
+        self.run_interrupt.trigger();
         self.run_cancel.cancel();
         while self.active_dispatches.load(Ordering::SeqCst) > 0 {
             let notified = self.drained_notify.notified();
@@ -170,35 +203,40 @@ impl PtcDispatchBridge {
             .failed_sub_calls
     }
 
-    fn clamp_bash_timeout(
+    fn clamp_subcall_timeout(
         &self,
+        tool_name: &str,
         input_json: &mut Value,
         fields: &mut BTreeMap<String, String>,
     ) -> std::result::Result<(), PtcBindingError> {
         let remaining = self.run_deadline.saturating_duration_since(Instant::now());
         if remaining < std::time::Duration::from_secs(3) {
             return Err(PtcBindingError {
-                tool_name: "Bash".to_string(),
+                tool_name: tool_name.to_string(),
                 kind: ToolFailureKind::Timeout,
-                message: "remaining RunCode timeout budget is too small (< 3s) to start Bash"
-                    .to_string(),
+                message: format!(
+                    "remaining RunCode timeout budget is too small (< 3s) to start {tool_name}"
+                ),
             });
         }
-        let max_bash_secs = remaining.as_secs().saturating_sub(2).max(1);
+        let max_subcall_secs = remaining.as_secs().saturating_sub(2).max(1);
         let configured_max = u64::try_from(self.ctx.tool_config.tool_timeout_max_secs)
             .unwrap_or(0)
             .max(5);
         let req_timeout = input_json.get("timeout").and_then(Value::as_u64);
         let clamp_to = match req_timeout {
-            Some(req) if req > 0 && req <= configured_max && req > max_bash_secs => {
-                Some(max_bash_secs)
+            Some(req) if req > 0 && req <= configured_max && req > max_subcall_secs => {
+                Some(max_subcall_secs)
             }
             Some(_) => None,
             None => {
-                let default_req = u64::try_from(self.ctx.tool_config.tool_timeout_secs)
-                    .unwrap_or(120)
-                    .clamp(5, configured_max);
-                (default_req > max_bash_secs).then_some(max_bash_secs)
+                let default_req = match tool_name {
+                    "PythonSandbox" => self.ctx.tool_config.sandbox_python.timeout.clamp(5, 300),
+                    _ => u64::try_from(self.ctx.tool_config.tool_timeout_secs)
+                        .unwrap_or(120)
+                        .clamp(5, configured_max),
+                };
+                (default_req > max_subcall_secs).then_some(max_subcall_secs)
             }
         };
         if let Some(clamped) = clamp_to
@@ -244,6 +282,7 @@ impl PtcDispatchBridge {
 #[async_trait]
 impl PtcBindingDispatcher for PtcDispatchBridge {
     fn cancel_pending(&self) {
+        self.run_interrupt.trigger();
         self.run_cancel.cancel();
     }
 
@@ -371,8 +410,8 @@ impl PtcBindingDispatcher for PtcDispatchBridge {
             })
             .unwrap_or_default();
 
-        if tool_name == "Bash" {
-            self.clamp_bash_timeout(&mut input_json, &mut fields)?;
+        if matches!(tool_name, "Bash" | "Python" | "PythonSandbox") {
+            self.clamp_subcall_timeout(tool_name, &mut input_json, &mut fields)?;
         }
 
         let sub_call_id = format!("{}:ptc:{seq}", self.parent_call_id);
@@ -459,6 +498,21 @@ impl PtcBindingDispatcher for PtcDispatchBridge {
         // cancellation to `run_cancel` (parent cancel/interrupt also cancels `run_cancel`).
         let mut nested_ctx = (*self.ctx).clone();
         nested_ctx.cancel = self.run_cancel.linked_child_token();
+        nested_ctx.interrupt = self.run_interrupt.clone();
+        let remaining_secs = self
+            .run_deadline
+            .saturating_duration_since(Instant::now())
+            .as_secs()
+            .saturating_sub(2)
+            .max(1);
+        if let Ok(bounded_secs) = i32::try_from(remaining_secs) {
+            nested_ctx.tool_config.tool_timeout_secs =
+                nested_ctx.tool_config.tool_timeout_secs.min(bounded_secs);
+            nested_ctx.tool_config.tool_timeout_max_secs = nested_ctx
+                .tool_config
+                .tool_timeout_max_secs
+                .min(bounded_secs.max(5));
+        }
         let nested_ctx = Arc::new(nested_ctx);
 
         let outcome = crate::tools::runner::execute_nested_tool_call(&nested_ctx, call).await;
@@ -904,5 +958,60 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.kind, ToolFailureKind::Timeout);
+
+        // Also verify clamp_subcall_timeout directly covers Python / PythonSandbox.
+        let mut py_json = serde_json::json!({"script": "print(1)", "timeout": 120});
+        let mut py_fields = BTreeMap::new();
+        bridge
+            .clamp_subcall_timeout("Python", &mut py_json, &mut py_fields)
+            .unwrap();
+        assert!(py_json["timeout"].as_u64().unwrap() < 10);
+        let py_tight = tight.clamp_subcall_timeout("PythonSandbox", &mut py_json, &mut py_fields);
+        assert_eq!(py_tight.unwrap_err().kind, ToolFailureKind::Timeout);
+    }
+
+    #[tokio::test]
+    async fn run_cancel_interrupts_inflight_bash_subcall() {
+        let shared = crate::regression::test_context_for_agent_with_config(
+            "ptc-bridge-cancel-bash",
+            |cfg| {
+                cfg.ptc = PtcConfig {
+                    mode: PtcMode::Exclusive,
+                    ..PtcConfig::default()
+                };
+            },
+        )
+        .await
+        .unwrap();
+        let ctx = Arc::new(ToolContext::from_shared(&shared));
+        let run_cancel = ctx.cancel.linked_child_token();
+        let bridge = Arc::new(PtcDispatchBridge::new(
+            ctx,
+            "bash_cancel_parent",
+            run_cancel.clone(),
+            10,
+            2,
+            "10 per min",
+        ));
+
+        let bridge_call = bridge.clone();
+        let handle = tokio::spawn(async move {
+            bridge_call
+                .invoke(
+                    "Bash",
+                    serde_json::json!({"command": "sleep 30", "timeout": 30}),
+                )
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        let started = Instant::now();
+        run_cancel.cancel();
+        let res = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("cancelled Bash sub-call must terminate promptly")
+            .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let err = res.unwrap_err();
+        assert_eq!(err.kind, ToolFailureKind::Aborted);
     }
 }

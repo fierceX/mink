@@ -29,7 +29,7 @@ pub(crate) enum RuntimeCmd {
     #[cfg(feature = "tui")]
     RenderTuiStream {
         stream: crate::runtime::AgentEventStream,
-        signals: std::sync::mpsc::Sender<crate::tui::TuiSignal>,
+        signals: mpsc::UnboundedSender<crate::tui::TuiSignal>,
     },
     Compact,
     Goal(crate::local::GoalCommand),
@@ -61,10 +61,13 @@ pub struct CliExit {
 pub fn run_cli_binary() -> ! {
     install_panic_hook();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Err(e) = bootstrap_sandbox_if_needed(&args) {
-        eprintln!("Error: {e}");
-        std::process::exit(1);
-    }
+    let preparsed = match bootstrap_sandbox_with_preparse(&args) {
+        Ok(preparsed) => preparsed,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -75,7 +78,7 @@ pub fn run_cli_binary() -> ! {
             std::process::exit(1);
         }
     };
-    let code = match runtime.block_on(main_entry(args)) {
+    let code = match runtime.block_on(main_entry_with_preparsed(args, preparsed)) {
         Ok(exit) => exit.code,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -99,51 +102,75 @@ pub fn install_panic_hook() {
     }));
 }
 
-pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
-    let mut cfg = match parse_args(args) {
-        Ok(v) => v,
-        Err(e) => match e.downcast_ref::<CliEarlyExit>() {
-            Some(CliEarlyExit::Help) => {
-                print_usage();
-                return Ok(CliExit { code: 0 });
-            }
-            Some(CliEarlyExit::Version) => {
-                println!("{}", version_line());
-                return Ok(CliExit { code: 0 });
-            }
-            None => return Err(e),
-        },
-    };
+struct PreparsedCli {
+    cfg: crate::config::CliConfig,
+    provider_defaults_applied: bool,
+}
 
+pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
+    main_entry_with_preparsed(args, None).await
+}
+
+async fn main_entry_with_preparsed(
+    args: Vec<String>,
+    preparsed: Option<PreparsedCli>,
+) -> Result<CliExit> {
     let cwd = std::env::current_dir()?;
     let home = crate::config::default_home();
 
-    if cfg.list_sessions {
-        list_sessions(&home, &cwd).await?;
-        return Ok(CliExit { code: 0 });
-    }
-    if cfg.list_skills {
-        list_skills();
-        return Ok(CliExit { code: 0 });
-    }
+    let (mut cfg, provider_defaults_applied, sandbox_checked) = match preparsed {
+        Some(pre) => (pre.cfg, pre.provider_defaults_applied, true),
+        None => {
+            let mut cfg = match parse_args(args) {
+                Ok(v) => v,
+                Err(e) => match e.downcast_ref::<CliEarlyExit>() {
+                    Some(CliEarlyExit::Help) => {
+                        print_usage();
+                        return Ok(CliExit { code: 0 });
+                    }
+                    Some(CliEarlyExit::Version) => {
+                        println!("{}", version_line());
+                        return Ok(CliExit { code: 0 });
+                    }
+                    None => return Err(e),
+                },
+            };
 
-    apply_config_file(&mut cfg)?;
-    if let Some(message) =
-        tui_stream_conflict(cfg.tui_mode.enabled(), cfg.agent_jsonl, cfg.output_format)
-    {
-        anyhow::bail!(message);
-    }
+            if cfg.list_sessions {
+                list_sessions(&home, &cwd).await?;
+                return Ok(CliExit { code: 0 });
+            }
+            if cfg.list_skills {
+                list_skills();
+                return Ok(CliExit { code: 0 });
+            }
+
+            apply_config_file(&mut cfg)?;
+            if let Some(message) =
+                tui_stream_conflict(cfg.tui_mode.enabled(), cfg.agent_jsonl, cfg.output_format)
+            {
+                anyhow::bail!(message);
+            }
+            (cfg, false, false)
+        }
+    };
 
     if !cfg.agent_jsonl {
-        apply_provider_defaults(&mut cfg)?;
-        reexec_if_sandbox(&cfg)?;
+        if !provider_defaults_applied {
+            apply_provider_defaults(&mut cfg)?;
+        }
+        if !sandbox_checked {
+            reexec_if_sandbox(&cfg)?;
+        }
     }
 
     // ═══ SDK protocol mode: early stdin parsing (before context creation) ═══
     let sdk_request: Option<SdkRequest> = if cfg.agent_jsonl {
         // Self-sandboxing must happen before reading SDK stdin so the
         // sandboxed child process inherits the original pipe with data intact.
-        reexec_if_sandbox(&cfg)?;
+        if !sandbox_checked {
+            reexec_if_sandbox(&cfg)?;
+        }
         let mut input = String::new();
         tokio::io::AsyncReadExt::read_to_string(&mut tokio::io::stdin(), &mut input).await?;
         let req = match parse_agent_jsonl_request(&input) {
@@ -200,7 +227,7 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
     // TUI channels (if tui_mode). Created before display so signal_tx is available.
     #[cfg(feature = "tui")]
     let tui_tx = if cfg.tui_mode.enabled() {
-        let (signal_tx, signal_rx) = std::sync::mpsc::channel::<crate::tui::TuiSignal>();
+        let (signal_tx, signal_rx) = mpsc::unbounded_channel::<crate::tui::TuiSignal>();
         Some((signal_tx, signal_rx))
     } else {
         None
@@ -321,12 +348,12 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
             if drives {
                 // Arm only: the create/resume command itself starts the run,
                 // so this path never schedules a second one.
-                runtime_handle.start_goal_driver()?;
+                runtime_handle.goals().start_driver()?;
             }
             display
                 .render_info(&crate::local::execute_goal_command(&runtime_handle, command).await?);
             if drives {
-                let outcome = runtime_handle.wait_goal().await?;
+                let outcome = runtime_handle.goals().wait().await?;
                 process_exit_code = if outcome.status == crate::runtime::GoalStatus::Completed {
                     0
                 } else {
@@ -337,10 +364,11 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
             let cmd_tx = start_runtime_broker(runtime_handle.clone(), display.clone());
             // UI and input wiring are ready: enable scheduling and pick up a
             // goal the previous session left active.
-            runtime_handle.start_goal_driver_and_run()?;
+            runtime_handle.goals().start_driver_and_run()?;
             display.render_info("mink interactive mode (type 'exit' or Ctrl+D to quit)");
             if !session.is_new {
-                replay_last_turns(&session.events_path);
+                let events_path = session.events_path.clone();
+                let _ = tokio::task::spawn_blocking(move || replay_last_turns(&events_path)).await;
             }
             run_interactive(cmd_tx, &home).await?;
         } else if !cfg.prompt.is_empty() {
@@ -478,22 +506,37 @@ fn combine_turn_and_shutdown(
 /// Run sandbox self-re-exec synchronously before spinning up the Tokio runtime
 /// so we do not spawn worker threads solely to `execve()` the sandboxed child.
 pub fn bootstrap_sandbox_if_needed(args: &[String]) -> Result<()> {
+    bootstrap_sandbox_with_preparse(args).map(|_| ())
+}
+
+fn bootstrap_sandbox_with_preparse(args: &[String]) -> Result<Option<PreparsedCli>> {
     let mut cfg = match parse_args(args.to_vec()) {
         Ok(v) => v,
-        Err(e) if e.downcast_ref::<CliEarlyExit>().is_some() => return Ok(()),
-        Err(_) => return Ok(()), // let `main_entry` surface arg errors uniformly
+        Err(e) if e.downcast_ref::<CliEarlyExit>().is_some() => return Ok(None),
+        Err(_) => return Ok(None), // let `main_entry` surface arg errors uniformly
     };
     if cfg.list_sessions || cfg.list_skills {
-        return Ok(());
+        return Ok(None);
     }
     apply_config_file(&mut cfg)?;
     if tui_stream_conflict(cfg.tui_mode.enabled(), cfg.agent_jsonl, cfg.output_format).is_some() {
-        return Ok(());
+        return Ok(None);
     }
-    if !cfg.agent_jsonl && apply_provider_defaults(&mut cfg).is_err() {
-        return Ok(());
+    let mut provider_defaults_applied = false;
+    if !cfg.agent_jsonl {
+        if apply_provider_defaults(&mut cfg).is_err() {
+            return Ok(Some(PreparsedCli {
+                cfg,
+                provider_defaults_applied: false,
+            }));
+        }
+        provider_defaults_applied = true;
     }
-    reexec_if_sandbox(&cfg)
+    reexec_if_sandbox(&cfg)?;
+    Ok(Some(PreparsedCli {
+        cfg,
+        provider_defaults_applied,
+    }))
 }
 
 fn reexec_if_sandbox(cfg: &crate::config::CliConfig) -> Result<()> {

@@ -1360,3 +1360,25 @@ async fn session_lease_stays_owned_until_outstanding_tool_context_exits() {
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
 }
+
+#[tokio::test]
+async fn dropping_runtime_without_shutdown_releases_session_lease() {
+    let home = unique_temp_dir("drop-lease-home");
+    let cwd = unique_temp_dir("drop-lease-cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let options = || {
+        AgentOptions::new(home.clone(), cwd.clone())
+            .with_session(SessionPolicy::UseOrCreate("drop-lease-test".into()))
+    };
+    let runtime = AgentRuntime::start(options()).await.unwrap();
+    drop(runtime);
+
+    let reopened = AgentRuntime::start(options()).await;
+    assert!(
+        reopened.is_ok(),
+        "dropping AgentRuntime without shutdown() must still release SessionLease"
+    );
+    reopened.unwrap().shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(home);
+    let _ = std::fs::remove_dir_all(cwd);
+}

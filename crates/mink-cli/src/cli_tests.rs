@@ -298,6 +298,29 @@ async fn broker_renders_set_model_error_once() {
     let _ = tokio::fs::remove_dir_all(base).await;
 }
 
+#[tokio::test]
+async fn broker_handles_non_create_goal_command_without_blocking_interrupt() {
+    let (runtime, base) = start_test_runtime("broker-goal-nonblocking").await;
+    let recording = std::sync::Arc::new(RecordingDisplay::default());
+    let cmd_tx = start_runtime_broker(runtime.handle(), recording.clone());
+
+    cmd_tx
+        .send(RuntimeCmd::Goal(crate::local::GoalCommand::Status))
+        .unwrap();
+    cmd_tx.send(RuntimeCmd::Interrupt).unwrap();
+    wait_until(|| {
+        recording
+            .infos()
+            .iter()
+            .any(|message| message.contains("No goal."))
+    })
+    .await;
+    cmd_tx.send(RuntimeCmd::Exit).unwrap();
+
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(base).await;
+}
+
 /// Goal boundary rows decode into typed signals from the structured payload
 /// alone; a guidance row or a plain user turn produces none.
 #[cfg(feature = "tui")]
