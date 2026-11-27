@@ -1,6 +1,6 @@
 # 计划与待办
 
-> 更新日期：2026-10-04
+> 更新日期：2026-11-27
 
 确认计划并使用 revision 管理执行进度。
 
@@ -27,10 +27,6 @@ LLM 提议 → PlanDraft(草稿) → 用户确认 → PlanConfirm → confirmed 
 PlanConfirm/PlanClear 不强制压缩。历史压缩后，活动 `plan.md` 以稳定的
 `<active-plan-checkpoint>` 出现在摘要 checkpoint 之后。
 执行阶段的 Todo 工具协议见 [工具系统 · Todo 协议](../reference/tools.md#todoread)。
-
-## 下一步
-
-查看[配置参考](../reference/configuration.md)、[工具参考](../reference/tools.md)或返回[文档总览](../start/overview.md)。
 
 ## Todo 操作
 

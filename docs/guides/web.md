@@ -112,8 +112,4 @@ MINK_SERVER_PORT=9000 ./target/debug/mink-server
 
 打开 `http://localhost:8765` 即可使用 Web 界面。
 
-## 下一步
-
-查看[配置参考](../reference/configuration.md)、[工具参考](../reference/tools.md)或返回[文档总览](../start/overview.md)。
-
 目标审核显示“判断是否需要验收”“检查完成证据”“宿主提交结论”。目标详情将轻量分流与完整审核分开：分流展示剩余要求、下一步和可打开的报告；历史完整审核标注所属轮次，不代表最新产物已通过。审核失败仍通过原入口重试已结束的执行轮。

@@ -448,11 +448,12 @@
 <nav class="nav" aria-label="主导航">
   <div class="shell nav-inner">
     <a class="brand" href="#home" onclick="showPage('home'); return false;" aria-label="Mink 首页">
-      <span class="brand-word"><span class="m">M</span>ink</span>
-      <span class="brand-version">v0.10.0 / OPEN SOURCE</span>
+      <svg class="brand-mark" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 18.5V8.2a1.6 1.6 0 0 1 2.75-1.1L12 12.6l5.25-5.5A1.6 1.6 0 0 1 20 8.2v10.3"/></svg>
+      <span class="brand-version">v0.10.0</span>
     </a>
     <div class="nav-links">
       <a id="nav-home" class="active" href="#features" onclick="openSection('features'); return false;">探索</a>
+      <a href="#start" onclick="openSection('start'); return false;">快速开始</a>
       <a id="nav-docs" href="#docs/start/overview.md" onclick="loadDoc('start/overview.md'); return false;">文档</a>
       <a class="nav-github" href="https://github.com/fierceX/mink" target="_blank" rel="noreferrer">GitHub ↗</a>
       <a class="nav-start" href="#docs/start/quickstart.md" onclick="loadDoc('start/quickstart.md'); return false;">开始使用 <span aria-hidden="true">↗</span></a>
@@ -463,57 +464,78 @@
 <main id="page-home" class="page-section active">
   <div class="shell">
     <section class="hero" aria-labelledby="hero-title">
-      <div class="hero-grid">
-        <div class="hero-copy">
-          <div class="eyebrow">RUST 原生 · 终端优先 · 可嵌入</div>
-          <h1 id="hero-title">轻量、可嵌入的<span class="accent">AI agent runtime</span></h1>
-          <p class="lead">在终端中执行编码任务，也能成为你系统里的 agent 能力。一个 Rust 内核，提供上下文管理、持久会话与有明确边界的代码编辑。</p>
-          <div class="hero-actions"><a class="btn btn-primary" href="#start" onclick="switchQuickstart('terminal'); openSection('start'); return false;">在终端开始 <span aria-hidden="true">→</span></a><a class="btn btn-secondary" href="#runtime" onclick="openSection('runtime'); return false;">了解嵌入 <span aria-hidden="true">↘</span></a></div>
-          <div class="hero-note"><span>单二进制 CLI</span><span>可替换模型后端</span><span>MIT 开源</span></div>
+      <div class="hero-copy">
+        <div class="eyebrow">Rust 原生 · 终端优先 · 可嵌入</div>
+        <h1 id="hero-title">轻量、可嵌入的 <span class="accent">AI agent runtime</span></h1>
+        <p class="lead">终端里的 coding agent，也是你系统里的运行时。一个 Rust 内核驱动 CLI、TUI、Web 与 SDK。</p>
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="#start" onclick="switchQuickstart('terminal'); openSection('start'); return false;">开始使用 →</a>
+          <a class="btn btn-secondary" href="#docs/start/overview.md" onclick="loadDoc('start/overview.md'); return false;">阅读文档</a>
         </div>
-        <div class="hero-terminal">
-          <div class="terminal-surround">
-          <div class="terminal-card" role="img" aria-label="Mink 0.6.6 实跑会话回放：修复 .env 解析器，运行中补充约束，最后通过 6 项测试。播放节奏经过加速。">
-            <div class="terminal-head"><div class="dots" aria-hidden="true"><i></i><i></i><i></i></div><span>mink --tui</span><span class="terminal-path">@env-reader</span></div>
-            <div class="terminal-body">
-              <div class="tui-stage" aria-hidden="true">
-                <div id="hero-tui-transcript" class="tui-transcript"><div class="tui-line"><span class="prompt">&gt;</span> 修复 .env 解析器：保留值中的等号，支持单双引号。</div></div>
-                <div class="tui-input-box"><span id="hero-input-title" class="tui-input-title">Enter: send task</span><div id="hero-tui-input" class="tui-input"><span class="cursor"></span></div></div>
-                <div id="hero-tui-status" class="tui-status"><span class="tui-status-model">flash</span><span>@env-reader</span><span class="tui-status-work" data-state="waiting">[waiting]</span></div>
-              </div>
+      </div>
+      <div class="hero-terminal">
+        <div class="terminal-card" role="img" aria-label="Mink 实跑会话回放：修复 .env 解析器，运行中补充约束，最后通过 6 项测试。播放节奏经过加速。">
+          <div class="terminal-head"><div class="dots" aria-hidden="true"><i></i><i></i><i></i></div><span>mink --tui</span><span class="terminal-path">@env-reader</span></div>
+          <div class="terminal-body">
+            <div class="tui-stage" aria-hidden="true">
+              <div id="hero-tui-transcript" class="tui-transcript"><div class="tui-line"><span class="prompt">&gt;</span> 修复 .env 解析器：保留值中的等号，支持单双引号。</div></div>
+              <div class="tui-input-box"><span id="hero-input-title" class="tui-input-title">Enter: send task</span><div id="hero-tui-input" class="tui-input"><span class="cursor"></span></div></div>
+              <div id="hero-tui-status" class="tui-status"><span class="tui-status-model">flash</span><span>@env-reader</span><span class="tui-status-work" data-state="waiting">[waiting]</span></div>
             </div>
           </div>
-          </div>
-          <div class="demo-caption"><span id="hero-case-caption">实跑回放 · .env 解析修复</span><div class="demo-controls"><button id="demo-guidance" type="button" onclick="playGuidanceExcerpt()">看中途引导</button><button id="demo-pause" type="button" onclick="toggleHeroReplay()" aria-label="暂停交互演示">暂停</button><button id="demo-restart" type="button" onclick="restartHeroReplay()">重播 ↺</button></div></div>
         </div>
+        <div class="demo-caption"><span id="hero-case-caption">TUI 实跑回放</span><div class="demo-controls"><button id="demo-pause" type="button" onclick="toggleHeroReplay()" aria-label="暂停交互演示">暂停</button><button id="demo-restart" type="button" onclick="restartHeroReplay()">重播 ↺</button></div></div>
       </div>
     </section>
 
-    <nav class="principle-nav" aria-label="核心特点"><a href="#runtime" onclick="openSection('runtime'); return false;"><span>01</span> 轻量与可嵌入 <span aria-hidden="true">↘</span></a><a href="#context" onclick="openSection('context'); return false;"><span>02</span> 长任务与上下文 <span aria-hidden="true">↘</span></a><a href="#reliability" onclick="openSection('reliability'); return false;"><span>03</span> 可靠编辑与状态 <span aria-hidden="true">↘</span></a></nav>
+    <section id="metrics" class="metrics-strip" aria-label="v0.10.0 核心指标">
+      <div class="metric-item"><strong>9.17 ms</strong><span>Runtime 启动 P50</span></div>
+      <div class="metric-item"><strong>0.87 ms</strong><span>单轮工具派发均值</span></div>
+      <div class="metric-item"><strong>~99.7%</strong><span>Prefix Cache 稳定命中</span></div>
+      <div class="metric-item"><strong>−56.0%</strong><span>PTC 总 Prompt 降幅</span></div>
+    </section>
 
-    <section id="features" class="capabilities" aria-label="Mink 的核心特点">
-      <article id="runtime" class="capability-row" aria-labelledby="runtime-title">
-        <div class="capability-copy"><div class="section-kicker">01 / 轻量与可嵌入</div><h2 id="runtime-title">一套 Rust 内核，<br>接入你的工作方式。</h2><p>终端里是单二进制的 coding agent。接入应用时，Rust 通过 <code>mink::runtime</code> 在进程内运行；Python SDK 与 Web 服务复用同一内核。</p><p class="capability-detail">模型后端可替换，工具范围可选择。会话、执行与恢复能力由 runtime 提供。</p><a class="text-link" href="#docs/integration/rust.md" onclick="loadDoc('integration/rust.md'); return false;">查看运行时与 SDK →</a></div>
-        <div class="runtime-map" aria-label="CLI/TUI、Web、Rust 与 Python 共用 AgentRuntime"><div class="entry-points"><span>CLI / TUI</span><span>Web</span><span>Rust 库</span><span>Python SDK</span></div><div class="runtime-bridge" aria-hidden="true"></div><div class="runtime-core"><span class="runtime-label">MINK CORE</span><strong>AgentRuntime</strong><p>会话 · 模型调用 · 工具执行 · 恢复</p></div><div class="runtime-lifecycle"><code>start()</code><span>→</span><code>stream_turn()</code><span>→</span><code>shutdown()</code></div><p class="diagram-note">Rust 同进程嵌入；Python 使用 wheel 内置的核心二进制。</p></div>
+    <nav class="principle-nav sr-only" aria-label="核心特点">
+      <a href="#runtime" onclick="openSection('runtime'); return false;">可嵌入内核</a>
+      <a href="#context" onclick="openSection('context'); return false;">长任务与前缀缓存</a>
+      <a href="#reliability" onclick="openSection('reliability'); return false;">可靠编辑与沙箱</a>
+    </nav>
+
+    <section id="features" class="bento-grid" aria-label="Mink 的核心特点">
+      <article id="runtime" class="bento-card capability-row" aria-labelledby="runtime-title">
+        <h2 id="runtime-title">一套 Rust 内核，多端复用</h2>
+        <p>Rust 通过 <code>mink::runtime</code> 进程内运行，Python SDK 与 Web 服务共用同一内核、工具协议与 Goal 控制。</p>
+        <a class="text-link" href="#docs/integration/rust.md" onclick="loadDoc('integration/rust.md'); return false;">Rust 与 SDK 集成 →</a>
       </article>
-      <article id="context" class="capability-row" aria-labelledby="context-title">
-        <div class="capability-copy"><div class="section-kicker">02 / 长任务与上下文</div><h2 id="context-title">任务继续，<br>上下文保持可控。</h2><p>完整会话持续保存，模型只读取当前的活跃上下文。压缩通过摘要推进上下文边界，保留原始历史；恢复会话后可以继续工作。</p><p class="capability-detail">Plan / Todo 保存任务状态，Artifact 保留超长输出。长任务的进度与材料都有明确的读取入口。</p><a class="text-link" href="#docs/concepts/state-and-context.md" onclick="loadDoc('concepts/state-and-context.md'); return false;">了解上下文与持久化 →</a></div>
-        <div class="context-map" aria-label="完整历史保留，活跃上下文由摘要、当前任务与近期交换组成"><div class="history-strip"><span class="diagram-label">完整会话历史</span><div class="history-blocks" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><small>只追加，保留原始记录</small></div><div class="context-transition"><span>摘要与投影</span><span aria-hidden="true">↓</span></div><div class="active-context"><span class="diagram-label">发送给模型的活跃上下文</span><div><span>摘要</span><span>当前任务</span><span>近期工具交换</span></div></div><div class="state-ledger"><span>Session 恢复</span><span>Plan / Todo</span><span>Artifact 回读</span></div></div>
+      <article id="context" class="bento-card capability-row" aria-labelledby="context-title">
+        <h2 id="context-title">上下文可控，前缀稳定</h2>
+        <p>非破坏式摘要 checkpoint 推进上下文边界并保持 Prefix Cache 稳定，配合 Plan / Todo 与 Artifact 持久化恢复。</p>
+        <a class="text-link" href="#docs/concepts/state-and-context.md" onclick="loadDoc('concepts/state-and-context.md'); return false;">上下文与持久化 →</a>
       </article>
-      <article id="reliability" class="capability-row" aria-labelledby="reliability-title">
-        <div class="capability-copy"><div class="section-kicker">03 / 可靠编辑与状态</div><h2 id="reliability-title">先读，再改。<br>有歧义，就明确返回。</h2><p>Hashline 用读取时的快照与锚点定位修改；Replace 用唯一的文本匹配定位。位置不确定时拒绝含糊修改，工具结果进入正式会话。</p><p class="capability-detail">计划与待办持久保存，待办变更比较 revision；输入有持久回执。执行错误保留真实状态，恢复时有记录可核对。</p><a class="text-link" href="#docs/reference/tools.md" onclick="loadDoc('reference/tools.md'); return false;">查看编辑与工具协议 →</a></div>
-        <div class="edit-map"><div class="edit-map-title"><span class="diagram-label">编辑边界</span><span>Read → Edit → Verify</span></div><div class="edit-path"><code>Hashline</code><p>读取快照 <span>→</span> 行锚点 <span>→</span> 校验后修改</p></div><div class="edit-path"><code>Replace</code><p>读取内容 <span>→</span> 唯一匹配 <span>→</span> 校验后修改</p></div><div class="edit-outcome"><span>遇到 stale 或多候选</span><strong>返回明确结果，重新读取后继续</strong></div><p class="diagram-note">模型负责提出修改；工具协议约束实际写入。</p></div>
+      <article id="reliability" class="bento-card capability-row" aria-labelledby="reliability-title">
+        <h2 id="reliability-title">先读再改，边界明确</h2>
+        <p>Hashline / Replace 精确锚定修改，支持 Python 宿主 PTC（<code>RunCode</code>）与 OS / WASI 多级沙箱隔离。</p>
+        <a class="text-link" href="#docs/reference/tools.md" onclick="loadDoc('reference/tools.md'); return false;">编辑与工具协议 →</a>
       </article>
     </section>
 
-    <section id="guidance" class="guidance-section" aria-labelledby="guidance-title">
-      <div class="guidance-copy"><div class="section-kicker">运行中引导 / 真实案例</div><h2 id="guidance-title">方向可以调整，<br>继续同一个任务。</h2><p>任务执行期间直接输入补充要求。引导持久接收，在当前工具交换完成后进入上下文，接下来的步骤采用新约束。</p><button class="text-link replay-guidance" type="button" onclick="playGuidanceExcerpt()">播放中途引导片段 ↗</button><a class="case-source text-link" href="#docs/examples/guided-env-parser.md" onclick="loadDoc('examples/guided-env-parser.md'); return false;">查看案例与验证记录 →</a></div>
-      <div class="guidance-story"><div class="case-step"><span>任务</span><p id="case-task">修复 .env 解析器：保留值中的等号，支持单双引号。</p></div><div class="case-step guidance-turn"><span>中途引导</span><blockquote id="case-guidance">只去掉首尾配对引号，不展开变量；空值也要保留，禁止新增依赖。</blockquote></div><div class="case-step"><span>结果</span><p id="case-result">读取代码 → 收到新约束 → 修改与测试。以实际运行记录为准。</p></div></div>
+    <section id="guidance" class="guidance-strip sr-only" aria-labelledby="guidance-title">
+      <div class="guidance-head">
+        <h2 id="guidance-title">执行途中随时补充约束，不中断当前任务。</h2>
+        <div class="guidance-actions">
+          <button class="text-link" type="button" onclick="playGuidanceExcerpt()">播放引导片段 ↗</button>
+          <a class="text-link" href="#docs/examples/guided-env-parser.md" onclick="loadDoc('examples/guided-env-parser.md'); return false;">完整案例 →</a>
+        </div>
+      </div>
+      <div class="guidance-steps">
+        <div class="case-step"><span>任务</span><p id="case-task">修复 .env 解析器：保留值中的等号，支持单双引号。</p></div>
+        <div class="case-step guidance-turn"><span>中途引导</span><blockquote id="case-guidance">只去掉首尾配对引号，不展开变量；空值也要保留，禁止新增依赖。</blockquote></div>
+        <div class="case-step"><span>结果</span><p id="case-result">读取代码 → 收到新约束 → 修改与测试。以实际运行记录为准。</p></div>
+      </div>
     </section>
 
     <section id="start" class="section start-section" aria-labelledby="start-title">
-      <div class="section-kicker">开始使用</div>
-      <div class="section-header"><h2 id="start-title">选择你的接入方式。</h2><p>选择一个入口，配置你的模型。<br>同一个内核，从终端到应用。</p></div>
+      <div class="section-header"><h2 id="start-title">开始使用</h2></div>
       <div class="quickstart-shell">
         <div class="quickstart-tabs" role="tablist" aria-label="开始方式">
           <button id="quick-tab-terminal" class="tab-button active" role="tab" aria-selected="true" aria-controls="tab-terminal" data-tab="terminal" onclick="switchQuickstart('terminal')">终端 CLI</button>
@@ -632,7 +654,7 @@ MINK_SERVER_PORT=9000 ./target/release/mink-server</code></pre></div>
   </div>
 </section>
 
-<footer class="footer"><div class="shell footer-inner"><a class="footer-brand" href="#home" onclick="showPage('home'); return false;">Mink<span>Rust 原生 · 轻量 · 可嵌入</span></a><div class="footer-links"><a href="https://github.com/fierceX/mink/blob/main/LICENSE" target="_blank" rel="noreferrer">MIT License</a><a href="https://crates.io/crates/mink-core" target="_blank" rel="noreferrer">Crates.io ↗</a><a href="https://pypi.org/project/mink-agent" target="_blank" rel="noreferrer">PyPI ↗</a><a href="https://github.com/fierceX/mink" target="_blank" rel="noreferrer">GitHub ↗</a></div></div></footer>
+<footer class="footer"><div class="shell footer-inner"><a class="footer-brand" href="#home" onclick="showPage('home'); return false;" aria-label="Mink 首页"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 18.5V8.2a1.6 1.6 0 0 1 2.75-1.1L12 12.6l5.25-5.5A1.6 1.6 0 0 1 20 8.2v10.3"/></svg><span>Rust 原生 · 轻量 · 可嵌入</span></a><div class="footer-links"><a href="https://github.com/fierceX/mink/blob/main/LICENSE" target="_blank" rel="noreferrer">MIT License</a><a href="https://crates.io/crates/mink-core" target="_blank" rel="noreferrer">Crates.io ↗</a><a href="https://pypi.org/project/mink-agent" target="_blank" rel="noreferrer">PyPI ↗</a><a href="https://github.com/fierceX/mink" target="_blank" rel="noreferrer">GitHub ↗</a></div></div></footer>
 <div class="reading-progress"><span id="reading-progress-bar"></span></div>
 <button class="back-to-top" id="back-to-top" type="button" aria-label="返回顶部">↑</button>
 <div class="toast" id="copy-toast" role="status" aria-live="polite" hidden></div>
@@ -1235,7 +1257,8 @@ async function loadHeroReplay() {
     document.getElementById("hero-tui-transcript").textContent = "真实会话片段加载失败，请刷新后重试。";
     document.getElementById("demo-pause").disabled = true;
     document.getElementById("demo-restart").disabled = true;
-    document.getElementById("demo-guidance").disabled = true;
+    const guidanceBtn = document.getElementById("demo-guidance");
+    if (guidanceBtn) guidanceBtn.disabled = true;
     return;
   }
   heroReady = true;

@@ -35,13 +35,6 @@
     "source": "docs/guides/sessions-and-guidance.md"
   },
   {
-    "path": "examples/guided-env-parser.md",
-    "title": "实跑案例：.env 解析器",
-    "group": "使用指南",
-    "description": "保留来源与验证记录的同轮引导案例。",
-    "source": "docs/examples/guided-env-parser.md"
-  },
-  {
     "path": "guides/plans-and-todos.md",
     "title": "计划与待办",
     "group": "使用指南",
@@ -68,6 +61,13 @@
     "group": "使用指南",
     "description": "选择工具、Skills 与 MISSION。",
     "source": "docs/guides/customization.md"
+  },
+  {
+    "path": "guides/ptc.md",
+    "title": "Python PTC（RunCode）",
+    "group": "使用指南",
+    "description": "用 Python 编排工具流水线并压缩上下文回传。",
+    "source": "docs/guides/ptc.md"
   },
   {
     "path": "guides/security.md",

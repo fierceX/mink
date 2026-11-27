@@ -121,7 +121,3 @@ let runtime = AgentRuntime::start(
 ## 初始化扩展
 
 宿主实现 `mink::runtime::PrefixSource` 提供不可变前缀，或实现 `PostInitHook` 在正常 session 初始化完成后运行逻辑。通过 `AgentOptions::with_prefix_source()` / `with_post_init_hook()` 注入。它们不替代共享的 runtime 创建、持久化与取消边界。完整可运行扩展见 [custom_llm_backend.rs](../../crates/mink-core/examples/custom_llm_backend.rs)、[redb_vfs.rs](../../crates/mink-core/examples/redb_vfs.rs)和 [web_api.rs](../../crates/mink-core/examples/web_api.rs)。
-
-## 下一步
-
-事件消费与唯一 shutdown owner 见 [Rust 集成](rust.md)；输出格式见[机器协议](../reference/protocols.md)。

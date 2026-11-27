@@ -170,10 +170,6 @@ macOS TUI 完成/失败/停止通知属于本地展示，不是模型工具。�
 只发单条 OSC；可选 `terminal-notifier` 点击激活终端应用，不执行脚本，不使用
 AppleScript 通知回退。
 
-## 下一步
-
-查看[配置参考](../reference/configuration.md)、[工具参考](../reference/tools.md)或返回[文档总览](../start/overview.md)。
-
 ## Goal
 
 `/goal TEXT` 创建有边界的跨轮目标；状态、暂停、预算、恢复和验收命令在三种终端共享。详见 [跨轮目标](goals.md)。

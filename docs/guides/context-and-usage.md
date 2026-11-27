@@ -64,7 +64,3 @@ context_compact_tail_tokens = 256000
 ```
 
 有限窗口必须大于响应预留；热尾部与摘要输出为软目标，可按可用空间自动收紧。
-
-## 下一步
-
-查看[配置参考](../reference/configuration.md)、[工具参考](../reference/tools.md)或返回[文档总览](../start/overview.md)。

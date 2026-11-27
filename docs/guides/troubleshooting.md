@@ -60,10 +60,6 @@ tools 与历史消息前缀字节级稳定。计划确认/清除通过 append-on
 - 模型自报 blocked 未结束目标：同一阻断（按报告 `summary`/`next_step` 指纹识别）需连续达到 `blocked_after_consecutive_rounds`（默认 3）轮；不同阻断会重置计数，可见 `blocked_rounds`（连续 blocked 轮数）与预算视图的阻断门槛（同一阻断连续轮数）。
 - 检查器验收不可用：部署未配置 `MINK_GOAL_CHECK` 时，`GET /api/sessions/{id}/goal` 的 `verifier` 为 false，工作台禁用该选项并隐藏 `/goal verified`。
 
-## 下一步
-
-查看[配置参考](../reference/configuration.md)、[工具参考](../reference/tools.md)或返回[文档总览](../start/overview.md)。
-
 ## 编辑恢复与未知工具结果
 
 看到 `[edit-recovery]` 时，重读列出的文件，对照本轮 Edit 差异决定下一步。看到 `execution outcome unknown` 时，先核对工具目标端或工作区的实际状态，再决定是否重试。有未决副作用的 Goal 需要按目标对账流程处理。

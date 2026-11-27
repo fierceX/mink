@@ -165,7 +165,3 @@ export MINK_BINARY="$(pwd)/target/release/mink-core"
 ```
 
 每个发布 wheel 在 CI 中安装到独立环境，检查 import、内置二进制版本，并通过本地隔离 provider 运行两轮验证会话复用；不依赖真实模型服务。
-
-## 下一步
-
-完整字段见[配置参考](../reference/configuration.md#sandboxconfig-配置项)，JSONL 数据见[机器协议](../reference/protocols.md)。

@@ -145,7 +145,3 @@ Text: ...
 ```
 
 Token 用量计入父会话统计。默认超时 1800 秒（30 分钟，`sub_agent_timeout` 可调）。超时后标记为 `failed`。
-
-## 下一步
-
-查看[配置参考](../reference/configuration.md)、[工具参考](../reference/tools.md)或返回[文档总览](../start/overview.md)。

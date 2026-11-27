@@ -62,7 +62,3 @@ mink --list-sessions                            # 列出所有 session
 `--continue` 选择最近修改的 session，恢复时 replay 最近 10 轮 LLM 响应。
 
 活动目标持有会话调度权期间，普通独立输入返回 busy（运行中引导仍可用）：先在终端或工作台暂停目标再提交独立任务，目标由显式 resume 继续；被拒绝的输入不会重启旧目标。
-
-## 下一步
-
-查看[配置参考](../reference/configuration.md)、[工具参考](../reference/tools.md)或返回[文档总览](../start/overview.md)。

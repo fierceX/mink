@@ -1,6 +1,6 @@
 # 快速开始
 
-> 更新日期：2026-10-05
+> 更新日期：2026-11-27
 
 目标：在项目目录让 Mink 读取文件并给出简洁说明。前置：Rust 1.99+、可访问的 DeepSeek/OpenAI-compatible 模型端点及 API key。
 
@@ -44,8 +44,4 @@ mink -m flash --session first-look --enabled-tools Read,Glob,Grep \
 mink -m flash --session first-look --tui
 ```
 
-空闲时输入下一条任务，运行中 Enter 可提交引导。只有正式上下文交接才会回显 `Added to context`。退出后可用 `--continue` 恢复最近会话。
-
-## 下一步
-
-[终端操作](../guides/terminal.md)、[Web 工作台](../guides/web.md)、[Rust 集成](../integration/rust.md)或[Python 集成](../integration/python.md)。请求失败时看[故障排查](../guides/troubleshooting.md)。
+空闲时输入下一条任务；退出后可用 `--continue` 恢复最近会话。

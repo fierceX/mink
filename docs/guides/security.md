@@ -105,7 +105,3 @@ package_dirs = ["./packages"]
 - **超时保护**：`MINK_SERVER_TURN_TIMEOUT`（默认 7200s，2 小时）防止 LLM/工具挂起卡死 running 状态；
   超时后进入 forced terminal 并关闭该会话 runtime
 - **安全**：单用户部署假设；`sk-fake`/受限 key 可用于测试环境
-
-## 下一步
-
-查看[配置参考](../reference/configuration.md)、[工具参考](../reference/tools.md)或返回[文档总览](../start/overview.md)。
