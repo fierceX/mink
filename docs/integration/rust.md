@@ -284,6 +284,7 @@ Rust crate mink ─────────────────────�
 |----|------|------|
 | **唯一构建入口** | `AgentOptions` + grouped options | 私有状态，无配置逃生口 |
 | **并发入口** | `AgentRuntimeHandle` | 可克隆，共享同一 turn/control gate，不拥有 shutdown |
+| **扩展 SPI（实验）** | `mink::runtime::ext` / `handle.ext()` | 供 `mink-goal` 等外部编排器使用的低层原语（`ExternalController`、`InternalTurnRequest`、`ToolEffectJournal`、`ToolCallObserver` 等），与稳定嵌入层隔离 |
 | **stream** | `AgentEventStream` | per-turn 实时事件，`recv()` + `outcome()` |
 
 嵌入式调用方可通过 `AgentOptions::with_read_only_file_system()` 注入 VFS，并通过

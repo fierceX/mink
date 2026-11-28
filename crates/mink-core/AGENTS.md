@@ -32,10 +32,10 @@
 
 ### 通用扩展原语
 
-- `mink-core` 不包含任何 Goal 业务概念、schema、存储或事件；只通过 `mink::runtime` 暴露 5 组通用扩展原语供 `mink-goal` 等外部扩展包组合：
-  - **工具与执行掩码**：`AgentOptions::add_tool`（动态工具注册）、`InternalTurnRequest.tool_mask`（`ToolExecutionMask` 运行时阻断工具但保持请求 `tools` schema 字节不变，保护前缀缓存）与 `ToolExecutionContext::new`。
-  - **外部执行所有权与停因**：`AgentRuntimeHandle::acquire_external_owner` / `ExternalOwnerGuard`（释放 `TurnGate` 时拒绝人类流式输入，返回 `RuntimeError::ExternallyControlled`）与 `handle.subscribe_stop_cause()`（区分 `StopCause::UserInterrupt` 与 `StopCause::RuntimeShutdown`）。
-  - **内部 turn 与扩展通道**：`InternalTurnRequest`、`ExtensionEmitter`（`emit_extension_event` / `emit_live_extension_event`）、`ArtifactReader`、`handle.run_ephemeral_child`、`handle.import_artifact`、`handle.execute_scoped_tool`、`handle.wait_turn_idle()`、`handle.committed_seq()`。
+- `mink-core` 不包含任何 Goal 业务概念、schema、存储或事件；只通过独立命名空间 `mink::runtime::ext` 与 `handle.ext()`（`RuntimeExtHandle`）暴露高级/实验性编排器 SPI 供 `mink-goal` 等外部扩展包组合（普通嵌入式宿主不得依赖 `mink::runtime::ext`，由 `tests/public_api_boundary.rs::only_orchestrators_import_runtime_ext` 守护）：
+  - **工具、观测与副作用日志**：`AgentOptions::add_tool`（动态工具注册）、`ToolExecutionContext::new`、`InternalTurnRequest.policy`（`ToolExecutionMask` 运行时阻断工具但保持请求 `tools` schema 字节不变以保护前缀缓存）、正交拆分的 `ToolEffectJournal`（副作用持久化追踪）与 `ToolCallObserver` / `ReadObservation`（无 `Any` downcast 的读证校验与解析诊断）。
+  - **外部控制与停因**：`handle.ext().attach_external_controller` 注册唯一 `ExternalController` 实现（拒绝普通人类控制时返回 `RuntimeError::ExternallyControlled`）与 `handle.ext().subscribe_stop_cause()`（区分 `StopCause::UserInterrupt` 与 `StopCause::RuntimeShutdown`）；`interrupt_current_turn()` 先释放 `admission` 互斥锁再回调 `ExternalController::on_user_interrupt()`。
+  - **内部 turn 与扩展通道**：`InternalTurnRequest`（含 `InternalTurnPolicy` 与 `InternalTurnHooks`，无论经 `stream_internal_turn` 还是 `run_internal_turn_with_permit` 均统一经 `OrchActor` 执行）、`ExtensionEmitter`（`emit_extension_event` / `emit_live_extension_event`）、`ArtifactReader`、`handle.ext().run_ephemeral_child`、`handle.ext().import_artifact`、`handle.ext().execute_scoped_tool`、`handle.ext().wait_turn_idle()`、`handle.ext().committed_seq()`。
   - **压缩与前缀锚点**：`CompactionCheckpointProvider` 与 `SessionReader::conversation_with_sequence`。
 
 ### Plan 与 Todo

@@ -147,10 +147,10 @@ Server 生命周期：Ctrl+C → axum serve 停止 → idle reaper abort → `re
 
 | 文件 | 职责 |
 |------|------|
-| `runtime/mod.rs` | `mink::runtime` 公共 API 导出，供 `mink::prelude` facade 复用 |
+| `runtime/mod.rs` | `mink::runtime` 稳定嵌入 API 导出（`mink::prelude` 复用）及隔离的编排器 SPI 命名空间 `mink::runtime::ext` |
 | `runtime/builder.rs` | crate-private `build_runtime()` — 从 `AgentOptions` 的内部 resolved 配置构造 runtime |
 | `runtime/config.rs` | 私有 resolved 配置 / `SessionPolicy` / `SessionInfo` |
-| `runtime/handle.rs` | `AgentRuntime`（唯一 shutdown owner）/ 可克隆 `AgentRuntimeHandle` — `start()`, `handle()`, `run_turn()`, `stream_turn()`, `compact()`, `set_model()`, `interrupt_current_turn()`, `shutdown()` |
+| `runtime/handle.rs` | `AgentRuntime`（唯一 shutdown owner）/ 可克隆 `AgentRuntimeHandle` — `start()`, `handle()`, `run_turn()`, `stream_turn()`, `compact()`, `set_model()`, `interrupt_current_turn()`, `shutdown()`，以及 `ext() -> RuntimeExtHandle<'_>` |
 | `runtime/options.rs` | `AgentOptions` ergonomic builder，包括 LLM backend、只读 VFS 和 resource session scope 注入 |
 | `runtime/events.rs` | turn-scoped `AgentEvent` envelope / `EventSink` / 异步 dispatcher / `EventDisplay` adapter |
 | `runtime/tools.rs` | 稳定异步 `AgentTool` 自定义工具 API：`ToolDefinition` / `ToolExecutionContext` / `ToolOutput` / `ToolError` |
@@ -444,7 +444,7 @@ VFS 只接管普通路径。`artifact://`、`skill://`、`rule://` 和 `session:
 
 ## Goal 协调与独立包边界（`crates/mink-goal`）
 
-Goal 子系统已从 `mink-core` 解耦至独立 workspace crate `crates/mink-goal`（`mink-goal`），并通过 5 组通用 `mink::runtime` 原语与内核协同：`AgentOptions::add_tool` / `ToolExecutionMask`、`ExternalOwnerGuard`、`StopCause`、`InternalTurnRequest` / `ExtensionEmitter` / `ArtifactReader` / `run_ephemeral_child`、`CompactionCheckpointProvider` / `SessionReader::conversation_with_sequence`。不需要 Goal 的纯 `mink-core` 宿主零 Goal 工具与状态开销；CLI 与 server 通过 `GoalPlugin::install_into(&mut options)` 与 `GoalEngine::attach(handle, plugin)` 组合：
+Goal 子系统已从 `mink-core` 解耦至独立 workspace crate `crates/mink-goal`（`mink-goal`），并通过 `mink::runtime::ext` 与 `handle.ext()` 暴露的通用编排器 SPI 与内核协同：`AgentOptions::add_tool` / `ToolExecutionMask`、`ToolEffectJournal` / `ToolCallObserver` / `ReadObservation`、`ExternalController`、`StopCause`、`InternalTurnRequest`（统一经 `OrchActor` 执行）/ `ExtensionEmitter` / `ArtifactReader` / `run_ephemeral_child`、`CompactionCheckpointProvider` / `SessionReader::conversation_with_sequence`。不需要 Goal 的纯 `mink-core` 宿主零 Goal 工具与状态开销；CLI 与 server 通过 `GoalPlugin::install_into(&mut options)` 与 `GoalEngine::attach(handle, plugin)` 组合：
 
 - `crates/mink-goal/src/engine/{mod,control,driver,verification,review}.rs` 在单轮执行器外调度目标和验收：`control` 负责合同生命周期、租约与准入，`driver` 持有 run 生命周期（`idle`/`running`/`stopping`/`faulted`/`closed`），`verification` 负责候选 generation、验收与证据版本，检查器变更证据后同轮重新只读审核；`review` 组织轻量分流与完整证据审核，重复继续时复用原只读子会话升级检查，通过 `run_ephemeral_child` 运行只读子会话并将描述性报告与实际读取证据经 `import_artifact` 导入父会话，再通过候选绑定的 `InternalTurnRequest` 调用 `GoalReview` 提交 `decision`/`summary`/`next_step`。
 - `crates/mink-goal/src/store/`（`types`、`transitions`、`store`、`protocol`）保存权威契约 `goal.json`、迭代、账单关联、副作用标记与恢复 journal `goal-transaction.json`。
