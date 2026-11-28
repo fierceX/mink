@@ -1,6 +1,7 @@
 //! Goal acceptance, evidence versions and verification failures.
 
 use super::*;
+use mink::runtime::{BudgetExhaustedError, InputStatus, TurnPermit};
 
 pub(super) fn blocker_evidence_versions(
     references: &[String],
@@ -20,15 +21,18 @@ pub(super) fn blocker_evidence_versions(
         .collect()
 }
 
-impl AgentRuntimeHandle {
+impl GoalEngine {
     pub(crate) fn evidence_version(&self, reference: &str) -> Result<String> {
-        let cwd = self.goal_ctx.paths.cwd.canonicalize()?;
+        let cwd = self.handle.session_info().cwd.canonicalize()?;
         let path = if let Some(id) = reference.strip_prefix("artifact://") {
             ensure!(
                 !id.contains('/') && !id.contains(".."),
                 "invalid artifact reference"
             );
-            self.session.artifacts_dir.join(format!("{id}.txt"))
+            self.handle
+                .artifact_reader()
+                .artifacts_dir()
+                .join(format!("{id}.txt"))
         } else {
             let p = Path::new(reference.strip_prefix("file://").unwrap_or(reference));
             let p = if p.is_absolute() {
@@ -81,8 +85,8 @@ impl AgentRuntimeHandle {
             };
             if current.status != GoalStatus::Active
                 || current.review_candidate != old.review_candidate
-                || self.goal_ctx.interrupt.is_set()
-                || self.goal_ctx.cancel.is_cancelled()
+                || self.handle.is_interrupted()
+                || self.handle.is_cancelled()
             {
                 return Ok(());
             }
@@ -91,7 +95,7 @@ impl AgentRuntimeHandle {
                 .review_candidate
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("missing review candidate"))?;
-            let next = self.goal_ctx.stores.goal_store.transition(
+            let next = self.goal_store.transition(
                 &current.id,
                 current.revision,
                 GoalTransition::RestartReview {
@@ -116,30 +120,32 @@ impl AgentRuntimeHandle {
         run_id: u64,
         apply: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
-        let _guard = self
-            .goal_driver
-            .admission
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if !self.run_scheduled(run_id) {
-            return Ok(());
-        }
-        apply()
+        self.handle.with_admission_lock(|| {
+            if !self.run_scheduled(run_id) {
+                return Ok(());
+            }
+            apply()
+        })
     }
     pub(crate) async fn accept_goal(&self, run_id: u64, mut goal: GoalSnapshot) -> Result<()> {
         if goal.iterations.last().is_some_and(|i| {
-            self.input_inbox.outstanding().iter().any(|r| {
+            self.handle.input_inbox().outstanding().iter().any(|r| {
                 r.guidance
                     && r.turn_id == i.turn_id
                     && matches!(
                         r.status,
-                        crate::runtime::InputStatus::Pending
-                            | crate::runtime::InputStatus::Applying
-                            | crate::runtime::InputStatus::Unapplied
+                        InputStatus::Pending | InputStatus::Applying | InputStatus::Unapplied
                     )
             })
         }) {
-            self.apply_if_run_scheduled(run_id, || self.verification_failure(&goal.id, "unapplied human guidance invalidates completion; explicitly resume or withdraw the input".into(), Vec::new(), true))?;
+            self.apply_if_run_scheduled(run_id, || {
+                self.verification_failure(
+                    &goal.id,
+                    "unapplied human guidance invalidates completion; explicitly resume or withdraw the input".into(),
+                    Vec::new(),
+                    true,
+                )
+            })?;
             return Ok(());
         }
         let permit = match self.begin_goal_verification(&goal.id, goal.revision) {
@@ -149,7 +155,7 @@ impl AgentRuntimeHandle {
                     || self
                         .goal_snapshot()
                         .is_none_or(|g| g.status != GoalStatus::Active)
-                    || self.is_closed()
+                    || self.handle.is_closed()
                 {
                     return Ok(());
                 }
@@ -173,7 +179,7 @@ impl AgentRuntimeHandle {
                             || self
                                 .goal_snapshot()
                                 .is_none_or(|g| g.status != GoalStatus::Active)
-                            || self.is_closed() =>
+                            || self.handle.is_closed() =>
                     {
                         return Ok(());
                     }
@@ -184,15 +190,11 @@ impl AgentRuntimeHandle {
         if !self.run_scheduled(run_id) {
             return Ok(());
         }
-        let seq = self.goal_ctx.stores.store.committed_len().await?;
+        let seq = self.handle.committed_seq().await?;
         let reviewer_id = format!(
             "goal-review:{}:{}",
-            self.goal_ctx
-                .active_model
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .actual,
-            self.goal_ctx.tools.tool_surface.fingerprint()
+            self.handle.active_model_name(),
+            self.handle.tool_surface_fingerprint()
         );
         if goal.review_candidate.as_ref().is_none_or(|c| {
             c.goal_id != goal.id
@@ -202,7 +204,7 @@ impl AgentRuntimeHandle {
                 || c.reviewer_id != reviewer_id
         }) {
             let prepare = |target: &GoalSnapshot| {
-                self.goal_ctx.stores.goal_store.transition(
+                self.goal_store.transition(
                     &target.id,
                     target.revision,
                     GoalTransition::PrepareReview {
@@ -236,59 +238,54 @@ impl AgentRuntimeHandle {
         let handle = self.clone();
         let audit_goal = goal.clone();
         let mut task = tokio::spawn(async move {
-            let _permit = permit;
-            handle.review_and_accept(run_id, audit_goal).await
+            let permit = permit;
+            handle.review_and_accept(run_id, audit_goal, &permit).await
         });
         tokio::select! {
             result = &mut task => {
                 match result {
                     Ok(Ok(())) => {},
                     Ok(Err(error)) => self.apply_if_run_scheduled(run_id, || {
-                        if self.goal_ctx.interrupt.is_set()
-                            || self.goal_ctx.cancel.is_cancelled()
-                        {
+                        if self.handle.is_interrupted() || self.handle.is_cancelled() {
                             return Ok(());
                         }
                         self.goal_review_failure(
                             &candidate,
                             format!("goal review failed: {error:#}"),
-                            crate::session::goal::GoalReviewFailureStatus::Blocked,
+                            GoalReviewFailureStatus::Blocked,
                         )
                     })?,
                     Err(error) => self.apply_if_run_scheduled(run_id, || {
-                        if self.goal_ctx.interrupt.is_set()
-                            || self.goal_ctx.cancel.is_cancelled()
-                        {
+                        if self.handle.is_interrupted() || self.handle.is_cancelled() {
                             return Ok(());
                         }
                         self.goal_review_failure(
                             &candidate,
                             format!("independent review task failed: {error}"),
-                            crate::session::goal::GoalReviewFailureStatus::Blocked,
+                            GoalReviewFailureStatus::Blocked,
                         )
                     })?,
                 }
             }
             _ = self.wait_verification_deadline(&goal) => {
-                self.goal_ctx.interrupt.trigger();
+                self.handle.interrupt_turn_gate();
                 self.apply_if_run_scheduled(run_id, || {
                     if self.goal_snapshot().is_some_and(|g| goal_now() >= g.spec.limits.deadline_unix_secs) {
                         self.goal_review_failure(
                             &candidate,
                             "goal deadline reached during review; execution ownership retained until exit".into(),
-                            crate::session::goal::GoalReviewFailureStatus::BudgetExhausted,
+                            GoalReviewFailureStatus::BudgetExhausted,
                         )
                     } else {
                         self.goal_review_failure(
                             &candidate,
                             "review timed out; execution ownership retained until exit".into(),
-                            crate::session::goal::GoalReviewFailureStatus::Blocked,
+                            GoalReviewFailureStatus::Blocked,
                         )
                     }
                 })?;
             }
-            _ = self.goal_ctx.interrupt.notified() => {},
-            _ = self.goal_ctx.cancel.cancelled() => {},
+            _ = self.handle.wait_interrupted_or_cancelled() => {},
         }
         Ok(())
     }
@@ -305,19 +302,13 @@ impl AgentRuntimeHandle {
                 .ok_or_else(|| anyhow::anyhow!("goal missing"))?;
             ensure!(
                 current.status == GoalStatus::Active
-                    && !self.goal_ctx.interrupt.is_set()
-                    && !self.goal_ctx.cancel.is_cancelled(),
+                    && !self.handle.is_interrupted()
+                    && !self.handle.is_cancelled(),
                 "goal stopped during continuation adjudication"
             );
             proposal.validate(&current)?;
             ensure!(
-                !self.input_inbox.outstanding().iter().any(|r| r.guidance
-                    && matches!(
-                        r.status,
-                        crate::runtime::InputStatus::Pending
-                            | crate::runtime::InputStatus::Applying
-                            | crate::runtime::InputStatus::Unapplied
-                    )),
+                !self.handle.has_outstanding_guidance(),
                 "human guidance arrived during adjudication; explicitly resume or withdraw it"
             );
             let report = current
@@ -333,7 +324,7 @@ impl AgentRuntimeHandle {
             }
             let fingerprint = proposal.fingerprint()?;
             let report_artifact = report.artifact.clone();
-            let next = self.goal_ctx.stores.goal_store.transition(
+            let next = self.goal_store.transition(
                 &current.id,
                 current.revision,
                 GoalTransition::CommitContinuation {
@@ -348,7 +339,12 @@ impl AgentRuntimeHandle {
         })
     }
 
-    async fn review_and_accept(&self, run_id: u64, mut goal: GoalSnapshot) -> Result<()> {
+    async fn review_and_accept(
+        &self,
+        run_id: u64,
+        mut goal: GoalSnapshot,
+        permit: &TurnPermit,
+    ) -> Result<()> {
         loop {
             let candidate = goal
                 .review_candidate
@@ -358,7 +354,7 @@ impl AgentRuntimeHandle {
                 && record.proposal.candidate == candidate
             {
                 ensure!(
-                    self.goal_ctx.stores.store.committed_len().await? == record.conversation_seq,
+                    self.handle.committed_seq().await? == record.conversation_seq,
                     "continued decision history changed"
                 );
                 self.apply_if_run_scheduled(run_id, || {
@@ -370,7 +366,7 @@ impl AgentRuntimeHandle {
                             && current.review_candidate.as_ref() == Some(&candidate),
                         "continued candidate changed"
                     );
-                    let next = self.goal_ctx.stores.goal_store.transition(
+                    let next = self.goal_store.transition(
                         &current.id,
                         current.revision,
                         GoalTransition::FinishContinuation {
@@ -423,33 +419,33 @@ impl AgentRuntimeHandle {
                         self.goal_review_failure(
                             &candidate,
                             format!("review budget exhausted: {reason}"),
-                            crate::session::goal::GoalReviewFailureStatus::BudgetExhausted,
+                            GoalReviewFailureStatus::BudgetExhausted,
                         )
                     })?;
                     return Ok(());
                 }
+                let handle_for_usage = self.handle.clone();
                 let session = Arc::new(super::review::GoalReviewSession::new(
                     goal.clone(),
-                    self.goal_ctx.stores.goal_store.clone(),
-                    self.goal_ctx.stores.usage.clone(),
+                    self.goal_store.clone(),
+                    Arc::new(move || handle_for_usage.usage_records()),
                 ));
-                let outcome = self.run_goal_review(goal.clone(), session.clone()).await;
-                self.goal_ctx
-                    .stores
-                    .goal_store
-                    .reconcile_usage(&self.goal_ctx.stores.usage.all_records()?)?;
-                if self.goal_ctx.cancel.is_cancelled() || self.goal_ctx.interrupt.is_set() {
+                let outcome = self
+                    .run_goal_review(goal.clone(), session.clone(), permit)
+                    .await;
+                self.goal_store
+                    .reconcile_usage(&self.handle.usage_records()?)?;
+                if self.handle.is_cancelled() || self.handle.is_interrupted() {
                     return Ok(());
                 }
                 if let Some(error) = outcome.as_ref().err()
-                    && let Some(exhausted) =
-                        error.downcast_ref::<super::review::GoalReviewBudgetExhausted>()
+                    && let Some(exhausted) = error.downcast_ref::<BudgetExhaustedError>()
                 {
                     self.apply_if_run_scheduled(run_id, || {
                         self.goal_review_failure(
                             &candidate,
                             exhausted.to_string(),
-                            crate::session::goal::GoalReviewFailureStatus::BudgetExhausted,
+                            GoalReviewFailureStatus::BudgetExhausted,
                         )
                     })?;
                     return Ok(());
@@ -463,15 +459,15 @@ impl AgentRuntimeHandle {
                 let (review, reads) = session.export(self)?;
                 (review, reads, expected_conversation_seq)
             };
-            let conversation_seq = self.goal_ctx.stores.store.committed_len().await?;
+            let conversation_seq = self.handle.committed_seq().await?;
             self.apply_if_run_scheduled(run_id, || {
                 let Some(current) = self.goal_snapshot() else {
                     return Ok(());
                 };
                 if current.status != GoalStatus::Active
                     || current.review_candidate.as_ref() != Some(&candidate)
-                    || self.goal_ctx.interrupt.is_set()
-                    || self.goal_ctx.cancel.is_cancelled()
+                    || self.handle.is_interrupted()
+                    || self.handle.is_cancelled()
                 {
                     return Ok(());
                 }
@@ -480,13 +476,7 @@ impl AgentRuntimeHandle {
                     "conversation changed during review"
                 );
                 ensure!(
-                    !self.input_inbox.outstanding().iter().any(|r| r.guidance
-                        && matches!(
-                            r.status,
-                            crate::runtime::InputStatus::Pending
-                                | crate::runtime::InputStatus::Applying
-                                | crate::runtime::InputStatus::Unapplied
-                        )),
+                    !self.handle.has_outstanding_guidance(),
                     "human guidance arrived during adjudication; explicitly resume or withdraw it"
                 );
                 for (reference, hash) in &reads {
@@ -544,7 +534,7 @@ impl AgentRuntimeHandle {
                 } else {
                     None
                 };
-                goal = self.goal_ctx.stores.goal_store.transition(
+                goal = self.goal_store.transition(
                     &current.id,
                     current.revision,
                     GoalTransition::CommitReview {
@@ -560,8 +550,8 @@ impl AgentRuntimeHandle {
             if review.verdict != GoalReviewVerdict::Satisfied
                 || !self.run_scheduled(run_id)
                 || goal.status != GoalStatus::Active
-                || self.goal_ctx.interrupt.is_set()
-                || self.goal_ctx.cancel.is_cancelled()
+                || self.handle.is_interrupted()
+                || self.handle.is_cancelled()
             {
                 return Ok(());
             }
@@ -580,17 +570,17 @@ impl AgentRuntimeHandle {
                     .ok_or_else(|| anyhow::anyhow!("configured checker unavailable: {id}"))?
                     .clone();
                 let context = GoalVerificationContext {
-                    cwd: self.goal_ctx.paths.cwd.clone(),
+                    cwd: self.handle.session_info().cwd.clone(),
                     goal: goal.clone(),
-                    cancelled: self.goal_ctx.interrupt.as_atomic(),
-                    tools: Arc::new(crate::context::ToolContext::from(self.goal_ctx.as_ref())),
+                    cancelled: self.handle.interrupt_flag(),
+                    handle: self.handle.clone(),
                 };
                 let effect_id = format!(
                     "checker:{}:{}:{}",
                     candidate.iteration, candidate.generation, id
                 );
                 self.apply_if_run_scheduled(run_id, || {
-                    if let Some(g) = self.goal_ctx.stores.goal_store.transition_if_current(
+                    if let Some(g) = self.goal_store.transition_if_current(
                         &goal.id,
                         GoalTransition::BeginChecker {
                             expected: candidate.clone(),
@@ -602,8 +592,8 @@ impl AgentRuntimeHandle {
                     Ok(())
                 })?;
                 if !self.run_scheduled(run_id)
-                    || self.goal_ctx.interrupt.is_set()
-                    || self.goal_ctx.cancel.is_cancelled()
+                    || self.handle.is_interrupted()
+                    || self.handle.is_cancelled()
                 {
                     return Ok(());
                 }
@@ -635,7 +625,7 @@ impl AgentRuntimeHandle {
                     reason: result.reason.clone(),
                     evidence: result.evidence.clone(),
                 };
-                if let Some(updated) = self.goal_ctx.stores.goal_store.transition_if_current(
+                if let Some(updated) = self.goal_store.transition_if_current(
                     &goal.id,
                     GoalTransition::RecordCheckerResult {
                         effect_id: effect_id.clone(),
@@ -659,8 +649,8 @@ impl AgentRuntimeHandle {
                     return Ok(());
                 }
                 if !self.run_scheduled(run_id)
-                    || self.goal_ctx.interrupt.is_set()
-                    || self.goal_ctx.cancel.is_cancelled()
+                    || self.handle.is_interrupted()
+                    || self.handle.is_cancelled()
                 {
                     return Ok(());
                 }
@@ -697,7 +687,7 @@ impl AgentRuntimeHandle {
                 evidence: Vec<(String, String)>,
                 checker_ok: bool,
             }
-            let conversation_seq = self.goal_ctx.stores.store.committed_len().await?;
+            let conversation_seq = self.handle.committed_seq().await?;
             let precheck = if let Some(snap) = self.goal_snapshot() {
                 let handle_for_precheck = self.clone();
                 let has_checker = checker.is_some();
@@ -726,8 +716,8 @@ impl AgentRuntimeHandle {
                 };
                 if current.status != GoalStatus::Active
                     || current.review_candidate.as_ref() != Some(&candidate)
-                    || self.goal_ctx.interrupt.is_set()
-                    || self.goal_ctx.cancel.is_cancelled()
+                    || self.handle.is_interrupted()
+                    || self.handle.is_cancelled()
                 {
                     return Ok(());
                 }
@@ -741,7 +731,7 @@ impl AgentRuntimeHandle {
                         && checked.checker_ok,
                     "candidate changed before completion"
                 );
-                let completed = self.goal_ctx.stores.goal_store.transition(
+                let completed = self.goal_store.transition(
                     &current.id,
                     current.revision,
                     GoalTransition::CompleteReview {
@@ -764,9 +754,9 @@ impl AgentRuntimeHandle {
         &self,
         candidate: &GoalReviewCandidate,
         reason: String,
-        outcome: crate::session::goal::GoalReviewFailureStatus,
+        outcome: GoalReviewFailureStatus,
     ) -> Result<()> {
-        let Some(goal) = self.goal_ctx.stores.goal_store.transition_if_current(
+        let Some(goal) = self.goal_store.transition_if_current(
             &candidate.goal_id,
             GoalTransition::ReviewFailure {
                 expected: candidate.clone(),
@@ -803,7 +793,7 @@ impl AgentRuntimeHandle {
             .filter_map(|r| self.evidence_version(r).ok().map(|v| (r, v)))
             .collect();
         let fingerprint = hash_bytes(&serde_json::to_vec(&(reason.as_str(), versions))?);
-        let Some(g) = self.goal_ctx.stores.goal_store.transition_if_current(
+        let Some(g) = self.goal_store.transition_if_current(
             goal_id,
             GoalTransition::VerificationFailure {
                 reason,

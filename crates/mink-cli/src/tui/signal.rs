@@ -15,9 +15,9 @@ pub enum TuiSignal {
     /// Authoritative goal snapshot mirrored into the read-only status marker
     /// and goal view. The runtime owns the contract; the UI never edits it.
     GoalUpdated(Box<crate::ui::GoalDisplay>),
-    /// A goal boundary typed by core (`_mink.goal_message`). Rendered as a
+    /// A goal boundary typed by `mink-goal` (`_mink.goal_message`). Rendered as a
     /// transcript card from the structured payload; live and replay share it.
-    GoalCard(Box<crate::runtime::GoalMessage>),
+    GoalCard(Box<mink_goal::GoalMessage>),
     /// The terminal goal facts row appended when a goal ends.
     GoalEnded {
         goal_id: String,
@@ -316,7 +316,7 @@ impl TuiState {
                 TranscriptKind::Info,
             ));
         }
-        if crate::runtime::TurnId::new(turn_id).is_goal_turn() {
+        if mink_goal::is_goal_turn_id(&crate::runtime::TurnId::new(turn_id)) {
             self.push_line(TranscriptItem::new(
                 "Goal turn ended; checking goal decision.".into(),
                 TranscriptKind::Info,

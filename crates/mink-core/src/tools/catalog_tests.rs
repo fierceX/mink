@@ -95,18 +95,6 @@ fn schemas_declare_exactly_the_runtime_accepted_fields() {
         ("PlanConfirm", &[]),
         ("PlanClear", &[]),
         ("SubAgent", &["prompt", "description", "fork", "model"]),
-        ("GoalRead", &[]),
-        ("GoalDraft", &["draft_id", "revision", "spec"]),
-        (
-            "GoalReview",
-            &[
-                "decision",
-                "remaining_requirements",
-                "summary",
-                "next_step",
-                "blocker",
-            ],
-        ),
         (
             "PythonSandbox",
             &["script", "script_file", "timeout", "command", "code"],

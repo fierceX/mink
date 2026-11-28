@@ -99,16 +99,18 @@ pub(crate) async fn execute_run_code(
         );
     };
 
-    let restrict_goal_readonly = ctx.goal_drafting || ctx.goal_adjudication.is_some();
     let tool_names: Vec<String> = ctx
         .tool_surface
         .programmatic_tools()
         .iter()
         .map(|t| t.metadata.name.to_string())
         .filter(|name| {
-            !restrict_goal_readonly
-                || (matches!(name.as_str(), "Read" | "Glob" | "Grep")
-                    && !ctx.custom_tools.iter().any(|c| c.definition.name == *name))
+            let Some(mask) = &ctx.tool_mask else {
+                return true;
+            };
+            mask.allow_exclusive_ptc
+                && mask.ptc_allowed_tools.contains(name)
+                && !ctx.custom_tools.iter().any(|c| c.definition.name == *name)
         })
         .collect();
 
@@ -567,7 +569,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exclusive_goal_drafting_permits_run_code_through_tool_runner() {
+    async fn exclusive_readonly_mask_permits_run_code_through_tool_runner() {
         let shared = crate::regression::test_context_for_agent_with_config(
             "ptc-runner-exclusive-draft",
             |cfg| {
@@ -580,7 +582,14 @@ mod tests {
         .await
         .unwrap();
         let mut ctx_val = ToolContext::from_shared(&shared);
-        ctx_val.goal_drafting = true;
+        ctx_val.tool_mask = Some(
+            crate::tools::policy_hook::ToolExecutionMask::allow_only(["Read", "Glob", "Grep"])
+                .with_exclusive_ptc(true)
+                .with_block_custom_resource_schemes(true)
+                .with_disable_native_web(true)
+                .with_disable_replan(true)
+                .with_block_reason("read-only exploration only"),
+        );
         ctx_val.ptc_runtime = Some(Arc::new(StubPtcRuntime {
             result: PtcRunResult {
                 output: vec![PtcOutputItem::Text("draft inspected".into())],

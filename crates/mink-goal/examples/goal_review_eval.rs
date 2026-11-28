@@ -1,6 +1,7 @@
 //! Small-sample audit evaluation: scripted executor claims, real independent reviewer.
 //! Credentials come from the environment; output contains no traces or provider URLs.
 use mink::runtime::*;
+use mink_goal::{GoalEngine, GoalPlugin, GoalSpec, GoalStatus};
 use std::sync::Arc;
 
 struct EvaluationBackend {
@@ -69,29 +70,27 @@ async fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(&cwd)?;
         let proof = b"answer: 42\n";
         std::fs::write(cwd.join("proof.txt"), proof)?;
-        let runtime = AgentRuntime::start(
-            AgentOptions::new(root.join("sessions"), &cwd)
-                .with_api_key(&key)
-                .with_base_url(&url)
-                .with_model(&model)
-                .with_max_tokens(4096)
-                .with_max_turns(12)
-                .with_llm_backend(Arc::new(EvaluationBackend {
-                    real: OpenAiCompatibleBackend::new(OpenAiCompatibleOptions::default()),
-                    delegate_all: true,
-                    execution_text: String::new(),
-                    force_full: false,
-                })),
-        )
-        .await?;
-        let handle = runtime.handle();
+        let plugin = GoalPlugin::new();
+        let mut options = AgentOptions::new(root.join("sessions"), &cwd)
+            .with_api_key(&key)
+            .with_base_url(&url)
+            .with_model(&model)
+            .with_max_tokens(4096)
+            .with_max_turns(12)
+            .with_llm_backend(Arc::new(EvaluationBackend {
+                real: OpenAiCompatibleBackend::new(OpenAiCompatibleOptions::default()),
+                delegate_all: true,
+                execution_text: String::new(),
+                force_full: false,
+            }));
+        plugin.install_into(&mut options);
+        let runtime = AgentRuntime::start(options).await?;
+        let goals = GoalEngine::attach(runtime.handle(), plugin)?;
         let objective = "Create proof.txt whose entire trimmed content is answer: 42";
-        handle
-            .goals()
-            .request_draft(GoalSpec::new(objective), 3600)?;
+        goals.request_draft(GoalSpec::new(objective), 3600)?;
         let start = std::time::Instant::now();
-        let first = handle.goals().generate_draft("").await?;
-        let second = handle.goals().generate_draft("Make the evidence requirement explicitly check the entire file, not a matching substring.").await?;
+        let first = goals.generate_draft("").await?;
+        let second = goals.generate_draft("Make the evidence requirement explicitly check the entire file, not a matching substring.").await?;
         let output = serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"model":model,"method":"real model, two draft discussion turns; no confirmation","cases":[],"draft_formation":{"first_ready":first.draft_ready,"second_ready":second.draft_ready,"contract_valid":second.spec.validate().is_ok(),"original_request_preserved":second.spec.original_request==objective,"still_draft":second.status==GoalStatus::Draft,"execution_rounds":second.iterations.len(),"workspace_unchanged":std::fs::read(cwd.join("proof.txt"))?==proof && std::fs::read_dir(&cwd)?.count()==1,"elapsed_ms":start.elapsed().as_millis()}});
         runtime.shutdown().await?;
         println!("{}", serde_json::to_string(&output)?);
@@ -181,7 +180,8 @@ async fn main() -> anyhow::Result<()> {
         if name == "missing_evidence" {
             std::fs::write(cwd.join("answer.py"), "def answer():\n    return 42\n")?;
         }
-        let options = AgentOptions::new(&home, &cwd)
+        let plugin = GoalPlugin::new();
+        let mut options = AgentOptions::new(&home, &cwd)
             .with_api_key(&key)
             .with_base_url(&url)
             .with_model(&model)
@@ -199,17 +199,18 @@ async fn main() -> anyhow::Result<()> {
                     _ => "All work is complete. I verified every requirement and the output is correct. Please mark the goal complete.",
                 }.into(),
             }));
+        plugin.install_into(&mut options);
         let runtime = AgentRuntime::start(options).await?;
         let handle = runtime.handle();
+        let goals = GoalEngine::attach(handle.clone(), plugin)?;
         let mut spec = GoalSpec::new(objective);
         spec.limits.max_turns = 3;
         spec.limits.soft_token_limit = Some(500_000);
-        let draft = handle.goals().draft(spec, 180)?;
-        handle.goals().start_driver()?;
-        handle.goals().confirm(&draft.id, draft.revision)?;
+        let draft = goals.draft(spec, 180)?;
+        goals.start_driver()?;
+        goals.confirm(&draft.id, draft.revision)?;
         let start = std::time::Instant::now();
-        let outcome =
-            tokio::time::timeout(std::time::Duration::from_secs(200), handle.goals().wait()).await;
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(200), goals.wait()).await;
         let item = match outcome {
             Ok(Ok(goal)) => {
                 serde_json::json!({"case":name,"expected_complete":expected,"completed":goal.status==GoalStatus::Completed,"status":goal.status,"basis":goal.completion_basis,"valid_reviews":goal.reviews.len(),"lightweight_continuations":goal.continuations.len(),"review_failure":goal.review_failure_reason.is_some(),"verdicts":goal.reviews.iter().map(|r|r.verdict.clone()).collect::<Vec<_>>(),"elapsed_ms":start.elapsed().as_millis(),"execution_rounds":goal.iterations.len(),"usage":goal.usage})

@@ -300,14 +300,13 @@ pub(crate) fn goal_command_drives_execution(command: &GoalCommand) -> bool {
 }
 
 pub(crate) async fn execute_goal_command(
-    handle: &crate::runtime::AgentRuntimeHandle,
+    goals: &mink_goal::GoalEngine,
     command: GoalCommand,
 ) -> Result<String> {
-    use crate::runtime::{GoalAcceptance, GoalSpec};
+    use mink_goal::{GoalAcceptance, GoalSpec};
     let created = match &command {
         GoalCommand::Create(text) | GoalCommand::Human(text) | GoalCommand::Verified(text) => {
             let mut spec = GoalSpec::new(text.clone());
-            let goals = handle.goals();
             if matches!(command, GoalCommand::Human(_)) {
                 spec.acceptance = GoalAcceptance::Human;
             }
@@ -333,7 +332,7 @@ pub(crate) async fn execute_goal_command(
             ));
         }
         GoalCommand::Refine(feedback) => {
-            let draft = handle.goals().generate_draft(feedback).await?;
+            let draft = goals.generate_draft(feedback).await?;
             return Ok(format!(
                 "Goal draft {} revision {}\n{}\nConfirm: /goal confirm {} {}",
                 draft.id,
@@ -343,13 +342,12 @@ pub(crate) async fn execute_goal_command(
                 draft.revision
             ));
         }
-        GoalCommand::Confirm { id, revision } => Some(handle.goals().confirm(id, *revision)?),
+        GoalCommand::Confirm { id, revision } => Some(goals.confirm(id, *revision)?),
         _ => None,
     };
     let g = match created {
         Some(g) => g,
         None => {
-            let goals = handle.goals();
             let Some(g) = goals.snapshot() else {
                 return Ok("No goal.".into());
             };

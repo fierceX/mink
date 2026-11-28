@@ -282,6 +282,7 @@ fn forced_terminal_is_published_once_after_closed() {
     let sequence = AtomicU64::new(1);
     let state = Arc::new(Mutex::new(RuntimeState {
         runtime: None,
+        goals: None,
         phase: RuntimePhase::Closing,
         turn_task: None,
         last_idle: Instant::now(),
@@ -360,7 +361,7 @@ async fn goal_mirror_rides_the_snapshot_watermark() {
     let runtime = SessionRuntime::open(AgentOptions::new(&dir, &dir).with_api_key("synthetic"))
         .await
         .unwrap();
-    let goal = mink::runtime::GoalSnapshot {
+    let goal = mink_goal::GoalSnapshot {
         version: 1,
         draft_duration_secs: None,
         needs_confirmation: false,
@@ -375,9 +376,9 @@ async fn goal_mirror_rides_the_snapshot_watermark() {
         id: "goal-mirror".into(),
         revision: 1,
         contract_revision: 1,
-        spec: mink::runtime::GoalSpec::new("mirror the goal"),
-        status: mink::runtime::GoalStatus::Paused,
-        phase: mink::runtime::GoalPhase::Idle,
+        spec: mink_goal::GoalSpec::new("mirror the goal"),
+        status: mink_goal::GoalStatus::Paused,
+        phase: mink_goal::GoalPhase::Idle,
         reason: None,
         review_failure_reason: None,
         review_failure_stage: None,
@@ -533,13 +534,9 @@ async fn concurrent_publish_and_publish_goal_preserve_monotonic_stream_sequence(
             .unwrap(),
     );
     let base_goal = runtime
-        .goal_handle()
-        .unwrap()
         .goals()
-        .draft(
-            mink::runtime::GoalSpec::new("ordered publish regression"),
-            60,
-        )
+        .unwrap()
+        .draft(mink_goal::GoalSpec::new("ordered publish regression"), 60)
         .unwrap();
     let (tx, mut rx) = broadcast::channel(1024);
 

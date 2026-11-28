@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub enum AgentRole {
     Primary,
     SubAgent,
-    GoalReviewer,
+    ScopedChild,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +56,7 @@ impl ToolResolutionContext {
             },
             edit_mode: config.edit_mode,
             delegation_allowed,
-            ptc_mode: if role == AgentRole::GoalReviewer {
+            ptc_mode: if role == AgentRole::ScopedChild {
                 crate::ptc::PtcMode::Off
             } else {
                 config.ptc.mode
@@ -126,9 +126,6 @@ fn is_programmatic_eligible(name: &str) -> bool {
             | "PlanDraft"
             | "PlanConfirm"
             | "PlanClear"
-            | "GoalRead"
-            | "GoalDraft"
-            | "GoalReview"
             | "SubAgent"
     )
 }
@@ -177,7 +174,20 @@ impl ModelToolSurface {
         let whitelist = config.enabled_tools.as_ref();
         for tool in custom_tools {
             let definition = &tool.definition;
-            if context.role == AgentRole::GoalReviewer {
+            let role_allowed = match definition.role_scope {
+                crate::tools::extension::ToolRoleScope::PrimaryOnly => {
+                    context.role == AgentRole::Primary
+                }
+                crate::tools::extension::ToolRoleScope::PrimaryAndSubAgent => {
+                    context.role != AgentRole::ScopedChild
+                }
+                crate::tools::extension::ToolRoleScope::All => true,
+            };
+            if !role_allowed {
+                hidden.insert(
+                    definition.name.clone(),
+                    ToolHiddenReason::UnavailableForRole,
+                );
                 continue;
             }
             if whitelist
@@ -337,19 +347,7 @@ impl ModelToolSurface {
                     continue;
                 }
             }
-            if (metadata.name == "GoalReview" && context.role != AgentRole::Primary)
-                || (context.role == AgentRole::GoalReviewer
-                    && !matches!(
-                        metadata.name.as_ref(),
-                        "Read" | "Glob" | "Grep" | "GoalRead"
-                    ))
-            {
-                hidden.insert(tool.name.clone(), ToolHiddenReason::UnavailableForRole);
-                continue;
-            }
-            if (metadata.name.as_ref() == "SubAgent" && !context.delegation_allowed)
-                || (context.role == AgentRole::SubAgent && metadata.name.as_ref() == "GoalDraft")
-            {
+            if metadata.name.as_ref() == "SubAgent" && !context.delegation_allowed {
                 hidden.insert(
                     metadata.name.to_string(),
                     ToolHiddenReason::UnavailableForRole,

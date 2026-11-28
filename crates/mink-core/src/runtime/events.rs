@@ -21,11 +21,9 @@ pub struct AgentEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEventKind {
     TurnStarted,
-    GoalUpdated {
-        goal: Box<crate::runtime::GoalSnapshot>,
-    },
-    GoalFinished {
-        goal: Box<crate::runtime::GoalSnapshot>,
+    Extension {
+        kind: String,
+        payload: serde_json::Value,
     },
     ConversationCommitted {
         conversation_seq: usize,
@@ -312,11 +310,6 @@ impl AgentEventKind {
             Self::Text { content } | Self::Thinking { content } => Some(content.len()),
             _ => None,
         }
-    }
-
-    /// Whether this informational notice belongs to the goal lifecycle stream.
-    pub fn is_goal_notice(&self) -> bool {
-        matches!(self, Self::Info { message } if message.starts_with("Goal "))
     }
 }
 

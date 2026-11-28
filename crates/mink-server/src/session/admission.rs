@@ -231,7 +231,7 @@ impl Drop for ExecutionPermit {
     }
 }
 
-/// The host side of `mink::runtime::GoalRunLease`: a pool permit that stays
+/// The host side of `mink_goal::GoalRunLease`: a pool permit that stays
 /// alive for exactly as long as the goal run core keeps the lease.
 pub(crate) struct PermitLease {
     // Retaining this RAII value is the capacity claim; dropping the lease frees it.
@@ -251,7 +251,7 @@ impl PermitLease {
     }
 }
 
-impl mink::runtime::GoalRunLease for PermitLease {}
+impl mink_goal::GoalRunLease for PermitLease {}
 
 impl Drop for PermitLease {
     fn drop(&mut self) {

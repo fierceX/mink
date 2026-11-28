@@ -37,19 +37,19 @@ impl SubAgentStopReason {
 
 /// Why this child session exists. Internal reviewers and replanners are not
 /// model-visible delegations and must not enter the delegation catalog.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SubAgentOrigin {
     SubAgent,
-    GoalReview,
     Replan,
+    Custom(String),
 }
 
 impl SubAgentOrigin {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &str {
         match self {
             Self::SubAgent => "sub_agent",
-            Self::GoalReview => "goal_review",
             Self::Replan => "replan",
+            Self::Custom(tag) => tag.as_str(),
         }
     }
 }
@@ -256,16 +256,17 @@ impl SubAgentExecutor {
         origin: SubAgentOrigin,
     ) -> Result<Self> {
         Self::new_inner(
-            parent_ctx, session_id, fork, config, cancel, origin, label, model, None,
+            parent_ctx, session_id, fork, config, cancel, origin, label, model, None, false, None,
+            None, None, None, None,
         )
         .await
     }
 
-    pub(crate) async fn new_with_review(
+    pub(crate) async fn new_ephemeral(
         parent_ctx: Arc<AgentSharedContext>,
         session_id: String,
         cancel: crate::cancel::CancellationToken,
-        review: Arc<crate::runtime::goal::review::GoalReviewSession>,
+        opts: crate::runtime::EphemeralChildOptions,
     ) -> Result<Self> {
         let mut config = parent_ctx.config.clone();
         let active = parent_ctx
@@ -274,26 +275,52 @@ impl SubAgentExecutor {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         config.model = active.alias.unwrap_or(active.actual);
-        let allowed: Vec<String> = ["Read", "Glob", "Grep", "GoalRead"]
-            .into_iter()
-            .filter(|name| parent_ctx.tools.tool_surface.has_any_reachable(name))
-            .map(str::to_string)
+        let extra_custom = crate::tools::extension::freeze_custom_tools(opts.extra_tools);
+        let extra_names: std::collections::HashSet<&str> = extra_custom
+            .iter()
+            .map(|t| t.definition.name.as_str())
+            .collect();
+        let allowed: Vec<String> = opts
+            .allowed_tools
+            .iter()
+            .filter(|name| {
+                parent_ctx.tools.tool_surface.has_any_reachable(name)
+                    || extra_names.contains(name.as_str())
+            })
+            .cloned()
             .collect();
         config
             .tool_approval
             .retain(|name, _| allowed.contains(name));
         config.enabled_tools = Some(allowed);
-        config.sub_agent_timeout_secs = crate::runtime::goal::GOAL_REVIEW_TIMEOUT_SECS as i32;
+        if let Some(timeout_secs) = opts.timeout_secs {
+            config.sub_agent_timeout_secs = i32::try_from(timeout_secs).unwrap_or(i32::MAX);
+        }
+        let custom_tools_override = if opts.isolate_extensions {
+            Some(extra_custom)
+        } else {
+            let mut merged = parent_ctx.tools.custom_tools.as_ref().clone();
+            merged.extend(extra_custom);
+            Some(merged)
+        };
+        let label = opts.label.clone();
+        let origin = SubAgentOrigin::Custom(opts.origin_tag.clone());
         Self::new_inner(
             parent_ctx,
             session_id,
-            true,
+            opts.fork_parent_session,
             config,
             cancel,
-            SubAgentOrigin::GoalReview,
-            Some("goal review".into()),
+            origin,
+            label,
             None,
-            Some(review),
+            Some(crate::tools::surface::AgentRole::ScopedChild),
+            opts.isolate_extensions,
+            custom_tools_override,
+            opts.billing_turn_id,
+            opts.tool_mask,
+            opts.tool_observer,
+            opts.budget_check,
         )
         .await
     }
@@ -308,7 +335,13 @@ impl SubAgentExecutor {
         origin: SubAgentOrigin,
         label: Option<String>,
         model: Option<String>,
-        review: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
+        role_override: Option<crate::tools::surface::AgentRole>,
+        isolate_extensions: bool,
+        custom_tools_override: Option<Vec<crate::tools::extension::RegisteredCustomTool>>,
+        billing_turn_id_override: Option<String>,
+        default_tool_mask: Option<crate::tools::policy_hook::ToolExecutionMask>,
+        default_tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolExecutionObserver>>,
+        budget_check: Option<Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync>>,
     ) -> Result<Self> {
         if let Some(model) = model {
             config.model = model;
@@ -379,7 +412,7 @@ impl SubAgentExecutor {
         };
 
         let built = match build_agent_context(AgentContextBuild {
-            goal_review: review.clone(),
+            role_override,
             session_lease: Some(child_lease),
             config,
             home: child_home,
@@ -407,27 +440,35 @@ impl SubAgentExecutor {
             runtime_skills: Vec::new(),
             skill_discovery_policy: crate::capabilities::SkillDiscoveryPolicy::Defaults,
             llm_backend: parent_ctx.llm_backend.clone(),
-            resource_router: if review.is_some() {
+            resource_router: if isolate_extensions {
                 None
             } else {
                 Some(parent_ctx.tools.resource_router.clone())
             },
             capability_snapshot: Some(parent_ctx.tools.capability_snapshot.clone()),
-            custom_tools: if review.is_some() {
-                Vec::new()
-            } else {
-                parent_ctx.tools.custom_tools.as_ref().clone()
-            },
-            prefix_source: if review.is_some() {
+            custom_tools: custom_tools_override.unwrap_or_else(|| {
+                if isolate_extensions {
+                    Vec::new()
+                } else {
+                    parent_ctx.tools.custom_tools.as_ref().clone()
+                }
+            }),
+            turn_policies: Vec::new(),
+            checkpoint_providers: Vec::new(),
+            prefix_source: if isolate_extensions {
                 None
             } else {
                 parent_ctx.tools.prefix_source.clone()
             },
-            ptc_runtime: if review.is_some() {
+            ptc_runtime: if isolate_extensions {
                 None
             } else {
                 parent_ctx.tools.ptc_runtime.clone()
             },
+            billing_turn_id_override,
+            default_tool_mask,
+            default_tool_observer,
+            budget_check,
         })
         .await
         {
@@ -645,34 +686,62 @@ impl SubAgentExecutor {
     }
 }
 
-/// Reuses only a successful read-only reviewer, never an ordinary execution agent.
-pub(crate) struct ReviewAgentSession {
+/// Reuses only a successful scoped child session; keeps deadline and usability state.
+pub struct EphemeralChildSession {
     executor: SubAgentExecutor,
     usable: bool,
+    deadline: Option<std::time::Instant>,
 }
-impl Drop for ReviewAgentSession {
+
+impl Drop for EphemeralChildSession {
     fn drop(&mut self) {
         self.executor.child_ctx.cancel.cancel();
     }
 }
-impl ReviewAgentSession {
-    pub(crate) fn new(executor: SubAgentExecutor) -> Self {
+
+impl EphemeralChildSession {
+    pub(crate) fn new(executor: SubAgentExecutor, deadline: Option<std::time::Instant>) -> Self {
         Self {
             executor,
             usable: true,
+            deadline,
         }
     }
-    pub(crate) async fn execute(&mut self, prompt: String) -> SubAgentResult {
+
+    pub fn session_dir(&self) -> std::path::PathBuf {
+        self.executor.child_ctx.paths.home.clone()
+    }
+
+    pub async fn run_turn(&mut self, prompt: String) -> crate::runtime::EphemeralChildOutcome {
+        use crate::runtime::{EphemeralChildOutcome, EphemeralChildStatus};
         if !self.usable {
-            return SubAgentResult::terminal_unmeasured(
-                SubAgentStatus::Failed,
-                SubAgentStopReason::Error,
-                Some("a failed reviewer cannot be restarted as a new turn".to_string()),
-            );
+            return EphemeralChildOutcome {
+                status: EphemeralChildStatus::Failed,
+                stop_reason: SubAgentStopReason::Error.as_str().to_string(),
+                text: String::new(),
+                thinking: String::new(),
+                diagnostic: Some(
+                    "a failed child session cannot be restarted as a new turn".to_string(),
+                ),
+                elapsed_ms: 0,
+            };
         }
-        let result = self.executor.execute_turn(prompt, None).await;
+        let deadline = self.deadline.map(tokio::time::Instant::from_std);
+        let result = self.executor.execute_turn(prompt, deadline).await;
         self.usable = result.status == SubAgentStatus::Succeeded;
-        result
+        EphemeralChildOutcome {
+            status: match result.status {
+                SubAgentStatus::Succeeded => EphemeralChildStatus::Succeeded,
+                SubAgentStatus::Failed => EphemeralChildStatus::Failed,
+                SubAgentStatus::Interrupted => EphemeralChildStatus::Interrupted,
+                SubAgentStatus::TimedOut => EphemeralChildStatus::TimedOut,
+            },
+            stop_reason: result.stop_reason.as_str().to_string(),
+            text: result.text,
+            thinking: result.thinking,
+            diagnostic: result.diagnostic,
+            elapsed_ms: result.elapsed_ms,
+        }
     }
 }
 

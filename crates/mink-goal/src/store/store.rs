@@ -39,7 +39,7 @@ impl GoalStore {
     fn clear_journal(journal: &Path, fault: &PersistenceFault) -> Result<()> {
         match std::fs::remove_file(journal) {
             Ok(()) => {
-                if let Err(error) = crate::session::atomic_file::sync_parent(journal) {
+                if let Err(error) = mink::runtime::sync_parent(journal) {
                     return Err(fault.raise(
                         journal,
                         format!("goal journal cleanup sync failed: {error:#}"),
@@ -467,43 +467,6 @@ impl GoalStore {
         })?;
         Ok(())
     }
-    /// Append the terminal goal facts once, at the tail of the conversation.
-    ///
-    /// Informational by contract: the lifecycle has already settled, so a failed
-    /// append is reported by the caller instead of changing the goal state or
-    /// latching the session.
-    pub(crate) async fn append_ended_row(
-        &self,
-        store: &crate::session::store::ConversationStore,
-        max_chars: usize,
-    ) -> Result<bool> {
-        let Some(g) = self
-            .snapshot()
-            .filter(|g| g.status.is_terminal() && !g.hidden)
-        else {
-            return Ok(false);
-        };
-        if store
-            .lines()
-            .await?
-            .iter()
-            .any(|m| m["_mink"]["goal_id"] == g.id && m["_mink"]["goal_state_kind"] == "ended")
-        {
-            return Ok(false);
-        }
-        let message = serde_json::json!({
-            "role": "user",
-            "content": state_text(&g, GoalStateKind::Ended, max_chars),
-            "_mink": {
-                "internal": true,
-                "goal_id": g.id,
-                "goal_revision": g.revision,
-                "goal_state_kind": "ended",
-            },
-        });
-        store.append_runtime_message_durable(message).await?;
-        Ok(true)
-    }
     /// Contract checkpoint mounted inside the active window after a compaction.
     ///
     /// The rendering carries no per-round facts, so the checkpoint stays
@@ -641,13 +604,16 @@ impl GoalStore {
     /// facts is an error instead of silently overwriting. The status decision
     /// of the round (failed/interrupted) lands in the same atomic commit as
     /// the finished/billing/usage facts, so a crash cannot leave them split.
-    pub(crate) fn settle_iteration(
+    pub(crate) fn settle_iteration_from_parts(
         &self,
         key: &IterationKey,
-        result: &crate::agent::orchestrator::TurnRunResult,
+        billing_turn_id: &str,
+        status: mink::runtime::TurnStatus,
+        error: Option<&str>,
+        usage_records: &[mink::runtime::UsageRecord],
         facts: &SettlementFacts,
     ) -> Result<ApplyResult> {
-        use crate::runtime::TurnStatus;
+        use mink::runtime::TurnStatus;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut next = state.clone();
         let is_current = next
@@ -682,9 +648,8 @@ impl GoalStore {
                 )
             })?;
         if iteration.finished {
-            let same = iteration.billing_turn_id.as_deref()
-                == Some(result.billing_turn_id.as_str())
-                && iteration.outcome_status == Some(result.status);
+            let same = iteration.billing_turn_id.as_deref() == Some(billing_turn_id)
+                && iteration.outcome_status == Some(status);
             return if same {
                 Ok(ApplyResult::AlreadyApplied)
             } else {
@@ -695,10 +660,10 @@ impl GoalStore {
             };
         }
         iteration.finished = true;
-        iteration.billing_turn_id = Some(result.billing_turn_id.clone());
-        iteration.outcome_status = Some(result.status);
-        iteration.outcome_error = result.error.clone();
-        for record in &result.usage_records {
+        iteration.billing_turn_id = Some(billing_turn_id.to_string());
+        iteration.outcome_status = Some(status);
+        iteration.outcome_error = error.map(str::to_string);
+        for record in usage_records {
             if !goal
                 .usage_records
                 .iter()
@@ -707,15 +672,15 @@ impl GoalStore {
                 goal.usage_records.push(record.clone());
             }
         }
-        goal.usage = crate::session::usage::UsageSummary::from_records(&goal.usage_records);
+        goal.usage = mink::runtime::UsageSummary::from_records(&goal.usage_records);
         if is_current {
             let goal = next.current.as_mut().expect("checked current goal");
             goal.phase = GoalPhase::Idle;
             if goal.status == GoalStatus::Active {
-                match result.status {
+                match status {
                     TurnStatus::Failed => {
                         goal.status = GoalStatus::Failed;
-                        goal.reason = result.error.clone();
+                        goal.reason = error.map(str::to_string);
                     }
                     TurnStatus::Interrupted if facts.interrupted_pause => {
                         goal.status = GoalStatus::Paused;
@@ -726,7 +691,7 @@ impl GoalStore {
             }
             // Natural completion only creates an audit phase. The execution model
             // cannot decide the goal's completion or consume a repair round.
-            if goal.status == GoalStatus::Active && result.status == TurnStatus::Ok {
+            if goal.status == GoalStatus::Active && status == TurnStatus::Ok {
                 goal.phase = GoalPhase::Verifying;
                 goal.review_candidate = None;
                 goal.review_stage = Some(GoalReviewStage::Screening);
@@ -741,10 +706,7 @@ impl GoalStore {
         self.publish(&mut state, next)?;
         Ok(ApplyResult::Applied)
     }
-    pub(crate) fn reconcile_usage(
-        &self,
-        records: &[crate::session::usage::UsageRecord],
-    ) -> Result<()> {
+    pub(crate) fn reconcile_usage(&self, records: &[mink::runtime::UsageRecord]) -> Result<()> {
         let Some(goal) = self.snapshot() else {
             return Ok(());
         };
@@ -777,7 +739,7 @@ impl GoalStore {
                     g.usage_records.push(record);
                 }
             }
-            g.usage = crate::session::usage::UsageSummary::from_records(&g.usage_records);
+            g.usage = mink::runtime::UsageSummary::from_records(&g.usage_records);
             Ok(())
         })?;
         Ok(())
@@ -804,8 +766,8 @@ impl GoalStore {
                 .flatten()
                 .filter(|b| {
                     b["type"] == "tool_result"
-                        && super::effect_outcome_known(b.get("_mink"))
-                        && serde_json::from_value::<crate::tools::metadata::ToolStatus>(
+                        && mink::runtime::effect_outcome_known(b.get("_mink"))
+                        && serde_json::from_value::<mink::runtime::tools::ToolStatus>(
                             b["_mink"]["status"].clone(),
                         )
                         .is_ok()
@@ -845,12 +807,12 @@ impl GoalStore {
                         && review.verdict != GoalReviewVerdict::Satisfied
                 });
                 match g.iterations.last().and_then(|i| i.outcome_status) {
-                    Some(crate::runtime::TurnStatus::Failed) => {
+                    Some(mink::runtime::TurnStatus::Failed) => {
                         g.status = GoalStatus::Failed;
                         g.reason = g.iterations.last().and_then(|i| i.outcome_error.clone());
                         g.phase = GoalPhase::Idle;
                     }
-                    Some(crate::runtime::TurnStatus::Ok)
+                    Some(mink::runtime::TurnStatus::Ok)
                         if settled_review.is_some()
                             || g.continuations.last().is_some_and(|c| {
                                 c.proposal.candidate.goal_id == g.id
@@ -867,7 +829,7 @@ impl GoalStore {
                                 g.continuations.last().map(|c| c.proposal.candidate.clone())
                             });
                     }
-                    Some(crate::runtime::TurnStatus::Ok)
+                    Some(mink::runtime::TurnStatus::Ok)
                         if matches!(g.phase, GoalPhase::Idle | GoalPhase::Executing) =>
                     {
                         g.phase = GoalPhase::Verifying;

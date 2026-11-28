@@ -16,23 +16,23 @@ pub(super) fn make_broadcast_event(value: &serde_json::Value) -> Arc<BroadcastEv
 }
 
 pub(super) fn agent_event_to_json(event: &AgentEvent, stream_sequence: u64) -> serde_json::Value {
+    if let mink::runtime::AgentEventKind::Extension { kind, payload } = &event.kind
+        && matches!(kind.as_str(), "goal_updated" | "goal_finished")
+    {
+        let goal = payload.get("goal").unwrap_or(payload);
+        return serde_json::json!({
+            "turn_id": event.turn_id,
+            "sequence": event.sequence,
+            "type": kind,
+            "goal": goal_summary_value(goal),
+            "stream_sequence": stream_sequence,
+        });
+    }
     let mut value = serde_json::to_value(event)
         .unwrap_or_else(|_| serde_json::json!({"type":"serialization_error"}));
     value["stream_sequence"] = stream_sequence.into();
     if value.get("type").and_then(serde_json::Value::as_str) == Some("final") {
         value["type"] = "turn_final".into();
-    }
-    // Core emits its own GoalUpdated/GoalFinished events during a turn; the
-    // server also mirrors the goal watch channel. Both carry the full contract,
-    // which can be hundreds of kilobytes of reviews and usage records. The
-    // stream carries the same summary on both paths, and the detail tab asks
-    // for the full snapshot explicitly.
-    if matches!(
-        value.get("type").and_then(serde_json::Value::as_str),
-        Some("goal_updated" | "goal_finished")
-    ) && let Some(goal) = value.get("goal").cloned()
-    {
-        value["goal"] = goal_summary_value(&goal);
     }
     let kind = value_type(&value).map(str::to_string);
     if let Some(object) = value.as_object_mut() {
@@ -84,7 +84,7 @@ pub(super) fn bounded_text(text: &str, max_bytes: usize) -> String {
 
 /// Goal fields the live bar and status wording consume. Heavy history stays on
 /// the explicit detail read; the stream and the session snapshot remain small.
-pub(super) fn goal_summary(goal: &GoalSnapshot) -> serde_json::Value {
+pub(super) fn goal_summary(goal: &mink_goal::GoalSnapshot) -> serde_json::Value {
     serde_json::to_value(goal)
         .map(|value| goal_summary_value(&value))
         .unwrap_or(serde_json::Value::Null)
@@ -148,7 +148,7 @@ pub(super) fn publish_goal(
     tx: &broadcast::Sender<Arc<BroadcastEvent>>,
     sequence: &AtomicU64,
     projection: &Arc<Mutex<Projection>>,
-    goal: Option<mink::runtime::GoalSnapshot>,
+    goal: Option<mink_goal::GoalSnapshot>,
 ) {
     let goal = goal.filter(|goal| !goal.hidden);
     let summary = goal.as_ref().map(goal_summary);

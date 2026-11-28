@@ -47,9 +47,9 @@ pub(crate) fn goal_detail_lines(state: &TuiState) -> Vec<Line<'static>> {
     };
     if let Some(stage) = goal.review_stage {
         let label = match stage {
-            mink::runtime::GoalReviewStage::Screening => "判断是否需要验收",
-            mink::runtime::GoalReviewStage::Inspecting => "检查完成证据",
-            mink::runtime::GoalReviewStage::Adjudicating => "宿主提交结论",
+            mink_goal::GoalReviewStage::Screening => "判断是否需要验收",
+            mink_goal::GoalReviewStage::Inspecting => "检查完成证据",
+            mink_goal::GoalReviewStage::Adjudicating => "宿主提交结论",
         };
         lines.push(field("Review stage", label));
     }
@@ -145,7 +145,7 @@ pub(crate) fn goal_detail_lines(state: &TuiState) -> Vec<Line<'static>> {
                 .filter(|c| {
                     review.criteria.iter().any(|check| {
                         check.criterion_id == c.id
-                            && check.status == mink::runtime::GoalCriterionStatus::Pass
+                            && check.status == mink_goal::GoalCriterionStatus::Pass
                     })
                 })
                 .count()

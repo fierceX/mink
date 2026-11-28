@@ -103,14 +103,11 @@ impl CompactionEngine {
             if self.interrupt.is_set() {
                 return Err(CompactionInterrupted::error());
             }
-            if let Some(review) = &self.review_session {
-                review.check_budget()?;
+            if let Some(check) = &self.budget_check {
+                check()?;
             }
-            // Ordinary turns must not be failed by an unrelated Goal's review
-            // budget. Reviewer compactions are gated by `review_session`; the
-            // host adjudication loop checks the same budget before and after
-            // its own turn. A cancelled or paused goal can therefore no longer
-            // poison every following user message with a deadline error.
+            // Ordinary turns must not be failed by an unrelated extension's budget
+            // check; each scoped turn or child session passes its own `budget_check`.
             self.fault.check()?;
             if retry.deadline_expired() {
                 return Err(SummaryUnavailable::error(format!(
@@ -448,7 +445,7 @@ impl CompactionEngine {
         let dropped = &active[..cut];
         let mut source_messages = if history_already_compacted {
             // Reuse `checkpoint_prefix` so the summary request prefix matches
-            // `active_messages()` verbatim (summary + active plan + goal checkpoint)
+            // `active_messages()` verbatim (summary + active plan + provider checkpoints)
             // and preserves provider prefix-cache alignment across 2nd+ compactions.
             self.checkpoint_prefix(previous_summary.unwrap_or_default())?
         } else {

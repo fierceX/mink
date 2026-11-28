@@ -209,23 +209,46 @@ async fn start_summary_server(
     Ok((format!("http://{addr}/chat/completions"), handle))
 }
 
+struct TestContractCheckpointProvider {
+    id: String,
+    marker: String,
+}
+
+impl crate::session::compaction::CompactionCheckpointProvider for TestContractCheckpointProvider {
+    fn render_checkpoint(
+        &self,
+        _max_chars: usize,
+    ) -> anyhow::Result<Option<crate::session::compaction::CompactionCheckpoint>> {
+        Ok(Some(crate::session::compaction::CompactionCheckpoint {
+            content: format!("Contract: {}", self.marker),
+            metadata: json!({
+                "internal": true,
+                "contract_id": self.id,
+                "state_kind": "contract",
+            }),
+        }))
+    }
+}
+
 #[tokio::test]
-async fn goal_checkpoint_survives_compaction_and_stays_out_of_immutable_prefix()
+async fn checkpoint_provider_survives_compaction_and_stays_out_of_immutable_prefix()
 -> anyhow::Result<()> {
     let backend: Arc<dyn LlmBackend> =
         Arc::new(MockLlmBackend::new("summary", vec![summary_script()]));
-    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
-        "goal-compact",
+    let provider = Arc::new(TestContractCheckpointProvider {
+        id: "contract-1".into(),
+        marker: "CONTRACT-MARKER".into(),
+    });
+    let ctx = crate::regression::test_context_for_agent_with_extensions(
+        "checkpoint-compact",
         |cfg| cfg.context_compact_tail_tokens = 1,
         backend,
+        vec![provider],
+        Vec::new(),
     )
     .await?;
-    let goal = ctx.stores.goal_store.create(
-        crate::runtime::GoalSpec::new("GOAL-CONTRACT-MARKER"),
-        "env".into(),
-    )?;
-    // The goal checkpoint is mounted by the compaction itself; no durable
-    // projection row is written any more, so the head is the only goal state in
+    // The checkpoint is mounted by the compaction itself; no durable
+    // projection row is written any more, so the head is the only state in
     // the compacted window.
     for n in 0..3 {
         ctx.stores
@@ -236,7 +259,7 @@ async fn goal_checkpoint_survives_compaction_and_stays_out_of_immutable_prefix()
     }
     let prefix = PrefixManager::new(ctx.clone());
     let (prompt_before, tools_before) = prefix.ensure().await?;
-    assert!(!prompt_before.contains("GOAL-CONTRACT-MARKER"));
+    assert!(!prompt_before.contains("CONTRACT-MARKER"));
     let mut compactor = TurnCompactor::new(ctx.clone(), prefix);
     let mut messages = ctx.stores.compaction.active_messages().await?;
     let mut prompt = String::new();
@@ -263,14 +286,14 @@ async fn goal_checkpoint_survives_compaction_and_stays_out_of_immutable_prefix()
     assert_eq!(
         messages
             .iter()
-            .filter(|m| m["_mink"]["goal_id"] == goal.id)
+            .filter(|m| m["_mink"]["contract_id"] == "contract-1")
             .count(),
         1
     );
     assert!(messages.iter().any(|m| {
         m["content"]
             .as_str()
-            .is_some_and(|s| s.contains("GOAL-CONTRACT-MARKER"))
+            .is_some_and(|s| s.contains("CONTRACT-MARKER"))
     }));
     // The fold lives in the projection, not in the durable history: the oldest
     // rows stay in `conversation.jsonl` while the active window starts after

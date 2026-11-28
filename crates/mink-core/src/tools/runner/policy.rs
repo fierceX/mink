@@ -92,70 +92,44 @@ impl ToolRunner {
             return PreparedCall::Immediate(blocked);
         }
 
-        let exclusive_ptc = self.ctx.tool_config.ptc.mode == crate::ptc::PtcMode::Exclusive;
-        if self.ctx.goal_drafting
-            && self.ctx.goal_review.is_none()
-            && ((!matches!(
-                call.name.as_str(),
-                "Read" | "Glob" | "Grep" | "GoalRead" | "GoalDraft"
-            ) && !(exclusive_ptc && call.name == "RunCode"))
-                || self.find_custom_tool(&call.name).is_some())
-        {
-            return PreparedCall::Immediate(blocked_tool_result(call.id, call.name, call.fields,
-                "Goal draft is awaiting human confirmation; only read-only exploration and GoalDraft are allowed".into(), ToolBlocker::ToolSurface));
-        }
-        if self.ctx.goal_review.is_some()
-            && !matches!(call.name.as_str(), "Read" | "Glob" | "Grep" | "GoalRead")
-        {
-            return PreparedCall::Immediate(blocked_tool_result(
-                call.id,
-                call.name,
-                call.fields,
-                "read-only goal reviewer".into(),
-                ToolBlocker::ToolSurface,
-            ));
-        }
-        if self.ctx.goal_adjudication.is_some()
-            && ((!matches!(
-                call.name.as_str(),
-                "Read" | "Glob" | "Grep" | "GoalRead" | "GoalReview"
-            ) && !(exclusive_ptc && call.name == "RunCode"))
-                || self.find_custom_tool(&call.name).is_some())
-        {
-            return PreparedCall::Immediate(blocked_tool_result(
-                call.id,
-                call.name,
-                call.fields,
-                "host adjudication only permits read-only inspection and GoalReview".into(),
-                ToolBlocker::ToolSurface,
-            ));
-        }
-        if (self.ctx.goal_drafting || self.ctx.goal_adjudication.is_some())
-            && call.name == "Read"
-            && call.input_json["path"].as_str().is_some_and(|p| {
-                p.contains("://")
-                    && !["artifact://", "skill://", "rule://", "session://"]
-                        .iter()
-                        .any(|scheme| p.starts_with(scheme))
-            })
-        {
-            return PreparedCall::Immediate(blocked_tool_result(
-                call.id,
-                call.name,
-                call.fields,
-                "draft exploration cannot invoke custom resource handlers".into(),
-                ToolBlocker::ToolSurface,
-            ));
+        if let Some(mask) = &self.ctx.tool_mask {
+            let exclusive_ptc = self.ctx.tool_config.ptc.mode == crate::ptc::PtcMode::Exclusive;
+            let allowed = mask.allowed_tools.contains(&call.name)
+                || (mask.allow_exclusive_ptc && exclusive_ptc && call.name == "RunCode");
+            if !allowed {
+                return PreparedCall::Immediate(blocked_tool_result(
+                    call.id,
+                    call.name,
+                    call.fields,
+                    mask.block_reason.clone(),
+                    ToolBlocker::ToolSurface,
+                ));
+            }
+            if mask.block_custom_resource_schemes
+                && call.name == "Read"
+                && call.input_json["path"].as_str().is_some_and(|p| {
+                    p.contains("://")
+                        && !["artifact://", "skill://", "rule://", "session://"]
+                            .iter()
+                            .any(|scheme| p.starts_with(scheme))
+                })
+            {
+                return PreparedCall::Immediate(blocked_tool_result(
+                    call.id,
+                    call.name,
+                    call.fields,
+                    "draft exploration cannot invoke custom resource handlers".into(),
+                    ToolBlocker::ToolSurface,
+                ));
+            }
         }
         // Model-generated arguments that could not be parsed become an
         // ordinary failed tool result (ModelFormat provenance) instead of
         // failing the turn: the model sees the decode diagnostic and can
         // resend corrected arguments. Repaired payloads are never executed.
         if let Some(error) = call.parse_error.clone() {
-            if call.name == "GoalReview"
-                && let Some(session) = &self.ctx.goal_adjudication
-            {
-                session.record_rejection(format!("invalid tool arguments: {error}"));
+            if let Some(observer) = &self.ctx.tool_observer {
+                observer.on_parse_error(&call.name, &error);
             }
             return PreparedCall::Immediate(model_format_failed_result(
                 call,
@@ -163,9 +137,8 @@ impl ToolRunner {
             ));
         }
 
-        if matches!(call.name.as_str(), "Read" | "Glob" | "Grep")
-            && let Some(review) = &self.ctx.goal_review
-            && let Err(error) = review.mark_inspecting()
+        if let Some(observer) = &self.ctx.tool_observer
+            && let Err(error) = observer.before_prepare_execute(&call.name)
         {
             return PreparedCall::Immediate(failed_tool_result(
                 call.id,

@@ -426,11 +426,11 @@ fn goals_slash_command_opens_the_goal_view() {
 #[test]
 fn goal_view_derives_progress_from_current_contract_review() {
     let mut goal = goal_display();
-    goal.subgoals = vec![mink::runtime::GoalSubgoal {
+    goal.subgoals = vec![mink_goal::GoalSubgoal {
         id: "delivery".into(),
         objective: "deliver parser".into(),
     }];
-    goal.criteria = vec![mink::runtime::GoalCriterion {
+    goal.criteria = vec![mink_goal::GoalCriterion {
         id: "proof".into(),
         subgoal_id: "delivery".into(),
         outcome: "parser delivered".into(),
@@ -567,12 +567,12 @@ fn slash_command_surface_matches_the_shared_contract() {
 fn goal_boundary_cards_render_from_the_structured_payload() {
     let mut state = TuiState::default();
     state.apply(TuiSignal::GoalCard(Box::new(goal_message(
-        crate::runtime::GoalMessageKind::Draft,
+        mink_goal::GoalMessageKind::Draft,
         0,
         Some("add evidence"),
     ))));
     state.apply(TuiSignal::GoalCard(Box::new(goal_message(
-        crate::runtime::GoalMessageKind::Start,
+        mink_goal::GoalMessageKind::Start,
         1,
         None,
     ))));
@@ -604,7 +604,7 @@ fn clicking_a_goal_card_opens_the_goal_view() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut state = TuiState::default();
     state.apply(TuiSignal::GoalCard(Box::new(goal_message(
-        crate::runtime::GoalMessageKind::Start,
+        mink_goal::GoalMessageKind::Start,
         1,
         None,
     ))));
@@ -643,7 +643,7 @@ fn goal_card_keyboard_collapses_the_newest_card_and_opens_the_detail() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut state = TuiState::default();
     state.apply(TuiSignal::GoalCard(Box::new(goal_message(
-        crate::runtime::GoalMessageKind::Start,
+        mink_goal::GoalMessageKind::Start,
         1,
         None,
     ))));
@@ -670,7 +670,7 @@ fn goal_card_keyboard_collapses_the_newest_card_and_opens_the_detail() {
 #[test]
 fn inline_goal_card_output_is_stable_across_renders() {
     let mut item = TranscriptItem::goal_card(goal_message(
-        crate::runtime::GoalMessageKind::Continuation,
+        mink_goal::GoalMessageKind::Continuation,
         3,
         None,
     ));
@@ -696,7 +696,7 @@ fn inline_goal_card_output_is_stable_across_renders() {
 fn goal_card_fold_and_unfold_render_the_screen_marker() {
     let mut state = TuiState::default();
     state.apply(TuiSignal::GoalCard(Box::new(goal_message(
-        crate::runtime::GoalMessageKind::Start,
+        mink_goal::GoalMessageKind::Start,
         1,
         None,
     ))));
@@ -817,12 +817,12 @@ fn live_goal_card_kinds_render_on_screen() {
     let mut state = TuiState::default();
     for (kind, iteration, feedback) in [
         (
-            crate::runtime::GoalMessageKind::Draft,
+            mink_goal::GoalMessageKind::Draft,
             0,
             Some("add the fixture"),
         ),
-        (crate::runtime::GoalMessageKind::Start, 1, None),
-        (crate::runtime::GoalMessageKind::Continuation, 2, None),
+        (mink_goal::GoalMessageKind::Start, 1, None),
+        (mink_goal::GoalMessageKind::Continuation, 2, None),
     ] {
         state.apply(TuiSignal::GoalCard(Box::new(goal_message(
             kind, iteration, feedback,
@@ -967,9 +967,9 @@ fn session_fixture_restores_goal_cards_and_never_echoes_internal_rows() {
     assert_eq!(
         kinds,
         vec![
-            crate::runtime::GoalMessageKind::Draft,
-            crate::runtime::GoalMessageKind::Start,
-            crate::runtime::GoalMessageKind::Continuation
+            mink_goal::GoalMessageKind::Draft,
+            mink_goal::GoalMessageKind::Start,
+            mink_goal::GoalMessageKind::Continuation
         ]
     );
 }
@@ -999,8 +999,8 @@ fn details_panel_includes_goal_and_labels_collapsed_goal_card() {
         },
         ..Default::default()
     };
-    let mut card = TranscriptItem::goal_card(crate::runtime::GoalMessage {
-        kind: crate::runtime::GoalMessageKind::Start,
+    let mut card = TranscriptItem::goal_card(mink_goal::GoalMessage {
+        kind: mink_goal::GoalMessageKind::Start,
         goal_id: "g1".into(),
         contract_revision: 1,
         iteration: 1,

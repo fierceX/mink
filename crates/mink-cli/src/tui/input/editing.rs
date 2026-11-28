@@ -22,10 +22,10 @@ pub(crate) fn handle_ctrl_c(
         || state.stream.work_state.is_working()
         || state.admission.admission_pending
         || state.admission.runtime.as_ref().is_some_and(|r| {
-            r.handle
-                .goals()
-                .snapshot()
-                .is_some_and(|g| g.status == crate::runtime::GoalStatus::Active)
+            r.goals
+                .as_ref()
+                .and_then(|goals| goals.snapshot())
+                .is_some_and(|g| g.status == mink_goal::GoalStatus::Active)
         })
     {
         let _ = orch_tx.send(RuntimeCmd::Interrupt);

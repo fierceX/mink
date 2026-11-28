@@ -16,7 +16,6 @@ pub mod sdk_protocol;
 /// tool, session, and LLM modules remain implementation details shared by the
 /// CLI binaries and the library runtime.
 pub mod prelude {
-    pub use crate::runtime::goal::GoalController;
     pub use crate::runtime::{
         AgentEvent, AgentEventKind, AgentEventStream, AgentOptions, AgentRuntime,
         AgentRuntimeHandle, AgentTool, CompactOutcome, EventSink, LlmBackend, ModelSwitchOutcome,
@@ -34,7 +33,6 @@ mod config;
 mod context;
 mod errors;
 mod events;
-mod goal_review;
 mod guard;
 mod llm;
 mod prompt;

@@ -5,7 +5,29 @@ impl Registry {
         std::env::var("MINK_GOAL_CHECK")
             .ok()
             .filter(|c| !c.trim().is_empty())
-            .is_some_and(|command| mink::runtime::CommandGoalVerifier::new(command, 60).is_ok())
+            .is_some_and(|command| mink_goal::CommandGoalVerifier::new(command, 60).is_ok())
+    }
+
+    pub(super) fn build_goal_plugin(&self) -> mink_goal::GoalPlugin {
+        let mut plugin = mink_goal::GoalPlugin::new();
+        // Checker acceptance needs a verifier. The terminal reads MINK_GOAL_CHECK;
+        // without the same wiring the workbench would offer an acceptance mode
+        // the server cannot honour.
+        if let Ok(command) = std::env::var("MINK_GOAL_CHECK")
+            && !command.trim().is_empty()
+        {
+            match mink_goal::CommandGoalVerifier::new(command, 60) {
+                Ok(verifier) => {
+                    plugin = plugin.with_verifier(std::sync::Arc::new(verifier));
+                }
+                // A bad command disables checker acceptance rather than failing
+                // session startup; the capability is reported as unavailable.
+                Err(error) => {
+                    eprintln!("MINK_GOAL_CHECK ignored: {error:#}");
+                }
+            }
+        }
+        plugin
     }
 
     pub(super) fn build_options(
@@ -40,23 +62,6 @@ impl Registry {
         options = options
             .with_project_scoped_sessions()
             .with_log_events(cfg.log_events.unwrap_or(true));
-        // Checker acceptance needs a verifier. The terminal reads MINK_GOAL_CHECK;
-        // without the same wiring the workbench would offer an acceptance mode
-        // the server cannot honour.
-        if let Ok(command) = std::env::var("MINK_GOAL_CHECK")
-            && !command.trim().is_empty()
-        {
-            match mink::runtime::CommandGoalVerifier::new(command, 60) {
-                Ok(verifier) => {
-                    options = options.with_goal_verifier(std::sync::Arc::new(verifier));
-                }
-                // A bad command disables checker acceptance rather than failing
-                // session startup; the capability is reported as unavailable.
-                Err(error) => {
-                    eprintln!("MINK_GOAL_CHECK ignored: {error:#}");
-                }
-            }
-        }
         if let Some(backend) = &self.llm_backend {
             options = options.with_llm_backend(backend.clone());
         }

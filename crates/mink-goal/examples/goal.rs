@@ -1,15 +1,15 @@
 //! Run an explicitly bounded goal. Requires a configured provider key.
-use mink::runtime::{AgentOptions, AgentRuntime, GoalSpec};
+use mink::runtime::{AgentOptions, AgentRuntime};
+use mink_goal::{GoalEngine, GoalPlugin, GoalSpec};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let runtime = AgentRuntime::start(
-        AgentOptions::new("/tmp/mink-goal-example", ".")
-            .with_api_key(std::env::var("DEEPSEEK_API_KEY")?),
-    )
-    .await?;
-    let handle = runtime.handle();
-    let goals = handle.goals();
+    let plugin = GoalPlugin::new();
+    let mut options = AgentOptions::new("/tmp/mink-goal-example", ".")
+        .with_api_key(std::env::var("DEEPSEEK_API_KEY")?);
+    plugin.install_into(&mut options);
+    let runtime = AgentRuntime::start(options).await?;
+    let goals = GoalEngine::attach(runtime.handle(), plugin)?;
     let mut changes = goals.subscribe();
     let initial = changes.borrow_and_update().clone();
     println!("Initial goal: {initial:?}");

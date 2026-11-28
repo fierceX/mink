@@ -34,6 +34,18 @@ pub enum ToolPtcExposure {
     ProgrammaticOnly,
 }
 
+/// Controls which agent roles include a custom tool in their resolved surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolRoleScope {
+    /// Available to primary and delegated sub-agents, excluded from scoped child sessions.
+    #[default]
+    PrimaryAndSubAgent,
+    /// Available only to the primary agent.
+    PrimaryOnly,
+    /// Available to all roles (primary, sub-agent, and scoped child sessions).
+    All,
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolDefinition {
     pub name: String,
@@ -45,6 +57,8 @@ pub struct ToolDefinition {
     pub mutating: bool,
     pub discoverable: bool,
     pub storm_exempt: bool,
+    pub side_effect_exempt: bool,
+    pub role_scope: ToolRoleScope,
     pub activation: ToolActivation,
     pub ptc_exposure: ToolPtcExposure,
     pub hard_dependencies: Vec<String>,
@@ -72,6 +86,8 @@ impl ToolDefinition {
             mutating: false,
             discoverable: false,
             storm_exempt: false,
+            side_effect_exempt: false,
+            role_scope: ToolRoleScope::PrimaryAndSubAgent,
             activation: ToolActivation::Enabled,
             ptc_exposure: ToolPtcExposure::Default,
             hard_dependencies: Vec::new(),
@@ -83,6 +99,41 @@ impl ToolDefinition {
         self.ptc_exposure = exposure;
         self
     }
+
+    pub fn with_role_scope(mut self, role_scope: ToolRoleScope) -> Self {
+        self.role_scope = role_scope;
+        self
+    }
+
+    pub fn with_side_effect_exempt(mut self, exempt: bool) -> Self {
+        self.side_effect_exempt = exempt;
+        self
+    }
+
+    pub fn with_approval(mut self, approval: ApprovalTier) -> Self {
+        self.approval = approval;
+        self
+    }
+
+    pub fn with_result_kind(mut self, result_kind: ToolResultKind) -> Self {
+        self.result_kind = result_kind;
+        self
+    }
+
+    pub fn with_execution(mut self, execution: ToolExecutionMode) -> Self {
+        self.execution = execution;
+        self
+    }
+
+    pub fn with_mutating(mut self, mutating: bool) -> Self {
+        self.mutating = mutating;
+        self
+    }
+
+    pub fn with_storm_exempt(mut self, storm_exempt: bool) -> Self {
+        self.storm_exempt = storm_exempt;
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -92,7 +143,7 @@ pub struct ToolExecutionContext {
 }
 
 impl ToolExecutionContext {
-    pub(crate) fn new(cwd: PathBuf, interrupt: Arc<AtomicBool>) -> Self {
+    pub fn new(cwd: PathBuf, interrupt: Arc<AtomicBool>) -> Self {
         Self { cwd, interrupt }
     }
     pub fn cwd(&self) -> &Path {

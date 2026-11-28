@@ -8,6 +8,7 @@ pub mod hashline;
 pub mod image;
 pub mod metadata;
 pub mod plan;
+pub mod policy_hook;
 pub(crate) mod process;
 pub mod python;
 pub mod read_memo;
@@ -74,5 +75,3 @@ where
 
 #[cfg(test)]
 mod edit_alignment_tests;
-
-pub mod goal;

@@ -298,8 +298,9 @@ pub enum EventLog {
     Stop {
         reason: String,
     },
-    GoalUpdated {
-        goal: Box<crate::session::goal::GoalSnapshot>,
+    Extension {
+        kind: String,
+        payload: Value,
     },
     Retry,
     Error {

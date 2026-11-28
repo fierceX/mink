@@ -6,6 +6,7 @@ mod custom_tools;
 mod events;
 mod extensions;
 mod handle;
+pub(crate) mod internal_turn;
 mod options;
 mod sdk_adapter;
 pub mod session;
@@ -25,13 +26,15 @@ pub mod llm {
 
 pub mod tools {
     pub use super::custom_tools::{
-        AgentTool, ToolActivation, ToolCapabilityOffer, ToolDefinition, ToolError,
-        ToolExecutionContext, ToolExecutionMode, ToolOutput, ToolPtcExposure,
+        AgentTool, ReadEvidenceContext, ToolActivation, ToolCapabilityOffer, ToolDefinition,
+        ToolError, ToolExecutionContext, ToolExecutionMask, ToolExecutionMode,
+        ToolExecutionObserver, ToolOutput, ToolPtcExposure, ToolRoleScope, TurnPolicyProvider,
     };
     pub use super::options::ToolOptions;
     pub use crate::config::{ToolApprovalMode, ToolApprovalPolicy};
     pub use crate::tools::metadata::{
         ApprovalTier, ToolBlocker, ToolFailureKind, ToolResultKind, ToolStatus,
+        effect_outcome_known,
     };
     pub use crate::tools::semantic_capabilities::{
         CapabilityAvailability, CapabilityUseScope, ProviderTier, ToolSemanticCapability,
@@ -63,10 +66,10 @@ pub mod ptc {
 
 pub mod ui {
     pub use crate::ui::{
-        ArtifactDisplay, Display, GoalDisplay, PlanDisplay, PlanTransitionDisplay,
-        PresentedToolResultDisplay, StatsSnapshot, SubAgentStreamKind, SubAgentStreamSink,
-        TodoChangeDisplay, TodoCountsDisplay, TodoDisplay, TodoItemDisplay, TodoStatusDisplay,
-        ToolCallDisplay, ToolPresentation, ToolResultDisplay, llm_wait_heartbeat_message,
+        ArtifactDisplay, Display, PlanDisplay, PlanTransitionDisplay, PresentedToolResultDisplay,
+        StatsSnapshot, SubAgentStreamKind, SubAgentStreamSink, TodoChangeDisplay,
+        TodoCountsDisplay, TodoDisplay, TodoItemDisplay, TodoStatusDisplay, ToolCallDisplay,
+        ToolPresentation, ToolResultDisplay, llm_wait_heartbeat_message,
         parse_llm_wait_heartbeat_elapsed,
     };
 }
@@ -129,10 +132,10 @@ pub use crate::tools::vfs::{
     validate_virtual_glob_request, validate_virtual_grep_request,
 };
 pub use crate::ui::{
-    ArtifactDisplay, GoalDisplay, PlanDisplay, PlanTransitionDisplay, PresentedToolResultDisplay,
-    PtcRunDisplay, PtcSubCallDisplay, StatsSnapshot, SubAgentStreamKind, SubAgentStreamSink,
-    TodoChangeDisplay, TodoCountsDisplay, TodoDisplay, TodoItemDisplay, TodoStatusDisplay,
-    ToolCallDisplay, ToolPresentation, ToolResultDisplay, llm_wait_heartbeat_message,
+    ArtifactDisplay, PlanDisplay, PlanTransitionDisplay, PresentedToolResultDisplay, PtcRunDisplay,
+    PtcSubCallDisplay, StatsSnapshot, SubAgentStreamKind, SubAgentStreamSink, TodoChangeDisplay,
+    TodoCountsDisplay, TodoDisplay, TodoItemDisplay, TodoStatusDisplay, ToolCallDisplay,
+    ToolPresentation, ToolResultDisplay, llm_wait_heartbeat_message,
     parse_llm_wait_heartbeat_elapsed,
 };
 pub(crate) use builder::build_runtime;
@@ -183,8 +186,9 @@ pub fn validate_runtime_limits(
 }
 
 pub use custom_tools::{
-    AgentTool, ToolActivation, ToolCapabilityOffer, ToolDefinition, ToolError,
-    ToolExecutionContext, ToolExecutionMode, ToolOutput, ToolPtcExposure,
+    AgentTool, ReadEvidenceContext, ToolActivation, ToolCapabilityOffer, ToolDefinition, ToolError,
+    ToolExecutionContext, ToolExecutionMask, ToolExecutionMode, ToolExecutionObserver, ToolOutput,
+    ToolPtcExposure, ToolRoleScope, TurnPolicyProvider,
 };
 pub use sdk_adapter::{
     exit_code_from_turn, final_from_outcome, runtime_skills_from_sdk_request,
@@ -200,21 +204,27 @@ pub fn reexec_in_sandbox(config: &SandboxConfig, exe: &std::path::Path, args: &[
     crate::sandbox::reexec_in_sandbox(config, exe, args);
 }
 
+pub use crate::agent::failure::BudgetExhaustedError;
+pub use crate::agent::sub_executor::EphemeralChildSession;
+pub use crate::resources::selector::{ReadPathSelection, split_read_path_selection};
+pub use crate::session::atomic_file::sync_parent;
+pub use crate::session::compaction::{
+    CompactionCheckpoint, CompactionCheckpointProvider, checkpoint_budget_chars,
+};
 pub use crate::session::lease::SessionLease;
-
-pub mod goal;
-pub use crate::session::goal::{
-    GOAL_MESSAGE_SOURCE, GoalAcceptance, GoalBudget, GoalCompletionBasis, GoalLimits, GoalMessage,
-    GoalMessageKind, GoalOutcome, GoalPhase, GoalReport, GoalReportKind, GoalSnapshot, GoalSpec,
-    GoalStatus, default_limits as default_goal_limits,
+pub use crate::session::persistence::{
+    PersistenceFault, PersistenceFaultError, PersistenceFaultInfo, publish_state,
 };
-pub use goal::GoalController;
-pub use goal::{
-    CommandGoalVerifier, GoalContinuation, GoalRunLease, GoalVerification, GoalVerificationContext,
-    GoalVerificationStatus, GoalVerifier,
+pub use crate::session::usage::{TokenUsage, UsageKind, UsageRecord, UsageStatus, UsageSummary};
+pub use crate::tools::metadata::effect_outcome_known;
+pub use crate::tools::runner::format_tool_result;
+pub use handle::TurnPermit;
+pub use internal_turn::{
+    ArtifactReader, ArtifactRef, EphemeralChildOptions, EphemeralChildOutcome,
+    EphemeralChildStatus, ExtensionEmitter, ExternalController, ExternalOwnerGuard,
+    InternalTurnRequest, PreparedInternalTurn, ScopedToolOutcome, StopCause, TurnBillingHook,
+    TurnPreAdmissionHook, TurnRollbackHook, TurnSettlementContext, TurnSettlementHook,
 };
-
-pub use crate::session::goal_protocol::*;
 
 #[cfg(test)]
 #[path = "session_event_sink_tests.rs"]

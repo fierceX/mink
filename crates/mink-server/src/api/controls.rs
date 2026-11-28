@@ -104,7 +104,9 @@ pub(super) async fn compact_session(
 /// interface, and the actionable ones need to say what to do next.
 pub(super) fn control_error(error: &mink::runtime::RuntimeError) -> String {
     match error {
-        mink::runtime::RuntimeError::GoalActive => "当前目标执行中，先暂停目标再操作".to_string(),
+        mink::runtime::RuntimeError::ExternallyControlled { .. } => {
+            "当前目标执行中，先暂停目标再操作".to_string()
+        }
         mink::runtime::RuntimeError::Busy { .. } => "本轮尚未结束，请稍后重试".to_string(),
         _ => error.to_string(),
     }

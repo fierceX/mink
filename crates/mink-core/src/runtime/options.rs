@@ -163,10 +163,10 @@ pub struct AgentOptions {
     llm_backend: Option<Arc<dyn LlmBackend>>,
     resource_session_id: Option<String>,
     custom_tools: Vec<Arc<dyn crate::runtime::AgentTool>>,
+    turn_policies: Vec<Arc<dyn crate::runtime::TurnPolicyProvider>>,
+    checkpoint_providers: Vec<Arc<dyn crate::session::compaction::CompactionCheckpointProvider>>,
     prefix_source: Option<Arc<dyn PrefixSource>>,
     post_init_hook: Option<Arc<dyn PostInitHook>>,
-    goal_verifiers: Vec<Arc<dyn crate::runtime::GoalVerifier>>,
-    goal_event_sink: Option<Arc<dyn EventSink>>,
     ptc_runtime: Option<Arc<dyn crate::ptc::PtcRuntime>>,
 }
 
@@ -206,10 +206,10 @@ impl AgentOptions {
             llm_backend: None,
             resource_session_id: None,
             custom_tools: Vec::new(),
+            turn_policies: Vec::new(),
+            checkpoint_providers: Vec::new(),
             prefix_source: None,
             post_init_hook: None,
-            goal_verifiers: Vec::new(),
-            goal_event_sink: None,
             ptc_runtime: None,
         }
     }
@@ -367,15 +367,6 @@ impl AgentOptions {
         self
     }
 
-    /// Reliable delivery for goal turns; ordinary turn streams retain their existing interface.
-    pub fn with_goal_event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
-        self.goal_event_sink = Some(sink);
-        self
-    }
-    pub fn with_goal_verifier(mut self, verifier: Arc<dyn crate::runtime::GoalVerifier>) -> Self {
-        self.goal_verifiers.push(verifier);
-        self
-    }
     pub fn with_llm_backend(mut self, backend: Arc<dyn LlmBackend>) -> Self {
         self.llm_backend = Some(backend);
         self
@@ -508,8 +499,36 @@ impl AgentOptions {
     }
 
     pub fn with_tool(mut self, tool: Arc<dyn crate::runtime::AgentTool>) -> Self {
-        self.custom_tools.push(tool);
+        self.add_tool(tool);
         self
+    }
+
+    pub fn add_tool(&mut self, tool: Arc<dyn crate::runtime::AgentTool>) {
+        self.custom_tools.push(tool);
+    }
+
+    pub fn with_turn_policy(mut self, policy: Arc<dyn crate::runtime::TurnPolicyProvider>) -> Self {
+        self.add_turn_policy(policy);
+        self
+    }
+
+    pub fn add_turn_policy(&mut self, policy: Arc<dyn crate::runtime::TurnPolicyProvider>) {
+        self.turn_policies.push(policy);
+    }
+
+    pub fn with_compaction_checkpoint_provider(
+        mut self,
+        provider: Arc<dyn crate::session::compaction::CompactionCheckpointProvider>,
+    ) -> Self {
+        self.add_compaction_checkpoint_provider(provider);
+        self
+    }
+
+    pub fn add_compaction_checkpoint_provider(
+        &mut self,
+        provider: Arc<dyn crate::session::compaction::CompactionCheckpointProvider>,
+    ) {
+        self.checkpoint_providers.push(provider);
     }
 
     /// Supply an alternative immutable prefix (system prompt + tool schemas)
@@ -830,10 +849,10 @@ impl AgentOptions {
             llm_backend: self.llm_backend,
             resource_session_id: self.resource_session_id,
             custom_tools: self.custom_tools,
+            turn_policies: self.turn_policies,
+            checkpoint_providers: self.checkpoint_providers,
             prefix_source: self.prefix_source,
             post_init_hook: self.post_init_hook,
-            goal_verifiers: self.goal_verifiers,
-            goal_event_sink: self.goal_event_sink,
             ptc_runtime: self.ptc_runtime,
         }
     }

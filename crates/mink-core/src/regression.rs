@@ -375,6 +375,27 @@ pub(crate) async fn context_with_writer_config(
     )
 }
 
+pub(crate) async fn test_context_for_agent_with_extensions(
+    name: &str,
+    configure: impl FnOnce(&mut Config),
+    llm_backend: Arc<dyn LlmBackend>,
+    checkpoint_providers: Vec<Arc<dyn crate::session::compaction::CompactionCheckpointProvider>>,
+    turn_policies: Vec<Arc<dyn crate::tools::policy_hook::TurnPolicyProvider>>,
+) -> anyhow::Result<Arc<AgentSharedContext>> {
+    Ok(harness_inner_ext(
+        name,
+        false,
+        300,
+        configure,
+        Some(llm_backend),
+        None,
+        checkpoint_providers,
+        turn_policies,
+    )
+    .await?
+    .ctx)
+}
+
 async fn harness_inner(
     name: &str,
     is_sub_agent: bool,
@@ -382,6 +403,30 @@ async fn harness_inner(
     configure: impl FnOnce(&mut Config),
     llm_backend: Option<Arc<dyn LlmBackend>>,
     event_log_writer: Option<crate::session::event_log::EventLogWriter>,
+) -> anyhow::Result<TestHarness> {
+    harness_inner_ext(
+        name,
+        is_sub_agent,
+        sub_agent_timeout_secs,
+        configure,
+        llm_backend,
+        event_log_writer,
+        Vec::new(),
+        Vec::new(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn harness_inner_ext(
+    name: &str,
+    is_sub_agent: bool,
+    sub_agent_timeout_secs: i32,
+    configure: impl FnOnce(&mut Config),
+    llm_backend: Option<Arc<dyn LlmBackend>>,
+    event_log_writer: Option<crate::session::event_log::EventLogWriter>,
+    checkpoint_providers: Vec<Arc<dyn crate::session::compaction::CompactionCheckpointProvider>>,
+    turn_policies: Vec<Arc<dyn crate::tools::policy_hook::TurnPolicyProvider>>,
 ) -> anyhow::Result<TestHarness> {
     static CNT: AtomicU64 = AtomicU64::new(0);
     let n = CNT.fetch_add(1, Ordering::SeqCst);
@@ -418,7 +463,7 @@ async fn harness_inner(
     });
     let build = crate::runtime::context_build::build_agent_context(
         crate::runtime::context_build::AgentContextBuild {
-            goal_review: None,
+            role_override: None,
             session_lease: None,
             config: cfg,
             home: home.clone(),
@@ -446,8 +491,14 @@ async fn harness_inner(
             resource_router: None,
             capability_snapshot: None,
             custom_tools: Vec::new(),
+            turn_policies,
+            checkpoint_providers,
             prefix_source: None,
             ptc_runtime: None,
+            billing_turn_id_override: None,
+            default_tool_mask: None,
+            default_tool_observer: None,
+            budget_check: None,
         },
     );
     let built = match event_log_writer {
@@ -505,9 +556,7 @@ async fn run_orchestrator_user_input(
         None,
     ));
     tx.send(OrchCmd::UserInput {
-        goal_draft: None,
-        goal_source: None,
-        goal_iteration: None,
+        internal: None,
         input: input.to_string(),
         turn_id,
         emitter,

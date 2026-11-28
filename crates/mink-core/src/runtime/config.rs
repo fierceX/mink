@@ -35,10 +35,11 @@ pub(crate) struct AgentRuntimeConfig {
     /// resolved runtime session id.
     pub resource_session_id: Option<String>,
     pub custom_tools: Vec<Arc<dyn crate::runtime::AgentTool>>,
+    pub turn_policies: Vec<Arc<dyn crate::runtime::TurnPolicyProvider>>,
+    pub checkpoint_providers:
+        Vec<Arc<dyn crate::session::compaction::CompactionCheckpointProvider>>,
     pub prefix_source: Option<Arc<dyn PrefixSource>>,
     pub post_init_hook: Option<Arc<dyn PostInitHook>>,
-    pub goal_verifiers: Vec<Arc<dyn crate::runtime::GoalVerifier>>,
-    pub goal_event_sink: Option<Arc<dyn EventSink>>,
     pub ptc_runtime: Option<Arc<dyn crate::ptc::PtcRuntime>>,
 }
 
@@ -72,10 +73,10 @@ impl AgentRuntimeConfig {
             llm_backend: None,
             resource_session_id: None,
             custom_tools: Vec::new(),
+            turn_policies: Vec::new(),
+            checkpoint_providers: Vec::new(),
             prefix_source: None,
             post_init_hook: None,
-            goal_verifiers: Vec::new(),
-            goal_event_sink: None,
             ptc_runtime: None,
         }
     }
@@ -176,13 +177,11 @@ impl SessionInfo {
         }
     }
 
-    /// Authoritative goal snapshot for this session directory. Derived rather
-    /// than stored because `goal.json` only exists once a goal does; a missing
-    /// file simply means there is no goal.
-    pub fn goal_path(&self) -> PathBuf {
+    /// Concrete session directory for this runtime.
+    pub fn session_dir(&self) -> PathBuf {
         self.conversation_path
             .parent()
-            .map_or_else(|| self.home.join("goal.json"), |dir| dir.join("goal.json"))
+            .map_or_else(|| self.home.clone(), std::path::Path::to_path_buf)
     }
 }
 

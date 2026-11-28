@@ -196,9 +196,10 @@ impl Registry {
         // 使用 session 自身的 cwd（跨工作区打开的关键：UseOrCreate 需要在
         // 正确的 project 布局下解析，而不是服务启动目录）。
         let session_cwd = session_cwd_from_dir(&dir).map_err(RegistryError::Internal)?;
-        let runtime = SessionRuntime::open(
+        let runtime = SessionRuntime::open_with_goal_plugin(
             self.build_options(id, &session_cwd)?
                 .with_session(SessionPolicy::Resume(id.to_string())),
+            self.build_goal_plugin(),
         )
         .await
         .map_err(RegistryError::from_lease)?;

@@ -124,12 +124,14 @@ async fn running_enter_uses_current_turn_and_formal_commit_handoff_without_break
     let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let tx = crate::cli::start_runtime_broker(
         runtime.handle(),
+        None,
         Arc::new(TuiDisplay::new(signals.clone())),
     );
     let mut state = TuiState {
         admission: state::AdmissionState {
             runtime: Some(TuiRuntime {
                 handle: runtime.handle(),
+                goals: None,
                 signals,
             }),
             ..Default::default()
@@ -275,12 +277,14 @@ async fn interrupted_inputs_survive_reopen_and_only_explicit_resume_runs_them() 
     let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let tx = crate::cli::start_runtime_broker(
         runtime.handle(),
+        None,
         Arc::new(TuiDisplay::new(signals.clone())),
     );
     let mut state = TuiState {
         admission: state::AdmissionState {
             runtime: Some(TuiRuntime {
                 handle: runtime.handle(),
+                goals: None,
                 signals: signals.clone(),
             }),
             ..Default::default()
@@ -316,10 +320,12 @@ async fn interrupted_inputs_survive_reopen_and_only_explicit_resume_runs_them() 
         .unwrap();
     let tx = crate::cli::start_runtime_broker(
         runtime.handle(),
+        None,
         Arc::new(TuiDisplay::new(signals.clone())),
     );
     state.admission.runtime = Some(TuiRuntime {
         handle: runtime.handle(),
+        goals: None,
         signals,
     });
     state.refresh_inputs();
@@ -407,6 +413,7 @@ async fn asynchronous_admission_preserves_later_draft_and_stop_during_admission(
     let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let tx = crate::cli::start_runtime_broker(
         runtime.handle(),
+        None,
         Arc::new(TuiDisplay::new(signals.clone())),
     );
     let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -414,6 +421,7 @@ async fn asynchronous_admission_preserves_later_draft_and_stop_during_admission(
         admission: state::AdmissionState {
             runtime: Some(TuiRuntime {
                 handle: runtime.handle(),
+                goals: None,
                 signals,
             }),
             ..Default::default()

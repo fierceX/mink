@@ -321,7 +321,7 @@ fn build_goal_card_segments(
     inner_w: u16,
     interactive: bool,
 ) -> Vec<Line<'static>> {
-    use crate::runtime::GoalMessageKind;
+    use mink_goal::GoalMessageKind;
     let Some(message) = item.goal_message.as_ref() else {
         let mut fallback = Vec::new();
         push_msg_with_width(

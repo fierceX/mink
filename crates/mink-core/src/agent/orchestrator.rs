@@ -18,14 +18,15 @@ pub struct OrchActor {
     forced_model: Option<String>,
 }
 
+pub(crate) struct InternalTurnExecution {
+    pub request: crate::runtime::InternalTurnRequest,
+}
+
 /// Commands received by the orchestrator.
 pub enum OrchCmd {
     UserInput {
         input: String,
-        goal_source: Option<crate::runtime::GoalContinuation>,
-        goal_draft: Option<crate::session::goal::GoalDraftDiscussion>,
-        /// Identity of the admitted goal iteration, when this turn is one.
-        goal_iteration: Option<crate::session::goal::IterationKey>,
+        internal: Option<Box<InternalTurnExecution>>,
         turn_id: crate::runtime::TurnId,
         emitter: std::sync::Arc<crate::runtime::TurnEventEmitter>,
         done: oneshot::Sender<TurnRunResult>,
@@ -51,6 +52,8 @@ pub struct TurnRunResult {
     pub usage: UsageSummary,
     pub text: String,
     pub thinking: String,
+    pub start_seq: usize,
+    pub end_seq: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -90,10 +93,12 @@ impl TurnRunResult {
             usage: UsageSummary::default(),
             text: String::new(),
             thinking: String::new(),
+            start_seq: 0,
+            end_seq: 0,
         }
     }
 
-    fn from_decision(decision: &TurnDecision, executor: &TurnExecutor) -> Self {
+    pub(crate) fn from_decision(decision: &TurnDecision, executor: &TurnExecutor) -> Self {
         let (status, failure, error) = match decision {
             TurnDecision::Stop => (TurnStatus::Ok, None, None),
             TurnDecision::Interrupted => (
@@ -121,68 +126,36 @@ impl TurnRunResult {
             usage: UsageSummary::default(),
             text: executor.text().to_string(),
             thinking: executor.thinking().to_string(),
+            start_seq: 0,
+            end_seq: 0,
         }
     }
 }
 
 impl OrchActor {
-    /// Record the goal boundary that opens this round.
-    ///
-    /// The first round is the goal starting and later rounds continue it. Both
-    /// carry `_mink.goal_message`, so a host renders a goal card instead of
-    /// recognising the model-visible sentence.
-    async fn publish_goal_boundary(
+    async fn append_internal_turn_row(
         &self,
-        input: &str,
-        source: &crate::runtime::GoalContinuation,
+        req: &crate::runtime::InternalTurnRequest,
     ) -> anyhow::Result<()> {
-        use crate::session::goal::GoalSnapshot;
-        let Some(goal) = self.ctx.stores.goal_store.snapshot() else {
-            return Ok(());
+        let mut meta = match &req.metadata {
+            serde_json::Value::Object(map) => map.clone(),
+            _ => serde_json::Map::new(),
         };
-        let kind = GoalSnapshot::boundary_kind(source.iteration);
+        meta.insert("internal".into(), serde_json::Value::Bool(true));
+        meta.insert(
+            "source".into(),
+            serde_json::Value::String(req.source_tag.clone()),
+        );
         let message = serde_json::json!({
             "role": "user",
-            "content": input,
-            "_mink": {
-                "internal": true,
-                "source": crate::session::goal::GOAL_MESSAGE_SOURCE,
-                "goal": source,
-                "goal_message": goal.message(kind, source.iteration),
-            }
+            "content": req.content,
+            "_mink": serde_json::Value::Object(meta),
         });
         self.ctx
             .stores
             .store
             .append_runtime_message_durable(message)
             .await
-    }
-
-    async fn publish_goal_draft_discussion(
-        &self,
-        input: &str,
-        source: &crate::session::goal::GoalDraftDiscussion,
-    ) -> anyhow::Result<()> {
-        use crate::session::goal::{GoalMessageKind, GoalStatus};
-        let goal = self
-            .ctx
-            .stores
-            .goal_store
-            .snapshot()
-            .ok_or_else(|| anyhow::anyhow!("goal draft missing"))?;
-        anyhow::ensure!(
-            goal.id == source.goal_id
-                && goal.revision == source.revision
-                && goal.status == GoalStatus::Draft,
-            "draft changed before discussion"
-        );
-        let mut message = goal.message(GoalMessageKind::Draft, 0);
-        message.objective = goal.spec.original_request.clone();
-        message.feedback = Some(source.feedback.clone());
-        self.ctx.stores.store.append_runtime_message_durable(serde_json::json!({
-            "role":"user", "content":input,
-            "_mink":{"internal":true,"source":"goal_draft","goal_draft":source,"goal_message":message}
-        })).await
     }
 }
 
@@ -230,9 +203,7 @@ impl OrchActor {
                 cmd = self.cmd_rx.recv() => match cmd {
                     Some(OrchCmd::UserInput {
                         input,
-                        goal_source,
-                        goal_draft,
-                        goal_iteration,
+                        internal,
                         turn_id,
                         emitter,
                         done,
@@ -242,16 +213,19 @@ impl OrchActor {
                             turn_id: turn_id.to_string(),
                         });
                         let started_at = Instant::now();
-                        let human = goal_source.is_none() && goal_draft.is_none();
-                        let prepared = match goal_source {
-                            Some(source) => self.publish_goal_boundary(input.as_str(), &source).await,
-                            None => match goal_draft {
-                                Some(source) => self.publish_goal_draft_discussion(input.as_str(), &source).await,
-                                None => Ok(()),
-                            },
+                        let start_seq = self
+                            .ctx
+                            .stores
+                            .store
+                            .committed_len()
+                            .await
+                            .unwrap_or(0);
+                        let prepared = match &internal {
+                            Some(exec) => self.append_internal_turn_row(&exec.request).await,
+                            None => Ok(()),
                         };
-                        let result = match prepared {
-                            Ok(()) => self.handle_user_input(input, human).await,
+                        let mut result = match prepared {
+                            Ok(()) => self.handle_user_input(input, internal.as_deref()).await,
                             Err(error) => {
                                 let finish_error = self.ctx.stores.input_inbox.finish().err();
                                 TurnRunResult::failed_with(
@@ -263,8 +237,16 @@ impl OrchActor {
                                 )
                             }
                         };
+                        result.start_seq = start_seq;
+                        result.end_seq = self
+                            .ctx
+                            .stores
+                            .store
+                            .committed_len()
+                            .await
+                            .unwrap_or(start_seq);
                         let result = self
-                            .settle_goal_iteration(goal_iteration.as_ref(), result)
+                            .run_internal_settlement(internal.as_deref(), result)
                             .await;
                         self.log_turn_final(&result, started_at.elapsed().as_millis() as u64)
                             .await;
@@ -461,20 +443,22 @@ impl OrchActor {
             Err(error) => Err(error),
         }
     }
-    async fn handle_user_input(&mut self, input: String, human: bool) -> TurnRunResult {
-        let billing_turn_id = self.ctx.stores.usage.begin_turn();
-        if self.ctx.stores.goal_store.snapshot().is_some_and(|g| {
-            g.phase == crate::session::goal::GoalPhase::Executing
-                && g.iterations.last().is_some_and(|i| !i.finished)
-        }) && let Err(error) = self
-            .ctx
-            .stores
-            .goal_store
-            .associate_iteration_billing(&billing_turn_id)
+    async fn handle_user_input(
+        &mut self,
+        input: String,
+        internal: Option<&InternalTurnExecution>,
+    ) -> TurnRunResult {
+        let human = internal.is_none();
+        let billing_turn_id = internal
+            .and_then(|exec| exec.request.billing_turn_id_override.clone())
+            .unwrap_or_else(|| self.ctx.stores.usage.begin_turn());
+        if let Some(exec) = internal
+            && let Some(hook) = &exec.request.on_billing_started
+            && let Err(error) = hook(&billing_turn_id)
         {
             let _ = self.ctx.stores.input_inbox.finish();
             return self.finish_usage(
-                TurnRunResult::failed(format!("goal billing association failed: {error:#}")),
+                TurnRunResult::failed(format!("turn billing hook failed: {error:#}")),
                 &billing_turn_id,
             );
         }
@@ -491,14 +475,35 @@ impl OrchActor {
             return result;
         }
         // 跨轮重复失败可累积升级，单次偶然失败自然消退。
-        self.belief.decay(self.ctx.config.signal.decay_per_input);
+        let enable_belief = internal.is_none_or(|exec| exec.request.enable_belief);
+        if enable_belief {
+            self.belief.decay(self.ctx.config.signal.decay_per_input);
+        }
         self.refresh_title().await;
-        let (model, mut executor) = self.prepare_turn();
+        let scope = internal.map(|exec| crate::agent::turn::TurnExecutionScope {
+            internal_entry: None,
+            skip_add_user: true,
+            count_as_user_turn: exec.request.count_as_user_turn,
+            consume_inbox: exec.request.consume_inbox,
+            enable_belief: exec.request.enable_belief,
+            disable_native_web: exec.request.disable_native_web,
+            tool_mask: exec.request.tool_mask.clone(),
+            tool_observer: exec.request.tool_observer.clone(),
+            budget_check: exec.request.budget_check.clone(),
+            stop_when: exec.request.stop_when.clone(),
+            continue_prompt_when_not_stopped: exec.request.continue_prompt_when_not_stopped.clone(),
+        });
+        let (model, mut executor) = self.prepare_turn_with_scope(scope);
 
-        let decision = if human {
-            executor.execute_human(&input, Some(&mut self.belief)).await
+        let belief_arg = if enable_belief {
+            Some(&mut self.belief)
         } else {
-            executor.execute(&input, Some(&mut self.belief)).await
+            None
+        };
+        let decision = if human {
+            executor.execute_human(&input, belief_arg).await
+        } else {
+            executor.execute(&input, belief_arg).await
         };
         let result = match decision {
             Ok((decision, effects)) => {
@@ -519,37 +524,30 @@ impl OrchActor {
         result
     }
 
-    /// Publish the goal iteration settlement before the terminal event.
-    ///
-    /// Settlement is identity-bound and idempotent: the admitted iteration is
-    /// the only row it may touch. A settlement failure must change the
-    /// published outcome, so this runs before `log_turn_final` and the Final
-    /// stream event.
-    async fn settle_goal_iteration(
+    async fn run_internal_settlement(
         &self,
-        key: Option<&crate::session::goal::IterationKey>,
+        internal: Option<&InternalTurnExecution>,
         mut result: TurnRunResult,
     ) -> TurnRunResult {
-        let Some(key) = key else {
+        let Some(hook) = internal.and_then(|exec| exec.request.on_before_final.as_ref()) else {
             return result;
         };
-        let facts = crate::session::goal::SettlementFacts {
-            interrupted_pause: result.status == TurnStatus::Interrupted
+        let ctx = crate::runtime::TurnSettlementContext {
+            billing_turn_id: result.billing_turn_id.clone(),
+            status: result.status,
+            failure: result.failure,
+            error: result.error.clone(),
+            text: result.text.clone(),
+            usage_records: result.usage_records.clone(),
+            interrupted_without_runtime_cancel: result.status == TurnStatus::Interrupted
                 && !self.ctx.cancel.is_cancelled(),
+            start_seq: result.start_seq,
+            end_seq: result.end_seq,
         };
-        let committed = async {
-            self.ctx.stores.store.sync().await?;
-            self.ctx
-                .stores
-                .goal_store
-                .settle_iteration(key, &result, &facts)
-                .map(|_| ())
-        }
-        .await;
-        if let Err(error) = committed {
+        if let Err(error) = hook(ctx).await {
             let error = self.ctx.stores.persistence_fault.raise(
                 self.ctx.stores.store.path(),
-                format!("goal iteration publication failed: {error:#}"),
+                format!("internal turn settlement failed: {error:#}"),
             );
             result.status = TurnStatus::Failed;
             result.failure = Some(TurnFailureReason::Persistence);
@@ -575,7 +573,10 @@ impl OrchActor {
         result
     }
 
-    fn prepare_turn(&mut self) -> (String, TurnExecutor) {
+    fn prepare_turn_with_scope(
+        &mut self,
+        scope: Option<crate::agent::turn::TurnExecutionScope>,
+    ) -> (String, TurnExecutor) {
         let resolved = self.resolve_active();
         *self
             .ctx
@@ -591,7 +592,10 @@ impl OrchActor {
         });
 
         let model = resolved.actual.clone();
-        let executor = TurnExecutor::new_for_model(self.ctx.clone(), resolved);
+        let executor = match scope {
+            Some(scope) => TurnExecutor::for_scope(self.ctx.clone(), resolved, scope),
+            None => TurnExecutor::new_for_model(self.ctx.clone(), resolved),
+        };
         (model, executor)
     }
 
@@ -699,6 +703,8 @@ impl OrchActor {
             usage: UsageSummary::default(),
             text: executor.text().to_string(),
             thinking: executor.thinking().to_string(),
+            start_seq: 0,
+            end_seq: 0,
         }
     }
 

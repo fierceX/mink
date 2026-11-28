@@ -50,6 +50,8 @@ fn final_from_outcome_contains_all_required_fields() {
         error: None,
         usage_records: Vec::new(),
         usage: Default::default(),
+        start_seq: 0,
+        end_seq: 0,
     };
 
     let final_json = serde_json::to_value(final_from_outcome(&outcome)).unwrap();
@@ -121,6 +123,8 @@ fn final_fields_match_python_sdk_contract() {
         error: Some("something broke".into()),
         usage_records: Vec::new(),
         usage: Default::default(),
+        start_seq: 0,
+        end_seq: 0,
     };
     let final_json = serde_json::to_value(final_from_outcome(&outcome)).unwrap();
     for key in expected_keys {

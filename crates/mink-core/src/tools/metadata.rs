@@ -221,6 +221,14 @@ impl ToolMetadata {
     }
 }
 
+/// Whether a dispatched tool call's outcome is already durable/known.
+///
+/// Records predating the optional `execution_outcome` marker retain their
+/// existing semantics and count as known.
+pub fn effect_outcome_known(metadata: Option<&serde_json::Value>) -> bool {
+    metadata.and_then(|m| m.get("execution_outcome")).is_none()
+}
+
 #[cfg(test)]
 #[path = "metadata_tests.rs"]
 mod tests;

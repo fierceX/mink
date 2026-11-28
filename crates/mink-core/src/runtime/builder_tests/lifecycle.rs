@@ -1382,3 +1382,53 @@ async fn dropping_runtime_without_shutdown_releases_session_lease() {
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
 }
+
+#[tokio::test]
+async fn subagent_executor_retains_child_and_parent_session_leases() {
+    let home = unique_temp_dir("lease-child-home");
+    let cwd = unique_temp_dir("lease-child-cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let runtime = AgentRuntime::start(AgentOptions::new(&home, &cwd))
+        .await
+        .unwrap();
+    let parent_dir = runtime
+        .session_info()
+        .conversation_path
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let child = crate::agent::sub_executor::SubAgentExecutor::new(
+        runtime.ctx.clone(),
+        "sub-lease-test".into(),
+        false,
+        runtime.ctx.config.clone(),
+    )
+    .await
+    .unwrap();
+    // Child context is private to its executor: keeping the executor alive also
+    // keeps any child tools' lease chain alive after parent teardown.
+    runtime.shutdown().await.unwrap();
+    assert!(crate::runtime::SessionLease::acquire_directory(&parent_dir).is_err());
+    assert!(
+        crate::runtime::SessionLease::acquire_directory(
+            &parent_dir.join("subagents/sub-lease-test")
+        )
+        .is_err()
+    );
+    drop(child);
+    // Dropping the executor releases the child's chain; the release can land on
+    // another task, so wait for it with a short deadline instead of racing it
+    // (a workspace-wide run schedules enough work to lose that race).
+    let release_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match crate::runtime::SessionLease::acquire_directory(&parent_dir) {
+            Ok(_lease) => break,
+            Err(_) if std::time::Instant::now() < release_deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Err(error) => panic!("parent lease still held after the executor dropped: {error}"),
+        }
+    }
+    let _ = std::fs::remove_dir_all(home);
+    let _ = std::fs::remove_dir_all(cwd);
+}

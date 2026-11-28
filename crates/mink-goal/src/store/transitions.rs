@@ -102,7 +102,7 @@ pub(crate) enum GoalTransition {
     },
     RecordCheckerResult {
         effect_id: String,
-        record: crate::session::goal_protocol::GoalCheckerRecord,
+        record: crate::store::protocol::GoalCheckerRecord,
         trusted: bool,
         evidence_versions: Vec<(String, Option<String>)>,
     },
@@ -662,7 +662,7 @@ impl GoalTransition {
                 evidence_versions,
             } => {
                 goal.checker_records.push(record.clone());
-                if record.status != crate::session::goal_protocol::GoalCriterionStatus::Unknown {
+                if record.status != crate::store::protocol::GoalCriterionStatus::Unknown {
                     goal.pending_effects.retain(|effect| effect != &effect_id);
                 }
                 if goal.review_candidate.as_ref() == Some(&record.candidate) {

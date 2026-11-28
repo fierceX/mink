@@ -219,7 +219,7 @@ fn tui_and_stream_json_output_are_mutually_exclusive() {
 async fn broker_renders_compact_skip_once() {
     let (runtime, base) = start_test_runtime("compact-skip").await;
     let recording = std::sync::Arc::new(RecordingDisplay::default());
-    let cmd_tx = start_runtime_broker(runtime.handle(), recording.clone());
+    let cmd_tx = start_runtime_broker(runtime.handle(), None, recording.clone());
 
     cmd_tx.send(RuntimeCmd::Compact).unwrap();
     wait_until(|| {
@@ -245,7 +245,7 @@ async fn broker_renders_compact_skip_once() {
 async fn broker_renders_set_model_success_label_and_title_once() {
     let (runtime, base) = start_test_runtime("set-model").await;
     let recording = std::sync::Arc::new(RecordingDisplay::default());
-    let cmd_tx = start_runtime_broker(runtime.handle(), recording.clone());
+    let cmd_tx = start_runtime_broker(runtime.handle(), None, recording.clone());
 
     cmd_tx
         .send(RuntimeCmd::SetModel("flash".to_string()))
@@ -276,7 +276,7 @@ async fn broker_renders_set_model_success_label_and_title_once() {
 async fn broker_renders_set_model_error_once() {
     let (runtime, base) = start_test_runtime("set-model-error").await;
     let recording = std::sync::Arc::new(RecordingDisplay::default());
-    let cmd_tx = start_runtime_broker(runtime.handle(), recording.clone());
+    let cmd_tx = start_runtime_broker(runtime.handle(), None, recording.clone());
 
     cmd_tx.send(RuntimeCmd::SetModel(String::new())).unwrap();
     wait_until(|| {
@@ -301,8 +301,10 @@ async fn broker_renders_set_model_error_once() {
 #[tokio::test]
 async fn broker_handles_non_create_goal_command_without_blocking_interrupt() {
     let (runtime, base) = start_test_runtime("broker-goal-nonblocking").await;
+    let goals =
+        mink_goal::GoalEngine::attach(runtime.handle(), mink_goal::GoalPlugin::new()).unwrap();
     let recording = std::sync::Arc::new(RecordingDisplay::default());
-    let cmd_tx = start_runtime_broker(runtime.handle(), recording.clone());
+    let cmd_tx = start_runtime_broker(runtime.handle(), Some(goals), recording.clone());
 
     cmd_tx
         .send(RuntimeCmd::Goal(crate::local::GoalCommand::Status))
@@ -347,7 +349,7 @@ fn goal_boundary_rows_decode_to_typed_signals() {
     match goal_boundary_signal(&start) {
         Some(crate::tui::TuiSignal::GoalCard(message)) => {
             assert_eq!(message.goal_id, "goal-1");
-            assert_eq!(message.kind, mink::runtime::GoalMessageKind::Start);
+            assert_eq!(message.kind, mink_goal::GoalMessageKind::Start);
             assert_eq!(message.objective, "ship the parser");
         }
         other => panic!("expected a goal card, got {other:?}"),

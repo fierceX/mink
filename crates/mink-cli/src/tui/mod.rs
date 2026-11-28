@@ -32,6 +32,7 @@ pub use signal::TuiSignal;
 #[derive(Clone)]
 pub struct TuiRuntime {
     pub handle: crate::runtime::AgentRuntimeHandle,
+    pub goals: Option<std::sync::Arc<mink_goal::GoalEngine>>,
     pub signals: tokio::sync::mpsc::UnboundedSender<TuiSignal>,
 }
 
@@ -246,10 +247,12 @@ async fn tui_main_loop(
     let mut goal_driver_started = false;
     loop {
         if !state.async_load.loading_history && !goal_driver_started {
-            if let Some(runtime) = &state.admission.runtime {
+            if let Some(runtime) = &state.admission.runtime
+                && let Some(goals) = &runtime.goals
+            {
                 // UI and input wiring are ready: enable scheduling and pick up
                 // a goal the previous session left active.
-                runtime.handle.goals().start_driver_and_run()?;
+                goals.start_driver_and_run()?;
             }
             goal_driver_started = true;
         }
@@ -525,8 +528,7 @@ fn load_persisted_state(session: &crate::runtime::SessionInfo, state: &mut TuiSt
 
     // Read-only goal mirror: a resumed session must show its unfinished goal
     // in the status bar before the driver emits anything.
-    state.mirrors.goal = snapshot
-        .goal
+    state.mirrors.goal = mink_goal::read_goal_snapshot(&mink_goal::goal_path(dir))
         .as_ref()
         .map(crate::ui::GoalDisplay::from)
         .filter(|goal| !goal.hidden);

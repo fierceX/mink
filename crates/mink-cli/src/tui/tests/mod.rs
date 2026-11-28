@@ -107,7 +107,7 @@ fn goal_display() -> GoalDisplay {
         review_candidate: None,
         id: "goal-1".into(),
         // Core derives this; the TUI renders it rather than recomputing.
-        budget: mink::runtime::GoalBudget {
+        budget: mink_goal::GoalBudget {
             max_turns: 20,
             turns_used: 8,
             remaining_turns: 12,
@@ -162,11 +162,11 @@ fn command_name(command: &super::command::SlashCommand) -> &'static str {
 }
 
 fn goal_message(
-    kind: crate::runtime::GoalMessageKind,
+    kind: mink_goal::GoalMessageKind,
     iteration: u32,
     feedback: Option<&str>,
-) -> crate::runtime::GoalMessage {
-    crate::runtime::GoalMessage {
+) -> mink_goal::GoalMessage {
+    mink_goal::GoalMessage {
         kind,
         goal_id: "goal-1".into(),
         contract_revision: 2,

@@ -1,8 +1,9 @@
 //! Goal driver: iteration scheduling, the drive loop and run settlement.
 
 use super::*;
+use mink::runtime::{InternalTurnRequest, PreparedInternalTurn, TurnId, checkpoint_budget_chars};
 
-impl AgentRuntimeHandle {
+impl GoalEngine {
     /// One run: drive to a stop, then settle the lifecycle exactly once.
     pub(crate) async fn run_goal_worker(
         &self,
@@ -11,11 +12,20 @@ impl AgentRuntimeHandle {
         lease: Option<Box<dyn GoalRunLease>>,
     ) {
         let guard = RunGuard {
-            handle: self.clone(),
+            engine: self.clone(),
             run_id,
             goal_id: goal_id.clone(),
             lease,
             finished: false,
+        };
+        let _owner = match self.handle.acquire_external_owner("goal") {
+            Ok(owner) => Some(owner),
+            Err(error) => {
+                self.handle.render_error(&format!(
+                    "Goal runner: failed to claim session owner: {error}"
+                ));
+                None
+            }
         };
         let fault = match self.drive_goal(run_id).await {
             // A stop intent that could not be persisted latched this run in
@@ -26,33 +36,29 @@ impl AgentRuntimeHandle {
                 // At most one attempt to persist `failed` for the same
                 // identity; if even that cannot be published the run still
                 // stops, with both causes reported.
-                let (publish_error, replaced) =
-                    match self.goal_ctx.stores.goal_store.transition_if_current(
-                        &goal_id,
-                        GoalTransition::FailRun {
-                            reason: format!("{error:#}"),
-                        },
-                    ) {
-                        Ok(Some(goal)) => {
-                            self.announce_goal(&goal);
-                            (None, false)
-                        }
-                        // The goal was replaced while this run failed: the error
-                        // belongs to the old identity and must not poison the
-                        // replacement's run.
-                        Ok(None) => (None, true),
-                        Err(publish_error) => (Some(format!("{publish_error:#}")), false),
-                    };
+                let (publish_error, replaced) = match self.goal_store.transition_if_current(
+                    &goal_id,
+                    GoalTransition::FailRun {
+                        reason: format!("{error:#}"),
+                    },
+                ) {
+                    Ok(Some(goal)) => {
+                        self.announce_goal(&goal);
+                        (None, false)
+                    }
+                    // The goal was replaced while this run failed: the error
+                    // belongs to the old identity and must not poison the
+                    // replacement's run.
+                    Ok(None) => (None, true),
+                    Err(publish_error) => (Some(format!("{publish_error:#}")), false),
+                };
                 let fault = match publish_error {
                     Some(publish_error) => format!(
                         "goal run failed: {error:#}; persisting the failed status also failed: {publish_error}"
                     ),
                     None => format!("goal run failed: {error:#}"),
                 };
-                self.goal_ctx
-                    .io
-                    .display
-                    .render_error(&format!("Goal runner: {fault}"));
+                self.handle.render_error(&format!("Goal runner: {fault}"));
                 if replaced {
                     None
                 } else {
@@ -70,23 +76,41 @@ impl AgentRuntimeHandle {
         // the tail, so the model sees the outcome without any request prefix
         // being rewritten. A failed informational append is reported, never
         // turned into a lifecycle change.
-        if let Err(error) = self
-            .goal_ctx
-            .stores
+        if let Some(ended) = self
             .goal_store
-            .append_ended_row(&self.goal_ctx.stores.store, self.goal_projection_chars())
-            .await
+            .snapshot()
+            .filter(|g| g.status.is_terminal() && !g.hidden)
         {
-            self.goal_ctx.io.display.render_error(&format!(
-                "Goal runner: terminal facts not recorded: {error:#}"
-            ));
+            let already_published = self.handle.conversation_lines().await.is_ok_and(|lines| {
+                lines.iter().any(|m| {
+                    m["_mink"]["goal_id"] == ended.id && m["_mink"]["goal_state_kind"] == "ended"
+                })
+            });
+            if !already_published {
+                let content =
+                    state_text(&ended, GoalStateKind::Ended, self.goal_projection_chars());
+                let metadata = serde_json::json!({
+                    "goal_id": ended.id,
+                    "goal_revision": ended.revision,
+                    "goal_state_kind": "ended",
+                });
+                if let Err(error) = self
+                    .handle
+                    .append_internal_tail(content, "", metadata)
+                    .await
+                {
+                    self.handle.render_error(&format!(
+                        "Goal runner: terminal facts not recorded: {error:#}"
+                    ));
+                }
+            }
         }
         if let Some(reason) = fault {
             // Execution work (an interrupted tool or checker) may still be
             // exiting. Report the stop while it finishes, and only then settle
             // the fault with the run's single completion path: the fault is
             // stable only once the run owns nothing anymore.
-            if self.active_turn_id().is_some() {
+            if self.handle.active_turn_id().is_some() {
                 {
                     let mut control = self.goal_driver.lock_control();
                     if matches!(
@@ -103,21 +127,12 @@ impl AgentRuntimeHandle {
                         );
                     }
                 }
-                self.turn_gate.wait_idle().await;
+                self.handle.wait_turn_idle().await;
             }
             guard.finish(Some(reason));
         } else {
             guard.finish(None);
         }
-    }
-
-    /// Whether a new goal iteration may be admitted right now.
-    ///
-    /// Read under the admission lock by the iteration admission path: once a
-    /// stop decision latches `Stopping`, no new execution may start, only the
-    /// execution already running may finish and settle the stable fault.
-    pub(crate) fn goal_iteration_allowed(&self) -> bool {
-        matches!(self.goal_driver.state(), DriverState::Running { .. })
     }
 
     /// Whether `run_id` is still the run this runtime schedules work for.
@@ -179,10 +194,7 @@ impl AgentRuntimeHandle {
             // Work may remain (a replacement goal, or a resume racing the
             // finish). A clean finish chains into it; an error never restarts.
             if let Err(error) = self.schedule_goal() {
-                self.goal_ctx
-                    .io
-                    .display
-                    .render_error(&format!("Goal runner: {error:#}"));
+                self.handle.render_error(&format!("Goal runner: {error:#}"));
             }
         }
     }
@@ -231,7 +243,7 @@ impl AgentRuntimeHandle {
             if let Some(id) = checker_id
                 && !self.goal_driver.verifiers.iter().any(|v| v.id() == id)
             {
-                let Some(updated) = self.goal_ctx.stores.goal_store.transition_if_current(
+                let Some(updated) = self.goal_store.transition_if_current(
                     &goal.id,
                     GoalTransition::MarkVerifierUnavailable {
                         verifier_id: id.clone(),
@@ -243,7 +255,7 @@ impl AgentRuntimeHandle {
                 self.announce_goal(&updated);
                 break;
             }
-            if self.goal_ctx.cancel.is_cancelled() || self.is_closed() {
+            if self.handle.is_cancelled() || self.handle.is_closed() {
                 break;
             }
             if goal.phase == GoalPhase::Verifying
@@ -253,7 +265,7 @@ impl AgentRuntimeHandle {
                 continue;
             }
             if let Some(reason) = goal.budget_reason() {
-                let Some(updated) = self.goal_ctx.stores.goal_store.transition_if_current(
+                let Some(updated) = self.goal_store.transition_if_current(
                     &goal.id,
                     GoalTransition::ExhaustBudget {
                         reason: reason.into(),
@@ -265,9 +277,109 @@ impl AgentRuntimeHandle {
                 self.announce_goal(&updated);
                 break;
             }
-            let stream = match self
-                .stream_goal_iteration(self.goal_ctx.stores.store.committed_len().await?)
-            {
+            let conversation_start = self.handle.committed_seq().await?;
+            let max_chars = self.goal_projection_chars();
+            let store = self.goal_store.clone();
+            let driver = self.goal_driver.clone();
+            let handle = self.handle.clone();
+            let iteration_key = Arc::new(Mutex::new(None::<IterationKey>));
+            let key_for_prepare = iteration_key.clone();
+            let key_for_billing = iteration_key.clone();
+            let key_for_settle = iteration_key.clone();
+            let store_for_prepare = store.clone();
+            let store_for_billing = store.clone();
+            let store_for_settle = store.clone();
+            let handle_for_settle = handle;
+            let mut req = InternalTurnRequest::new(GOAL_MESSAGE_SOURCE, String::new());
+            req.turn_id_prefix = Some("goal".to_string());
+            req.accept_guidance = false;
+            req.count_as_user_turn = true;
+            req.consume_inbox = true;
+            req.pre_admission_check = Some(Arc::new(move || {
+                if !matches!(driver.state(), DriverState::Running { .. }) {
+                    return Err(RuntimeError::Busy {
+                        active_turn_id: TurnId::new("goal run is stopping; no new iteration"),
+                    });
+                }
+                Ok(())
+            }));
+            req.prepare_on_admit = Some(Arc::new(move |turn_id| {
+                let goal = store_for_prepare
+                    .begin_iteration(turn_id.as_str(), conversation_start)
+                    .map_err(|e| RuntimeError::Command(format!("{e:#}")))?;
+                let iteration = goal
+                    .iterations
+                    .last()
+                    .map(|registered| registered.iteration)
+                    .unwrap_or(0);
+                let prompt = round_prompt(&goal, max_chars);
+                let key = IterationKey {
+                    goal_id: goal.id.clone(),
+                    iteration,
+                    turn_id: turn_id.to_string(),
+                };
+                *key_for_prepare.lock().unwrap_or_else(|e| e.into_inner()) = Some(key.clone());
+                let continuation = GoalContinuation {
+                    goal_id: goal.id.clone(),
+                    contract_revision: goal.contract_revision,
+                    iteration,
+                };
+                let kind = GoalSnapshot::boundary_kind(iteration);
+                let metadata = serde_json::json!({
+                    "goal": continuation,
+                    "goal_message": goal.message(kind, iteration),
+                });
+                let rollback_store = store_for_prepare.clone();
+                Ok(PreparedInternalTurn {
+                    content: prompt,
+                    metadata,
+                    on_rollback: Some(Arc::new(move || {
+                        let _ = rollback_store.abort_unstarted_iteration(
+                            &key.goal_id,
+                            key.iteration,
+                            &key.turn_id,
+                        );
+                    })),
+                })
+            }));
+            req.on_billing_started = Some(Arc::new(move |billing_turn_id| {
+                if store_for_billing.snapshot().is_some_and(|g| {
+                    g.phase == GoalPhase::Executing
+                        && g.iterations.last().is_some_and(|i| !i.finished)
+                }) {
+                    store_for_billing.associate_iteration_billing(billing_turn_id)?;
+                }
+                let _ = &key_for_billing;
+                Ok(())
+            }));
+            req.on_before_final = Some(Arc::new(move |ctx| {
+                let key = key_for_settle
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                let store = store_for_settle.clone();
+                let handle = handle_for_settle.clone();
+                Box::pin(async move {
+                    let Some(key) = key else {
+                        return Ok(());
+                    };
+                    handle.sync_conversation().await?;
+                    let facts = SettlementFacts {
+                        interrupted_pause: ctx.interrupted_without_runtime_cancel,
+                    };
+                    store
+                        .settle_iteration_from_parts(
+                            &key,
+                            &ctx.billing_turn_id,
+                            ctx.status,
+                            ctx.error.as_deref(),
+                            &ctx.usage_records,
+                            &facts,
+                        )
+                        .map(|_| ())
+                })
+            }));
+            let stream = match self.handle.stream_internal_turn(req) {
                 Ok(stream) => stream,
                 Err(RuntimeError::Closed) => break,
                 Err(error) => {
@@ -310,7 +422,7 @@ impl AgentRuntimeHandle {
             let _result = tokio::select! {
                 result = &mut outcome => result?,
                 _ = self.wait_goal_deadline() => {
-                    if let Some(budget) = self.goal_ctx.stores.goal_store.transition_if_current(
+                    if let Some(budget) = self.goal_store.transition_if_current(
                         &goal.id,
                         GoalTransition::ExhaustBudget {
                             reason: "goal deadline reached during execution".into(),
@@ -318,14 +430,14 @@ impl AgentRuntimeHandle {
                     )? {
                         self.announce_goal(&budget);
                     }
-                    self.turn_gate.interrupt();
+                    self.handle.interrupt_turn_gate();
                     outcome.await?
                 }
             };
             // The orchestrator settled this iteration by identity at the
             // persistence boundary; the driver only reads the outcome and
             // applies the report-driven next action.
-            let Some(g) = self.goal_ctx.stores.goal_store.snapshot() else {
+            let Some(g) = self.goal_store.snapshot() else {
                 return Ok(());
             };
             if g.id != settled_goal_id {
@@ -333,7 +445,7 @@ impl AgentRuntimeHandle {
                 // decisions belong to the goal that started the round.
                 return Ok(());
             }
-            if g.status != GoalStatus::Active || self.is_closed() {
+            if g.status != GoalStatus::Active || self.handle.is_closed() {
                 self.announce_goal(&g);
                 break;
             }
@@ -397,6 +509,6 @@ impl AgentRuntimeHandle {
         }
     }
     pub(crate) fn goal_projection_chars(&self) -> usize {
-        goal_projection_chars(self.goal_ctx.config.max_context_tokens)
+        checkpoint_budget_chars(self.handle.max_context_tokens())
     }
 }

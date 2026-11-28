@@ -53,19 +53,18 @@ impl PrefixManager {
         if !self.allow_native_web
             || (!options.native_search && !options.native_read_url)
             || self.ctx.tools.tool_resolution_context.role()
-                == crate::tools::surface::AgentRole::GoalReviewer
+                == crate::tools::surface::AgentRole::ScopedChild
             || self
                 .ctx
                 .config
                 .enabled_tools
                 .as_ref()
                 .is_some_and(Vec::is_empty)
-            || self
-                .ctx
-                .stores
-                .goal_store
-                .snapshot()
-                .is_some_and(|goal| goal.status == crate::session::goal::GoalStatus::Draft)
+            || self.ctx.tools.turn_policies.iter().any(|policy| {
+                policy
+                    .ordinary_turn_mask()
+                    .is_some_and(|mask| mask.disable_native_web)
+            })
         {
             return Vec::new();
         }

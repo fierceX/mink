@@ -1583,38 +1583,3 @@ async fn guidance_during_tool_execution_preserves_exchange_and_round_limit() {
         let _ = tokio::fs::remove_dir_all(cwd).await;
     }
 }
-
-#[tokio::test]
-async fn goal_deadline_interrupts_pending_request_and_cancel_is_terminal() {
-    use crate::runtime::*;
-    let home = unique_temp_dir("goal-deadline-home");
-    let cwd = unique_temp_dir("goal-deadline-cwd");
-    std::fs::create_dir_all(&cwd).unwrap();
-    let backend = Arc::new(PendingEstablishBackend::default());
-    let runtime =
-        AgentRuntime::start(AgentOptions::new(&home, &cwd).with_llm_backend(backend.clone()))
-            .await
-            .unwrap();
-    let handle = runtime.handle();
-    let mut spec = GoalSpec::new("work");
-    spec.limits.deadline_unix_secs = crate::session::goal::goal_now() + 3;
-    handle.confirmed_test_goal(spec).unwrap();
-    handle.goals().start_driver_and_run().unwrap();
-    let goal = tokio::time::timeout(std::time::Duration::from_secs(10), handle.goals().wait())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(goal.status, GoalStatus::BudgetExhausted);
-    assert_eq!(*backend.calls.lock().unwrap(), 1);
-    let cancelled = handle.goals().cancel(&goal.id, goal.revision).unwrap();
-    assert_eq!(cancelled.status, GoalStatus::Cancelled);
-    assert!(
-        handle
-            .goals()
-            .resume(&cancelled.id, cancelled.revision)
-            .is_err()
-    );
-    runtime.shutdown().await.unwrap();
-    let _ = std::fs::remove_dir_all(home);
-    let _ = std::fs::remove_dir_all(cwd);
-}

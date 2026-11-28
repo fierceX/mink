@@ -1556,25 +1556,28 @@ async fn storm_suppression_preserves_format_provenance_across_batches() {
 }
 
 #[test]
-fn goal_effect_ledger_excludes_controls_but_records_retired_custom_names() {
+fn durable_effect_ledger_respects_side_effect_exempt_and_records_custom_tools() {
     let write =
         ToolMetadata::new("Write", ApprovalTier::Write, ToolResultKind::FileWrite).mutating();
     let read = ToolMetadata::new("Read", ApprovalTier::Read, ToolResultKind::FileWrite);
-    let report =
-        ToolMetadata::new("GoalReport", ApprovalTier::Write, ToolResultKind::Control).mutating();
+    let exempt = crate::tools::extension::ToolDefinition::new(
+        "ControlExempt",
+        "control",
+        serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false}),
+    )
+    .with_side_effect_exempt(true);
+    let custom = crate::tools::extension::ToolDefinition::new(
+        "MyTool",
+        "custom",
+        serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false}),
+    );
 
     // Mutating and unknown builtins are recorded.
-    assert!(records_goal_effect("Write", Some(&write), false));
-    assert!(records_goal_effect("Mystery", None, false));
+    assert!(records_durable_effect(Some(&write), None));
+    assert!(records_durable_effect(None, None));
     // Read-only builtins are not side effects.
-    assert!(!records_goal_effect("Read", Some(&read), false));
-    // Retired names are ordinary custom effects; only current built-in
-    // goal controls are excluded from workspace side-effect accounting.
-    assert!(records_goal_effect("GoalReport", Some(&report), false));
-    assert!(records_goal_effect("GoalReport", None, true));
-    assert!(!records_goal_effect("GoalDraft", Some(&report), false));
-    assert!(!records_goal_effect("GoalReview", Some(&report), false));
-    // Unknown custom tools stay conservative even when they claim to be read-only.
-    assert!(records_goal_effect("MyTool", Some(&read), true));
-    assert!(records_goal_effect("MyTool", None, true));
+    assert!(!records_durable_effect(Some(&read), None));
+    // Custom tools marked side_effect_exempt are excluded; other custom tools are recorded conservatively.
+    assert!(!records_durable_effect(None, Some(&exempt)));
+    assert!(records_durable_effect(None, Some(&custom)));
 }

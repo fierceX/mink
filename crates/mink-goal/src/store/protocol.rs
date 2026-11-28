@@ -36,7 +36,7 @@ pub struct GoalDraftSpec {
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GoalCommand {
     CreateDraft {
-        spec: Box<super::goal::GoalSpec>,
+        spec: Box<super::GoalSpec>,
         environment: String,
         duration_secs: u64,
         ready: bool,
@@ -62,8 +62,8 @@ impl GoalCommand {
             }
         }
     }
-    pub(crate) fn apply_to(self, goal: &mut super::goal::GoalSnapshot) -> Result<()> {
-        use super::goal::{GoalPhase, GoalStatus};
+    pub(crate) fn apply_to(self, goal: &mut super::GoalSnapshot) -> Result<()> {
+        use super::{GoalPhase, GoalStatus};
         let (id, revision) = self
             .identity()
             .ok_or_else(|| anyhow::anyhow!("creation requires GoalStore"))?;
@@ -106,7 +106,7 @@ impl GoalCommand {
                 goal.spec.validate()?;
                 if let Some(duration) = goal.draft_duration_secs.take() {
                     goal.spec.limits.deadline_unix_secs =
-                        super::goal::goal_now().saturating_add(duration);
+                        super::goal_now().saturating_add(duration);
                 }
                 ensure!(
                     goal.budget_reason().is_none(),
@@ -135,7 +135,7 @@ impl GoalCommand {
 }
 
 /// A draft uses the same durable identity and revision as its confirmed goal.
-pub type GoalDraftSnapshot = super::goal::GoalSnapshot;
+pub type GoalDraftSnapshot = super::GoalSnapshot;
 
 /// Host-admitted draft discussion, distinct from a human inbox request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,7 +145,7 @@ pub struct GoalDraftDiscussion {
     pub feedback: String,
 }
 
-pub(crate) fn validate_contract(spec: &super::goal::GoalSpec) -> Result<()> {
+pub(crate) fn validate_contract(spec: &super::GoalSpec) -> Result<()> {
     ensure!(
         !spec.original_request.trim().is_empty(),
         "original request is empty"
@@ -312,7 +312,7 @@ impl<'de> Deserialize<'de> for GoalReviewSubmission {
 }
 
 impl GoalContinueProposal {
-    pub fn validate(&self, goal: &super::goal::GoalSnapshot) -> Result<()> {
+    pub fn validate(&self, goal: &super::GoalSnapshot) -> Result<()> {
         ensure!(
             goal.review_candidate.as_ref() == Some(&self.candidate),
             "stale review candidate"
@@ -459,7 +459,7 @@ impl GoalReview {
         })
     }
 
-    pub fn validate(&self, goal: &super::goal::GoalSnapshot) -> Result<()> {
+    pub fn validate(&self, goal: &super::GoalSnapshot) -> Result<()> {
         ensure!(
             goal.review_candidate.as_ref() == Some(&self.candidate),
             "stale review candidate"
@@ -624,7 +624,7 @@ impl GoalReview {
 }
 
 impl GoalReviewFeedback {
-    pub(crate) fn validate(&self, goal: &super::goal::GoalSnapshot) -> Result<()> {
+    pub(crate) fn validate(&self, goal: &super::GoalSnapshot) -> Result<()> {
         ensure!(
             goal.review_candidate.as_ref() == Some(&self.candidate),
             "stale review candidate"
@@ -715,7 +715,7 @@ impl GoalReviewFeedback {
 
     /// Derive the consistency expectation from submitted requirement statuses.
     /// This validates, rather than submits or commits, the host agent's verdict.
-    pub(crate) fn into_review(self, goal: &super::goal::GoalSnapshot) -> Result<GoalReview> {
+    pub(crate) fn into_review(self, goal: &super::GoalSnapshot) -> Result<GoalReview> {
         self.validate(goal)?;
         let all_requirements_pass = self.original_request.status == GoalCriterionStatus::Pass
             && self

@@ -2156,6 +2156,7 @@ dependencies = [
  "futures",
  "ignore",
  "mink-core",
+ "mink-goal",
  "ratatui",
  "rustyline",
  "serde",
@@ -2203,6 +2204,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mink-goal"
+version = "0.10.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "mink-core",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "time",
+ "tokio",
+]
+
+[[package]]
 name = "mink-server"
 version = "0.10.0"
 dependencies = [
@@ -2216,6 +2232,7 @@ dependencies = [
  "http-body-util",
  "libc",
  "mink-core",
+ "mink-goal",
  "serde",
  "serde_json",
  "tokio",

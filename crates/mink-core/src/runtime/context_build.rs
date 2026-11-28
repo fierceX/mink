@@ -23,7 +23,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 pub struct AgentContextBuild {
-    pub goal_review: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
+    pub role_override: Option<crate::tools::surface::AgentRole>,
     pub session_lease: Option<Arc<crate::session::lease::SessionLease>>,
     pub config: Config,
     pub home: PathBuf,
@@ -57,8 +57,15 @@ pub struct AgentContextBuild {
     pub resource_router: Option<Arc<ResourceRouter>>,
     pub capability_snapshot: Option<Arc<CapabilitySnapshot>>,
     pub custom_tools: Vec<crate::runtime::RegisteredCustomTool>,
+    pub turn_policies: Vec<Arc<dyn crate::tools::policy_hook::TurnPolicyProvider>>,
+    pub checkpoint_providers:
+        Vec<Arc<dyn crate::session::compaction::CompactionCheckpointProvider>>,
     pub prefix_source: Option<Arc<dyn crate::runtime::PrefixSource>>,
     pub ptc_runtime: Option<Arc<dyn crate::ptc::PtcRuntime>>,
+    pub billing_turn_id_override: Option<String>,
+    pub default_tool_mask: Option<crate::tools::policy_hook::ToolExecutionMask>,
+    pub default_tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolExecutionObserver>>,
+    pub budget_check: Option<Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync>>,
 }
 
 pub(crate) struct BuiltAgentContext {
@@ -102,16 +109,15 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
     let mut config = params.config.clone();
     config.session_id = params.session_id.clone();
     let tool_config = ToolConfig::from_config(&config);
+    let role = params.role_override.unwrap_or(if params.is_sub_agent {
+        crate::tools::surface::AgentRole::SubAgent
+    } else {
+        crate::tools::surface::AgentRole::Primary
+    });
     let (tool_resolution_context, tool_surface, tool_capabilities) =
         crate::context::resolve_tool_runtime(
             &tool_config,
-            if params.goal_review.is_some() {
-                crate::tools::surface::AgentRole::GoalReviewer
-            } else if params.is_sub_agent {
-                crate::tools::surface::AgentRole::SubAgent
-            } else {
-                crate::tools::surface::AgentRole::Primary
-            },
+            role,
             params.read_only_fs.is_some(),
             params.sub_agent_depth,
             &params.custom_tools,
@@ -146,27 +152,6 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         persistence_fault.clone(),
     )?);
     input_inbox.recover(&store).await?;
-    let goal_store = Arc::new(crate::session::goal::GoalStore::load(
-        &paths.session_dir,
-        persistence_fault.clone(),
-    )?);
-    if !params.is_sub_agent && goal_store.snapshot().is_some() {
-        goal_store.reconcile_usage(&usage.all_records()?)?;
-    }
-    if !params.is_sub_agent
-        && goal_store
-            .snapshot()
-            .is_some_and(|g| !g.status.is_terminal())
-    {
-        let (history, committed_sequence) =
-            crate::runtime::session::SessionReader::new(paths.session_dir.clone())
-                .conversation_with_sequence()?;
-        goal_store.recover(
-            &crate::runtime::goal::goal_environment(&params.cwd, &tool_surface),
-            &history,
-            committed_sequence,
-        )?;
-    }
     let vfs_scope = VfsScope {
         resource_session_id: params.resource_session_id,
         agent_session_id: params.session_id.clone(),
@@ -219,12 +204,8 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
             params.session_event_sink.clone(),
         )?
         .with_fault(persistence_fault.clone())
-        .with_goal_store(if params.is_sub_agent {
-            None
-        } else {
-            Some(goal_store.clone())
-        })
-        .with_review_session(params.goal_review.clone()),
+        .with_checkpoint_providers(params.checkpoint_providers)
+        .with_budget_check(params.budget_check.clone()),
     );
 
     // Session-scoped model capabilities: resolve once, freeze, persist, and
@@ -259,16 +240,14 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
             artifacts,
             todo_store,
             plan_store: plan_store.clone(),
-            goal_store,
             input_inbox,
             stats,
             usage,
             compaction,
             persistence_fault,
             session_lease: Arc::new(Mutex::new(params.session_lease)),
-            goal_review: params
-                .goal_review
-                .map(|review| review as Arc<dyn crate::goal_review::GoalReviewToolSession>),
+            billing_turn_id_override: params.billing_turn_id_override,
+            budget_check: params.budget_check,
         },
         tools: ToolRuntimeContext {
             read_memo: Arc::new(Mutex::new(crate::tools::read_memo::ReadMemo::new())),
@@ -284,6 +263,9 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
             tool_surface,
             tool_capabilities,
             custom_tools: Arc::new(params.custom_tools),
+            turn_policies: Arc::new(params.turn_policies),
+            default_tool_mask: params.default_tool_mask,
+            default_tool_observer: params.default_tool_observer,
             prefix_source: params.prefix_source,
             model_capabilities,
             ptc_runtime: params.ptc_runtime.or_else(|| default_ptc_runtime(&config)),

@@ -251,22 +251,27 @@ async fn draft_signal_recovery_cannot_spawn_an_execution_replan() {
             reason: "end_turn".into(),
         })),
     ];
+    struct DisableReplanPolicy;
+    impl crate::tools::policy_hook::TurnPolicyProvider for DisableReplanPolicy {
+        fn ordinary_turn_mask(&self) -> Option<crate::tools::policy_hook::ToolExecutionMask> {
+            Some(
+                crate::tools::policy_hook::ToolExecutionMask::allow_only([
+                    "Read", "Glob", "Grep", "Bash",
+                ])
+                .with_disable_replan(true),
+            )
+        }
+    }
     let llm = Arc::new(MockLlmBackend::new("flash", vec![replan_child]));
-    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+    let ctx = crate::regression::test_context_for_agent_with_extensions(
         "abort-replan-guard-clear",
         |_| {},
         llm.clone(),
+        Vec::new(),
+        vec![Arc::new(DisableReplanPolicy)],
     )
     .await
     .unwrap();
-    ctx.stores
-        .goal_store
-        .draft(
-            crate::session::goal::GoalSpec::new("discuss the contract"),
-            "env".into(),
-            3600,
-        )
-        .unwrap();
     let child_directory = ctx.stores.store.path().parent().unwrap().join("subagents");
     let mut executor = TurnExecutor::new(ctx);
     executor.local.signal_recovery_guard = true;

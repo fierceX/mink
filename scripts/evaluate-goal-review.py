@@ -96,7 +96,7 @@ def main():
         env["MINK_EVAL_FORCE_FULL"] = "1"
     if args.draft_only:
         env["MINK_EVAL_DRAFT_ONLY"] = "1"
-    run = subprocess.run(["cargo", "run", "-q", "-p", "mink-core", "--example", "goal_review_eval"], cwd=repo, env=env, text=True, capture_output=True)
+    run = subprocess.run(["cargo", "run", "-q", "-p", "mink-goal", "--example", "goal_review_eval"], cwd=repo, env=env, text=True, capture_output=True)
     # Provider diagnostics can contain URLs; keep them in local logs only.
     (output / "private-run.log").write_text(run.stdout + "\n" + run.stderr)
     if run.returncode:

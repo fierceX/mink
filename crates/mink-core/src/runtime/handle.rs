@@ -23,9 +23,6 @@ impl TurnId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-    pub fn is_goal_turn(&self) -> bool {
-        self.0.starts_with("goal:")
-    }
 }
 
 impl fmt::Display for TurnId {
@@ -37,7 +34,7 @@ impl fmt::Display for TurnId {
 #[derive(Debug)]
 pub enum RuntimeError {
     Busy { active_turn_id: TurnId },
-    GoalActive,
+    ExternallyControlled { owner: &'static str },
     Closed,
     Command(String),
     Join(String),
@@ -51,7 +48,9 @@ impl fmt::Display for RuntimeError {
             Self::Busy { active_turn_id } => {
                 write!(f, "runtime is busy with turn {active_turn_id}")
             }
-            Self::GoalActive => f.write_str("goal owns session; pause before control commands"),
+            Self::ExternallyControlled { owner } => {
+                write!(f, "{owner} owns session; pause before control commands")
+            }
             Self::Closed => f.write_str("runtime is closed"),
             Self::Command(message) => write!(f, "runtime command failed: {message}"),
             Self::Join(message) => write!(f, "runtime task failed: {message}"),
@@ -82,6 +81,10 @@ pub struct ModelSwitchOutcome {
     pub stats: crate::ui::StatsSnapshot,
 }
 
+fn usize_is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnOutcome {
     pub turn_id: TurnId,
@@ -97,6 +100,10 @@ pub struct TurnOutcome {
     pub error: Option<String>,
     pub usage_records: Vec<crate::session::usage::UsageRecord>,
     pub usage: crate::session::usage::UsageSummary,
+    #[serde(default, skip_serializing_if = "usize_is_zero")]
+    pub start_seq: usize,
+    #[serde(default, skip_serializing_if = "usize_is_zero")]
+    pub end_seq: usize,
 }
 
 impl TurnOutcome {
@@ -118,6 +125,8 @@ impl TurnOutcome {
             error: result.error,
             usage_records: result.usage_records,
             usage: result.usage,
+            start_seq: result.start_seq,
+            end_seq: result.end_seq,
         }
     }
 }
@@ -135,7 +144,7 @@ struct TurnGateState {
 }
 
 impl TurnGate {
-    fn acquire(self: &Arc<Self>, turn_id: TurnId) -> RuntimeResult<TurnPermit> {
+    fn acquire(self: &Arc<Self>, turn_id: TurnId) -> RuntimeResult<TurnGatePermit> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.closed {
             return Err(RuntimeError::Closed);
@@ -145,7 +154,7 @@ impl TurnGate {
         }
         self.interrupt.reset();
         state.active = Some(turn_id.clone());
-        Ok(TurnPermit {
+        Ok(TurnGatePermit {
             gate: self.clone(),
             turn_id,
         })
@@ -194,18 +203,28 @@ impl TurnGate {
     }
 }
 
-pub(crate) struct TurnPermit {
+pub(crate) struct TurnGatePermit {
     gate: Arc<TurnGate>,
-    turn_id: TurnId,
+    pub(crate) turn_id: TurnId,
 }
 
-impl Drop for TurnPermit {
+impl Drop for TurnGatePermit {
     fn drop(&mut self) {
         let mut state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.active.as_ref() == Some(&self.turn_id) {
             state.active = None;
             self.gate.idle.notify_waiters();
         }
+    }
+}
+
+/// Exclusive single-turn execution permit held across internal or verification
+/// turns until the execution stream or closure releases it.
+pub struct TurnPermit(pub(crate) TurnGatePermit);
+
+impl TurnPermit {
+    pub fn turn_id(&self) -> &TurnId {
+        &self.0.turn_id
     }
 }
 
@@ -300,10 +319,27 @@ impl Drop for AgentRuntime {
         if self.shutdown_called {
             return;
         }
-        self.handle.goal_driver.disable();
+        let controller = self
+            .handle
+            .external_control
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .controller
+            .take();
+        if let Some(controller) = &controller {
+            controller.on_shutdown_disable();
+        }
+        let _ = self
+            .handle
+            .external_control
+            .stop_cause
+            .send_replace(Some(crate::runtime::StopCause::RuntimeShutdown));
         self.ctx.cancel.cancel();
         self.handle.turn_gate.close_and_interrupt();
-        self.handle.goal_driver.close();
+        if let Some(controller) = &controller {
+            controller.on_shutdown_close();
+        }
         if let Some(orch_handle) = self.orch_handle.take() {
             orch_handle.abort();
         }
@@ -319,8 +355,8 @@ impl Drop for AgentRuntime {
 #[derive(Clone)]
 pub struct AgentRuntimeHandle {
     pub(crate) input_inbox: Arc<crate::session::input::InputInbox>,
-    pub(crate) goal_ctx: Arc<AgentSharedContext>,
-    pub(crate) goal_driver: Arc<crate::runtime::goal::GoalDriver>,
+    pub(crate) ctx: Arc<AgentSharedContext>,
+    pub(crate) external_control: Arc<crate::runtime::internal_turn::ExternalControlState>,
     pub(crate) image_input: crate::runtime::ImageInputCapability,
     pub(crate) cmd_tx: mpsc::UnboundedSender<OrchCmd>,
     pub(crate) session: SessionInfo,
@@ -398,86 +434,27 @@ impl AgentRuntimeHandle {
         resume: Option<(&str, u64)>,
         register: bool,
     ) -> RuntimeResult<(crate::runtime::InputReceipt, Option<AgentEventStream>)> {
-        self.stream_input_inner_with_source(input, resume, register, None, None)
-    }
-    fn stream_input_inner_with_source(
-        &self,
-        mut input: crate::runtime::HumanInput,
-        resume: Option<(&str, u64)>,
-        register: bool,
-        goal_source: Option<usize>,
-        goal_draft: Option<crate::session::goal::GoalDraftDiscussion>,
-    ) -> RuntimeResult<(crate::runtime::InputReceipt, Option<AgentEventStream>)> {
         let _admission = self
-            .goal_driver
+            .external_control
             .admission
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some(early) = self.check_pre_admission(&input, resume, register, goal_source)? {
-            return Ok((early, None));
-        }
-        let turn_id = self.allocate_turn_id(goal_source.is_some());
-        let permit = self.turn_gate.acquire(turn_id.clone())?;
-        let (source, goal_iteration, inbox_started) = self.prepare_submission_context(
-            &mut input.text,
-            &turn_id,
-            goal_source,
-            goal_draft.as_ref(),
-        )?;
-        let receipt = match self.register_submission_receipt(&input, &turn_id, resume, register) {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                self.rollback_unstarted_submission(goal_iteration.as_ref(), inbox_started);
-                return Err(error);
-            }
-        };
-        self.dispatch_turn_stream(
-            input.text,
-            turn_id,
-            permit,
-            source,
-            goal_draft,
-            goal_iteration,
-            inbox_started,
-            receipt,
-        )
-    }
-
-    fn check_pre_admission(
-        &self,
-        input: &crate::runtime::HumanInput,
-        resume: Option<(&str, u64)>,
-        register: bool,
-        goal_source: Option<usize>,
-    ) -> RuntimeResult<Option<crate::runtime::InputReceipt>> {
         if self.is_closed() {
             return Err(RuntimeError::Closed);
         }
-        if goal_source.is_some() && !self.goal_iteration_allowed() {
-            // A stop decision latched while this iteration is being admitted:
-            // no new goal execution may start, only the run's settlement.
-            return Err(RuntimeError::Busy {
-                active_turn_id: TurnId::new("goal run is stopping; no new iteration"),
-            });
-        }
-        if goal_source.is_none()
-            && input.target_turn_id.is_none()
-            && self.goal_snapshot().is_some_and(|g| {
-                g.status == crate::runtime::GoalStatus::Active
-                    || (g.status == crate::runtime::GoalStatus::Blocked
-                        && g.phase == crate::session::goal::GoalPhase::Verifying)
-            })
+        if input.target_turn_id.is_none()
+            && let Some(owner) = _admission.blocking_owner()
         {
-            return Err(RuntimeError::GoalActive);
+            return Err(RuntimeError::ExternallyControlled { owner });
         }
         if register
             && resume.is_none()
             && let Some(receipt) = self
                 .input_inbox
-                .existing(input)
+                .existing(&input)
                 .map_err(|e| RuntimeError::Command(e.to_string()))?
         {
-            return Ok(Some(receipt));
+            return Ok((receipt, None));
         }
         if input.target_turn_id.is_some() && resume.is_none() {
             if self.turn_gate.interrupt.is_set() {
@@ -485,92 +462,14 @@ impl AgentRuntimeHandle {
             }
             let receipt = self
                 .input_inbox
-                .accept(input.clone(), None)
+                .accept(input, None)
                 .map_err(|e| RuntimeError::Command(e.to_string()))?;
-            return Ok(Some(receipt));
+            return Ok((receipt, None));
         }
-        Ok(None)
-    }
-
-    fn allocate_turn_id(&self, is_goal: bool) -> TurnId {
         let turn_id = self.next_turn_id();
-        if is_goal {
-            TurnId::new(format!("goal:{turn_id}"))
-        } else {
-            turn_id
-        }
-    }
-
-    fn prepare_submission_context(
-        &self,
-        input_text: &mut String,
-        turn_id: &TurnId,
-        goal_source: Option<usize>,
-        goal_draft: Option<&crate::session::goal::GoalDraftDiscussion>,
-    ) -> RuntimeResult<(
-        Option<crate::runtime::GoalContinuation>,
-        Option<crate::session::goal::IterationKey>,
-        bool,
-    )> {
-        let mut inbox_started = false;
-        let (source, goal_iteration) = if let Some(conversation_start) = goal_source {
-            let goal = self
-                .goal_ctx
-                .stores
-                .goal_store
-                .begin_iteration(turn_id.as_str(), conversation_start)
-                .map_err(|e| RuntimeError::Command(format!("{e:#}")))?;
-            let iteration = goal
-                .iterations
-                .last()
-                .map(|registered| registered.iteration)
-                .unwrap_or(0);
-            *input_text = crate::session::goal::round_prompt(
-                &goal,
-                crate::runtime::goal::goal_projection_chars(
-                    self.goal_ctx.config.max_context_tokens,
-                ),
-            );
-            let key = crate::session::goal::IterationKey {
-                goal_id: goal.id.clone(),
-                iteration,
-                turn_id: turn_id.to_string(),
-            };
-            if let Err(err) = self.input_inbox.begin_goal_turn(turn_id.as_str()) {
-                let _ = self.goal_ctx.stores.goal_store.abort_unstarted_iteration(
-                    &key.goal_id,
-                    key.iteration,
-                    &key.turn_id,
-                );
-                return Err(RuntimeError::Command(format!("{err:#}")));
-            }
-            inbox_started = true;
-            (
-                Some(crate::runtime::GoalContinuation {
-                    goal_id: goal.id,
-                    contract_revision: goal.contract_revision,
-                    iteration,
-                }),
-                Some(key),
-            )
-        } else {
-            (None, None)
-        };
-        if let Some(draft) = goal_draft {
-            let goal = self
-                .goal_draft_snapshot()
-                .ok_or_else(|| RuntimeError::Command("goal is not a draft".into()))?;
-            if goal.id != draft.goal_id || goal.revision != draft.revision {
-                return Err(RuntimeError::Command(
-                    "draft changed before discussion".into(),
-                ));
-            }
-            self.input_inbox
-                .begin_goal_turn(turn_id.as_str())
-                .map_err(|e| RuntimeError::Command(format!("{e:#}")))?;
-            inbox_started = true;
-        }
-        Ok((source, goal_iteration, inbox_started))
+        let permit = self.turn_gate.acquire(turn_id.clone())?;
+        let receipt = self.register_submission_receipt(&input, &turn_id, resume, register)?;
+        self.dispatch_turn_stream(input.text, turn_id, permit, None, false, None, receipt)
     }
 
     fn register_submission_receipt(
@@ -597,18 +496,14 @@ impl AgentRuntimeHandle {
 
     fn rollback_unstarted_submission(
         &self,
-        goal_iteration: Option<&crate::session::goal::IterationKey>,
+        on_rollback: Option<&crate::runtime::TurnRollbackHook>,
         inbox_started: bool,
     ) {
         if inbox_started {
             let _ = self.input_inbox.finish();
         }
-        if let Some(key) = goal_iteration {
-            let _ = self.goal_ctx.stores.goal_store.abort_unstarted_iteration(
-                &key.goal_id,
-                key.iteration,
-                &key.turn_id,
-            );
+        if let Some(hook) = on_rollback {
+            hook();
         }
     }
 
@@ -617,11 +512,10 @@ impl AgentRuntimeHandle {
         &self,
         input: String,
         turn_id: TurnId,
-        permit: TurnPermit,
-        goal_source: Option<crate::runtime::GoalContinuation>,
-        goal_draft: Option<crate::session::goal::GoalDraftDiscussion>,
-        goal_iteration: Option<crate::session::goal::IterationKey>,
+        permit: TurnGatePermit,
+        internal: Option<crate::agent::orchestrator::InternalTurnExecution>,
         inbox_started: bool,
+        on_rollback: Option<crate::runtime::TurnRollbackHook>,
         receipt: crate::runtime::InputReceipt,
     ) -> RuntimeResult<(crate::runtime::InputReceipt, Option<AgentEventStream>)> {
         let stream_turn_id = turn_id.clone();
@@ -637,15 +531,13 @@ impl AgentRuntimeHandle {
         let (done_tx, done_rx) = oneshot::channel();
         if let Err(error) = self.cmd_tx.send(OrchCmd::UserInput {
             input,
-            goal_source,
-            goal_draft,
-            goal_iteration: goal_iteration.clone(),
+            internal: internal.map(Box::new),
             turn_id: turn_id.clone(),
             emitter: emitter.clone(),
             done: done_tx,
         }) {
             self.event_display.end_turn(&turn_id);
-            self.rollback_unstarted_submission(goal_iteration.as_ref(), inbox_started);
+            self.rollback_unstarted_submission(on_rollback.as_ref(), inbox_started);
             return Err(RuntimeError::Command(error.to_string()));
         }
         let session = self.session.clone();
@@ -685,17 +577,13 @@ impl AgentRuntimeHandle {
     /// waiting, it does not cancel the operation or release the gate early.
     pub async fn compact(&self) -> RuntimeResult<CompactOutcome> {
         let permit = {
-            let _guard = self
-                .goal_driver
+            let guard = self
+                .external_control
                 .admission
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if self.goal_snapshot().is_some_and(|g| {
-                g.status == crate::runtime::GoalStatus::Active
-                    || (g.status == crate::runtime::GoalStatus::Blocked
-                        && g.phase == crate::session::goal::GoalPhase::Verifying)
-            }) {
-                return Err(RuntimeError::GoalActive);
+            if let Some(owner) = guard.blocking_owner() {
+                return Err(RuntimeError::ExternallyControlled { owner });
             }
             self.turn_gate.acquire(self.next_turn_id())?
         };
@@ -719,7 +607,7 @@ impl AgentRuntimeHandle {
 
     /// The model in force right now, preserving the accepted alias when present.
     pub fn current_model(&self) -> String {
-        self.goal_ctx
+        self.ctx
             .active_model
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -729,7 +617,7 @@ impl AgentRuntimeHandle {
 
     /// The concrete model in force right now.
     pub fn resolved_model(&self) -> String {
-        self.goal_ctx
+        self.ctx
             .active_model
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -740,7 +628,7 @@ impl AgentRuntimeHandle {
     /// Alias choices this runtime honours: the built-in pair plus the configured
     /// aliases, each with the model it resolves to.
     pub fn model_choices(&self) -> Vec<(String, String)> {
-        crate::config::model_resolver(&self.goal_ctx.config)
+        crate::config::model_resolver(&self.ctx.config)
             .aliases()
             .iter()
             .map(|(alias, model)| (alias.clone(), model.clone()))
@@ -766,17 +654,13 @@ impl AgentRuntimeHandle {
         model: impl Into<String>,
     ) -> RuntimeResult<ModelSwitchOutcome> {
         let permit = {
-            let _guard = self
-                .goal_driver
+            let guard = self
+                .external_control
                 .admission
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if self.goal_snapshot().is_some_and(|g| {
-                g.status == crate::runtime::GoalStatus::Active
-                    || (g.status == crate::runtime::GoalStatus::Blocked
-                        && g.phase == crate::session::goal::GoalPhase::Verifying)
-            }) {
-                return Err(RuntimeError::GoalActive);
+            if let Some(owner) = guard.blocking_owner() {
+                return Err(RuntimeError::ExternallyControlled { owner });
             }
             self.turn_gate.acquire(self.next_turn_id())?
         };
@@ -797,102 +681,545 @@ impl AgentRuntimeHandle {
         task.await.map_err(|e| RuntimeError::Join(e.to_string()))?
     }
 
-    pub(crate) fn begin_goal_verification(
+    // -------------------------------------------------------------------------
+    // Generic External Controller, Internal Turn, Child & Extension Primitives
+    // -------------------------------------------------------------------------
+
+    pub fn attach_external_controller(
         &self,
-        id: &str,
-        revision: u64,
-    ) -> RuntimeResult<TurnPermit> {
-        let _guard = self
-            .goal_driver
+        controller: Arc<dyn crate::runtime::ExternalController>,
+    ) -> RuntimeResult<()> {
+        let mut guard = self
+            .external_control
             .admission
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        self.ensure_goal_control_open()?;
-        if !self.goal_snapshot().is_some_and(|g| {
-            g.id == id && g.revision == revision && g.status == crate::runtime::GoalStatus::Active
-        }) {
-            return Err(RuntimeError::Command("goal acceptance superseded".into()));
+        if self.is_closed() {
+            return Err(RuntimeError::Closed);
         }
-        self.turn_gate.acquire(TurnId::new(format!(
-            "goal-verification:{}",
-            self.next_turn_id()
-        )))
+        if let Some(existing) = &guard.controller
+            && let Some(owner) = existing.blocks_ordinary_control()
+        {
+            return Err(RuntimeError::ExternallyControlled { owner });
+        }
+        guard.controller = Some(controller);
+        Ok(())
     }
-    pub(crate) fn active_turn_id(&self) -> Option<TurnId> {
+
+    pub fn acquire_external_owner(
+        &self,
+        owner: &'static str,
+    ) -> RuntimeResult<crate::runtime::ExternalOwnerGuard> {
+        let mut guard = self
+            .external_control
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if self.is_closed() {
+            return Err(RuntimeError::Closed);
+        }
+        if let Some(existing) = guard.active_owner {
+            return Err(RuntimeError::ExternallyControlled { owner: existing });
+        }
+        guard.active_owner = Some(owner);
+        Ok(crate::runtime::ExternalOwnerGuard {
+            control: self.external_control.clone(),
+            owner,
+        })
+    }
+
+    pub fn with_admission_lock<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _guard = self
+            .external_control
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        f()
+    }
+
+    pub fn acquire_turn_permit(&self, prefix: Option<&str>) -> RuntimeResult<TurnPermit> {
+        self.acquire_turn_permit_when(prefix, || Ok(()))
+    }
+
+    pub fn acquire_turn_permit_when(
+        &self,
+        prefix: Option<&str>,
+        check: impl FnOnce() -> RuntimeResult<()>,
+    ) -> RuntimeResult<TurnPermit> {
+        let _guard = self
+            .external_control
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if self.is_closed() {
+            return Err(RuntimeError::Closed);
+        }
+        self.ctx
+            .stores
+            .persistence_fault
+            .check()
+            .map_err(|e| RuntimeError::Command(format!("{e:#}")))?;
+        check()?;
+        let base = self.next_turn_id();
+        let turn_id = match prefix {
+            Some(prefix) => TurnId::new(format!("{prefix}:{base}")),
+            None => base,
+        };
+        Ok(TurnPermit(self.turn_gate.acquire(turn_id)?))
+    }
+
+    pub async fn wait_turn_idle(&self) {
+        self.turn_gate.wait_idle().await;
+    }
+
+    pub fn subscribe_stop_cause(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<crate::runtime::StopCause>> {
+        self.external_control.stop_cause.subscribe()
+    }
+
+    pub fn active_turn_id(&self) -> Option<TurnId> {
         self.turn_gate.active()
     }
-    pub(crate) fn is_closed(&self) -> bool {
+
+    pub fn is_closed(&self) -> bool {
         self.turn_gate
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .closed
     }
-    pub(crate) fn ensure_goal_control_open(&self) -> RuntimeResult<()> {
+
+    pub fn is_cancelled(&self) -> bool {
+        self.ctx.cancel.is_cancelled()
+    }
+
+    pub fn interrupt_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.ctx.interrupt.as_atomic()
+    }
+
+    pub fn is_interrupted(&self) -> bool {
+        self.ctx.interrupt.is_set()
+    }
+
+    pub fn interrupt_turn_gate(&self) {
+        self.turn_gate.interrupt();
+    }
+
+    pub fn interrupt_turn_if_owner(&self, expected: &TurnId) {
+        self.turn_gate.interrupt_if_owner(expected);
+    }
+
+    pub fn stream_internal_turn(
+        &self,
+        mut req: crate::runtime::InternalTurnRequest,
+    ) -> RuntimeResult<AgentEventStream> {
+        let _guard = self
+            .external_control
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if self.is_closed() {
             return Err(RuntimeError::Closed);
         }
-        self.goal_ctx
+        if let Some(check) = &req.pre_admission_check {
+            check()?;
+        }
+        let base = self.next_turn_id();
+        let turn_id = match req.turn_id_prefix.as_deref() {
+            Some(prefix) => TurnId::new(format!("{prefix}:{base}")),
+            None => base,
+        };
+        let permit = self.turn_gate.acquire(turn_id.clone())?;
+        let on_rollback = if let Some(prepare) = &req.prepare_on_admit {
+            let prepared = prepare(&turn_id)?;
+            req.content = prepared.content;
+            req.metadata = prepared.metadata;
+            prepared.on_rollback
+        } else {
+            None
+        };
+        if let Err(err) = self.input_inbox.begin_internal_turn(turn_id.as_str()) {
+            if let Some(hook) = &on_rollback {
+                hook();
+            }
+            return Err(RuntimeError::Command(format!("{err:#}")));
+        }
+        let receipt = crate::runtime::InputReceipt::transient(
+            crate::runtime::HumanInput {
+                request_id: String::new(),
+                text: req.content.clone(),
+                target_turn_id: None,
+                attachment_ids: Vec::new(),
+            },
+            turn_id.as_str(),
+        );
+        let input_text = req.content.clone();
+        self.dispatch_turn_stream(
+            input_text,
+            turn_id,
+            permit,
+            Some(crate::agent::orchestrator::InternalTurnExecution { request: req }),
+            true,
+            on_rollback,
+            receipt,
+        )
+        .map(|(_, stream)| stream.expect("internal turn stream"))
+    }
+
+    pub async fn run_internal_turn_with_permit(
+        &self,
+        permit: &TurnPermit,
+        mut req: crate::runtime::InternalTurnRequest,
+    ) -> anyhow::Result<TurnOutcome> {
+        self.ctx.stores.persistence_fault.check()?;
+        let start_seq = self.ctx.stores.store.committed_len().await?;
+        let mut meta = match req.metadata.take() {
+            serde_json::Value::Object(map) => map,
+            _ => serde_json::Map::new(),
+        };
+        meta.insert("internal".into(), serde_json::Value::Bool(true));
+        meta.insert(
+            "source".into(),
+            serde_json::Value::String(req.source_tag.clone()),
+        );
+        let scope = crate::agent::turn::TurnExecutionScope {
+            internal_entry: Some((req.content.clone(), serde_json::Value::Object(meta))),
+            skip_add_user: false,
+            count_as_user_turn: req.count_as_user_turn,
+            consume_inbox: req.consume_inbox,
+            enable_belief: req.enable_belief,
+            disable_native_web: req.disable_native_web,
+            tool_mask: req.tool_mask,
+            tool_observer: req.tool_observer,
+            budget_check: req.budget_check,
+            stop_when: req.stop_when,
+            continue_prompt_when_not_stopped: req.continue_prompt_when_not_stopped,
+        };
+        let (billing_turn_id, own_billing) = match req.billing_turn_id_override {
+            Some(id) => (id, false),
+            None => (self.ctx.stores.usage.begin_turn(), true),
+        };
+        let mut executor = crate::agent::turn::TurnExecutor::new_for_scope(self.ctx.clone(), scope);
+        let exec_result = self
+            .ctx
+            .stores
+            .usage
+            .with_billing_scope(
+                billing_turn_id.clone(),
+                executor.execute(&req.content, None),
+            )
+            .await;
+        if own_billing {
+            self.ctx.stores.usage.end_turn(&billing_turn_id);
+        }
+        let end_seq = self
+            .ctx
+            .stores
+            .store
+            .committed_len()
+            .await
+            .unwrap_or(start_seq);
+        let mut run_result = match exec_result {
+            Ok((decision, _effects)) => TurnRunResult::from_decision(&decision, &executor),
+            Err(error) => TurnRunResult::failed_with(
+                crate::agent::failure::classify_turn_error(&error),
+                format!("{error:#}"),
+            ),
+        };
+        run_result.billing_turn_id = billing_turn_id.clone();
+        run_result.start_seq = start_seq;
+        run_result.end_seq = end_seq;
+        if let Ok(records) = self.ctx.stores.usage.records_for(&billing_turn_id) {
+            run_result.usage = crate::session::usage::UsageSummary::from_records(&records);
+            run_result.usage_records = records;
+        }
+        Ok(TurnOutcome::from_run_result(
+            run_result,
+            self.session.clone(),
+            permit.turn_id().clone(),
+        ))
+    }
+
+    pub async fn append_internal_tail(
+        &self,
+        content: String,
+        source_tag: &str,
+        metadata: serde_json::Value,
+    ) -> anyhow::Result<usize> {
+        let mut meta = match metadata {
+            serde_json::Value::Object(map) => map,
+            _ => serde_json::Map::new(),
+        };
+        meta.insert("internal".into(), serde_json::Value::Bool(true));
+        if !source_tag.is_empty() {
+            meta.insert(
+                "source".into(),
+                serde_json::Value::String(source_tag.to_string()),
+            );
+        }
+        self.ctx
+            .stores
+            .store
+            .append_runtime_message_durable(serde_json::json!({
+                "role": "user",
+                "content": content,
+                "_mink": serde_json::Value::Object(meta),
+            }))
+            .await?;
+        self.ctx.stores.store.committed_len().await
+    }
+
+    pub async fn committed_seq(&self) -> anyhow::Result<usize> {
+        self.ctx.stores.store.committed_len().await
+    }
+
+    pub async fn sync_conversation(&self) -> anyhow::Result<()> {
+        self.ctx.stores.store.sync().await
+    }
+
+    pub async fn conversation_lines(&self) -> anyhow::Result<Vec<serde_json::Value>> {
+        self.ctx.stores.store.lines().await
+    }
+
+    pub fn has_outstanding_guidance(&self) -> bool {
+        self.input_inbox.outstanding().iter().any(|r| {
+            r.guidance
+                && matches!(
+                    r.status,
+                    crate::runtime::InputStatus::Pending
+                        | crate::runtime::InputStatus::Applying
+                        | crate::runtime::InputStatus::Unapplied
+                )
+        })
+    }
+
+    pub async fn wait_interrupted_or_cancelled(&self) {
+        if self.is_interrupted() || self.is_cancelled() {
+            return;
+        }
+        tokio::select! {
+            _ = self.ctx.interrupt.notified() => {}
+            _ = self.ctx.cancel.cancelled() => {}
+        }
+    }
+
+    pub async fn spawn_ephemeral_child(
+        &self,
+        session_id: String,
+        opts: crate::runtime::EphemeralChildOptions,
+    ) -> anyhow::Result<crate::runtime::EphemeralChildSession> {
+        let deadline = opts.deadline;
+        let cancel = self.ctx.cancel.linked_child_token();
+        let executor = crate::agent::sub_executor::SubAgentExecutor::new_ephemeral(
+            self.ctx.clone(),
+            session_id,
+            cancel,
+            opts,
+        )
+        .await?;
+        Ok(crate::runtime::EphemeralChildSession::new(
+            executor, deadline,
+        ))
+    }
+
+    pub async fn run_ephemeral_child(
+        &self,
+        session_id: String,
+        opts: crate::runtime::EphemeralChildOptions,
+        prompt: String,
+    ) -> anyhow::Result<crate::runtime::EphemeralChildOutcome> {
+        let mut child = self.spawn_ephemeral_child(session_id, opts).await?;
+        Ok(child.run_turn(prompt).await)
+    }
+
+    pub fn write_artifact(
+        &self,
+        tool: &str,
+        description: &str,
+        content: &str,
+    ) -> anyhow::Result<crate::runtime::ArtifactRef> {
+        let record = self
+            .ctx
+            .stores
+            .artifacts
+            .write_text(tool, description, content)?;
+        let path = self.session.artifacts_dir.join(&record.path);
+        let sha256 = crate::runtime::internal_turn::sha256_hex(content.as_bytes());
+        Ok(crate::runtime::ArtifactRef {
+            url: format!("artifact://{}", record.id),
+            id: record.id,
+            tool: record.tool,
+            path,
+            sha256,
+            bytes: record.bytes,
+        })
+    }
+
+    pub fn import_artifact(
+        &self,
+        source_path: &std::path::Path,
+        label: &str,
+    ) -> anyhow::Result<crate::runtime::ArtifactRef> {
+        let content = std::fs::read_to_string(source_path)?;
+        self.write_artifact(label, label, &content)
+    }
+
+    pub fn artifact_reader(&self) -> crate::runtime::internal_turn::ArtifactReader {
+        crate::runtime::internal_turn::ArtifactReader {
+            artifacts: self.ctx.stores.artifacts.clone(),
+            artifacts_dir: self.session.artifacts_dir.clone(),
+        }
+    }
+
+    pub fn extension_emitter(&self) -> crate::runtime::internal_turn::ExtensionEmitter {
+        crate::runtime::internal_turn::ExtensionEmitter {
+            event_display: self.event_display.clone(),
+            ctx: self.ctx.clone(),
+        }
+    }
+
+    pub fn find_artifact(&self, id: &str) -> anyhow::Result<Option<crate::runtime::ArtifactRef>> {
+        self.artifact_reader().find(id)
+    }
+
+    pub fn read_artifact_text(&self, id: &str) -> anyhow::Result<String> {
+        self.ctx.stores.artifacts.read_text(id)
+    }
+
+    pub fn format_tool_result(&self, text: &str, max_bytes: usize) -> String {
+        crate::tools::runner::format_tool_result(text, max_bytes)
+    }
+
+    pub async fn execute_scoped_tool(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+    ) -> anyhow::Result<crate::runtime::ScopedToolOutcome> {
+        self.ctx.stores.persistence_fault.check()?;
+        let fields = input
+            .as_object()
+            .map(|obj| {
+                obj.iter()
+                    .map(|(k, v)| {
+                        let rendered = v
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| v.to_string());
+                        (k.clone(), rendered)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let call = crate::protocol::ToolCallEvent {
+            id: format!("scoped-{}", name.to_ascii_lowercase()),
+            name: name.to_string(),
+            input_json: input,
+            fields,
+            parse_error: None,
+            raw_arguments_digest: None,
+        };
+        let tool_ctx = Arc::new(crate::context::ToolContext::from_shared(&self.ctx));
+        let result = crate::tools::runner::ToolRunner::new(tool_ctx)
+            .execute_verifier_call(call)
+            .await?;
+        Ok(crate::runtime::ScopedToolOutcome {
+            succeeded: result.succeeded(),
+            content: result.content,
+            exit_code: result.exit_code,
+            artifacts: result
+                .artifacts
+                .into_iter()
+                .map(|a| format!("artifact://{}", a.id))
+                .collect(),
+        })
+    }
+
+    pub fn persistence_fault(&self) -> crate::session::persistence::PersistenceFault {
+        self.ctx.stores.persistence_fault.clone()
+    }
+
+    pub fn check_persistence_fault(&self) -> anyhow::Result<()> {
+        self.ctx.stores.persistence_fault.check()
+    }
+
+    pub fn latch_persistence_fault(&self, detail: &str) {
+        let _ = self
+            .ctx
             .stores
             .persistence_fault
-            .check()
-            .map_err(|e| RuntimeError::Command(format!("{e:#}")))
+            .raise(&self.session.conversation_path, detail.to_string());
     }
-    pub(crate) fn stream_goal_iteration(
-        &self,
-        conversation_start: usize,
-    ) -> RuntimeResult<AgentEventStream> {
-        let input = crate::runtime::HumanInput {
-            request_id: String::new(),
-            text: String::new(),
-            target_turn_id: None,
-            attachment_ids: Vec::new(),
-        };
-        self.stream_input_inner_with_source(input, None, false, Some(conversation_start), None)
-            .map(|(_, stream)| stream.expect("goal stream"))
+
+    pub fn tool_surface_fingerprint(&self) -> String {
+        self.ctx.tools.tool_surface.fingerprint().to_string()
     }
-    pub(crate) fn stream_goal_draft_discussion(
-        &self,
-        prompt: String,
-        source: crate::session::goal::GoalDraftDiscussion,
-    ) -> RuntimeResult<AgentEventStream> {
-        let input = crate::runtime::HumanInput {
-            request_id: String::new(),
-            text: prompt,
-            target_turn_id: None,
-            attachment_ids: Vec::new(),
-        };
-        self.stream_input_inner_with_source(input, None, false, None, Some(source))
-            .map(|(_, stream)| stream.expect("draft discussion stream"))
+
+    pub fn has_tool(&self, name: &str) -> bool {
+        self.ctx.tools.tool_surface.has(name)
     }
+
+    pub fn has_reachable_tool(&self, name: &str) -> bool {
+        self.ctx.tools.tool_surface.has_any_reachable(name)
+    }
+
+    pub fn max_context_tokens(&self) -> usize {
+        self.ctx.config.max_context_tokens
+    }
+
+    pub fn tool_result_max_bytes(&self) -> usize {
+        self.ctx.tools.tool_config.tool_result_max_bytes
+    }
+
+    pub fn active_model_name(&self) -> String {
+        self.ctx
+            .active_model
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .actual
+            .clone()
+    }
+
+    pub fn usage_records(&self) -> anyhow::Result<Vec<crate::session::usage::UsageRecord>> {
+        self.ctx.stores.usage.all_records()
+    }
+
+    pub fn session_dir(&self) -> std::path::PathBuf {
+        self.session.session_dir()
+    }
+
+    pub fn emit_extension_event(&self, kind: &str, payload: serde_json::Value) {
+        self.extension_emitter().emit_extension_event(kind, payload);
+    }
+
+    pub fn emit_live_extension_event(&self, kind: &str, payload: serde_json::Value) {
+        self.extension_emitter()
+            .emit_live_extension_event(kind, payload);
+    }
+
+    pub fn render_info(&self, message: &str) {
+        self.ctx.io.display.render_info(message);
+    }
+
+    pub fn render_error(&self, message: &str) {
+        self.ctx.io.display.render_error(message);
+    }
+
     pub fn interrupt_current_turn(&self) {
         let _guard = self
-            .goal_driver
+            .external_control
             .admission
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if !self.is_closed()
-            && self
-                .goal_snapshot()
-                .is_some_and(|g| g.status == crate::runtime::GoalStatus::Active)
+            && let Some(controller) = &_guard.controller
         {
-            match self
-                .goal_ctx
-                .stores
-                .goal_store
-                .pause_if_active("paused by user interrupt")
-            {
-                Ok(Some(goal)) => self.announce_goal(&goal),
-                Ok(None) => {}
-                Err(error) => {
-                    // The stop intent could not be stored: latch the stop for
-                    // the current run so it cannot keep scheduling, and report
-                    // the failure instead of a silent pause.
-                    self.stop_run_after_failed_stop_intent(&format!("{error:#}"));
-                    self.goal_ctx.io.display.render_error(&format!("{error:#}"));
-                }
-            }
+            controller.on_user_interrupt();
         }
+        let _ = self
+            .external_control
+            .stop_cause
+            .send_replace(Some(crate::runtime::StopCause::UserInterrupt));
         self.turn_gate.interrupt();
     }
 
@@ -952,11 +1279,6 @@ impl AgentRuntime {
         self.handle.clone()
     }
 
-    /// Access goal lifecycle and scheduling controls for this session.
-    pub fn goals(&self) -> crate::runtime::GoalController<'_> {
-        self.handle.goals()
-    }
-
     pub async fn run_turn(&self, input: impl Into<String>) -> RuntimeResult<TurnOutcome> {
         self.handle.run_turn(input).await
     }
@@ -989,33 +1311,53 @@ impl AgentRuntime {
 
     pub async fn shutdown(mut self) -> RuntimeResult<()> {
         self.shutdown_called = true;
-        self.handle.goal_driver.disable();
+        let controller = self
+            .handle
+            .external_control
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .controller
+            .clone();
+        if let Some(controller) = &controller {
+            controller.on_shutdown_disable();
+        }
+        let _ = self
+            .handle
+            .external_control
+            .stop_cause
+            .send_replace(Some(crate::runtime::StopCause::RuntimeShutdown));
         // Cancellation is the runtime's own stop signal and must land before the
-        // turn-gate interrupt: an in-flight goal round settles as a pause only
-        // when the gate was interrupted without the runtime being cancelled, and
-        // a normal shutdown must keep the goal's active intent for the next open
-        // (see `docs/reference/goals.md`).
+        // turn-gate interrupt: an in-flight external round settles as a pause
+        // only when the gate was interrupted without the runtime being cancelled,
+        // and a normal shutdown keeps active intent for the next open.
         self.ctx.cancel.cancel();
         let had_active = self.handle.turn_gate.close_and_interrupt();
         let turn_timed_out = had_active
             && tokio::time::timeout(Duration::from_secs(5), self.handle.turn_gate.wait_idle())
                 .await
                 .is_err();
-        // Wait for the driver's actual exit, not for a disk status: a run that
-        // faulted before it could publish still counts as exited, while a
-        // running one must finish (or hit the bounded wait).
-        let goal_wait = if self.handle.goal_driver.is_active() {
-            tokio::time::timeout(Duration::from_secs(5), self.handle.wait_goal())
+        // Wait for any active external run to exit (bounded).
+        let ext_wait = if let Some(controller) = &controller
+            && controller.is_active()
+        {
+            tokio::time::timeout(Duration::from_secs(5), controller.wait_exit())
                 .await
                 .is_err()
         } else {
             false
         };
-        // Late waiters observe the terminal lifecycle instead of hanging on a
-        // run that will never report again.
-        self.handle.goal_driver.close();
+        if let Some(controller) = &controller {
+            controller.on_shutdown_close();
+        }
+        self.handle
+            .external_control
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .controller = None;
         let mut failures = Vec::new();
-        let mut shutdown_timed_out = turn_timed_out || goal_wait;
+        let mut shutdown_timed_out = turn_timed_out || ext_wait;
         if let Some(mut orchestrator) = self.orch_handle.take() {
             if turn_timed_out {
                 orchestrator.abort();

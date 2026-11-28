@@ -13,17 +13,10 @@ async fn send_set_model(
     Ok(())
 }
 
-async fn send_user_input(
+async fn send_user_input_with_internal(
     tx: &tokio::sync::mpsc::UnboundedSender<OrchCmd>,
     input: &str,
-) -> anyhow::Result<crate::agent::orchestrator::TurnRunResult> {
-    send_user_input_with_iteration(tx, input, None).await
-}
-
-async fn send_user_input_with_iteration(
-    tx: &tokio::sync::mpsc::UnboundedSender<OrchCmd>,
-    input: &str,
-    goal_iteration: Option<crate::session::goal::IterationKey>,
+    internal: Option<crate::agent::orchestrator::InternalTurnExecution>,
 ) -> anyhow::Result<crate::agent::orchestrator::TurnRunResult> {
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let turn_id = crate::runtime::TurnId::new("test-turn");
@@ -33,15 +26,20 @@ async fn send_user_input_with_iteration(
         None,
     ));
     tx.send(OrchCmd::UserInput {
-        goal_draft: None,
-        goal_source: None,
-        goal_iteration,
+        internal: internal.map(Box::new),
         input: input.into(),
         turn_id,
         emitter,
         done: done_tx,
     })?;
     Ok(done_rx.await?)
+}
+
+async fn send_user_input(
+    tx: &tokio::sync::mpsc::UnboundedSender<OrchCmd>,
+    input: &str,
+) -> anyhow::Result<crate::agent::orchestrator::TurnRunResult> {
+    send_user_input_with_internal(tx, input, None).await
 }
 
 #[tokio::test]
@@ -339,7 +337,7 @@ async fn orchestrator_cancel_signal_shuts_actor_down() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn goal_settlement_failure_is_the_published_terminal() -> anyhow::Result<()> {
+async fn internal_settlement_failure_is_the_published_terminal() -> anyhow::Result<()> {
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
         vec![vec![
@@ -356,14 +354,18 @@ async fn goal_settlement_failure_is_the_published_terminal() -> anyhow::Result<(
     let actor = OrchActor::new(h.ctx.clone(), rx);
     let handle = tokio::spawn(actor.run());
 
-    // A key that names no goal forces the identity-bound settlement to fail
-    // after the turn has already completed normally.
-    let key = crate::session::goal::IterationKey {
-        goal_id: "missing-goal".into(),
-        iteration: 1,
-        turn_id: "test-turn".into(),
-    };
-    let result = send_user_input_with_iteration(&tx, "finish", Some(key)).await?;
+    // A settlement hook that fails forces persistence-fault latching even
+    // after the turn itself completed normally.
+    let mut req = crate::runtime::InternalTurnRequest::new("test_internal", "finish");
+    req.on_before_final = Some(Arc::new(|_ctx| {
+        Box::pin(async { anyhow::bail!("injected settlement failure") })
+    }));
+    let result = send_user_input_with_internal(
+        &tx,
+        "finish",
+        Some(crate::agent::orchestrator::InternalTurnExecution { request: req }),
+    )
+    .await?;
     assert_eq!(
         result.status,
         crate::runtime::TurnStatus::Failed,

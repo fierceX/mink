@@ -24,15 +24,12 @@ pub(crate) fn load_session_history(events_path: &Path) -> LoadedHistory {
             true,
             None,
         )
-        && rows
-            .iter()
-            .any(crate::runtime::session::SessionReader::row_needs_conversation_replay)
+        && rows.iter().any(|row| {
+            crate::runtime::session::SessionReader::row_needs_conversation_replay(row)
+                || mink_goal::row_needs_goal_replay(row)
+        })
     {
-        let entries: Vec<_> = rows
-            .iter()
-            .flat_map(crate::runtime::session::SessionReader::decode_conversation_row)
-            .collect();
-        return build_history_from_transcript(&entries);
+        return build_history_from_rows(&rows);
     }
     if !events_path.exists() {
         return LoadedHistory {
@@ -103,70 +100,87 @@ fn finalize_loaded_history(mut state: TuiState) -> LoadedHistory {
     }
 }
 
+fn apply_transcript_entry(state: &mut TuiState, entry: &crate::runtime::session::TranscriptEntry) {
+    use crate::runtime::session::TranscriptEntry;
+    match entry {
+        TranscriptEntry::WebSource(source) => {
+            state.finalize_stream();
+            state.apply(TuiSignal::Info(source.clone()));
+        }
+        TranscriptEntry::User { text, guidance } => {
+            push_user_line(state, text, *guidance);
+        }
+        TranscriptEntry::Thinking(content) => {
+            state.apply(TuiSignal::Thinking(content.clone()));
+        }
+        TranscriptEntry::Text(content) => {
+            state.apply(TuiSignal::Text(content.clone()));
+        }
+        TranscriptEntry::ToolCall {
+            id,
+            name,
+            summary,
+            input,
+        } => {
+            state.apply(TuiSignal::ToolCall {
+                tool_use_id: (!id.is_empty()).then(|| id.clone()),
+                tool_name: name.clone(),
+                summary: summary.clone(),
+                input: (!input.is_null()).then(|| input.clone()),
+            });
+        }
+        TranscriptEntry::ToolResult {
+            tool_use_id,
+            tool_name,
+            content,
+            status,
+            exit_code,
+            result_kind,
+            presentation,
+            artifacts,
+        } => {
+            state.apply(TuiSignal::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                tool_name: tool_name.clone(),
+                content: content.clone(),
+                status: *status,
+                exit_code: *exit_code,
+                result_kind: *result_kind,
+                presentation: presentation.clone(),
+                artifacts: artifacts.clone(),
+            });
+        }
+    }
+}
+
+fn build_history_from_rows(rows: &[serde_json::Value]) -> LoadedHistory {
+    let mut state = TuiState::default();
+    for row in rows {
+        if let Some(boundary) = mink_goal::decode_goal_boundary(row) {
+            match boundary {
+                mink_goal::GoalBoundaryEvent::Card(message) => {
+                    state.apply(TuiSignal::GoalCard(message));
+                }
+                mink_goal::GoalBoundaryEvent::Ended { goal_id, revision } => {
+                    state.apply(TuiSignal::GoalEnded { goal_id, revision });
+                }
+            }
+            continue;
+        }
+        for entry in crate::runtime::session::SessionReader::decode_conversation_row(row) {
+            apply_transcript_entry(&mut state, &entry);
+        }
+    }
+    finalize_loaded_history(state)
+}
+
+#[cfg(test)]
 fn build_history_from_transcript(
     entries: &[crate::runtime::session::TranscriptEntry],
 ) -> LoadedHistory {
-    use crate::runtime::session::TranscriptEntry;
     let mut state = TuiState::default();
     for entry in entries {
-        match entry {
-            TranscriptEntry::GoalCard(message) => {
-                state.apply(TuiSignal::GoalCard(message.clone()));
-            }
-            TranscriptEntry::GoalEnded { goal_id, revision } => {
-                state.apply(TuiSignal::GoalEnded {
-                    goal_id: goal_id.clone(),
-                    revision: *revision,
-                });
-            }
-            TranscriptEntry::WebSource(source) => {
-                state.finalize_stream();
-                state.apply(TuiSignal::Info(source.clone()));
-            }
-            TranscriptEntry::User { text, guidance } => {
-                push_user_line(&mut state, text, *guidance);
-            }
-            TranscriptEntry::Thinking(content) => {
-                state.apply(TuiSignal::Thinking(content.clone()));
-            }
-            TranscriptEntry::Text(content) => {
-                state.apply(TuiSignal::Text(content.clone()));
-            }
-            TranscriptEntry::ToolCall {
-                id,
-                name,
-                summary,
-                input,
-            } => {
-                state.apply(TuiSignal::ToolCall {
-                    tool_use_id: (!id.is_empty()).then(|| id.clone()),
-                    tool_name: name.clone(),
-                    summary: summary.clone(),
-                    input: (!input.is_null()).then(|| input.clone()),
-                });
-            }
-            TranscriptEntry::ToolResult {
-                tool_use_id,
-                tool_name,
-                content,
-                status,
-                exit_code,
-                result_kind,
-                presentation,
-                artifacts,
-            } => {
-                state.apply(TuiSignal::ToolResult {
-                    tool_use_id: tool_use_id.clone(),
-                    tool_name: tool_name.clone(),
-                    content: content.clone(),
-                    status: *status,
-                    exit_code: *exit_code,
-                    result_kind: *result_kind,
-                    presentation: presentation.clone(),
-                    artifacts: artifacts.clone(),
-                });
-            }
-        }
+        apply_transcript_entry(&mut state, entry);
     }
     finalize_loaded_history(state)
 }
@@ -306,7 +320,7 @@ pub(crate) fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<Trans
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::GoalMessageKind;
+    use mink_goal::GoalMessageKind;
 
     #[test]
     fn web_history_restores_calls_and_sources_from_conversation() {
@@ -452,11 +466,7 @@ mod tests {
                 "_mink":{"internal":true,"goal_id":"goal-1","goal_revision":9,"goal_state_kind":"ended"}
             }),
         ];
-        let entries: Vec<_> = rows
-            .iter()
-            .flat_map(crate::runtime::session::SessionReader::decode_conversation_row)
-            .collect();
-        let items = build_history_from_transcript(&entries).lines;
+        let items = build_history_from_rows(&rows).lines;
         let text = items
             .iter()
             .map(|item| item.text.clone())

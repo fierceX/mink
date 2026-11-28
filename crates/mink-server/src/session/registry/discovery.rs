@@ -193,9 +193,10 @@ impl Registry {
             )
             .await?;
             drop(seed_lease);
-            let runtime = SessionRuntime::open(
+            let runtime = SessionRuntime::open_with_goal_plugin(
                 self.build_options(&session_id, cwd)?
                     .with_session(SessionPolicy::Resume(session_id.clone())),
+                self.build_goal_plugin(),
             )
             .await?;
             runtime.shutdown().await?;

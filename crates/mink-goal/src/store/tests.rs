@@ -465,8 +465,8 @@ fn recovery_resolves_effects_by_physical_sequence_after_blank_lines() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-#[tokio::test]
-async fn checkpoint_is_bounded_and_terminal_facts_are_published_once() {
+#[test]
+fn checkpoint_is_bounded_and_ended_text_is_rendered() {
     let (dir, store) = store();
     let mut spec = GoalSpec::new("x".repeat(4000));
     spec.set_acceptance_criteria(vec!["proof".into()]);
@@ -476,13 +476,7 @@ async fn checkpoint_is_bounded_and_terminal_facts_are_published_once() {
     assert!(checkpoint["content"].as_str().unwrap().chars().count() < 400);
     assert_eq!(store.snapshot().unwrap().spec.objective.len(), 4000);
 
-    let history = crate::session::store::ConversationStore::new(dir.join("conversation.jsonl"));
-    history.ensure().await.unwrap();
-    assert!(
-        !store.append_ended_row(&history, 4096).await.unwrap(),
-        "a live goal has no terminal row"
-    );
-    store
+    let ended = store
         .change(&goal.id, goal.revision, |g| {
             g.status = GoalStatus::Completed;
             g.completion_basis = Some(GoalCompletionBasis::ModelReported);
@@ -490,15 +484,8 @@ async fn checkpoint_is_bounded_and_terminal_facts_are_published_once() {
             Ok(())
         })
         .unwrap();
-    assert!(store.append_ended_row(&history, 4096).await.unwrap());
-    assert!(
-        !store.append_ended_row(&history, 4096).await.unwrap(),
-        "the terminal row is published exactly once"
-    );
-    let lines = history.lines().await.unwrap();
-    assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0]["_mink"]["goal_state_kind"], "ended");
-    assert_eq!(lines[0]["_mink"]["internal"], true);
+    let ended_text = state_text(&ended, GoalStateKind::Ended, 4096);
+    assert!(ended_text.contains("Status: completed"));
     assert!(
         store.checkpoint(4096).unwrap().is_none(),
         "a terminal goal leaves the request prefix alone"
@@ -508,7 +495,7 @@ async fn checkpoint_is_bounded_and_terminal_facts_are_published_once() {
 
 #[test]
 fn crash_usage_reconciliation_counts_all_kinds_once_and_unknown_attempts() {
-    use crate::session::usage::{TokenUsage, UsageKind, UsageRecord, UsageStatus};
+    use mink::runtime::{TokenUsage, UsageKind, UsageRecord, UsageStatus};
     let (dir, store) = store();
     let goal = store.create(GoalSpec::new("work"), "env".into()).unwrap();
     store
@@ -605,7 +592,7 @@ fn settled_failure_is_not_restarted_and_report_is_idempotent() {
                 billing_turn_id: None,
                 finished: true,
                 conversation_start: 0,
-                outcome_status: Some(crate::runtime::TurnStatus::Failed),
+                outcome_status: Some(mink::runtime::TurnStatus::Failed),
                 outcome_error: Some("format_recovery_exhausted".into()),
             });
             Ok(())

@@ -30,10 +30,10 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         llm_backend,
         resource_session_id,
         custom_tools,
+        turn_policies,
+        checkpoint_providers,
         prefix_source,
         post_init_hook,
-        goal_verifiers,
-        goal_event_sink,
         ptc_runtime,
     } = config;
 
@@ -73,7 +73,7 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         llm_backend.unwrap_or_else(|| Arc::new(OpenAiCompatibleBackend::from_config(&config)));
     let resource_session_id = resource_session_id.unwrap_or_else(|| sid.clone());
     let built = build_agent_context(AgentContextBuild {
-        goal_review: None,
+        role_override: None,
         session_lease: Some(lease.clone()),
         config: config.clone(),
         home: home.clone(),
@@ -101,8 +101,14 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         resource_router: None,
         capability_snapshot: None,
         custom_tools,
+        turn_policies,
+        checkpoint_providers,
         prefix_source,
         ptc_runtime,
+        billing_turn_id_override: None,
+        default_tool_mask: None,
+        default_tool_observer: None,
+        budget_check: None,
     })
     .await?;
     let ctx = built.ctx;
@@ -194,13 +200,11 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
     }
 
     let session_info = SessionInfo::new(sid, session_ref, new_session, home, cwd, &spaths);
+    let external_control = Arc::new(crate::runtime::internal_turn::ExternalControlState::new());
     let handle = crate::runtime::AgentRuntimeHandle {
         input_inbox: ctx.stores.input_inbox.clone(),
-        goal_ctx: ctx.clone(),
-        goal_driver: Arc::new(crate::runtime::goal::GoalDriver::new(
-            goal_verifiers,
-            goal_event_sink,
-        )),
+        ctx: ctx.clone(),
+        external_control,
         image_input: ctx.tools.model_capabilities.image_input.clone(),
         cmd_tx,
         session: session_info,

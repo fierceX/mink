@@ -41,6 +41,14 @@ pub(crate) fn classify_event(evt: &Value) -> ReplayEventKind {
         "assistant_message" => ReplayEventKind::AssistantMessage,
         "prefix_snapshot" => ReplayEventKind::PrefixSnapshot,
         "goal_updated" | "goal_finished" => ReplayEventKind::GoalLifecycle,
+        "extension"
+            if matches!(
+                evt.get("kind").and_then(Value::as_str),
+                Some("goal_updated" | "goal_finished")
+            ) =>
+        {
+            ReplayEventKind::GoalLifecycle
+        }
         "session_start" | "usage" | "stop" | "retry" => ReplayEventKind::Ignored,
         _ => ReplayEventKind::Unknown,
     }

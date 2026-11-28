@@ -1,7 +1,5 @@
 use anyhow::{Result, anyhow};
-use mink::runtime::{
-    AgentEvent, AgentEventStream, AgentOptions, AgentRuntime, GoalSnapshot, SessionInfo,
-};
+use mink::runtime::{AgentEvent, AgentEventStream, AgentOptions, AgentRuntime, SessionInfo};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
@@ -80,6 +78,7 @@ pub(super) enum GuardedTurnResult {
 
 pub(super) struct RuntimeState {
     pub(super) runtime: Option<AgentRuntime>,
+    pub(super) goals: Option<Arc<mink_goal::GoalEngine>>,
     pub(super) phase: RuntimePhase,
     pub(super) turn_task: Option<JoinHandle<Result<()>>>,
     pub(super) last_idle: Instant,
@@ -107,7 +106,15 @@ pub struct SessionRuntime {
 }
 
 impl SessionRuntime {
+    #[cfg(test)]
     pub async fn open(options: AgentOptions) -> Result<Self> {
+        Self::open_with_goal_plugin(options, mink_goal::GoalPlugin::new()).await
+    }
+
+    pub async fn open_with_goal_plugin(
+        mut options: AgentOptions,
+        mut goal_plugin: mink_goal::GoalPlugin,
+    ) -> Result<Self> {
         // Goal turns bypass `submit_input`, so without a sink their body, tool
         // calls, formal history and final never reach the mirror. The
         // projection is built below, so the sink reaches it through a slot that
@@ -115,12 +122,24 @@ impl SessionRuntime {
         let goal_projection: Arc<OnceLock<Arc<Mutex<Projection>>>> = Arc::new(OnceLock::new());
         let (event_tx, _) = broadcast::channel(1024);
         let stream_sequence = Arc::new(AtomicU64::new(1));
-        let options = options.with_goal_event_sink(Arc::new(GoalTurnSink {
+        goal_plugin = goal_plugin.with_event_sink(Arc::new(GoalTurnSink {
             tx: event_tx.clone(),
             sequence: Arc::clone(&stream_sequence),
             projection: goal_projection.clone(),
         }));
+        goal_plugin.install_into(&mut options);
         let runtime = AgentRuntime::start(options).await?;
+        let goals = match mink_goal::GoalEngine::attach(runtime.handle(), goal_plugin) {
+            Ok(goals) => goals,
+            Err(error) => {
+                return match runtime.shutdown().await {
+                    Ok(()) => Err(anyhow::Error::from(error).context("cannot attach goal engine")),
+                    Err(shutdown) => Err(anyhow!(
+                        "cannot attach goal engine: {error:#}; cleanup failed: {shutdown}"
+                    )),
+                };
+            }
+        };
         let info = runtime.session_info();
         let directory = info
             .conversation_path
@@ -157,7 +176,7 @@ impl SessionRuntime {
         // goal must be visible in the first snapshot without a state read. A
         // cleared (hidden) goal is seeded as null, exactly like every later
         // publication normalizes it.
-        let goal = runtime.goals().snapshot().filter(|goal| !goal.hidden);
+        let goal = goals.snapshot().filter(|goal| !goal.hidden);
         let has_older = rows
             .first()
             .and_then(|r| r.get("seq"))
@@ -192,12 +211,13 @@ impl SessionRuntime {
         ));
         // Subscribe before the runtime is moved into state: the watch channel
         // carries every later lifecycle change and replays the current value.
-        let mut goal_updates = runtime.goals().subscribe();
-        let mut goal_turns = runtime.goals().subscribe_turns();
+        let mut goal_updates = goals.subscribe();
+        let mut goal_turns = goals.subscribe_turns();
         let projection = Arc::new(Mutex::new(projection));
         let _ = goal_projection.set(projection.clone());
         let state = Arc::new(Mutex::new(RuntimeState {
             runtime: Some(runtime),
+            goals: Some(goals),
             phase: RuntimePhase::Idle,
             turn_task: None,
             last_idle: Instant::now(),
@@ -321,10 +341,6 @@ impl SessionRuntime {
     /// Named after what it is rather than `goal_handle` so model switching and
     /// manual compaction do not read as goal operations.
     pub fn handle(&self) -> Option<mink::runtime::AgentRuntimeHandle> {
-        self.goal_handle()
-    }
-
-    pub fn goal_handle(&self) -> Option<mink::runtime::AgentRuntimeHandle> {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -333,39 +349,29 @@ impl SessionRuntime {
             .map(mink::runtime::AgentRuntime::handle)
     }
 
+    pub fn goals(&self) -> Option<Arc<mink_goal::GoalEngine>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .goals
+            .clone()
+    }
+
     /// Live goal snapshot, falling back to the persisted file when no runtime
     /// is open so a closed session still reports what it left behind.
-    pub fn goal_snapshot(&self) -> Option<mink::runtime::GoalSnapshot> {
-        if let Some(goal) = self
-            .goal_handle()
-            .and_then(|handle| handle.goals().snapshot())
-        {
+    pub fn goal_snapshot(&self) -> Option<mink_goal::GoalSnapshot> {
+        if let Some(goal) = self.goals().and_then(|goals| goals.snapshot()) {
             return Some(goal);
         }
         self.persisted_goal()
     }
 
-    pub fn persisted_goal(&self) -> Option<mink::runtime::GoalSnapshot> {
-        mink::runtime::session::read_goal_snapshot(&self.goal_path())
+    pub fn persisted_goal(&self) -> Option<mink_goal::GoalSnapshot> {
+        mink_goal::read_goal_snapshot(&self.goal_path())
     }
 
     fn goal_path(&self) -> std::path::PathBuf {
-        let directory = self
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .runtime
-            .as_ref()
-            .map(|runtime| runtime.session_info().goal_path());
-        directory
-            .or_else(|| Some(self.goal_fallback_path()))
-            .unwrap_or_default()
-    }
-
-    fn goal_fallback_path(&self) -> std::path::PathBuf {
-        // Only reached once the runtime is dropped; the session directory is
-        // recovered from the projection's stored artifact root.
-        self.goal_dir.join("goal.json")
+        mink_goal::goal_path(&self.goal_dir)
     }
 
     pub fn inbox(&self) -> &Arc<mink::runtime::InputInbox> {
@@ -541,6 +547,7 @@ impl SessionRuntime {
                             &projection,
                             serde_json::json!({"type":"phase_updated","phase":"closing"}),
                         );
+                        state.goals = None;
                         state.runtime.take()
                     };
                     let owns_runtime_shutdown = runtime.is_some();
@@ -625,6 +632,7 @@ impl SessionRuntime {
             if let Some(runtime) = &state.runtime {
                 runtime.interrupt_current_turn();
             }
+            state.goals = None;
             (state.turn_task.take(), state.runtime.take())
         };
         let turn_join_grace = if runtime.is_none() {

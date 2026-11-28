@@ -10,9 +10,10 @@
 
 use anyhow::{Result, anyhow};
 use mink::runtime::{
-    AgentOptions, AgentRuntime, GoalSpec, GoalStatus, LlmBackend, LlmEvent, LlmRequest,
-    LlmResponseStream, LlmStopEvent, LlmTextEvent, LlmToolCallEvent,
+    AgentOptions, AgentRuntime, LlmBackend, LlmEvent, LlmRequest, LlmResponseStream, LlmStopEvent,
+    LlmTextEvent, LlmToolCallEvent,
 };
+use mink_goal::{GoalEngine, GoalPlugin, GoalReviewCandidate, GoalSpec, GoalStatus};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -148,25 +149,25 @@ async fn goal_rounds_extend_the_request_prefix_instead_of_rewriting_it() -> Resu
     let (home, cwd) = temp_pair("extend");
     std::fs::write(cwd.join("proof.txt"), "objective evidence")?;
     let backend = Arc::new(GoalScriptBackend::new());
-    let runtime =
-        AgentRuntime::start(AgentOptions::new(&home, &cwd).with_llm_backend(backend.clone()))
-            .await?;
+    let plugin = GoalPlugin::new();
+    let mut options = AgentOptions::new(&home, &cwd).with_llm_backend(backend.clone());
+    plugin.install_into(&mut options);
+    let runtime = AgentRuntime::start(options).await?;
     let handle = runtime.handle();
+    let goals = GoalEngine::attach(handle.clone(), plugin)?;
 
     // A turn before the goal proves that starting a goal appends rather than
     // inserting: the goal state may not appear in front of existing history.
     handle.run_turn("warm up").await?;
-    handle.goals().start_driver_and_run()?;
+    goals.start_driver_and_run()?;
     let mut spec = GoalSpec::new("ship the parser");
     spec.limits.max_turns = 2;
-    let draft = handle.goals().draft(spec, 3600)?;
-    let created = handle.goals().confirm(&draft.id, draft.revision)?;
+    let draft = goals.draft(spec, 3600)?;
+    let created = goals.confirm(&draft.id, draft.revision)?;
     let mut limits = created.spec.limits.clone();
     limits.max_turns = 2;
-    let _ = handle
-        .goals()
-        .update_limits(&created.id, created.revision, limits);
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), handle.goals().wait())
+    let _ = goals.update_limits(&created.id, created.revision, limits);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), goals.wait())
         .await
         .map_err(|_| anyhow!("goal run timed out"))??;
     assert_eq!(outcome.status, GoalStatus::Completed, "{outcome:?}");
@@ -265,8 +266,6 @@ async fn goal_rounds_extend_the_request_prefix_instead_of_rewriting_it() -> Resu
     let _ = std::fs::remove_dir_all(home.parent().unwrap());
     Ok(())
 }
-
-use mink::runtime::GoalReviewCandidate;
 
 fn natural_goal_end() -> Vec<anyhow::Result<LlmEvent>> {
     vec![

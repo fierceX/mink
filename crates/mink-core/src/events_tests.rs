@@ -244,25 +244,17 @@ fn legacy_sub_agent_events_decode_without_optional_catalog_fields() {
 }
 
 #[test]
-fn goal_updated_serializes_with_expected_type_and_roundtrips() {
-    let dir = std::env::temp_dir().join(format!("mink-events-goal-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let store = crate::session::goal::GoalStore::load(&dir, Default::default()).unwrap();
-    let snap = store
-        .create(
-            crate::session::goal::GoalSpec::new("ship feature"),
-            "env".into(),
-        )
-        .unwrap();
-    let id = snap.id.clone();
-    let event = EventLog::GoalUpdated {
-        goal: Box::new(snap),
+fn extension_event_serializes_with_expected_type_and_roundtrips() {
+    let event = EventLog::Extension {
+        kind: "custom_updated".into(),
+        payload: serde_json::json!({"id": "ext-1", "status": "active"}),
     };
     let value = serde_json::to_value(&event).unwrap();
-    assert_eq!(value["type"], "goal_updated");
-    assert_eq!(value["goal"]["id"], id);
+    assert_eq!(value["type"], "extension");
+    assert_eq!(value["kind"], "custom_updated");
+    assert_eq!(value["payload"]["id"], "ext-1");
     let roundtrip: EventLog = serde_json::from_value(value).unwrap();
-    assert!(matches!(roundtrip, EventLog::GoalUpdated { goal } if goal.id == id));
-    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        matches!(roundtrip, EventLog::Extension { kind, payload } if kind == "custom_updated" && payload["id"] == "ext-1")
+    );
 }

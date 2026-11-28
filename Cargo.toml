@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/mink-core",
+    "crates/mink-goal",
     "crates/mink-cli",
     "crates/mink-server",
 ]

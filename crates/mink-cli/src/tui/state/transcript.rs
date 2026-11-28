@@ -80,7 +80,7 @@ pub(crate) struct TranscriptItem {
     pub presentation: Option<ToolPresentation>,
     pub artifacts: Vec<ArtifactDisplay>,
     /// Structured goal boundary payload; only `TranscriptKind::Goal` carries it.
-    pub goal_message: Option<crate::runtime::GoalMessage>,
+    pub goal_message: Option<mink_goal::GoalMessage>,
     pub sealed: bool,
     pub cached_lines: Option<Vec<Line<'static>>>,
     pub cached_width: u16,
@@ -177,7 +177,7 @@ impl TranscriptItem {
     ///
     /// The plain fallback text keeps Inline output self-contained; the Full
     /// renderer colours the same card through `TranscriptKind::Goal`.
-    pub(crate) fn goal_card(message: crate::runtime::GoalMessage) -> Self {
+    pub(crate) fn goal_card(message: mink_goal::GoalMessage) -> Self {
         let mut item = Self::new(goal_card_text(&message), TranscriptKind::Goal);
         item.goal_message = Some(message);
         item
@@ -242,8 +242,8 @@ impl TranscriptItem {
  * out of prose. The Inline projection and the collapsed Full summary both use
  * this text, while the Full renderer colours the same fields.
  */
-pub(crate) fn goal_card_text(message: &crate::runtime::GoalMessage) -> String {
-    use crate::runtime::GoalMessageKind;
+pub(crate) fn goal_card_text(message: &mink_goal::GoalMessage) -> String {
+    use mink_goal::GoalMessageKind;
     let label = match message.kind {
         GoalMessageKind::Draft => "目标草案讨论",
         GoalMessageKind::Start => "开始目标",

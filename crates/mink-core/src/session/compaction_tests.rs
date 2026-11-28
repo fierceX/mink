@@ -3091,24 +3091,50 @@ async fn emergency_checkpoint_keeps_long_request_ends_in_projection() -> anyhow:
     Ok(())
 }
 
-/// 未压缩时请求就是耐久历史本身：goal 状态一旦插到头部，每轮都会改写 provider 已经
-/// 见过的前缀，命中率随之归零。
+struct MutableTestCheckpointProvider {
+    marker: String,
+    round: std::sync::atomic::AtomicU64,
+}
+
+impl MutableTestCheckpointProvider {
+    fn new(marker: &str) -> Self {
+        Self {
+            marker: marker.to_string(),
+            round: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+impl CompactionCheckpointProvider for MutableTestCheckpointProvider {
+    fn render_checkpoint(&self, _max_chars: usize) -> Result<Option<CompactionCheckpoint>> {
+        let _round = self.round.load(std::sync::atomic::Ordering::SeqCst);
+        Ok(Some(CompactionCheckpoint {
+            content: format!("Contract: {}", self.marker),
+            metadata: json!({
+                "internal": true,
+                "checkpoint_state_kind": "contract",
+            }),
+        }))
+    }
+}
+
+/// 未压缩时请求就是耐久历史本身：provider checkpoint 一旦插到头部，每轮都会改写 provider
+/// 已经见过的前缀，命中率随之归零。
 #[tokio::test]
-async fn goal_state_is_not_mounted_before_a_compaction() -> anyhow::Result<()> {
-    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
-        "goal-no-head",
+async fn checkpoint_state_is_not_mounted_before_a_compaction() -> anyhow::Result<()> {
+    let provider = Arc::new(MutableTestCheckpointProvider::new("CONTRACT-MARKER"));
+    let ctx = crate::regression::test_context_for_agent_with_extensions(
+        "checkpoint-no-head",
         |config| {
             config.max_context_tokens = 64_000;
             config.context_reserve_tokens = 8_000;
             config.context_compact_tail_tokens = 1;
         },
         summary_backend(),
+        vec![provider],
+        Vec::new(),
     )
     .await?;
-    ctx.stores.goal_store.create(
-        crate::runtime::GoalSpec::new("GOAL-CONTRACT-MARKER"),
-        "env".into(),
-    )?;
     add_tool_history(&ctx).await?;
 
     let rows = ctx.stores.store.lines().await?;
@@ -3122,21 +3148,20 @@ async fn goal_state_is_not_mounted_before_a_compaction() -> anyhow::Result<()> {
 
 /// 压缩后的契约 checkpoint 挂在请求前缀里，必须逐字节稳定：只有每轮事实走尾部追加。
 #[tokio::test]
-async fn goal_contract_checkpoint_is_byte_stable_across_rounds() -> anyhow::Result<()> {
-    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
-        "goal-contract-stable",
+async fn checkpoint_provider_is_byte_stable_across_rounds() -> anyhow::Result<()> {
+    let provider = Arc::new(MutableTestCheckpointProvider::new("CONTRACT-MARKER"));
+    let ctx = crate::regression::test_context_for_agent_with_extensions(
+        "checkpoint-contract-stable",
         |config| {
             config.max_context_tokens = 64_000;
             config.context_reserve_tokens = 8_000;
             config.context_compact_tail_tokens = 1;
         },
         summary_backend(),
+        vec![provider.clone()],
+        Vec::new(),
     )
     .await?;
-    let goal = ctx.stores.goal_store.create(
-        crate::runtime::GoalSpec::new("GOAL-CONTRACT-MARKER"),
-        "env".into(),
-    )?;
     add_tool_history(&ctx).await?;
     add_follow_up_turn(&ctx).await?;
 
@@ -3145,75 +3170,52 @@ async fn goal_contract_checkpoint_is_byte_stable_across_rounds() -> anyhow::Resu
     let checkpoint = |messages: &[Value]| -> Value {
         messages
             .iter()
-            .find(|message| message["_mink"]["goal_state_kind"] == "contract")
+            .find(|message| message["_mink"]["checkpoint_state_kind"] == "contract")
             .cloned()
-            .expect("the compacted window carries the goal contract")
+            .expect("the compacted window carries the contract checkpoint")
     };
     let before = checkpoint(&ctx.stores.compaction.active_messages().await?);
     let text = before["content"].as_str().unwrap_or_default();
-    assert!(text.contains("GOAL-CONTRACT-MARKER"), "{text}");
-    for per_round in ["Round:", "Remaining turns", "Phase:", "Decision:"] {
-        assert!(
-            !text.contains(per_round),
-            "the mounted checkpoint must stay byte-stable across rounds: {per_round} in\n{text}"
-        );
-    }
+    assert!(text.contains("CONTRACT-MARKER"), "{text}");
 
     // Only per-round state moves between rounds.
-    ctx.stores
-        .goal_store
-        .change(&goal.id, goal.revision, |goal| {
-            goal.iterations.push(crate::session::goal::GoalIteration {
-                iteration: 1,
-                turn_id: "turn-1".into(),
-                billing_turn_id: None,
-                finished: true,
-                conversation_start: 0,
-                outcome_status: None,
-                outcome_error: None,
-            });
-            goal.phase = crate::session::goal::GoalPhase::Executing;
-            goal.reason = Some("round one finished".into());
-            goal.blocked_rounds = 2;
-            Ok(())
-        })?;
+    provider.round.store(2, std::sync::atomic::Ordering::SeqCst);
 
     let after = checkpoint(&ctx.stores.compaction.active_messages().await?);
     // `_mink` is engine metadata that never reaches the provider, so the wire
     // bytes are the content (see `llm::transport::convert_messages_to_openai`).
     assert_eq!(
         after["content"], before["content"],
-        "the goal contract checkpoint changed with per-round state"
+        "the contract checkpoint changed with per-round state"
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn second_compaction_summary_input_includes_goal_contract_checkpoint() -> anyhow::Result<()> {
+async fn second_compaction_summary_input_includes_checkpoint_provider() -> anyhow::Result<()> {
     let backend = Arc::new(CapturingSummaryBackend::default());
-    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
-        "goal-summary-prefix-align",
+    let provider = Arc::new(MutableTestCheckpointProvider::new("CACHE-ALIGN-MARKER"));
+    let ctx = crate::regression::test_context_for_agent_with_extensions(
+        "checkpoint-summary-prefix-align",
         |config| {
             config.max_context_tokens = 64_000;
             config.context_reserve_tokens = 8_000;
             config.context_compact_tail_tokens = 1;
         },
         backend.clone(),
+        vec![provider],
+        Vec::new(),
     )
     .await?;
-    ctx.stores.goal_store.create(
-        crate::runtime::GoalSpec::new("GOAL-CACHE-ALIGN-MARKER"),
-        "env".into(),
-    )?;
     add_tool_history(&ctx).await?;
     add_follow_up_turn(&ctx).await?;
     let (first_ok, first_detail) = compact(&ctx, "manual", 40_000).await?;
     assert!(first_ok, "{first_detail}");
 
     // Add more turns, record the agent request that would have been sent with
-    // `active_messages()` (which carries summary + goal contract checkpoint),
+    // `active_messages()` (which carries summary + contract checkpoint),
     // and compact a second time: the cache-aligned summary input must match the
-    // prefix including the goal contract checkpoint instead of diverging at index 1.
+    // prefix including the contract checkpoint instead of diverging at index 1.
     add_tool_history(&ctx).await?;
     add_follow_up_turn(&ctx).await?;
     let active = ctx.stores.compaction.active_messages().await?;
@@ -3237,14 +3239,14 @@ async fn second_compaction_summary_input_includes_goal_contract_checkpoint() -> 
 
     let requests = backend.requests.lock().unwrap();
     let second_req = requests.last().expect("second summary request");
-    let has_goal_checkpoint = second_req.messages.iter().any(|msg| {
+    let has_checkpoint = second_req.messages.iter().any(|msg| {
         msg["content"]
             .as_str()
-            .is_some_and(|text| text.contains("GOAL-CACHE-ALIGN-MARKER"))
+            .is_some_and(|text| text.contains("CACHE-ALIGN-MARKER"))
     });
     assert!(
-        has_goal_checkpoint,
-        "second compaction summary input must include the goal contract checkpoint for prefix alignment: {:?}",
+        has_checkpoint,
+        "second compaction summary input must include the checkpoint for prefix alignment: {:?}",
         second_req.messages
     );
     assert!(

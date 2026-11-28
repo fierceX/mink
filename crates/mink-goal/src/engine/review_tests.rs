@@ -1,24 +1,27 @@
+use super::test_helpers::*;
 use super::*;
+use mink::runtime::*;
 
 #[tokio::test]
 async fn goal_missing_review_blocks_without_a_report_repair_round() {
-    use crate::runtime::{GoalSpec, GoalStatus};
     let home = unique_temp_dir("goal-missing-home");
     let cwd = unique_temp_dir("goal-missing-cwd");
     std::fs::create_dir_all(&cwd).unwrap();
-    let runtime = build_runtime(runtime_config_with_mock(&home, &cwd, mock_llm_hello()))
-        .await
-        .unwrap();
+    let backend = Arc::new(ScriptedMockLlmBackend::new("flash", vec![]));
+    let (runtime, goals) = start_with_goal(
+        AgentOptions::new(&home, &cwd).with_llm_backend(backend),
+        GoalPlugin::new(),
+    )
+    .await
+    .unwrap();
     let handle = runtime.handle();
-    handle
-        .confirmed_test_goal(GoalSpec::new("do work"))
-        .unwrap();
+    confirmed_test_goal(&goals, GoalSpec::new("do work")).unwrap();
     assert!(matches!(
         handle.stream_turn("other"),
-        Err(crate::runtime::RuntimeError::GoalActive)
+        Err(RuntimeError::ExternallyControlled { .. })
     ));
-    handle.goals().start_driver_and_run().unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), handle.goals().wait())
+    goals.start_driver_and_run().unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), goals.wait())
         .await
         .unwrap()
         .unwrap();
@@ -26,11 +29,8 @@ async fn goal_missing_review_blocks_without_a_report_repair_round() {
     assert_eq!(result.iterations.len(), 1);
     assert!(result.iterations.iter().all(|i| i.finished));
     assert_eq!(
-        runtime
-            .ctx
-            .stores
-            .store
-            .lines()
+        handle
+            .conversation_lines()
             .await
             .unwrap()
             .iter()
@@ -45,14 +45,10 @@ async fn goal_missing_review_blocks_without_a_report_repair_round() {
 
 #[tokio::test]
 async fn goal_natural_end_continues_then_completes_with_independent_review() {
-    use crate::runtime::*;
-    let (runtime, home, cwd, backend) = goal_runtime("goal-complete", true, None).await;
-    let handle = runtime.handle();
-    handle.goals().start_driver_and_run().unwrap();
-    handle
-        .confirmed_test_goal(GoalSpec::new("produce proof"))
-        .unwrap();
-    let goal = handle.goals().wait().await.unwrap();
+    let (runtime, goals, home, cwd, backend) = goal_runtime("goal-complete", true, None).await;
+    goals.start_driver_and_run().unwrap();
+    confirmed_test_goal(&goals, GoalSpec::new("produce proof")).unwrap();
+    let goal = goals.wait().await.unwrap();
     assert_eq!(goal.status, GoalStatus::Completed, "{goal:?}");
     assert_eq!(
         goal.completion_basis,
@@ -69,7 +65,7 @@ async fn goal_natural_end_continues_then_completes_with_independent_review() {
 
 #[tokio::test]
 async fn goal_review_failure_can_resume_same_candidate_without_reexecuting() {
-    use crate::runtime::*;
+    use mink::runtime::*;
     let home = unique_temp_dir("goal-review-retry-home");
     let cwd = unique_temp_dir("goal-review-retry-cwd");
     std::fs::create_dir_all(&cwd).unwrap();
@@ -78,17 +74,18 @@ async fn goal_review_failure_can_resume_same_candidate_without_reexecuting() {
         review_calls: Default::default(),
         execution_calls: Default::default(),
     });
-    let runtime =
-        AgentRuntime::start(AgentOptions::new(&home, &cwd).with_llm_backend(backend.clone()))
-            .await
-            .unwrap();
-    let handle = runtime.handle();
-    handle.goals().start_driver_and_run().unwrap();
+    let (runtime, goals) = start_with_goal(
+        AgentOptions::new(&home, &cwd).with_llm_backend(backend.clone()),
+        GoalPlugin::new(),
+    )
+    .await
+    .unwrap();
+    goals.start_driver_and_run().unwrap();
     let mut spec = GoalSpec::new("produce proof");
     spec.limits.max_turns = 1;
-    handle.confirmed_test_goal(spec).unwrap();
+    confirmed_test_goal(&goals, spec).unwrap();
 
-    let blocked = tokio::time::timeout(std::time::Duration::from_secs(15), handle.goals().wait())
+    let blocked = tokio::time::timeout(std::time::Duration::from_secs(15), goals.wait())
         .await
         .expect("first review should finish with an unavailable result")
         .unwrap();
@@ -103,14 +100,11 @@ async fn goal_review_failure_can_resume_same_candidate_without_reexecuting() {
     );
     let candidate = blocked.review_candidate.clone().expect("retry candidate");
 
-    let resumed = handle
-        .goals()
-        .resume(&blocked.id, blocked.revision)
-        .unwrap();
+    let resumed = goals.resume(&blocked.id, blocked.revision).unwrap();
     assert_eq!(resumed.phase, GoalPhase::Verifying);
     assert_eq!(resumed.review_candidate.as_ref(), Some(&candidate));
     assert_eq!(resumed.review_failure_reason, None);
-    let completed = tokio::time::timeout(std::time::Duration::from_secs(15), handle.goals().wait())
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(15), goals.wait())
         .await
         .expect("the resumed audit should complete")
         .unwrap();
@@ -141,7 +135,7 @@ async fn goal_review_failure_can_resume_same_candidate_without_reexecuting() {
 
 #[tokio::test]
 async fn goal_host_corrects_unread_evidence_after_repeated_submission_rejections() {
-    use crate::runtime::*;
+    use mink::runtime::*;
     let home = unique_temp_dir("goal-review-format-continuation-home");
     let cwd = unique_temp_dir("goal-review-format-continuation-cwd");
     std::fs::create_dir_all(&cwd).unwrap();
@@ -152,17 +146,18 @@ async fn goal_host_corrects_unread_evidence_after_repeated_submission_rejections
         recover_after_rejections: true,
         end_without_conclusion: false,
     });
-    let runtime =
-        AgentRuntime::start(AgentOptions::new(&home, &cwd).with_llm_backend(backend.clone()))
-            .await
-            .unwrap();
-    let handle = runtime.handle();
-    handle.goals().start_driver_and_run().unwrap();
+    let (runtime, goals) = start_with_goal(
+        AgentOptions::new(&home, &cwd).with_llm_backend(backend.clone()),
+        GoalPlugin::new(),
+    )
+    .await
+    .unwrap();
+    goals.start_driver_and_run().unwrap();
     let mut spec = GoalSpec::new("produce proof");
     spec.limits.max_turns = 1;
-    handle.confirmed_test_goal(spec).unwrap();
+    confirmed_test_goal(&goals, spec).unwrap();
 
-    let completed = tokio::time::timeout(std::time::Duration::from_secs(15), handle.goals().wait())
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(15), goals.wait())
         .await
         .expect("host correction should complete within the shared deadline")
         .unwrap();
@@ -195,7 +190,7 @@ async fn goal_host_corrects_unread_evidence_after_repeated_submission_rejections
 
 #[tokio::test]
 async fn goal_host_reports_terminal_reason_after_malformed_tool_calls() {
-    use crate::runtime::*;
+    use mink::runtime::*;
     let home = unique_temp_dir("goal-review-format-failure-home");
     let cwd = unique_temp_dir("goal-review-format-failure-cwd");
     std::fs::create_dir_all(&cwd).unwrap();
@@ -206,17 +201,18 @@ async fn goal_host_reports_terminal_reason_after_malformed_tool_calls() {
         recover_after_rejections: false,
         end_without_conclusion: false,
     });
-    let runtime =
-        AgentRuntime::start(AgentOptions::new(&home, &cwd).with_llm_backend(backend.clone()))
-            .await
-            .unwrap();
-    let handle = runtime.handle();
-    handle.goals().start_driver_and_run().unwrap();
+    let (runtime, goals) = start_with_goal(
+        AgentOptions::new(&home, &cwd).with_llm_backend(backend.clone()),
+        GoalPlugin::new(),
+    )
+    .await
+    .unwrap();
+    goals.start_driver_and_run().unwrap();
     let mut spec = GoalSpec::new("produce proof");
     spec.limits.max_turns = 1;
-    handle.confirmed_test_goal(spec).unwrap();
+    confirmed_test_goal(&goals, spec).unwrap();
 
-    let blocked = tokio::time::timeout(std::time::Duration::from_secs(15), handle.goals().wait())
+    let blocked = tokio::time::timeout(std::time::Duration::from_secs(15), goals.wait())
         .await
         .expect("the bounded host turn should finish")
         .unwrap();
@@ -240,7 +236,7 @@ async fn goal_host_reports_terminal_reason_after_malformed_tool_calls() {
 
 #[tokio::test]
 async fn goal_host_continues_after_prose_end_without_submitting_conclusion() {
-    use crate::runtime::*;
+    use mink::runtime::*;
     let home = unique_temp_dir("goal-review-empty-end-home");
     let cwd = unique_temp_dir("goal-review-empty-end-cwd");
     std::fs::create_dir_all(&cwd).unwrap();
@@ -251,17 +247,18 @@ async fn goal_host_continues_after_prose_end_without_submitting_conclusion() {
         recover_after_rejections: true,
         end_without_conclusion: true,
     });
-    let runtime =
-        AgentRuntime::start(AgentOptions::new(&home, &cwd).with_llm_backend(backend.clone()))
-            .await
-            .unwrap();
-    let handle = runtime.handle();
-    handle.goals().start_driver_and_run().unwrap();
+    let (runtime, goals) = start_with_goal(
+        AgentOptions::new(&home, &cwd).with_llm_backend(backend.clone()),
+        GoalPlugin::new(),
+    )
+    .await
+    .unwrap();
+    goals.start_driver_and_run().unwrap();
     let mut spec = GoalSpec::new("produce proof");
     spec.limits.max_turns = 1;
-    handle.confirmed_test_goal(spec).unwrap();
+    confirmed_test_goal(&goals, spec).unwrap();
 
-    let completed = tokio::time::timeout(std::time::Duration::from_secs(15), handle.goals().wait())
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(15), goals.wait())
         .await
         .expect("host correction should complete within the shared deadline")
         .unwrap();
@@ -294,14 +291,12 @@ async fn goal_host_continues_after_prose_end_without_submitting_conclusion() {
 
 #[tokio::test]
 async fn goal_human_approval_checks_evidence_versions() {
-    use crate::runtime::*;
-    let (runtime, home, cwd, _) = goal_runtime("goal-human", false, None).await;
-    let handle = runtime.handle();
-    handle.goals().start_driver_and_run().unwrap();
+    let (runtime, goals, home, cwd, _) = goal_runtime("goal-human", false, None).await;
+    goals.start_driver_and_run().unwrap();
     let mut spec = GoalSpec::new("produce proof");
     spec.acceptance = GoalAcceptance::Human;
-    handle.confirmed_test_goal(spec).unwrap();
-    let goal = handle.goals().wait().await.unwrap();
+    confirmed_test_goal(&goals, spec).unwrap();
+    let goal = goals.wait().await.unwrap();
     assert_eq!(goal.status, GoalStatus::Blocked);
     std::fs::write(
         cwd.join("proof.txt"),
@@ -309,8 +304,7 @@ async fn goal_human_approval_checks_evidence_versions() {
     )
     .unwrap();
     assert!(
-        handle
-            .goals()
+        goals
             .approve(&goal.id, goal.revision, vec!["reviewed".into()])
             .is_err(),
         "approval must reject changed evidence"
@@ -321,7 +315,6 @@ async fn goal_human_approval_checks_evidence_versions() {
 }
 #[tokio::test]
 async fn goal_verifier_failure_stalls_and_missing_verifier_never_downgrades() {
-    use crate::runtime::*;
     for missing in [false, true] {
         let verifier = if missing {
             None
@@ -331,15 +324,15 @@ async fn goal_verifier_failure_stalls_and_missing_verifier_never_downgrades() {
                 mutate: false,
             }) as Arc<dyn GoalVerifier>)
         };
-        let (runtime, home, cwd, backend) = goal_runtime("goal-verifier", false, verifier).await;
-        let handle = runtime.handle();
-        handle.goals().start_driver_and_run().unwrap();
+        let (runtime, goals, home, cwd, backend) =
+            goal_runtime("goal-verifier", false, verifier).await;
+        goals.start_driver_and_run().unwrap();
         let mut spec = GoalSpec::new("produce proof");
         spec.acceptance = GoalAcceptance::Verifier {
             id: "test-check-v1".into(),
         };
-        handle.confirmed_test_goal(spec).unwrap();
-        let goal = handle.goals().wait().await.unwrap();
+        confirmed_test_goal(&goals, spec).unwrap();
+        let goal = goals.wait().await.unwrap();
         assert_eq!(goal.status, GoalStatus::Blocked);
         assert_eq!(goal.completion_basis, None);
         assert_eq!(goal.iterations.len(), if missing { 0 } else { 3 });
@@ -355,7 +348,7 @@ async fn goal_verifier_failure_stalls_and_missing_verifier_never_downgrades() {
 
 #[tokio::test]
 async fn goal_review_can_read_its_own_spilled_contract_artifact() {
-    use crate::runtime::*;
+    use mink::runtime::*;
     struct SpillReader(std::sync::atomic::AtomicUsize);
     #[async_trait::async_trait]
     impl LlmBackend for SpillReader {
@@ -386,7 +379,7 @@ async fn goal_review_can_read_its_own_spilled_contract_artifact() {
                         )
                     };
                     vec![
-                        Ok(LlmEvent::ToolCall(crate::protocol::ToolCallEvent {
+                        Ok(LlmEvent::ToolCall(mink::runtime::LlmToolCallEvent {
                             id: format!("spill-{stage}"),
                             name: name.into(),
                             input_json: input,
@@ -412,19 +405,20 @@ async fn goal_review_can_read_its_own_spilled_contract_artifact() {
     let cwd = unique_temp_dir("review-spill-cwd");
     std::fs::create_dir_all(&cwd).unwrap();
     std::fs::write(cwd.join("proof.txt"), "objective evidence").unwrap();
-    let runtime = AgentRuntime::start(
+    let (runtime, goals) = start_with_goal(
         AgentOptions::new(&home, &cwd)
             .with_tool_result_max_bytes(512)
             .with_llm_backend(Arc::new(SpillReader(Default::default()))),
+        GoalPlugin::new(),
     )
     .await
     .unwrap();
     let handle = runtime.handle();
-    let mut spec = crate::runtime::GoalSpec::new("produce proof");
+    let mut spec = GoalSpec::new("produce proof");
     spec.limits.max_turns = 1;
-    handle.confirmed_test_goal(spec).unwrap();
-    handle.goals().start_driver_and_run().unwrap();
-    let goal = handle.goals().wait().await.unwrap();
+    confirmed_test_goal(&goals, spec).unwrap();
+    goals.start_driver_and_run().unwrap();
+    let goal = goals.wait().await.unwrap();
     let artifacts: Vec<_> = goal
         .evidence_versions
         .iter()
@@ -432,23 +426,12 @@ async fn goal_review_can_read_its_own_spilled_contract_artifact() {
         .collect();
     let imported = artifacts
         .iter()
-        .map(|(r, _)| {
-            runtime
-                .ctx
-                .stores
-                .artifacts
-                .read_text(r.strip_prefix("artifact://").unwrap())
-        })
+        .map(|(r, _)| handle.read_artifact_text(r.strip_prefix("artifact://").unwrap()))
         .collect::<anyhow::Result<Vec<_>>>();
     runtime.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
-    assert_eq!(
-        goal.status,
-        crate::runtime::GoalStatus::Completed,
-        "{:?}",
-        goal.reason
-    );
+    assert_eq!(goal.status, GoalStatus::Completed, "{:?}", goal.reason);
     assert_eq!(artifacts.len(), 1);
     assert!(imported.unwrap()[0].contains("produce proof"));
     assert_eq!(goal.iterations.len(), 1);
@@ -456,7 +439,6 @@ async fn goal_review_can_read_its_own_spilled_contract_artifact() {
 
 #[tokio::test]
 async fn goal_known_checker_result_closes_marker_when_evidence_cannot_be_hashed() {
-    use crate::runtime::*;
     struct MakeDirectory;
     #[async_trait::async_trait]
     impl GoalVerifier for MakeDirectory {
@@ -477,18 +459,15 @@ async fn goal_known_checker_result_closes_marker_when_evidence_cannot_be_hashed(
             })
         }
     }
-    let (runtime, home, cwd, _) = goal_runtime(
+    let (runtime, goals, home, cwd, _) = goal_runtime(
         "goal-checker-evidence-error",
         false,
         Some(Arc::new(MakeDirectory)),
     )
     .await;
-    let handle = runtime.handle();
-    handle
-        .confirmed_test_goal(GoalSpec::new("produce proof"))
-        .unwrap();
-    handle.goals().start_driver_and_run().unwrap();
-    let goal = handle.goals().wait().await.unwrap();
+    confirmed_test_goal(&goals, GoalSpec::new("produce proof")).unwrap();
+    goals.start_driver_and_run().unwrap();
+    let goal = goals.wait().await.unwrap();
     runtime.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
@@ -504,7 +483,7 @@ async fn goal_known_checker_result_closes_marker_when_evidence_cannot_be_hashed(
 
 #[tokio::test]
 async fn goal_recovery_reaudits_known_checker_changes_without_replaying_checker() {
-    use crate::runtime::*;
+    use mink::runtime::*;
     struct MustNotReplay;
     #[async_trait::async_trait]
     impl GoalVerifier for MustNotReplay {
@@ -516,22 +495,20 @@ async fn goal_recovery_reaudits_known_checker_changes_without_replaying_checker(
         }
     }
     let verifier = Arc::new(MustNotReplay);
-    let (runtime, home, cwd, _) =
+    let (runtime, goals, home, cwd, _) =
         goal_runtime("goal-checker-recovery", false, Some(verifier.clone())).await;
     let handle = runtime.handle();
     let mut spec = GoalSpec::new("produce proof");
     spec.limits.max_turns = 1;
-    handle.confirmed_test_goal(spec).unwrap();
+    confirmed_test_goal(&goals, spec).unwrap();
     let sid = handle.session_info().session_id.clone();
-    let executing = runtime
-        .ctx
-        .stores
+    let executing = goals
         .goal_store
         .begin_iteration("committed-execution", 0)
         .unwrap();
-    let old_hash = handle.evidence_version("proof.txt").unwrap();
+    let old_hash = goals.evidence_version("proof.txt").unwrap();
     std::fs::write(cwd.join("proof.txt"), "known checker refreshed proof").unwrap();
-    let new_hash = handle.evidence_version("proof.txt").unwrap();
+    let new_hash = goals.evidence_version("proof.txt").unwrap();
     let candidate = GoalReviewCandidate {
         generation: 1,
         goal_id: executing.id.clone(),
@@ -540,8 +517,8 @@ async fn goal_recovery_reaudits_known_checker_changes_without_replaying_checker(
         conversation_seq: 0,
         reviewer_id: format!(
             "goal-review:{}:{}",
-            runtime.ctx.active_model.lock().unwrap().actual,
-            runtime.ctx.tools.tool_surface.fingerprint()
+            handle.active_model_name(),
+            handle.tool_surface_fingerprint()
         ),
     };
     let review: GoalReview = serde_json::from_value(serde_json::json!({
@@ -550,9 +527,7 @@ async fn goal_recovery_reaudits_known_checker_changes_without_replaying_checker(
         "criteria":[{"criterion_id":"criterion-1","status":"pass","reason":"checked","evidence":["proof.txt"]}],
         "constraints":[],"summary":"checked","next_step":"","blocker":null
     })).unwrap();
-    runtime
-        .ctx
-        .stores
+    goals
         .goal_store
         .change(&executing.id, executing.revision, |g| {
             g.iterations[0].finished = true;
@@ -580,17 +555,16 @@ async fn goal_recovery_reaudits_known_checker_changes_without_replaying_checker(
         calls: Default::default(),
         continue_first: false,
     });
-    let resumed = AgentRuntime::start(
+    let (resumed, h) = start_with_goal(
         AgentOptions::new(&home, &cwd)
             .with_session(SessionPolicy::Resume(sid))
-            .with_llm_backend(backend.clone())
-            .with_goal_verifier(verifier),
+            .with_llm_backend(backend.clone()),
+        GoalPlugin::new().with_verifier(verifier),
     )
     .await
     .unwrap();
-    let h = resumed.handle();
-    h.goals().start_driver_and_run().unwrap();
-    let goal = h.goals().wait().await.unwrap();
+    h.start_driver_and_run().unwrap();
+    let goal = h.wait().await.unwrap();
     resumed.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
@@ -605,7 +579,6 @@ async fn goal_recovery_reaudits_known_checker_changes_without_replaying_checker(
 
 #[tokio::test]
 async fn goal_last_round_reaudits_checker_changes_without_reexecuting() {
-    use crate::runtime::*;
     struct MutateOnce(std::sync::atomic::AtomicUsize);
     #[async_trait::async_trait]
     impl GoalVerifier for MutateOnce {
@@ -627,14 +600,13 @@ async fn goal_last_round_reaudits_checker_changes_without_reexecuting() {
         }
     }
     let verifier = Arc::new(MutateOnce(Default::default()));
-    let (runtime, home, cwd, backend) =
+    let (runtime, goals, home, cwd, backend) =
         goal_runtime("goal-reaudit-last", false, Some(verifier.clone())).await;
-    let handle = runtime.handle();
     let mut spec = GoalSpec::new("produce proof");
     spec.limits.max_turns = 1;
-    handle.confirmed_test_goal(spec).unwrap();
-    handle.goals().start_driver_and_run().unwrap();
-    let goal = handle.goals().wait().await.unwrap();
+    confirmed_test_goal(&goals, spec).unwrap();
+    goals.start_driver_and_run().unwrap();
+    let goal = goals.wait().await.unwrap();
     runtime.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
@@ -652,23 +624,21 @@ async fn goal_last_round_reaudits_checker_changes_without_reexecuting() {
 
 #[tokio::test]
 async fn goal_verifier_pass_and_evidence_mutation_have_distinct_completion() {
-    use crate::runtime::*;
     for mutate in [false, true] {
         let verifier = Arc::new(TestGoalVerifier {
             status: GoalVerificationStatus::Pass,
             mutate,
         });
-        let (runtime, home, cwd, _) =
+        let (runtime, goals, home, cwd, _) =
             goal_runtime("goal-proof-version", false, Some(verifier)).await;
-        let handle = runtime.handle();
         let mut spec = GoalSpec::new("produce proof");
         spec.acceptance = GoalAcceptance::Verifier {
             id: "test-check-v1".into(),
         };
         spec.limits.max_turns = 2;
-        handle.confirmed_test_goal(spec).unwrap();
-        handle.goals().start_driver_and_run().unwrap();
-        let goal = handle.goals().wait().await.unwrap();
+        confirmed_test_goal(&goals, spec).unwrap();
+        goals.start_driver_and_run().unwrap();
+        let goal = goals.wait().await.unwrap();
         assert_eq!(goal.status, GoalStatus::Completed);
         assert_eq!(goal.completion_basis, Some(GoalCompletionBasis::Verified));
         assert_eq!(goal.iterations.len(), 1);
@@ -682,25 +652,19 @@ async fn goal_verifier_pass_and_evidence_mutation_have_distinct_completion() {
 
 #[tokio::test]
 async fn goal_human_approval_rejects_expired_deadline() {
-    use crate::runtime::*;
-    let (runtime, home, cwd, _) = goal_runtime("goal-human-deadline", false, None).await;
-    let handle = runtime.handle();
+    let (runtime, goals, home, cwd, _) = goal_runtime("goal-human-deadline", false, None).await;
     let mut spec = GoalSpec::new("produce proof");
     spec.acceptance = GoalAcceptance::Human;
-    handle.confirmed_test_goal(spec).unwrap();
-    handle.goals().start_driver_and_run().unwrap();
-    let waiting = handle.goals().wait().await.unwrap();
+    confirmed_test_goal(&goals, spec).unwrap();
+    goals.start_driver_and_run().unwrap();
+    let waiting = goals.wait().await.unwrap();
     let mut limits = waiting.spec.limits.clone();
     limits.deadline_unix_secs = 1;
-    let expired = handle
-        .goals()
+    let expired = goals
         .update_limits(&waiting.id, waiting.revision, limits)
         .unwrap();
-    let approved =
-        handle
-            .goals()
-            .approve(&expired.id, expired.revision, vec!["checked proof".into()]);
-    let current = handle.goals().snapshot().unwrap();
+    let approved = goals.approve(&expired.id, expired.revision, vec!["checked proof".into()]);
+    let current = goals.snapshot().unwrap();
     runtime.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
@@ -716,20 +680,19 @@ async fn goal_human_approval_rejects_expired_deadline() {
 
 #[tokio::test]
 async fn goal_human_wait_owns_evidence_and_approval_has_human_basis() {
-    use crate::runtime::*;
-    let (runtime, home, cwd, _) = goal_runtime("goal-human-pass", false, None).await;
+    use mink::runtime::*;
+    let (runtime, goals, home, cwd, _) = goal_runtime("goal-human-pass", false, None).await;
     let handle = runtime.handle();
     let mut spec = GoalSpec::new("produce proof");
     spec.acceptance = GoalAcceptance::Human;
-    handle.confirmed_test_goal(spec).unwrap();
-    handle.goals().start_driver_and_run().unwrap();
-    let goal = handle.goals().wait().await.unwrap();
+    confirmed_test_goal(&goals, spec).unwrap();
+    goals.start_driver_and_run().unwrap();
+    let goal = goals.wait().await.unwrap();
     assert!(matches!(
         handle.stream_turn("change evidence"),
-        Err(RuntimeError::GoalActive)
+        Err(RuntimeError::ExternallyControlled { .. })
     ));
-    let completed = handle
-        .goals()
+    let completed = goals
         .approve(&goal.id, goal.revision, vec!["reviewed proof".into()])
         .unwrap();
     assert_eq!(
@@ -737,50 +700,41 @@ async fn goal_human_wait_owns_evidence_and_approval_has_human_basis() {
         Some(GoalCompletionBasis::HumanApproved)
     );
     assert!(
-        handle
-            .goals()
+        goals
             .approve(&goal.id, goal.revision, vec!["duplicate".into()])
             .is_err()
     );
-    assert!(
-        handle
-            .goals()
-            .resume(&completed.id, completed.revision)
-            .is_err()
-    );
-    handle
-        .goals()
-        .clear(&completed.id, completed.revision)
-        .unwrap();
+    assert!(goals.resume(&completed.id, completed.revision).is_err());
+    goals.clear(&completed.id, completed.revision).unwrap();
     runtime.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
 }
 #[tokio::test]
 async fn goal_pause_during_verifier_keeps_execution_owned_until_checker_exits() {
-    use crate::runtime::*;
+    use mink::runtime::*;
     let verifier = Arc::new(HeldGoalVerifier {
         entered: Default::default(),
         release: Default::default(),
     });
-    let (runtime, home, cwd, _) =
+    let (runtime, goals, home, cwd, _) =
         goal_runtime("goal-held-check", false, Some(verifier.clone())).await;
     let handle = runtime.handle();
     let mut spec = GoalSpec::new("produce proof");
     spec.acceptance = GoalAcceptance::Verifier {
         id: "held-check-v1".into(),
     };
-    handle.confirmed_test_goal(spec).unwrap();
-    handle.goals().start_driver_and_run().unwrap();
+    confirmed_test_goal(&goals, spec).unwrap();
+    goals.start_driver_and_run().unwrap();
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
         verifier.entered.notified(),
     )
     .await
     .unwrap();
-    let g = handle.goals().snapshot().unwrap();
-    handle.goals().pause(&g.id, g.revision).unwrap();
-    let paused = handle.goals().wait().await.unwrap();
+    let g = goals.snapshot().unwrap();
+    goals.pause(&g.id, g.revision).unwrap();
+    let paused = goals.wait().await.unwrap();
     assert_eq!(paused.status, GoalStatus::Paused);
     assert_eq!(paused.completion_basis, None);
     assert!(
@@ -790,7 +744,7 @@ async fn goal_pause_during_verifier_keeps_execution_owned_until_checker_exits() 
         ),
         "checker still owns permit"
     );
-    assert!(handle.goals().resume(&paused.id, paused.revision).is_err());
+    assert!(goals.resume(&paused.id, paused.revision).is_err());
     verifier.release.notify_one();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while handle.active_turn_id().is_some() {
@@ -799,8 +753,8 @@ async fn goal_pause_during_verifier_keeps_execution_owned_until_checker_exits() 
     })
     .await
     .unwrap();
-    let g = handle.goals().snapshot().unwrap();
-    handle.goals().cancel(&g.id, g.revision).unwrap();
+    let g = goals.snapshot().unwrap();
+    goals.cancel(&g.id, g.revision).unwrap();
     runtime.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
@@ -811,23 +765,20 @@ async fn goal_pause_during_verifier_keeps_execution_owned_until_checker_exits() 
 /// dropped only after the gate goes idle, and no caller blocks meanwhile.
 #[tokio::test]
 async fn audit8_paused_checker_keeps_the_host_lease_until_it_exits() {
-    use crate::runtime::*;
     let verifier = Arc::new(HeldGoalVerifier {
         entered: Default::default(),
         release: Default::default(),
     });
-    let (runtime, home, cwd, _) =
+    let (runtime, goals, home, cwd, _) =
         goal_runtime("audit8-lease-held", false, Some(verifier.clone())).await;
     let handle = runtime.handle();
-    handle.goals().start_driver().unwrap();
+    goals.start_driver().unwrap();
     let alive = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut spec = GoalSpec::new("produce proof");
     spec.acceptance = GoalAcceptance::Verifier {
         id: "held-check-v1".into(),
     };
-    handle
-        .confirmed_test_goal_with_lease(spec, Box::new(CountingLease::new(&alive)))
-        .unwrap();
+    confirmed_test_goal_with_lease(&goals, spec, Box::new(CountingLease::new(&alive))).unwrap();
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
         verifier.entered.notified(),
@@ -835,11 +786,11 @@ async fn audit8_paused_checker_keeps_the_host_lease_until_it_exits() {
     .await
     .unwrap();
     assert_eq!(alive.load(std::sync::atomic::Ordering::SeqCst), 1);
-    let g = handle.goals().snapshot().unwrap();
-    handle.goals().pause(&g.id, g.revision).unwrap();
+    let g = goals.snapshot().unwrap();
+    goals.pause(&g.id, g.revision).unwrap();
     // The pause settles the run and `wait_goal` returns while the checker is
     // still exiting: the lease must not be released by that return.
-    let paused = handle.goals().wait().await.unwrap();
+    let paused = goals.wait().await.unwrap();
     assert_eq!(paused.status, GoalStatus::Paused);
     assert!(
         handle.active_turn_id().is_some(),
@@ -868,23 +819,23 @@ async fn audit8_paused_checker_keeps_the_host_lease_until_it_exits() {
 
 #[tokio::test]
 async fn goal_checker_deadline_cannot_release_ownership_or_complete() {
-    use crate::runtime::*;
+    use mink::runtime::*;
     let verifier = Arc::new(HeldGoalVerifier {
         entered: Default::default(),
         release: Default::default(),
     });
-    let (runtime, home, cwd, _) =
+    let (runtime, goals, home, cwd, _) =
         goal_runtime("goal-check-deadline", false, Some(verifier.clone())).await;
     let handle = runtime.handle();
     let mut spec = GoalSpec::new("produce proof");
     spec.acceptance = GoalAcceptance::Verifier {
         id: "held-check-v1".into(),
     };
-    spec.limits.deadline_unix_secs = crate::session::goal::goal_now() + 4;
-    handle.confirmed_test_goal(spec).unwrap();
-    handle.goals().start_driver_and_run().unwrap();
+    spec.limits.deadline_unix_secs = crate::store::goal_now() + 4;
+    confirmed_test_goal(&goals, spec).unwrap();
+    goals.start_driver_and_run().unwrap();
     verifier.entered.notified().await;
-    let exhausted = tokio::time::timeout(std::time::Duration::from_secs(8), handle.goals().wait())
+    let exhausted = tokio::time::timeout(std::time::Duration::from_secs(8), goals.wait())
         .await
         .unwrap()
         .unwrap();
@@ -909,30 +860,27 @@ async fn goal_checker_deadline_cannot_release_ownership_or_complete() {
 
 #[tokio::test]
 async fn goal_limit_change_during_verification_preserves_valid_acceptance() {
-    use crate::runtime::*;
     let verifier = Arc::new(HeldGoalVerifier {
         entered: Default::default(),
         release: Default::default(),
     });
-    let (runtime, home, cwd, _) =
+    let (runtime, goals, home, cwd, _) =
         goal_runtime("goal-check-budget", false, Some(verifier.clone())).await;
-    let handle = runtime.handle();
     let mut spec = GoalSpec::new("produce proof");
     spec.acceptance = GoalAcceptance::Verifier {
         id: "held-check-v1".into(),
     };
-    handle.confirmed_test_goal(spec).unwrap();
-    handle.goals().start_driver_and_run().unwrap();
+    confirmed_test_goal(&goals, spec).unwrap();
+    goals.start_driver_and_run().unwrap();
     verifier.entered.notified().await;
-    let goal = handle.goals().snapshot().unwrap();
+    let goal = goals.snapshot().unwrap();
     let mut limits = goal.spec.limits.clone();
     limits.max_turns = 30;
-    handle
-        .goals()
+    goals
         .update_limits(&goal.id, goal.revision, limits)
         .unwrap();
     verifier.release.notify_one();
-    let completed = tokio::time::timeout(std::time::Duration::from_secs(5), handle.goals().wait())
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(5), goals.wait())
         .await
         .unwrap()
         .unwrap();
@@ -951,37 +899,32 @@ async fn goal_limit_change_during_verification_preserves_valid_acceptance() {
 
 #[tokio::test]
 async fn audit3_verifier_obeys_shortened_deadline() {
-    use crate::runtime::*;
     let verifier = Arc::new(HeldGoalVerifier {
         entered: Default::default(),
         release: Default::default(),
     });
-    let (runtime, home, cwd, _) =
+    let (runtime, goals, home, cwd, _) =
         goal_runtime("audit3-deadline", false, Some(verifier.clone())).await;
-    let handle = runtime.handle();
     let mut spec = GoalSpec::new("produce proof");
     spec.acceptance = GoalAcceptance::Verifier {
         id: "held-check-v1".into(),
     };
-    handle.confirmed_test_goal(spec).unwrap();
-    handle.goals().start_driver_and_run().unwrap();
+    confirmed_test_goal(&goals, spec).unwrap();
+    goals.start_driver_and_run().unwrap();
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
         verifier.entered.notified(),
     )
     .await
     .unwrap();
-    let g = handle.goals().snapshot().unwrap();
+    let g = goals.snapshot().unwrap();
     let mut limits = g.spec.limits.clone();
-    limits.deadline_unix_secs = crate::session::goal::goal_now() + 1;
-    handle
-        .goals()
-        .update_limits(&g.id, g.revision, limits)
-        .unwrap();
+    limits.deadline_unix_secs = crate::store::goal_now() + 1;
+    goals.update_limits(&g.id, g.revision, limits).unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    let observed = handle.goals().snapshot().unwrap().status;
+    let observed = goals.snapshot().unwrap().status;
     verifier.release.notify_one();
-    handle.goals().wait().await.unwrap();
+    goals.wait().await.unwrap();
     runtime.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
@@ -993,28 +936,24 @@ async fn audit3_verifier_obeys_shortened_deadline() {
 }
 #[tokio::test]
 async fn audit3_failed_sink_resets_turn_activity() {
-    use crate::runtime::*;
+    use mink::runtime::*;
     let home = unique_temp_dir("audit3-sink-home");
     let cwd = unique_temp_dir("audit3-sink-cwd");
     std::fs::create_dir_all(&cwd).unwrap();
     let backend = Arc::new(PendingEstablishBackend::default());
-    let runtime = AgentRuntime::start(
-        AgentOptions::new(&home, &cwd)
-            .with_llm_backend(backend)
-            .with_goal_event_sink(Arc::new(Audit3FailingSink)),
+    let (runtime, goals) = start_with_goal(
+        AgentOptions::new(&home, &cwd).with_llm_backend(backend),
+        GoalPlugin::new().with_event_sink(Arc::new(Audit3FailingSink)),
     )
     .await
     .unwrap();
-    let handle = runtime.handle();
-    let activity = handle.goals().subscribe_turns();
-    handle
-        .confirmed_test_goal(GoalSpec::new("test sink"))
-        .unwrap();
-    handle.goals().start_driver_and_run().unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle.goals().wait())
+    let activity = goals.subscribe_turns();
+    confirmed_test_goal(&goals, GoalSpec::new("test sink")).unwrap();
+    goals.start_driver_and_run().unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), goals.wait())
         .await
         .unwrap();
-    let goal = handle.goals().snapshot().unwrap();
+    let goal = goals.snapshot().unwrap();
     let active = *activity.borrow();
     runtime.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(home);
@@ -1031,17 +970,13 @@ async fn audit3_failed_sink_resets_turn_activity() {
 
 #[tokio::test]
 async fn audit3_human_approval_requires_nonblank_evidence() {
-    use crate::runtime::*;
-    let (runtime, home, cwd, _) = goal_runtime("audit3-blank", false, None).await;
-    let handle = runtime.handle();
+    let (runtime, goals, home, cwd, _) = goal_runtime("audit3-blank", false, None).await;
     let mut spec = GoalSpec::new("produce proof");
     spec.acceptance = GoalAcceptance::Human;
-    handle.confirmed_test_goal(spec).unwrap();
-    handle.goals().start_driver_and_run().unwrap();
-    let g = handle.goals().wait().await.unwrap();
-    let approved = handle
-        .goals()
-        .approve(&g.id, g.revision, vec![String::new()]);
+    confirmed_test_goal(&goals, spec).unwrap();
+    goals.start_driver_and_run().unwrap();
+    let g = goals.wait().await.unwrap();
+    let approved = goals.approve(&g.id, g.revision, vec![String::new()]);
     runtime.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
@@ -1052,7 +987,7 @@ async fn audit3_human_approval_requires_nonblank_evidence() {
 }
 #[tokio::test]
 async fn audit3_old_iteration_cannot_bill_replacement_goal() {
-    use crate::runtime::*;
+    use mink::runtime::*;
     let home = unique_temp_dir("audit3-replace-home");
     let cwd = unique_temp_dir("audit3-replace-cwd");
     std::fs::create_dir_all(&cwd).unwrap();
@@ -1066,18 +1001,15 @@ async fn audit3_old_iteration_cannot_bill_replacement_goal() {
         calls: Default::default(),
         continue_first: false,
     });
-    let runtime = AgentRuntime::start(
-        AgentOptions::new(&home, &cwd)
-            .with_llm_backend(backend)
-            .with_goal_event_sink(sink.clone()),
+    let (runtime, goals) = start_with_goal(
+        AgentOptions::new(&home, &cwd).with_llm_backend(backend),
+        GoalPlugin::new().with_event_sink(sink.clone()),
     )
     .await
     .unwrap();
     let handle = runtime.handle();
-    handle
-        .confirmed_test_goal(GoalSpec::new("old goal"))
-        .unwrap();
-    handle.goals().start_driver_and_run().unwrap();
+    confirmed_test_goal(&goals, GoalSpec::new("old goal")).unwrap();
+    goals.start_driver_and_run().unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), sink.entered.notified())
         .await
         .unwrap();
@@ -1088,26 +1020,24 @@ async fn audit3_old_iteration_cannot_bill_replacement_goal() {
     })
     .await
     .unwrap();
-    let old = handle.goals().snapshot().unwrap();
+    let old = goals.snapshot().unwrap();
     let old_bill = old.iterations[0].billing_turn_id.clone().unwrap();
-    handle.goals().cancel(&old.id, old.revision).unwrap();
+    goals.cancel(&old.id, old.revision).unwrap();
     assert!(matches!(
-        handle.goals().draft(GoalSpec::new("new goal"), 3600),
+        goals.draft(GoalSpec::new("new goal"), 3600),
         Err(RuntimeError::Busy { .. })
     ));
     // Inject a replacement to exercise stale callbacks even though the public
     // protocol refuses replacement until the previous run has exited.
-    let new = handle
-        .goal_ctx
-        .stores
+    let new = goals
         .goal_store
         .create(
             GoalSpec::new("new goal"),
-            crate::runtime::goal::goal_environment(&cwd, &handle.goal_ctx.tools.tool_surface),
+            goal_environment_from_parts(&cwd, &handle.tool_surface_fingerprint()),
         )
         .unwrap();
     sink.release.notify_one();
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handle.goals().wait())
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), goals.wait())
         .await
         .unwrap()
         .unwrap();
@@ -1129,22 +1059,20 @@ async fn audit3_old_iteration_cannot_bill_replacement_goal() {
 
 #[tokio::test]
 async fn audit3_recover_normal_end_after_idle_publication() {
-    use crate::runtime::*;
-    let (runtime, home, cwd, _) = goal_runtime("audit3-recovery", false, None).await;
+    use mink::runtime::*;
+    let (runtime, goals, home, cwd, _) = goal_runtime("audit3-recovery", false, None).await;
     let handle = runtime.handle();
     let mut spec = GoalSpec::new("produce proof");
     spec.limits.max_turns = 1;
-    handle.confirmed_test_goal(spec).unwrap();
+    confirmed_test_goal(&goals, spec).unwrap();
     let sid = handle.session_info().session_id.clone();
     // Exact persisted boundary in drive_goal: result committed, phase=Idle,
     // normal completion must recover into independent verification.
-    runtime
-        .ctx
-        .stores
+    goals
         .goal_store
         .update_for_test(|s| {
             s.phase = GoalPhase::Idle;
-            s.iterations.push(crate::session::goal::GoalIteration {
+            s.iterations.push(crate::store::GoalIteration {
                 iteration: 1,
                 turn_id: "crash-boundary".into(),
                 billing_turn_id: None,
@@ -1162,16 +1090,16 @@ async fn audit3_recover_normal_end_after_idle_publication() {
         calls: Default::default(),
         continue_first: false,
     });
-    let resumed = AgentRuntime::start(
+    let (resumed, h) = start_with_goal(
         AgentOptions::new(&home, &cwd)
             .with_session(SessionPolicy::Resume(sid))
             .with_llm_backend(backend),
+        GoalPlugin::new(),
     )
     .await
     .unwrap();
-    let h = resumed.handle();
-    h.goals().start_driver_and_run().unwrap();
-    let result = h.goals().wait().await.unwrap();
+    h.start_driver_and_run().unwrap();
+    let result = h.wait().await.unwrap();
     resumed.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
@@ -1184,7 +1112,7 @@ async fn audit3_recover_normal_end_after_idle_publication() {
 }
 #[tokio::test]
 async fn audit4_old_sink_error_cannot_fail_replacement() {
-    use crate::runtime::*;
+    use mink::runtime::*;
     let home = unique_temp_dir("audit3-replace-home");
     let cwd = unique_temp_dir("audit3-replace-cwd");
     std::fs::create_dir_all(&cwd).unwrap();
@@ -1198,18 +1126,15 @@ async fn audit4_old_sink_error_cannot_fail_replacement() {
         calls: Default::default(),
         continue_first: false,
     });
-    let runtime = AgentRuntime::start(
-        AgentOptions::new(&home, &cwd)
-            .with_llm_backend(backend)
-            .with_goal_event_sink(sink.clone()),
+    let (runtime, goals) = start_with_goal(
+        AgentOptions::new(&home, &cwd).with_llm_backend(backend),
+        GoalPlugin::new().with_event_sink(sink.clone()),
     )
     .await
     .unwrap();
     let handle = runtime.handle();
-    handle
-        .confirmed_test_goal(GoalSpec::new("old goal"))
-        .unwrap();
-    handle.goals().start_driver_and_run().unwrap();
+    confirmed_test_goal(&goals, GoalSpec::new("old goal")).unwrap();
+    goals.start_driver_and_run().unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), sink.entered.notified())
         .await
         .unwrap();
@@ -1220,26 +1145,24 @@ async fn audit4_old_sink_error_cannot_fail_replacement() {
     })
     .await
     .unwrap();
-    let old = handle.goals().snapshot().unwrap();
+    let old = goals.snapshot().unwrap();
     let old_bill = old.iterations[0].billing_turn_id.clone().unwrap();
-    handle.goals().cancel(&old.id, old.revision).unwrap();
+    goals.cancel(&old.id, old.revision).unwrap();
     assert!(matches!(
-        handle.goals().draft(GoalSpec::new("new goal"), 3600),
+        goals.draft(GoalSpec::new("new goal"), 3600),
         Err(RuntimeError::Busy { .. })
     ));
     // Inject a replacement to exercise stale callbacks even though the public
     // protocol refuses replacement until the previous run has exited.
-    let new = handle
-        .goal_ctx
-        .stores
+    let new = goals
         .goal_store
         .create(
             GoalSpec::new("new goal"),
-            crate::runtime::goal::goal_environment(&cwd, &handle.goal_ctx.tools.tool_surface),
+            goal_environment_from_parts(&cwd, &handle.tool_surface_fingerprint()),
         )
         .unwrap();
     sink.release.notify_one();
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handle.goals().wait())
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), goals.wait())
         .await
         .unwrap()
         .unwrap();
@@ -1262,15 +1185,13 @@ async fn audit4_old_sink_error_cannot_fail_replacement() {
 
 #[tokio::test]
 async fn audit4_empty_approval_is_rejected() {
-    use crate::runtime::*;
-    let (runtime, home, cwd, _) = goal_runtime("audit4-empty", false, None).await;
-    let h = runtime.handle();
+    let (runtime, goals, home, cwd, _) = goal_runtime("audit4-empty", false, None).await;
     let mut spec = GoalSpec::new("proof");
     spec.acceptance = GoalAcceptance::Human;
-    h.confirmed_test_goal(spec).unwrap();
-    h.goals().start_driver_and_run().unwrap();
-    let g = h.goals().wait().await.unwrap();
-    let result = h.goals().approve(&g.id, g.revision, vec![]);
+    confirmed_test_goal(&goals, spec).unwrap();
+    goals.start_driver_and_run().unwrap();
+    let g = goals.wait().await.unwrap();
+    let result = goals.approve(&g.id, g.revision, vec![]);
     runtime.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
@@ -1282,19 +1203,18 @@ async fn audit4_empty_approval_is_rejected() {
 )]
 #[tokio::test]
 async fn audit4_verifier_attempt_exceeds_old_sixty_second_cap() {
-    use crate::runtime::*;
     let verifier = Arc::new(HeldGoalVerifier {
         entered: Default::default(),
         release: Default::default(),
     });
-    let (runtime, home, cwd, _) = goal_runtime("audit4-cap", false, Some(verifier.clone())).await;
-    let h = runtime.handle();
+    let (runtime, goals, home, cwd, _) =
+        goal_runtime("audit4-cap", false, Some(verifier.clone())).await;
     let mut spec = GoalSpec::new("proof");
     spec.acceptance = GoalAcceptance::Verifier {
         id: "held-check-v1".into(),
     };
-    h.confirmed_test_goal(spec).unwrap();
-    h.goals().start_driver_and_run().unwrap();
+    confirmed_test_goal(&goals, spec).unwrap();
+    goals.start_driver_and_run().unwrap();
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
         verifier.entered.notified(),
@@ -1302,9 +1222,9 @@ async fn audit4_verifier_attempt_exceeds_old_sixty_second_cap() {
     .await
     .unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(62)).await;
-    let observed = h.goals().snapshot().unwrap().status;
+    let observed = goals.snapshot().unwrap().status;
     verifier.release.notify_one();
-    h.goals().wait().await.unwrap();
+    goals.wait().await.unwrap();
     runtime.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
@@ -1319,45 +1239,35 @@ async fn audit4_verifier_attempt_exceeds_old_sixty_second_cap() {
 async fn goal_human_draft_requires_explicit_selection_with_multiple_checkers() {
     struct NamedChecker(&'static str);
     #[async_trait::async_trait]
-    impl crate::runtime::GoalVerifier for NamedChecker {
+    impl GoalVerifier for NamedChecker {
         fn id(&self) -> &str {
             self.0
         }
-        async fn verify(
-            &self,
-            _: crate::runtime::GoalVerificationContext,
-        ) -> anyhow::Result<crate::runtime::GoalVerification> {
+        async fn verify(&self, _: GoalVerificationContext) -> anyhow::Result<GoalVerification> {
             anyhow::bail!("not executed in a draft")
         }
     }
     let home = unique_temp_dir("goal-multiple-checkers-home");
     let cwd = unique_temp_dir("goal-multiple-checkers-cwd");
     std::fs::create_dir_all(&cwd).unwrap();
-    let runtime = AgentRuntime::start(
-        AgentOptions::new(&home, &cwd)
-            .with_llm_backend(Arc::new(GoalReportBackend {
-                calls: Default::default(),
-                continue_first: false,
-            }))
-            .with_goal_verifier(Arc::new(NamedChecker("first")))
-            .with_goal_verifier(Arc::new(NamedChecker("second"))),
+    let (runtime, goals) = start_with_goal(
+        AgentOptions::new(&home, &cwd).with_llm_backend(Arc::new(GoalReportBackend {
+            calls: Default::default(),
+            continue_first: false,
+        })),
+        GoalPlugin::new()
+            .with_verifier(Arc::new(NamedChecker("first")))
+            .with_verifier(Arc::new(NamedChecker("second"))),
     )
     .await
     .unwrap();
-    let handle = runtime.handle();
     let mut spec = GoalSpec::new("ship");
-    spec.acceptance = crate::runtime::GoalAcceptance::Human;
-    assert!(handle.goals().draft(spec.clone(), 3600).is_err());
-    assert!(handle.goals().snapshot().is_none());
+    spec.acceptance = GoalAcceptance::Human;
+    assert!(goals.draft(spec.clone(), 3600).is_err());
+    assert!(goals.snapshot().is_none());
     spec.checker_id = Some("first".into());
     assert_eq!(
-        handle
-            .goals()
-            .draft(spec, 3600)
-            .unwrap()
-            .spec
-            .checker_id
-            .as_deref(),
+        goals.draft(spec, 3600).unwrap().spec.checker_id.as_deref(),
         Some("first")
     );
     runtime.shutdown().await.unwrap();
@@ -1367,36 +1277,31 @@ async fn goal_human_draft_requires_explicit_selection_with_multiple_checkers() {
 
 #[tokio::test]
 async fn goal_draft_discussion_is_internal_and_does_not_register_a_human_request() {
-    let (runtime, home, cwd, backend) = goal_runtime("goal-draft-discussion", false, None).await;
+    let (runtime, goals, home, cwd, backend) =
+        goal_runtime("goal-draft-discussion", false, None).await;
     let handle = runtime.handle();
-    let draft = handle
-        .goals()
+    let draft = goals
         .request_draft(GoalSpec::new("ship the parser"), 3600)
         .unwrap();
     assert!(!draft.draft_ready);
-    assert!(handle.goals().confirm(&draft.id, draft.revision).is_err());
+    assert!(goals.confirm(&draft.id, draft.revision).is_err());
     assert!(
-        handle
-            .goals()
+        goals
             .generate_draft_at(&draft.id, draft.revision + 1, "stale feedback")
             .await
             .is_err()
     );
     assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert_eq!(
-        handle.goals().draft_snapshot().unwrap().revision,
-        draft.revision
-    );
-    let discussed = handle
-        .goals()
+    assert_eq!(goals.draft_snapshot().unwrap().revision, draft.revision);
+    let discussed = goals
         .generate_draft("also cover invalid input")
         .await
         .unwrap();
-    assert_eq!(discussed.status, crate::runtime::GoalStatus::Draft);
+    assert_eq!(discussed.status, GoalStatus::Draft);
     assert!(discussed.iterations.is_empty());
-    assert!(handle.input_inbox.entries().is_empty());
-    assert!(handle.input_inbox.active_turn().is_none());
-    let reader = crate::runtime::session::SessionReader::new(
+    assert!(handle.input_inbox().entries().is_empty());
+    assert!(handle.input_inbox().active_turn().is_none());
+    let reader = mink::runtime::SessionReader::new(
         handle.session_info().conversation_path.parent().unwrap(),
     );
     let rows = reader.conversation().unwrap();
@@ -1426,37 +1331,85 @@ async fn goal_draft_discussion_is_internal_and_does_not_register_a_human_request
 
 #[tokio::test]
 async fn goal_draft_rejects_mutation_and_requires_host_confirmation() {
-    let (runtime, home, cwd, backend) = goal_runtime("goal-draft-authority", false, None).await;
-    let handle = runtime.handle();
-    let draft = handle.goals().draft(GoalSpec::new("ship"), 3600).unwrap();
-    handle.goals().start_driver_and_run().unwrap();
+    let home = unique_temp_dir("goal-draft-authority-home");
+    let cwd = unique_temp_dir("goal-draft-authority-cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::write(cwd.join("proof.txt"), "objective evidence").unwrap();
+    let draft_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    struct DraftMaskBackend {
+        inner: GoalReportBackend,
+        write_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[async_trait]
+    impl LlmBackend for DraftMaskBackend {
+        fn name(&self) -> &str {
+            "draft-mask-backend"
+        }
+        async fn stream(&self, request: LlmRequest) -> anyhow::Result<LlmResponseStream> {
+            let has_draft_tag = request
+                .messages
+                .iter()
+                .filter_map(|m| m["content"].as_str())
+                .any(|s| s == "attempt forbidden write");
+            if has_draft_tag
+                && self
+                    .write_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    == 0
+            {
+                return Ok(LlmResponseStream {
+                    events: Box::pin(futures::stream::iter(vec![
+                        Ok(LlmEvent::ToolCall(tool_call_event(
+                            "Write",
+                            "forbidden-write",
+                            serde_json::json!({"path":"forbidden.txt","content":"bad"}),
+                        ))),
+                        Ok(LlmEvent::Stop(LlmStopEvent {
+                            reason: "tool_use".into(),
+                        })),
+                    ])),
+                    attempt_count: 1,
+                });
+            }
+            self.inner.stream(request).await
+        }
+    }
+    let backend = Arc::new(DraftMaskBackend {
+        inner: GoalReportBackend {
+            calls: Default::default(),
+            continue_first: false,
+        },
+        write_calls: draft_calls,
+    });
+    let (runtime, goals) = start_with_goal(
+        AgentOptions::new(&home, &cwd).with_llm_backend(backend.clone()),
+        GoalPlugin::new(),
+    )
+    .await
+    .unwrap();
+    let draft = goals.draft(GoalSpec::new("ship"), 3600).unwrap();
+    goals.start_driver_and_run().unwrap();
     tokio::task::yield_now().await;
-    assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-    let tools = crate::tools::runner::ToolRunner::new(Arc::new(crate::context::ToolContext::from(
-        handle.goal_ctx.as_ref(),
-    )));
-    let call = crate::protocol::ToolCallEvent {
-        id: "forbidden-write".into(),
-        name: "Write".into(),
-        input_json: serde_json::json!({"path":"forbidden.txt","content":"bad"}),
-        fields: Default::default(),
-        parse_error: None,
-        raw_arguments_digest: None,
-    };
-    let result = tools.execute_all(vec![call]).await.unwrap();
-    assert!(!result[0].succeeded());
-    assert!(!cwd.join("forbidden.txt").exists());
-    assert!(
-        handle
-            .goals()
-            .confirm(&draft.id, draft.revision + 1)
-            .is_err()
+    assert_eq!(
+        backend
+            .inner
+            .calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
     );
-    handle.goals().confirm(&draft.id, draft.revision).unwrap();
-    let completed = handle.goals().wait().await.unwrap();
+    let outcome = runtime
+        .handle()
+        .run_turn("attempt forbidden write")
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, TurnStatus::Ok);
+    assert!(!cwd.join("forbidden.txt").exists());
+    assert!(goals.confirm(&draft.id, draft.revision + 1).is_err());
+    goals.confirm(&draft.id, draft.revision).unwrap();
+    let completed = goals.wait().await.unwrap();
     assert_eq!(
         completed.completion_basis,
-        Some(crate::runtime::GoalCompletionBasis::AgentReviewed)
+        Some(GoalCompletionBasis::AgentReviewed)
     );
     assert!(completed.report.is_none());
     assert_eq!(completed.iterations.len(), 1);
@@ -1467,16 +1420,13 @@ async fn goal_draft_rejects_mutation_and_requires_host_confirmation() {
 
 #[tokio::test]
 async fn goal_review_rejects_unread_forged_or_changed_evidence() {
-    use crate::session::goal::*;
-    let (runtime, home, cwd, _) = goal_runtime("goal-review-evidence", false, None).await;
-    let handle = runtime.handle();
-    let goal = handle
-        .goal_ctx
-        .stores
+    let (runtime, goals, home, cwd, _) = goal_runtime("goal-review-evidence", false, None).await;
+    let handle = goals.handle.clone();
+    let goal = goals
         .goal_store
         .create(
             GoalSpec::new("ship"),
-            crate::runtime::goal::goal_environment(&cwd, &handle.goal_ctx.tools.tool_surface),
+            goal_environment_from_parts(&cwd, &handle.tool_surface_fingerprint()),
         )
         .unwrap();
     let candidate = GoalReviewCandidate {
@@ -1487,9 +1437,7 @@ async fn goal_review_rejects_unread_forged_or_changed_evidence() {
         conversation_seq: 0,
         reviewer_id: "test-reviewer".into(),
     };
-    let goal = handle
-        .goal_ctx
-        .stores
+    let goal = goals
         .goal_store
         .change(&goal.id, goal.revision, |g| {
             g.review_candidate = Some(candidate.clone());
@@ -1497,14 +1445,17 @@ async fn goal_review_rejects_unread_forged_or_changed_evidence() {
             Ok(())
         })
         .unwrap();
-    let session = Arc::new(crate::runtime::goal::review::GoalReviewSession::new(
+    let handle_for_usage = handle.clone();
+    let session = Arc::new(super::review::GoalReviewSession::new(
         goal.clone(),
-        handle.goal_ctx.stores.goal_store.clone(),
-        handle.goal_ctx.stores.usage.clone(),
+        goals.goal_store.clone(),
+        Arc::new(move || handle_for_usage.usage_records()),
     ));
-    let mut ctx = crate::context::ToolContext::from(handle.goal_ctx.as_ref());
-    ctx.goal_adjudication = Some(session.clone());
-    let evidence_ctx = ctx.goal_review_tool_context().unwrap();
+    let artifacts = handle.artifact_reader();
+    let evidence_ctx = crate::tools::GoalReviewToolContext {
+        cwd: &cwd,
+        artifacts: &artifacts,
+    };
     let review = GoalReview {
         candidate,
         verdict: GoalReviewVerdict::Satisfied,
@@ -1534,18 +1485,14 @@ async fn goal_review_rejects_unread_forged_or_changed_evidence() {
         session.submit(review.clone(), &evidence_ctx).is_err(),
         "file existence is not inspection"
     );
-    let call = crate::protocol::ToolCallEvent {
-        id: "read".into(),
-        name: "Read".into(),
-        input_json: serde_json::json!({"path":"proof.txt"}),
-        fields: Default::default(),
-        parse_error: None,
-        raw_arguments_digest: None,
-    };
     session
-        .finish_read(session.capture_read(&call, &evidence_ctx).unwrap().unwrap())
+        .finish_read(
+            crate::tools::capture_read_path("proof.txt", &cwd, artifacts.artifacts_dir())
+                .unwrap()
+                .unwrap(),
+        )
         .unwrap();
-    let host_goal_before_submission = handle.goals().snapshot().unwrap();
+    let host_goal_before_submission = goals.snapshot().unwrap();
     for bad in [
         {
             let mut r = review.clone();
@@ -1591,7 +1538,7 @@ async fn goal_review_rejects_unread_forged_or_changed_evidence() {
     );
     session.submit(review.clone(), &evidence_ctx).unwrap();
     assert_eq!(
-        handle.goals().snapshot().unwrap(),
+        goals.snapshot().unwrap(),
         host_goal_before_submission,
         "recording the host conclusion must not bypass the runtime commit"
     );
@@ -1605,7 +1552,7 @@ async fn goal_review_rejects_unread_forged_or_changed_evidence() {
 
 #[tokio::test]
 async fn draft_deadline_returns_after_the_owned_turn_exits() {
-    use crate::runtime::{AgentOptions, AgentRuntime, GoalSpec};
+    use mink::runtime::AgentOptions;
     let home = unique_temp_dir("draft-deadline-home");
     let cwd = unique_temp_dir("draft-deadline-cwd");
     std::fs::create_dir_all(&cwd).unwrap();
@@ -1613,17 +1560,17 @@ async fn draft_deadline_returns_after_the_owned_turn_exits() {
         calls: Default::default(),
         entered: Default::default(),
     });
-    let runtime =
-        AgentRuntime::start(AgentOptions::new(&home, &cwd).with_llm_backend(backend.clone()))
-            .await
-            .unwrap();
+    let (runtime, goals) = start_with_goal(
+        AgentOptions::new(&home, &cwd).with_llm_backend(backend.clone()),
+        GoalPlugin::new(),
+    )
+    .await
+    .unwrap();
     let handle = runtime.handle();
-    let draft = handle
-        .goals()
+    let draft = goals
         .request_draft(GoalSpec::new("draft only"), 3600)
         .unwrap();
-    let error = handle
-        .goals()
+    let error = goals
         .generate_draft_at_with_timeout(
             &draft.id,
             draft.revision,
@@ -1638,7 +1585,7 @@ async fn draft_deadline_returns_after_the_owned_turn_exits() {
         handle.active_turn_id().is_none(),
         "timed-out draft still owns the turn"
     );
-    assert!(!handle.goals().draft_snapshot().unwrap().draft_ready);
+    assert!(!goals.draft_snapshot().unwrap().draft_ready);
     runtime.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
     std::fs::remove_dir_all(cwd).unwrap();

@@ -6,8 +6,6 @@ pub(crate) mod compaction_cut;
 pub mod compaction_input;
 pub(crate) mod event_log;
 pub(crate) mod event_reader;
-pub mod goal;
-pub mod goal_protocol;
 pub mod image_cache;
 pub mod init;
 pub mod input;

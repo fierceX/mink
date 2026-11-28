@@ -33,7 +33,7 @@ pub enum PtcMode {
     #[serde(alias = "hybrid")]
     Tool,
     /// Strict/embedded domain mode: wire tools expose `RunCode` + planning/control tools
-    /// (`Plan*`, `Todo*`, `Goal*`, `SubAgent`) while workspace/exec tools live inside `RunCode`.
+    /// (`Plan*`, `Todo*`, `SubAgent`, and registered control extensions) while workspace/exec tools live inside `RunCode`.
     Exclusive,
 }
 

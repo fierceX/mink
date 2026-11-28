@@ -1,8 +1,12 @@
 //! Optional cross-turn scheduling. A turn remains the unit of execution/recovery.
-use crate::runtime::{AgentRuntimeHandle, RuntimeError, RuntimeResult};
-use crate::session::goal::*;
+use crate::store::*;
+use crate::tools::GoalToolBundle;
 use anyhow::{Result, ensure};
 use async_trait::async_trait;
+use mink::runtime::{
+    AgentOptions, AgentRuntimeHandle, EventSink, ExtensionEmitter, RuntimeError, RuntimeResult,
+    SessionReader,
+};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -10,18 +14,118 @@ use std::sync::{Arc, Mutex};
 
 mod control;
 mod driver;
+#[cfg(test)]
+mod lifecycle_tests;
 pub(crate) mod review;
+#[cfg(test)]
+mod review_tests;
+#[cfg(test)]
+mod test_helpers;
 #[cfg(test)]
 mod tests;
 mod verification;
 
-pub use crate::session::goal::{
-    GOAL_MESSAGE_SOURCE, GoalAcceptance, GoalBudget, GoalCompletionBasis, GoalDraftSnapshot,
-    GoalLimits, GoalMessage, GoalMessageKind, GoalOutcome, GoalPhase, GoalReport, GoalReportKind,
-    GoalSnapshot, GoalSpec, GoalStatus, default_limits as default_goal_limits,
-};
-pub use crate::session::goal_protocol::*;
-pub use control::GoalController;
+/// Configuration bundle installed into [`AgentOptions`] before starting an
+/// [`AgentRuntime`](mink::runtime::AgentRuntime), then bound once attached to its
+/// live [`AgentRuntimeHandle`] via [`GoalEngine::attach`].
+#[derive(Clone, Default)]
+pub struct GoalPlugin {
+    pub(crate) tools: Arc<GoalToolBundle>,
+    pub(crate) verifiers: Vec<Arc<dyn GoalVerifier>>,
+    pub(crate) event_sink: Option<Arc<dyn EventSink>>,
+}
+
+impl GoalPlugin {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_verifier(mut self, verifier: Arc<dyn GoalVerifier>) -> Self {
+        self.verifiers.push(verifier);
+        self
+    }
+
+    pub fn with_event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
+        self.event_sink = Some(sink);
+        self
+    }
+
+    /// Register Goal tools, turn policies, and compaction checkpoint hooks
+    /// onto `options`. Does not open `goal.json` (that waits until
+    /// [`GoalEngine::attach`] after `SessionLease` is held).
+    pub fn install_into(&self, options: &mut AgentOptions) {
+        for tool in self.tools.tools() {
+            options.add_tool(tool);
+        }
+        options.add_turn_policy(self.tools.turn_policy());
+        options.add_compaction_checkpoint_provider(self.tools.checkpoint_provider());
+    }
+}
+
+/// Goal lifecycle, verification, and cross-turn scheduling engine attached to an
+/// [`AgentRuntimeHandle`].
+#[derive(Clone)]
+pub struct GoalEngine {
+    pub(crate) handle: AgentRuntimeHandle,
+    pub(crate) goal_driver: Arc<GoalDriver>,
+    pub(crate) goal_store: Arc<GoalStore>,
+    pub(crate) goal_tools: Arc<GoalToolBundle>,
+}
+
+impl GoalEngine {
+    /// Load and recover the session's durable goal state (under the runtime's
+    /// active `SessionLease`) and wire Goal scheduling into `handle`.
+    pub fn attach(handle: AgentRuntimeHandle, plugin: GoalPlugin) -> RuntimeResult<Arc<Self>> {
+        let session_dir = handle.session_dir();
+        let goal_store = Arc::new(
+            GoalStore::load(&session_dir, handle.persistence_fault())
+                .map_err(|e| RuntimeError::Configuration(format!("{e:#}")))?,
+        );
+        if goal_store.snapshot().is_some() {
+            let records = handle
+                .usage_records()
+                .map_err(|e| RuntimeError::Configuration(format!("{e:#}")))?;
+            goal_store
+                .reconcile_usage(&records)
+                .map_err(|e| RuntimeError::Configuration(format!("{e:#}")))?;
+        }
+        if goal_store
+            .snapshot()
+            .is_some_and(|g| !g.status.is_terminal())
+        {
+            let (history, committed_sequence) = SessionReader::new(session_dir)
+                .conversation_with_sequence()
+                .map_err(|e| RuntimeError::Configuration(format!("{e:#}")))?;
+            let env = goal_environment_from_parts(
+                &handle.session_info().cwd,
+                &handle.tool_surface_fingerprint(),
+            );
+            goal_store
+                .recover(&env, &history, committed_sequence)
+                .map_err(|e| RuntimeError::Configuration(format!("{e:#}")))?;
+        }
+        plugin
+            .tools
+            .bind_store(goal_store.clone(), handle.artifact_reader());
+        let goal_driver = Arc::new(GoalDriver::new(plugin.verifiers, plugin.event_sink));
+        let controller = Arc::new(GoalExternalController::new(
+            goal_driver.clone(),
+            goal_store.clone(),
+            handle.extension_emitter(),
+        ));
+        handle.attach_external_controller(controller)?;
+        Ok(Arc::new(Self {
+            handle,
+            goal_driver,
+            goal_store,
+            goal_tools: plugin.tools,
+        }))
+    }
+
+    pub fn handle(&self) -> &AgentRuntimeHandle {
+        &self.handle
+    }
+}
 
 /// Maximum wall-clock time for one independent review attempt.
 pub(crate) const GOAL_REVIEW_TIMEOUT_SECS: u64 = 600;
@@ -59,7 +163,7 @@ pub struct GoalVerificationContext {
     pub cwd: PathBuf,
     pub goal: GoalSnapshot,
     pub cancelled: Arc<AtomicBool>,
-    pub(crate) tools: Arc<crate::context::ToolContext>,
+    pub handle: AgentRuntimeHandle,
 }
 #[async_trait]
 pub trait GoalVerifier: Send + Sync {
@@ -105,13 +209,12 @@ pub(crate) struct GoalDriver {
     /// on-disk goal still reads active.
     #[cfg(test)]
     pub(crate) drive_attempts: std::sync::atomic::AtomicU64,
-    pub(crate) admission: Mutex<()>,
     pub(crate) control: Mutex<GoalControlState>,
     /// Driver lifecycle so waiters cannot lose a wakeup: a watch keeps the
     /// current state instead of racing a check against a notification.
     changes: tokio::sync::watch::Sender<DriverState>,
     pub(crate) verifiers: Vec<Arc<dyn GoalVerifier>>,
-    pub(crate) sink: Option<Arc<dyn crate::runtime::EventSink>>,
+    pub(crate) sink: Option<Arc<dyn EventSink>>,
     /// Whether a goal turn is executing right now.
     ///
     /// Hosts that drive a session need this to report the session as running:
@@ -122,13 +225,12 @@ pub(crate) struct GoalDriver {
 impl GoalDriver {
     pub(crate) fn new(
         verifiers: Vec<Arc<dyn GoalVerifier>>,
-        sink: Option<Arc<dyn crate::runtime::EventSink>>,
+        sink: Option<Arc<dyn EventSink>>,
     ) -> Self {
         let (changes, _) = tokio::sync::watch::channel(DriverState::Idle);
         Self {
             #[cfg(test)]
             drive_attempts: std::sync::atomic::AtomicU64::new(0),
-            admission: Mutex::new(()),
             control: Mutex::new(GoalControlState {
                 enabled: false,
                 next_run_id: 1,
@@ -174,23 +276,101 @@ impl GoalDriver {
         control.driver = state.clone();
         let _ = self.changes.send_replace(state);
     }
+    /// Wait until any active driver run reaches an idle, closed, or faulted state.
+    pub(crate) async fn wait_for_exit(&self) {
+        let mut changes = self.changes.subscribe();
+        loop {
+            match changes.borrow_and_update().clone() {
+                DriverState::Running { .. } | DriverState::Stopping { .. } => {}
+                DriverState::Idle | DriverState::Closed | DriverState::Faulted { .. } => return,
+            }
+            if changes.changed().await.is_err() {
+                return;
+            }
+        }
+    }
 }
-pub(crate) fn goal_environment(
-    cwd: &Path,
-    surface: &crate::tools::surface::ModelToolSurface,
-) -> String {
+
+pub(crate) struct GoalExternalController {
+    goal_driver: Arc<GoalDriver>,
+    goal_store: Arc<GoalStore>,
+    emitter: ExtensionEmitter,
+}
+
+impl GoalExternalController {
+    pub(crate) fn new(
+        goal_driver: Arc<GoalDriver>,
+        goal_store: Arc<GoalStore>,
+        emitter: ExtensionEmitter,
+    ) -> Self {
+        Self {
+            goal_driver,
+            goal_store,
+            emitter,
+        }
+    }
+}
+
+impl mink::runtime::ExternalController for GoalExternalController {
+    fn blocks_ordinary_control(&self) -> Option<&'static str> {
+        let blocked = self.goal_store.snapshot().is_some_and(|g| {
+            g.status == GoalStatus::Active
+                || (g.status == GoalStatus::Blocked && g.phase == GoalPhase::Verifying)
+        });
+        blocked.then_some("goal")
+    }
+
+    fn on_user_interrupt(&self) {
+        if self
+            .goal_store
+            .snapshot()
+            .is_some_and(|g| g.status == GoalStatus::Active)
+        {
+            match self.goal_store.pause_if_active("paused by user interrupt") {
+                Ok(Some(goal)) => {
+                    let payload = serde_json::json!({ "goal": goal });
+                    self.emitter
+                        .emit_extension_event(crate::events::GOAL_UPDATED_EVENT, payload.clone());
+                    if goal.status.is_terminal() {
+                        self.emitter
+                            .emit_live_extension_event(crate::events::GOAL_FINISHED_EVENT, payload);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    control::latch_stopping_after_failed_stop_intent(
+                        &self.goal_driver,
+                        &format!("{error:#}"),
+                    );
+                    self.emitter.render_error(&format!("{error:#}"));
+                }
+            }
+        }
+    }
+
+    fn on_shutdown_disable(&self) {
+        self.goal_driver.disable();
+    }
+
+    fn is_active(&self) -> bool {
+        self.goal_driver.is_active()
+    }
+
+    fn wait_exit(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(self.goal_driver.wait_for_exit())
+    }
+
+    fn on_shutdown_close(&self) {
+        self.goal_driver.close();
+    }
+}
+
+pub(crate) fn goal_environment_from_parts(cwd: &Path, surface_fingerprint: &str) -> String {
     let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    format!("{}:{}", cwd.display(), surface.fingerprint())
+    format!("{}:{}", cwd.display(), surface_fingerprint)
 }
 fn command_error(error: anyhow::Error) -> RuntimeError {
     RuntimeError::Command(format!("{error:#}"))
-}
-pub(crate) fn goal_projection_chars(window: usize) -> usize {
-    if window == 0 {
-        8192
-    } else {
-        (window / 8).clamp(128, 8192)
-    }
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
@@ -255,37 +435,26 @@ impl GoalVerifier for CommandGoalVerifier {
     }
     async fn verify(&self, context: GoalVerificationContext) -> Result<GoalVerification> {
         ensure!(
-            context.tools.tool_surface.has_any_reachable("Bash"),
+            context.handle.has_reachable_tool("Bash"),
             "checker requires Bash in the resolved tool surface"
         );
-        let call = crate::protocol::ToolCallEvent {
-            id: "goal-check".into(),
-            name: "Bash".into(),
-            input_json: serde_json::json!({"command":self.command,"timeout":self.timeout_secs}),
-            fields: std::collections::BTreeMap::from([
-                ("command".into(), self.command.clone()),
-                ("timeout".into(), self.timeout_secs.to_string()),
-            ]),
-            parse_error: None,
-            raw_arguments_digest: None,
-        };
-        let result = crate::tools::runner::ToolRunner::new(context.tools)
-            .execute_verifier_call(call)
+        let result = context
+            .handle
+            .execute_scoped_tool(
+                "Bash",
+                serde_json::json!({"command": self.command, "timeout": self.timeout_secs}),
+            )
             .await?;
         Ok(GoalVerification {
-            status: if result.succeeded() {
+            status: if result.succeeded {
                 GoalVerificationStatus::Pass
             } else if result.exit_code.is_some() {
                 GoalVerificationStatus::Fail
             } else {
                 GoalVerificationStatus::Inconclusive
             },
-            reason: result.content.clone(),
-            evidence: result
-                .artifacts
-                .iter()
-                .map(|a| format!("artifact://{}", a.id))
-                .collect(),
+            reason: result.content,
+            evidence: result.artifacts,
         })
     }
 }
@@ -295,7 +464,7 @@ impl GoalVerifier for CommandGoalVerifier {
 /// host lease lives here so capacity is released exactly when the run ends
 /// *and* no execution it left behind still owns the turn gate.
 struct RunGuard {
-    handle: AgentRuntimeHandle,
+    engine: GoalEngine,
     run_id: u64,
     goal_id: String,
     lease: Option<Box<dyn GoalRunLease>>,
@@ -304,7 +473,7 @@ struct RunGuard {
 impl RunGuard {
     fn finish(mut self, fault: Option<String>) {
         self.finished = true;
-        self.handle
+        self.engine
             .finish_goal_run(self.run_id, &self.goal_id, fault);
         self.hand_off_lease();
     }
@@ -323,15 +492,15 @@ impl RunGuard {
         let Some(lease) = self.lease.take() else {
             return;
         };
-        if self.handle.active_turn_id().is_none() {
+        if self.engine.handle.active_turn_id().is_none() {
             drop(lease);
             return;
         }
-        let gate = self.handle.turn_gate.clone();
+        let handle = self.engine.handle.clone();
         match tokio::runtime::Handle::try_current() {
             Ok(runtime) => {
                 runtime.spawn(async move {
-                    gate.wait_idle().await;
+                    handle.wait_turn_idle().await;
                     drop(lease);
                 });
             }
@@ -350,7 +519,7 @@ impl Drop for RunGuard {
         // aborted with no scheduled exit left to outlive.
         drop(self.lease.take());
         if !self.finished {
-            self.handle.finish_goal_run(
+            self.engine.finish_goal_run(
                 self.run_id,
                 &self.goal_id,
                 Some("goal runner exited unexpectedly".into()),

@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 tokio::task_local! {
-    /// Host adjudication and its summaries share the independent review bill.
-    static GOAL_ADJUDICATION_BILLING: (PathBuf, String);
+    /// Internal turns and summaries can override the billing turn id.
+    static BILLING_SCOPE_OVERRIDE: (PathBuf, String);
 }
 
 const USAGE_RECORD_VERSION: u32 = 1;
@@ -196,7 +196,7 @@ recovering salvageable records",
 
     pub fn scope(&self, kind: UsageKind, origin_session_id: impl Into<String>) -> UsageScope {
         let active = self.active_turn.lock().unwrap_or_else(|e| e.into_inner());
-        let billing_turn_id = GOAL_ADJUDICATION_BILLING
+        let billing_turn_id = BILLING_SCOPE_OVERRIDE
             .try_with(|(path, id)| (path == &self.path).then(|| id.clone()))
             .ok()
             .flatten()
@@ -209,12 +209,12 @@ recovering salvageable records",
         }
     }
 
-    pub(crate) async fn with_goal_adjudication<F: std::future::Future>(
+    pub(crate) async fn with_billing_scope<F: std::future::Future>(
         &self,
         billing_turn_id: String,
         future: F,
     ) -> F::Output {
-        GOAL_ADJUDICATION_BILLING
+        BILLING_SCOPE_OVERRIDE
             .scope((self.path.clone(), billing_turn_id), future)
             .await
     }

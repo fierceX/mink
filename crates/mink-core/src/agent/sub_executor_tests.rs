@@ -592,7 +592,10 @@ async fn child_metadata_records_parent_origin_label_and_depth() -> anyhow::Resul
 #[tokio::test]
 async fn internal_origins_are_distinct_and_do_not_require_delegation_depth() -> anyhow::Result<()> {
     assert_eq!(SubAgentOrigin::SubAgent.as_str(), "sub_agent");
-    assert_eq!(SubAgentOrigin::GoalReview.as_str(), "goal_review");
+    assert_eq!(
+        SubAgentOrigin::Custom("custom_audit".into()).as_str(),
+        "custom_audit"
+    );
     assert_eq!(SubAgentOrigin::Replan.as_str(), "replan");
 
     let parent =
@@ -619,18 +622,18 @@ async fn internal_origins_are_distinct_and_do_not_require_delegation_depth() -> 
 
     let review = SubAgentExecutor::new_child(
         parent.clone(),
-        "goal-review-metadata-child".into(),
+        "custom-audit-metadata-child".into(),
         true,
         parent.config.clone(),
         parent.cancel.linked_child_token(),
-        Some("goal review".into()),
+        Some("custom audit".into()),
         None,
-        SubAgentOrigin::GoalReview,
+        SubAgentOrigin::Custom("custom_audit".into()),
     )
     .await?;
     let raw = tokio::fs::read_to_string(review.child_ctx.paths.home.join("session.json")).await?;
     let metadata: serde_json::Value = serde_json::from_str(&raw)?;
-    assert_eq!(metadata["subagent"]["origin"], "goal_review");
+    assert_eq!(metadata["subagent"]["origin"], "custom_audit");
     assert_eq!(metadata["subagent"]["mode"], "fork");
     Ok(())
 }

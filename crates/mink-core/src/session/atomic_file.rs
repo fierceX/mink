@@ -228,7 +228,7 @@ fn replace_existing(temporary: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn sync_parent(path: &Path) -> Result<()> {
+pub fn sync_parent(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         let parent = path

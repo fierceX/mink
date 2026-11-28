@@ -1,0 +1,26 @@
+[package]
+name = "mink-goal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Goal lifecycle, independent review, and verification extension for mink"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+mink = { package = "mink-core", version = "0.10.0", path = "../mink-core", default-features = false, features = ["runtime"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+time.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+
+[features]
+slow-tests = ["mink/slow-tests"]

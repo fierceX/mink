@@ -1,12 +1,14 @@
 //! Durable explicit goals; model reports never grant lifecycle authority.
-pub use super::goal_protocol::*;
-use crate::session::persistence::{PersistenceFault, publish_state};
+pub mod protocol;
 use anyhow::{Result, ensure};
+use mink::runtime::{PersistenceFault, publish_state};
+pub use protocol::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 mod render;
+#[allow(clippy::module_inception)]
 mod store;
 mod transitions;
 mod types;
@@ -28,10 +30,5 @@ pub(crate) use types::GOAL_FORMAT_VERSION;
 use types::State;
 
 #[cfg(test)]
-#[path = "../goal_tests.rs"]
+#[path = "tests.rs"]
 mod tests;
-
-/// Old records predate the optional outcome marker and retain their existing semantics.
-pub(crate) fn effect_outcome_known(metadata: Option<&serde_json::Value>) -> bool {
-    metadata.and_then(|m| m.get("execution_outcome")).is_none()
-}

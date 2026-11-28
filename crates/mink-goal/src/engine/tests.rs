@@ -1,5 +1,9 @@
+use super::test_helpers::*;
 use super::*;
-use crate::runtime::{AgentOptions, AgentRuntime, LlmBackend, LlmRequest, LlmResponseStream};
+use mink::runtime::{
+    AgentOptions, AgentRuntime, AgentTool, InternalTurnRequest, LlmBackend, LlmEvent, LlmRequest,
+    LlmResponseStream, ToolExecutionContext,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct NoRequest;
@@ -18,7 +22,7 @@ impl LlmBackend for HostConclusionBackend {
     }
 
     async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream> {
-        use crate::runtime::{LlmEvent, LlmStopEvent, LlmTextEvent};
+        use mink::runtime::{LlmEvent, LlmStopEvent, LlmTextEvent};
         let prompt = request
             .messages
             .iter()
@@ -27,7 +31,7 @@ impl LlmBackend for HostConclusionBackend {
             .find(|s| !s.starts_with("<goal-conclusion-required>"))
             .unwrap_or_default();
         let tool = |id: &str, name: &str, input_json| {
-            Ok(LlmEvent::ToolCall(crate::protocol::ToolCallEvent {
+            Ok(LlmEvent::ToolCall(mink::runtime::LlmToolCallEvent {
                 id: id.into(),
                 name: name.into(),
                 input_json,
@@ -124,23 +128,20 @@ async fn host_agent_retries_rejected_conclusions_after_prose_only_independent_re
         reviewer_requests: AtomicUsize::new(0),
         host_requests: AtomicUsize::new(0),
     });
-    let runtime = AgentRuntime::start(
+    let (runtime, goals) = start_with_goal(
         AgentOptions::new(root.join("home"), &cwd).with_llm_backend(backend.clone()),
+        GoalPlugin::new(),
     )
     .await
     .unwrap();
-    let handle = runtime.handle();
-    handle.goals().start_driver().unwrap();
-    let draft = handle
-        .goals()
-        .draft(GoalSpec::new("deliver proof"), 3600)
-        .unwrap();
-    handle.goals().confirm(&draft.id, draft.revision).unwrap();
-    let completed = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
+    goals.start_driver().unwrap();
+    let draft = goals.draft(GoalSpec::new("deliver proof"), 3600).unwrap();
+    goals.confirm(&draft.id, draft.revision).unwrap();
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(20), goals.wait())
         .await
         .unwrap()
         .unwrap();
-    let history = handle.goal_ctx.stores.store.lines().await.unwrap();
+    let history = runtime.handle().conversation_lines().await.unwrap();
     runtime.shutdown().await.unwrap();
     std::fs::remove_dir_all(root).unwrap();
     assert_eq!(completed.status, GoalStatus::Completed, "{completed:?}");
@@ -179,7 +180,7 @@ impl LlmBackend for NoRequest {
     }
 }
 
-async fn blocked_review_fixture() -> (AgentRuntime, AgentRuntimeHandle, PathBuf, GoalSnapshot) {
+async fn blocked_review_fixture() -> (AgentRuntime, Arc<GoalEngine>, PathBuf, GoalSnapshot) {
     let root = std::env::temp_dir().join(format!(
         "mink-review-replay-{}-{:?}",
         time::OffsetDateTime::now_utc().unix_timestamp_nanos(),
@@ -188,20 +189,13 @@ async fn blocked_review_fixture() -> (AgentRuntime, AgentRuntimeHandle, PathBuf,
     let cwd = root.join("work");
     std::fs::create_dir_all(&cwd).unwrap();
     std::fs::write(cwd.join("proof.txt"), "external input has not arrived\n").unwrap();
-    let runtime = AgentRuntime::start(
-        AgentOptions::new(root.join("home"), &cwd).with_llm_backend(Arc::new(NoRequest)),
-    )
-    .await
-    .unwrap();
-    let handle = runtime.handle();
-    let draft = handle
-        .goals()
+    let options = AgentOptions::new(root.join("home"), &cwd).with_llm_backend(Arc::new(NoRequest));
+    let (runtime, goals) = start_with_goal(options, GoalPlugin::new()).await.unwrap();
+    let draft = goals
         .draft(GoalSpec::new("obtain external input"), 3600)
         .unwrap();
-    handle.goals().confirm(&draft.id, draft.revision).unwrap();
-    let executing = handle
-        .goal_ctx
-        .stores
+    goals.confirm(&draft.id, draft.revision).unwrap();
+    let executing = goals
         .goal_store
         .begin_iteration("one-execution", 0)
         .unwrap();
@@ -213,8 +207,8 @@ async fn blocked_review_fixture() -> (AgentRuntime, AgentRuntimeHandle, PathBuf,
         conversation_seq: 0,
         reviewer_id: format!(
             "goal-review:{}:{}",
-            handle.goal_ctx.active_model.lock().unwrap().actual,
-            handle.goal_ctx.tools.tool_surface.fingerprint()
+            goals.handle.active_model_name(),
+            goals.handle.tool_surface_fingerprint()
         ),
     };
     let review: GoalReview = serde_json::from_value(serde_json::json!({
@@ -224,7 +218,7 @@ async fn blocked_review_fixture() -> (AgentRuntime, AgentRuntimeHandle, PathBuf,
         "constraints":[],"summary":"waiting","next_step":"obtain external input",
         "blocker":{"category":"external","criterion_ids":["criterion-1"],"dependency":"missing input","evidence":["proof.txt"]}
     })).unwrap();
-    let hash = handle.evidence_version("proof.txt").unwrap();
+    let hash = goals.evidence_version("proof.txt").unwrap();
     let fingerprint = hash_bytes(
         &serde_json::to_vec(&(
             "external",
@@ -234,13 +228,11 @@ async fn blocked_review_fixture() -> (AgentRuntime, AgentRuntimeHandle, PathBuf,
         ))
         .unwrap(),
     );
-    let goal = handle
-        .goal_ctx
-        .stores
+    let goal = goals
         .goal_store
         .change(&executing.id, executing.revision, |g| {
             g.iterations[0].finished = true;
-            g.iterations[0].outcome_status = Some(crate::runtime::TurnStatus::Ok);
+            g.iterations[0].outcome_status = Some(mink::runtime::TurnStatus::Ok);
             g.phase = GoalPhase::Idle;
             g.review_candidate = Some(candidate);
             g.reviews.push(review);
@@ -259,9 +251,9 @@ async fn blocked_review_fixture() -> (AgentRuntime, AgentRuntimeHandle, PathBuf,
         })
         .unwrap();
     {
-        let mut control = handle.goal_driver.lock_control();
+        let mut control = goals.goal_driver.lock_control();
         control.enabled = true;
-        handle.goal_driver.set_driver_locked(
+        goals.goal_driver.set_driver_locked(
             &mut control,
             DriverState::Running {
                 run_id: 1,
@@ -269,13 +261,13 @@ async fn blocked_review_fixture() -> (AgentRuntime, AgentRuntimeHandle, PathBuf,
             },
         );
     }
-    (runtime, handle, root, goal)
+    (runtime, goals, root, goal)
 }
 
-async fn close_fixture(runtime: AgentRuntime, handle: &AgentRuntimeHandle, root: PathBuf) {
+async fn close_fixture(runtime: AgentRuntime, goals: &GoalEngine, root: PathBuf) {
     {
-        let mut control = handle.goal_driver.lock_control();
-        handle
+        let mut control = goals.goal_driver.lock_control();
+        goals
             .goal_driver
             .set_driver_locked(&mut control, DriverState::Idle);
     }
@@ -285,15 +277,10 @@ async fn close_fixture(runtime: AgentRuntime, handle: &AgentRuntimeHandle, root:
 
 #[tokio::test]
 async fn settled_review_recovery_preserves_next_execution_phase() {
-    let (runtime, handle, root, goal) = blocked_review_fixture().await;
-    handle
-        .goal_ctx
-        .stores
-        .goal_store
-        .recover(&goal.environment, &[], 0)
-        .unwrap();
-    let recovered = handle.goals().snapshot().unwrap();
-    close_fixture(runtime, &handle, root).await;
+    let (runtime, goals, root, goal) = blocked_review_fixture().await;
+    goals.goal_store.recover(&goal.environment, &[], 0).unwrap();
+    let recovered = goals.snapshot().unwrap();
+    close_fixture(runtime, &goals, root).await;
     assert_eq!(
         recovered.phase,
         GoalPhase::Idle,
@@ -304,29 +291,30 @@ async fn settled_review_recovery_preserves_next_execution_phase() {
 
 #[tokio::test]
 async fn external_blocker_requires_inspected_evidence() {
-    let (runtime, handle, root, goal) = blocked_review_fixture().await;
+    let (runtime, goals, root, goal) = blocked_review_fixture().await;
+    let handle_for_usage = goals.handle.clone();
     let session = super::review::GoalReviewSession::new(
         goal.clone(),
-        handle.goal_ctx.stores.goal_store.clone(),
-        handle.goal_ctx.stores.usage.clone(),
+        goals.goal_store.clone(),
+        Arc::new(move || handle_for_usage.usage_records()),
     );
-    let ctx = crate::context::ToolContext::from(handle.goal_ctx.as_ref());
-    let evidence_ctx = ctx.goal_review_tool_context().unwrap();
-    let call = crate::protocol::ToolCallEvent {
-        id: "proof-read".into(),
-        name: "Read".into(),
-        input_json: serde_json::json!({"path":"proof.txt"}),
-        fields: Default::default(),
-        parse_error: None,
-        raw_arguments_digest: None,
+    let artifacts = goals.handle.artifact_reader();
+    let cwd = &goals.handle.session_info().cwd;
+    let evidence_ctx = crate::tools::GoalReviewToolContext {
+        cwd,
+        artifacts: &artifacts,
     };
     session
-        .finish_read(session.capture_read(&call, &evidence_ctx).unwrap().unwrap())
+        .finish_read(
+            crate::tools::capture_read_path("proof.txt", cwd, artifacts.artifacts_dir())
+                .unwrap()
+                .unwrap(),
+        )
         .unwrap();
     let mut claimed = goal.reviews[0].clone();
     claimed.blocker.as_mut().unwrap().evidence.clear();
     let accepted = session.submit(claimed, &evidence_ctx);
-    close_fixture(runtime, &handle, root).await;
+    close_fixture(runtime, &goals, root).await;
     assert!(
         accepted.is_err(),
         "an unsupported external dependency was accepted"
@@ -335,68 +323,94 @@ async fn external_blocker_requires_inspected_evidence() {
 
 #[tokio::test]
 async fn host_conclusion_tool_is_scoped_and_rejections_preserve_goal_state() {
-    use crate::tools::runner::ToolRunner;
-    let (runtime, handle, root, goal) = blocked_review_fixture().await;
+    let (runtime, goals, root, goal) = blocked_review_fixture().await;
+    let handle_for_usage = goals.handle.clone();
     let session = Arc::new(super::review::GoalReviewSession::new(
         goal.clone(),
-        handle.goal_ctx.stores.goal_store.clone(),
-        handle.goal_ctx.stores.usage.clone(),
+        goals.goal_store.clone(),
+        Arc::new(move || handle_for_usage.usage_records()),
     ));
-    let mut ctx = crate::context::ToolContext::from(handle.goal_ctx.as_ref());
-    let call = |id: &str, name: &str, input_json| crate::protocol::ToolCallEvent {
-        id: id.into(),
-        name: name.into(),
-        input_json,
-        fields: Default::default(),
-        parse_error: None,
-        raw_arguments_digest: None,
-    };
+    let exec_ctx = ToolExecutionContext::new(
+        goals.handle.session_info().cwd.clone(),
+        goals.handle.interrupt_flag(),
+    );
     let conclusion = serde_json::to_value(&goal.reviews[0]).unwrap();
-    let ordinary = ToolRunner::new(Arc::new(ctx.clone()))
-        .execute_all(vec![call(
-            "ordinary-submit",
-            "GoalReview",
-            conclusion.clone(),
-        )])
+    let ordinary_tool =
+        crate::tools::GoalReviewTool::for_test_adjudication(None, goals.handle.artifact_reader());
+    let ordinary = AgentTool::execute(&ordinary_tool, conclusion.clone(), exec_ctx.clone())
         .await
-        .unwrap();
-    assert!(!ordinary[0].succeeded());
+        .unwrap_err();
     assert!(
-        ordinary[0]
-            .content
+        ordinary
+            .to_string()
             .contains("host agent's adjudication turn")
     );
-    ctx.goal_adjudication = Some(session.clone());
-    let runner = ToolRunner::new(Arc::new(ctx));
-    let forbidden = runner
-        .execute_all(vec![call(
-            "forbidden-write",
-            "Write",
-            serde_json::json!({"path":"forbidden.txt","content":"must not execute"}),
-        )])
-        .await
-        .unwrap();
-    assert!(!forbidden[0].succeeded());
-    assert!(!handle.goal_ctx.paths.cwd.join("forbidden.txt").exists());
+    goals.goal_tools.set_adjudication(Some(session.clone()));
+    let tool = crate::tools::GoalReviewTool::for_test_adjudication(
+        Some(session.clone()),
+        goals.handle.artifact_reader(),
+    );
     let mut invalid = conclusion;
     invalid["criteria"] = serde_json::json!([]);
-    let rejected = runner
-        .execute_all(vec![call("host-invalid", "GoalReview", invalid)])
-        .await
-        .unwrap();
-    assert!(!rejected[0].succeeded());
+    let rejected = AgentTool::execute(&tool, invalid, exec_ctx).await.unwrap();
+    assert!(!rejected.success);
     assert!(
-        rejected[0]
+        rejected
             .content
             .contains("review must cover each criterion exactly once")
     );
-    assert_eq!(
-        rejected[0].failure_source, None,
-        "a conclusion rejection is not a damaged model format"
-    );
     assert!(session.submitted_conclusion().is_none());
-    assert_eq!(handle.goals().snapshot().unwrap(), goal);
-    close_fixture(runtime, &handle, root).await;
+    assert_eq!(goals.snapshot().unwrap(), goal);
+    goals.goal_tools.set_adjudication(None);
+    close_fixture(runtime, &goals, root).await;
+
+    // Also verify `goal_adjudication_mask` blocks Write in a real runtime turn.
+    let mask_root = unique_temp_dir("adj-mask");
+    let mask_cwd = mask_root.join("work");
+    std::fs::create_dir_all(&mask_cwd).unwrap();
+    let backend = Arc::new(ScriptedMockLlmBackend::new(
+        "flash",
+        vec![
+            vec![
+                Ok(LlmEvent::ToolCall(tool_call_event(
+                    "Write",
+                    "forbidden-write",
+                    serde_json::json!({"path":"forbidden.txt","content":"must not execute"}),
+                ))),
+                Ok(LlmEvent::Stop(mink::runtime::LlmStopEvent {
+                    reason: "tool_use".into(),
+                })),
+            ],
+            natural_goal_end(),
+        ],
+    ));
+    let plugin = GoalPlugin::new();
+    let mut opts = AgentOptions::new(mask_root.join("home"), &mask_cwd).with_llm_backend(backend);
+    plugin.install_into(&mut opts);
+    let rt2 = AgentRuntime::start(opts).await.unwrap();
+    let mut req = InternalTurnRequest::new("goal_adjudication", "adjudicate");
+    req.tool_mask = Some(crate::tools::goal_adjudication_mask());
+    let mut stream = rt2.handle().stream_internal_turn(req).unwrap();
+    let mut saw_failed_write = false;
+    while let Some(ev) = stream.recv().await {
+        if let mink::runtime::AgentEvent {
+            kind:
+                mink::runtime::AgentEventKind::ToolResult {
+                    tool_name, status, ..
+                },
+            ..
+        } = ev
+            && tool_name == "Write"
+            && matches!(status, mink::runtime::tools::ToolStatus::Blocked(_))
+        {
+            saw_failed_write = true;
+        }
+    }
+    let _ = stream.outcome().await.unwrap();
+    assert!(saw_failed_write);
+    assert!(!mask_cwd.join("forbidden.txt").exists());
+    rt2.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(mask_root);
 }
 
 #[tokio::test]
@@ -409,24 +423,22 @@ async fn goal_confirmation_rejects_a_missing_host_submission_tool_before_activat
     let options = AgentOptions::new(root.join("home"), &root)
         .with_llm_backend(Arc::new(NoRequest))
         .with_enabled_tools(vec!["GoalRead".into()]);
-    let runtime = AgentRuntime::start(options).await.unwrap();
-    let handle = runtime.handle();
-    let draft = handle
-        .goals()
+    let (runtime, goals) = start_with_goal(options, GoalPlugin::new()).await.unwrap();
+    let draft = goals
         .draft(GoalSpec::new("requires a host conclusion"), 3600)
         .unwrap();
-    let refused = handle.goals().confirm(&draft.id, draft.revision);
+    let refused = goals.confirm(&draft.id, draft.revision);
     assert!(
         matches!(refused,Err(RuntimeError::Configuration(ref error)) if error.contains("GoalReview"))
     );
-    assert_eq!(handle.goals().snapshot().unwrap(), draft);
+    assert_eq!(goals.snapshot().unwrap(), draft);
     runtime.shutdown().await.unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]
 async fn host_conclusion_verdict_must_match_requirement_findings() {
-    let (runtime, handle, root, goal) = blocked_review_fixture().await;
+    let (runtime, goals, root, goal) = blocked_review_fixture().await;
     let mut feedback = goal.reviews[0].feedback().unwrap();
 
     let blocked = feedback.clone().into_review(&goal).unwrap();
@@ -453,15 +465,14 @@ async fn host_conclusion_verdict_must_match_requirement_findings() {
     unsupported_host_conclusion.criteria[0].status = GoalCriterionStatus::Fail;
     assert!(unsupported_host_conclusion.validate(&goal).is_err());
 
-    close_fixture(runtime, &handle, root).await;
+    close_fixture(runtime, &goals, root).await;
 }
 
 #[tokio::test]
 async fn review_token_limit_stops_new_provider_requests() {
-    let (runtime, handle, root, goal) = blocked_review_fixture().await;
-    let verifying = handle
-        .goal_ctx
-        .stores
+    let (runtime, goals, root, goal) = blocked_review_fixture().await;
+    let handle = goals.handle.clone();
+    let verifying = goals
         .goal_store
         .change(&goal.id, goal.revision, |g| {
             g.reviews.clear();
@@ -471,10 +482,10 @@ async fn review_token_limit_stops_new_provider_requests() {
             Ok(())
         })
         .unwrap();
-    handle.accept_goal(1, verifying).await.unwrap();
-    let after = handle.goals().snapshot().unwrap();
-    let requests = handle.goal_ctx.stores.usage.all_records().unwrap().len();
-    close_fixture(runtime, &handle, root).await;
+    goals.accept_goal(1, verifying).await.unwrap();
+    let after = goals.snapshot().unwrap();
+    let requests = handle.usage_records().unwrap().len();
+    close_fixture(runtime, &goals, root).await;
     assert_eq!(after.status, GoalStatus::BudgetExhausted);
     assert_eq!(requests, 0, "review requests share the goal token budget");
 }
@@ -504,24 +515,20 @@ impl LlmBackend for ReviewBudgetBackend {
         };
         Ok(LlmResponseStream {
             events: Box::pin(futures::stream::iter(vec![
-                Ok(crate::runtime::LlmEvent::Text(
-                    crate::runtime::LlmTextEvent {
-                        content: "natural end without structured review feedback".into(),
-                    },
-                )),
-                Ok(crate::runtime::LlmEvent::Usage(
-                    crate::runtime::LlmUsageEvent {
+                Ok(mink::runtime::LlmEvent::Text(mink::runtime::LlmTextEvent {
+                    content: "natural end without structured review feedback".into(),
+                })),
+                Ok(mink::runtime::LlmEvent::Usage(
+                    mink::runtime::LlmUsageEvent {
                         input_tokens,
                         output_tokens: 0,
                         cache_read_input_tokens: 0,
                         cache_creation_input_tokens: 0,
                     },
                 )),
-                Ok(crate::runtime::LlmEvent::Stop(
-                    crate::runtime::LlmStopEvent {
-                        reason: "end_turn".into(),
-                    },
-                )),
+                Ok(mink::runtime::LlmEvent::Stop(mink::runtime::LlmStopEvent {
+                    reason: "end_turn".into(),
+                })),
             ])),
             attempt_count: 1,
         })
@@ -538,24 +545,26 @@ async fn host_adjudication_is_not_admitted_after_review_spends_soft_token_limit(
     let cwd = root.join("work");
     std::fs::create_dir_all(&cwd).unwrap();
     let review_requests = Arc::new(AtomicUsize::new(0));
-    let runtime = AgentRuntime::start(AgentOptions::new(root.join("home"), &cwd).with_llm_backend(
-        Arc::new(ReviewBudgetBackend {
-            review_requests: review_requests.clone(),
-        }),
-    ))
+    let (runtime, goals) = start_with_goal(
+        AgentOptions::new(root.join("home"), &cwd).with_llm_backend(Arc::new(
+            ReviewBudgetBackend {
+                review_requests: review_requests.clone(),
+            },
+        )),
+        GoalPlugin::new(),
+    )
     .await
     .unwrap();
-    let handle = runtime.handle();
-    handle.goals().start_driver().unwrap();
+    goals.start_driver().unwrap();
     let mut spec = GoalSpec::new("stop reviewer continuations at the token soft limit");
     spec.limits.soft_token_limit = Some(10);
-    let draft = handle.goals().draft(spec, 3600).unwrap();
-    handle.goals().confirm(&draft.id, draft.revision).unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
+    let draft = goals.draft(spec, 3600).unwrap();
+    goals.confirm(&draft.id, draft.revision).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(20), goals.wait())
         .await
         .unwrap()
         .unwrap();
-    let after = handle.goals().snapshot().unwrap();
+    let after = goals.snapshot().unwrap();
     runtime.shutdown().await.unwrap();
     std::fs::remove_dir_all(root).unwrap();
 
@@ -582,24 +591,22 @@ async fn host_adjudication_is_not_admitted_after_review_spends_soft_token_limit(
 
 #[tokio::test]
 async fn cached_review_replay_does_not_count_another_execution_round() {
-    let (runtime, handle, root, _) = blocked_review_fixture().await;
+    let (runtime, goals, root, _) = blocked_review_fixture().await;
     let mut counts = vec![1];
     for _ in 0..2 {
-        let current = handle.goals().snapshot().unwrap();
-        let verifying = handle
-            .goal_ctx
-            .stores
+        let current = goals.snapshot().unwrap();
+        let verifying = goals
             .goal_store
             .change(&current.id, current.revision, |g| {
                 g.phase = GoalPhase::Verifying;
                 Ok(())
             })
             .unwrap();
-        handle.accept_goal(1, verifying).await.unwrap();
-        counts.push(handle.goals().snapshot().unwrap().blocker_rounds);
+        goals.accept_goal(1, verifying).await.unwrap();
+        counts.push(goals.snapshot().unwrap().blocker_rounds);
     }
-    let after = handle.goals().snapshot().unwrap();
-    close_fixture(runtime, &handle, root).await;
+    let after = goals.snapshot().unwrap();
+    close_fixture(runtime, &goals, root).await;
     assert_eq!(counts, vec![1, 1, 1]);
     assert_eq!(after.iterations.len(), 1);
     assert_eq!(after.reviews.len(), 1);
@@ -613,7 +620,7 @@ impl LlmBackend for LightweightReviewBackend {
         "lightweight-review"
     }
     async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream> {
-        use crate::runtime::{LlmEvent, LlmStopEvent, LlmTextEvent};
+        use mink::runtime::{LlmEvent, LlmStopEvent, LlmTextEvent};
         let prompt = request
             .messages
             .iter()
@@ -628,7 +635,7 @@ impl LlmBackend for LightweightReviewBackend {
                     .find_map(|l| l.strip_prefix("Candidate: "))
                     .unwrap(),
             )?;
-            events.push(Ok(LlmEvent::ToolCall(crate::protocol::ToolCallEvent {
+            events.push(Ok(LlmEvent::ToolCall(mink::runtime::LlmToolCallEvent {
                 id: "continue-submission".into(), name: "GoalReview".into(),
                 input_json: serde_json::json!({"mode":"continue","candidate":candidate,"summary":"The required deliverable is still incomplete.","remaining_requirements":["criterion-1"],"next_step":"Implement the remaining deliverable"}),
                 fields: Default::default(), parse_error: None, raw_arguments_digest: None,
@@ -659,19 +666,19 @@ async fn lightweight_continue_on_last_round_preserves_decision_without_full_revi
     ));
     let cwd = root.join("work");
     std::fs::create_dir_all(&cwd).unwrap();
-    let runtime = AgentRuntime::start(
+    let (runtime, goals) = start_with_goal(
         AgentOptions::new(root.join("home"), &cwd)
             .with_llm_backend(Arc::new(LightweightReviewBackend)),
+        GoalPlugin::new(),
     )
     .await
     .unwrap();
-    let handle = runtime.handle();
-    handle.goals().start_driver().unwrap();
+    goals.start_driver().unwrap();
     let mut spec = GoalSpec::new("Implement a deliverable");
     spec.limits.max_turns = 1;
-    let draft = handle.goals().draft(spec, 3600).unwrap();
-    handle.goals().confirm(&draft.id, draft.revision).unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
+    let draft = goals.draft(spec, 3600).unwrap();
+    goals.confirm(&draft.id, draft.revision).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), goals.wait())
         .await
         .unwrap()
         .unwrap();
@@ -696,8 +703,8 @@ struct SimpleConclusionBackend;
 
 #[tokio::test]
 async fn goal_state_control_matrix_preserves_terminal_and_retry_boundaries() {
-    use crate::runtime::TurnStatus;
-    let (runtime, handle, root, _) = blocked_review_fixture().await;
+    use mink::runtime::TurnStatus;
+    let (runtime, goals, root, _) = blocked_review_fixture().await;
     for status in [
         GoalStatus::Draft,
         GoalStatus::Active,
@@ -709,9 +716,7 @@ async fn goal_state_control_matrix_preserves_terminal_and_retry_boundaries() {
         GoalStatus::Failed,
     ] {
         for action in ["resume", "budget", "pause", "cancel", "clear"] {
-            let goal = handle
-                .goal_ctx
-                .stores
+            let goal = goals
                 .goal_store
                 .update_for_test(|g| {
                     g.status = status.clone();
@@ -729,7 +734,7 @@ async fn goal_state_control_matrix_preserves_terminal_and_retry_boundaries() {
                 .unwrap();
             let (actual, expected) = match action {
                 "resume" => (
-                    handle.goals().resume(&goal.id, goal.revision),
+                    goals.resume(&goal.id, goal.revision),
                     matches!(
                         status,
                         GoalStatus::Active
@@ -740,27 +745,19 @@ async fn goal_state_control_matrix_preserves_terminal_and_retry_boundaries() {
                     ),
                 ),
                 "budget" => (
-                    handle
-                        .goals()
-                        .update_limits(&goal.id, goal.revision, goal.spec.limits.clone()),
+                    goals.update_limits(&goal.id, goal.revision, goal.spec.limits.clone()),
                     !matches!(status, GoalStatus::Completed | GoalStatus::Cancelled),
                 ),
                 "pause" => (
-                    handle.goals().pause(&goal.id, goal.revision),
+                    goals.pause(&goal.id, goal.revision),
                     !status.is_terminal() && status != GoalStatus::Draft,
                 ),
-                "cancel" => (
-                    handle.goals().cancel(&goal.id, goal.revision),
-                    !status.is_terminal(),
-                ),
-                "clear" => (
-                    handle.goals().clear(&goal.id, goal.revision),
-                    status.is_terminal(),
-                ),
+                "cancel" => (goals.cancel(&goal.id, goal.revision), !status.is_terminal()),
+                "clear" => (goals.clear(&goal.id, goal.revision), status.is_terminal()),
                 _ => unreachable!(),
             };
             assert_eq!(actual.is_ok(), expected, "{status:?}/{action}: {actual:?}");
-            let current = handle.goals().snapshot().unwrap();
+            let current = goals.snapshot().unwrap();
             assert_eq!(current.id, goal.id);
             assert_eq!(current.spec, goal.spec);
             assert_eq!(current.iterations, goal.iterations);
@@ -785,12 +782,12 @@ async fn goal_state_control_matrix_preserves_terminal_and_retry_boundaries() {
             }
         }
     }
-    close_fixture(runtime, &handle, root).await;
+    close_fixture(runtime, &goals, root).await;
 }
 
 #[tokio::test]
 async fn failed_goal_retries_after_restart_and_explicit_budget_adjustment() {
-    use crate::runtime::SessionPolicy;
+    use mink::runtime::SessionPolicy;
     let root = std::env::temp_dir().join(format!(
         "mink-failed-retry-{}",
         time::OffsetDateTime::now_utc().unix_timestamp_nanos()
@@ -804,26 +801,24 @@ async fn failed_goal_retries_after_restart_and_explicit_budget_adjustment() {
     let options = || {
         AgentOptions::new(root.join("home"), &cwd)
             .with_llm_backend(backend.clone())
-            .with_llm_recovery(crate::config::LlmRecoveryPolicy {
+            .with_llm_recovery(mink::runtime::llm::LlmRecoveryPolicy {
                 request_max_retries: 0,
                 ..Default::default()
             })
     };
-    let runtime = AgentRuntime::start(options()).await.unwrap();
+    let (runtime, goals) = start_with_goal(options(), GoalPlugin::new()).await.unwrap();
     let handle = runtime.handle();
-    handle.goals().start_driver().unwrap();
+    goals.start_driver().unwrap();
     let mut spec = GoalSpec::new("Implement deliverable");
     spec.limits.max_turns = 2;
-    let draft = handle.goals().draft(spec, 3600).unwrap();
-    handle.goals().confirm(&draft.id, draft.revision).unwrap();
-    let failed = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
+    let draft = goals.draft(spec, 3600).unwrap();
+    goals.confirm(&draft.id, draft.revision).unwrap();
+    let failed = tokio::time::timeout(std::time::Duration::from_secs(20), goals.wait())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(failed.status, GoalStatus::Failed);
-    handle
-        .goal_ctx
-        .stores
+    goals
         .goal_store
         .update_for_test(|g| {
             g.spec.limits.deadline_unix_secs = goal_now() - 1;
@@ -833,21 +828,21 @@ async fn failed_goal_retries_after_restart_and_explicit_budget_adjustment() {
     let sid = handle.session_info().session_id.clone();
     runtime.shutdown().await.unwrap();
     drop(handle);
-    let runtime = AgentRuntime::start(options().with_session(SessionPolicy::Resume(sid)))
-        .await
-        .unwrap();
-    let handle = runtime.handle();
-    handle.goals().start_driver().unwrap();
-    let old = handle.goals().snapshot().unwrap();
+    let (runtime, goals) = start_with_goal(
+        options().with_session(SessionPolicy::Resume(sid)),
+        GoalPlugin::new(),
+    )
+    .await
+    .unwrap();
+    goals.start_driver().unwrap();
+    let old = goals.snapshot().unwrap();
     assert_eq!(
         old.status,
         GoalStatus::Failed,
         "opening a session must not automatically retry old failures"
     );
     assert_eq!(backend.execution_calls.load(Ordering::SeqCst), 2);
-    let pending = handle
-        .goal_ctx
-        .stores
+    let pending = goals
         .goal_store
         .change(&old.id, old.revision, |g| {
             g.pending_effects.push("unknown-effect".into());
@@ -857,21 +852,18 @@ async fn failed_goal_retries_after_restart_and_explicit_budget_adjustment() {
         })
         .unwrap();
     assert!(
-        handle
-            .goals()
+        goals
             .resume(&pending.id, pending.revision)
             .unwrap_err()
             .to_string()
             .contains("reconciliation")
     );
     assert!(
-        handle
-            .goals()
+        goals
             .reconcile_effects(&pending.id, pending.revision, String::new())
             .is_err()
     );
-    let old = handle
-        .goals()
+    let old = goals
         .reconcile_effects(
             &pending.id,
             pending.revision,
@@ -879,17 +871,12 @@ async fn failed_goal_retries_after_restart_and_explicit_budget_adjustment() {
         )
         .unwrap();
     assert_eq!(old.status, GoalStatus::Failed);
-    let rejected = handle
-        .goals()
-        .resume(&old.id, old.revision)
-        .unwrap_err()
-        .to_string();
+    let rejected = goals.resume(&old.id, old.revision).unwrap_err().to_string();
     assert!(
         rejected.contains("adjust exhausted goal limits"),
         "{rejected}"
     );
-    let adjusted = handle
-        .goals()
+    let adjusted = goals
         .update_limits(&old.id, old.revision, failed.spec.limits.clone())
         .unwrap();
     assert_eq!(
@@ -900,14 +887,11 @@ async fn failed_goal_retries_after_restart_and_explicit_budget_adjustment() {
     assert_eq!(adjusted.iterations, failed.iterations);
     assert_eq!(adjusted.usage_records, failed.usage_records);
     assert!(
-        handle.goals().resume(&adjusted.id, old.revision).is_err(),
+        goals.resume(&adjusted.id, old.revision).is_err(),
         "stale retries must be rejected"
     );
-    handle
-        .goals()
-        .resume(&adjusted.id, adjusted.revision)
-        .unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
+    goals.resume(&adjusted.id, adjusted.revision).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), goals.wait())
         .await
         .unwrap()
         .unwrap();
@@ -940,7 +924,7 @@ async fn failed_goal_retries_after_restart_and_explicit_budget_adjustment() {
 
 #[tokio::test]
 async fn resume_phase_matrix_allows_last_round_review_without_an_extra_execution_round() {
-    let (runtime, handle, root, _) = blocked_review_fixture().await;
+    let (runtime, goals, root, _) = blocked_review_fixture().await;
     for status in [
         GoalStatus::Active,
         GoalStatus::Paused,
@@ -949,9 +933,7 @@ async fn resume_phase_matrix_allows_last_round_review_without_an_extra_execution
         GoalStatus::Failed,
     ] {
         for phase in [GoalPhase::Idle, GoalPhase::Executing, GoalPhase::Verifying] {
-            let goal = handle
-                .goal_ctx
-                .stores
+            let goal = goals
                 .goal_store
                 .update_for_test(|g| {
                     g.status = status.clone();
@@ -961,13 +943,13 @@ async fn resume_phase_matrix_allows_last_round_review_without_an_extra_execution
                     Ok(())
                 })
                 .unwrap();
-            let resumed = handle.goals().resume(&goal.id, goal.revision);
+            let resumed = goals.resume(&goal.id, goal.revision);
             assert_eq!(
                 resumed.is_ok(),
                 phase == GoalPhase::Verifying,
                 "{status:?}/{phase:?}: {resumed:?}"
             );
-            let current = handle.goals().snapshot().unwrap();
+            let current = goals.snapshot().unwrap();
             assert_eq!(current.iterations, goal.iterations);
             assert_eq!(current.spec.limits, goal.spec.limits);
             if let Ok(resumed) = resumed {
@@ -975,12 +957,12 @@ async fn resume_phase_matrix_allows_last_round_review_without_an_extra_execution
             }
         }
     }
-    close_fixture(runtime, &handle, root).await;
+    close_fixture(runtime, &goals, root).await;
 }
 
 struct ExecutionRequestFailureBackend {
     execution_calls: AtomicUsize,
-    kind: Option<crate::llm::recovery::UpstreamFailureKind>,
+    kind: Option<mink::runtime::llm::UpstreamFailureKind>,
 }
 
 #[async_trait]
@@ -990,7 +972,7 @@ impl LlmBackend for ExecutionRequestFailureBackend {
     }
 
     async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream> {
-        use crate::runtime::{LlmEvent, LlmStopEvent};
+        use mink::runtime::{LlmEvent, LlmStopEvent};
         let prompt = request
             .messages
             .iter()
@@ -1003,7 +985,7 @@ impl LlmBackend for ExecutionRequestFailureBackend {
         match self.execution_calls.fetch_add(1, Ordering::SeqCst) {
             0 => Ok(LlmResponseStream {
                 events: Box::pin(futures::stream::iter(vec![
-                    Ok(LlmEvent::ToolCall(crate::protocol::ToolCallEvent {
+                    Ok(LlmEvent::ToolCall(mink::runtime::LlmToolCallEvent {
                         id: "write-before-request-failure".into(),
                         name: "Write".into(),
                         input_json: serde_json::json!({"path":"progress.txt","content":"committed once"}),
@@ -1018,7 +1000,7 @@ impl LlmBackend for ExecutionRequestFailureBackend {
                 attempt_count: 1,
             }),
             1 => match self.kind {
-                Some(kind) => Err(crate::llm::recovery::LlmUpstreamError::new(
+                Some(kind) => Err(mink::runtime::llm::LlmUpstreamError::new(
                     kind,
                     "response decoding failed",
                 )
@@ -1039,7 +1021,7 @@ impl LlmBackend for ExecutionRequestFailureBackend {
 
 #[tokio::test]
 async fn execution_failure_classes_stop_automatically_but_allow_explicit_retry() {
-    use crate::llm::recovery::UpstreamFailureKind;
+    use mink::runtime::llm::UpstreamFailureKind;
     for kind in [
         Some(UpstreamFailureKind::Recoverable),
         Some(UpstreamFailureKind::Permanent),
@@ -1056,39 +1038,37 @@ async fn execution_failure_classes_stop_automatically_but_allow_explicit_retry()
             execution_calls: AtomicUsize::new(0),
             kind,
         });
-        let runtime = AgentRuntime::start(
+        let (runtime, goals) = start_with_goal(
             AgentOptions::new(root.join("home"), &cwd)
                 .with_llm_backend(backend.clone())
-                .with_llm_recovery(crate::config::LlmRecoveryPolicy {
+                .with_llm_recovery(mink::runtime::llm::LlmRecoveryPolicy {
                     request_max_retries: 0,
                     ..Default::default()
                 }),
+            GoalPlugin::new(),
         )
         .await
         .unwrap();
-        let handle = runtime.handle();
-        handle.goals().start_driver().unwrap();
+        goals.start_driver().unwrap();
         let mut spec = GoalSpec::new("Implement deliverable");
         spec.limits.max_turns = 2;
-        let draft = handle.goals().draft(spec, 3600).unwrap();
-        handle.goals().confirm(&draft.id, draft.revision).unwrap();
-        let result =
-            tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
-                .await
-                .unwrap()
-                .unwrap();
+        let draft = goals.draft(spec, 3600).unwrap();
+        goals.confirm(&draft.id, draft.revision).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), goals.wait())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(result.status, GoalStatus::Failed, "{kind:?}: {result:?}");
         assert_eq!(
             backend.execution_calls.load(Ordering::SeqCst),
             2,
             "failure must stop automatic execution"
         );
-        handle.goals().resume(&result.id, result.revision).unwrap();
-        let retried =
-            tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
-                .await
-                .unwrap()
-                .unwrap();
+        goals.resume(&result.id, result.revision).unwrap();
+        let retried = tokio::time::timeout(std::time::Duration::from_secs(20), goals.wait())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(retried.status, GoalStatus::BudgetExhausted, "{retried:?}");
         assert_eq!(retried.iterations.len(), 2);
         assert_eq!(retried.iterations[0], result.iterations[0]);
@@ -1119,7 +1099,7 @@ impl LlmBackend for SimpleBlockerBackend {
         "simple-blocker-identity"
     }
     async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream> {
-        use crate::runtime::{LlmEvent, LlmStopEvent, LlmTextEvent};
+        use mink::runtime::{LlmEvent, LlmStopEvent, LlmTextEvent};
         let prompt = request
             .messages
             .iter()
@@ -1127,7 +1107,7 @@ impl LlmBackend for SimpleBlockerBackend {
             .rfind(|s| !s.starts_with("<goal-conclusion-required>"))
             .unwrap_or("");
         let call = |id: &str, name: &str, input_json| {
-            Ok(LlmEvent::ToolCall(crate::protocol::ToolCallEvent {
+            Ok(LlmEvent::ToolCall(mink::runtime::LlmToolCallEvent {
                 id: format!("{id}-{}", request.messages.len()),
                 name: name.into(),
                 input_json,
@@ -1200,20 +1180,22 @@ async fn descriptive_blocker_identity_ignores_wording_and_round_conclusion_artif
     let cwd = root.join("work");
     std::fs::create_dir_all(&cwd).unwrap();
     std::fs::write(cwd.join("proof.txt"), "operator approval pending").unwrap();
-    let runtime = AgentRuntime::start(AgentOptions::new(root.join("home"), &cwd).with_llm_backend(
-        Arc::new(SimpleBlockerBackend {
-            host_calls: AtomicUsize::new(0),
-        }),
-    ))
+    let (runtime, goals) = start_with_goal(
+        AgentOptions::new(root.join("home"), &cwd).with_llm_backend(Arc::new(
+            SimpleBlockerBackend {
+                host_calls: AtomicUsize::new(0),
+            },
+        )),
+        GoalPlugin::new(),
+    )
     .await
     .unwrap();
-    let handle = runtime.handle();
-    handle.goals().start_driver().unwrap();
+    goals.start_driver().unwrap();
     let mut spec = GoalSpec::new("Obtain operator approval");
     spec.limits.max_turns = 3;
-    let draft = handle.goals().draft(spec, 3600).unwrap();
-    handle.goals().confirm(&draft.id, draft.revision).unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
+    let draft = goals.draft(spec, 3600).unwrap();
+    goals.confirm(&draft.id, draft.revision).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), goals.wait())
         .await
         .unwrap()
         .unwrap();
@@ -1227,21 +1209,16 @@ async fn descriptive_blocker_identity_ignores_wording_and_round_conclusion_artif
 
 #[tokio::test]
 async fn simple_conclusion_cannot_complete_without_independent_evidence() {
-    use crate::tools::runner::ToolExec;
-    let (runtime, handle, root, goal) = blocked_review_fixture().await;
+    let (runtime, goals, root, goal) = blocked_review_fixture().await;
+    let handle = goals.handle.clone();
     let artifact = handle
-        .goal_ctx
-        .stores
-        .artifacts
-        .write_text(
+        .write_artifact(
             "IndependentGoalReview",
             "report",
             "Necessary contract work remains; implement it next",
         )
         .unwrap();
-    let current = handle
-        .goal_ctx
-        .stores
+    let current = goals
         .goal_store
         .change(&goal.id, goal.revision, |g| {
             g.reviews.clear();
@@ -1257,20 +1234,27 @@ async fn simple_conclusion_cannot_complete_without_independent_evidence() {
             Ok(())
         })
         .unwrap();
+    let handle_for_usage = handle.clone();
     let session = Arc::new(super::review::GoalReviewSession::new(
         current.clone(),
-        handle.goal_ctx.stores.goal_store.clone(),
-        handle.goal_ctx.stores.usage.clone(),
+        goals.goal_store.clone(),
+        Arc::new(move || handle_for_usage.usage_records()),
     ));
-    let mut ctx = crate::context::ToolContext::from(handle.goal_ctx.as_ref());
-    ctx.goal_adjudication = Some(session.clone());
-    let tool = crate::tools::goal::GoalReviewTool;
-    let rejected = tool
-        .execute(
-            &serde_json::json!({"decision":"complete","summary":"claimed complete"}),
-            &ctx,
-        )
-        .unwrap();
+    let tool = crate::tools::GoalReviewTool::for_test_adjudication(
+        Some(session.clone()),
+        handle.artifact_reader(),
+    );
+    let exec_ctx = mink::runtime::ToolExecutionContext::new(
+        handle.session_info().cwd.clone(),
+        handle.interrupt_flag(),
+    );
+    let rejected = mink::runtime::AgentTool::execute(
+        &tool,
+        serde_json::json!({"decision":"complete","summary":"claimed complete"}),
+        exec_ctx.clone(),
+    )
+    .await
+    .unwrap();
     assert!(!rejected.success);
     assert!(
         rejected
@@ -1284,16 +1268,21 @@ async fn simple_conclusion_cannot_complete_without_independent_evidence() {
         serde_json::to_value(decoded).unwrap(),
         serde_json::json!({"decision":"continue","summary":"The independent report confirms work remains","next_step":"Implement deliverable","remaining_requirements":[]})
     );
-    assert!(tool.execute(&payload, &ctx).unwrap().success);
+    assert!(
+        mink::runtime::AgentTool::execute(&tool, payload, exec_ctx)
+            .await
+            .unwrap()
+            .success
+    );
     let review = session.submitted_conclusion().unwrap();
     assert_eq!(review.verdict, GoalReviewVerdict::NeedsWork);
     assert!(review.original_request.is_none() && review.criteria.is_empty());
     assert_eq!(
-        handle.goals().snapshot().unwrap(),
+        goals.snapshot().unwrap(),
         current,
         "submission mailbox does not mutate GoalStore"
     );
-    close_fixture(runtime, &handle, root).await;
+    close_fixture(runtime, &goals, root).await;
 }
 
 struct SimpleCompletionBackend {
@@ -1315,11 +1304,11 @@ impl LlmBackend for SimpleCompletionBackend {
         {
             return self.reader.stream(request).await;
         }
-        use crate::runtime::{LlmEvent, LlmStopEvent};
+        use mink::runtime::{LlmEvent, LlmStopEvent};
         let attempt = self.host_calls.fetch_add(1, Ordering::SeqCst);
         Ok(LlmResponseStream {
             events: Box::pin(futures::stream::iter(vec![
-                Ok(LlmEvent::ToolCall(crate::protocol::ToolCallEvent {
+                Ok(LlmEvent::ToolCall(mink::runtime::LlmToolCallEvent {
                     id: format!("simple-complete-{attempt}"),
                     name: "GoalReview".into(),
                     input_json: serde_json::json!({"decision":"complete","summary":if attempt < 4 { "" } else { "Independent reviewer inspected and verified the deliverable" }}),
@@ -1352,19 +1341,16 @@ async fn simple_completion_retries_semantic_rejection_and_keeps_descriptive_evid
         },
         host_calls: AtomicUsize::new(0),
     });
-    let runtime = AgentRuntime::start(
+    let (runtime, goals) = start_with_goal(
         AgentOptions::new(root.join("home"), &cwd).with_llm_backend(backend.clone()),
+        GoalPlugin::new(),
     )
     .await
     .unwrap();
-    let handle = runtime.handle();
-    handle.goals().start_driver().unwrap();
-    let draft = handle
-        .goals()
-        .draft(GoalSpec::new("deliver proof"), 3600)
-        .unwrap();
-    handle.goals().confirm(&draft.id, draft.revision).unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
+    goals.start_driver().unwrap();
+    let draft = goals.draft(GoalSpec::new("deliver proof"), 3600).unwrap();
+    goals.confirm(&draft.id, draft.revision).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), goals.wait())
         .await
         .unwrap()
         .unwrap();
@@ -1376,11 +1362,11 @@ async fn simple_completion_retries_semantic_rejection_and_keeps_descriptive_evid
     assert!(result.reviews[0].criteria.is_empty());
     assert!(result.reviews[0].report.is_some());
     assert_eq!(
-        handle.validate_review_evidence(&result).unwrap(),
+        goals.validate_review_evidence(&result).unwrap(),
         result.evidence_versions
     );
     std::fs::write(cwd.join("proof.txt"), "changed").unwrap();
-    assert!(handle.validate_review_evidence(&result).is_err());
+    assert!(goals.validate_review_evidence(&result).is_err());
     runtime.shutdown().await.unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -1399,7 +1385,7 @@ impl LlmBackend for SimpleConclusionBackend {
         if !adjudicating {
             return RepeatedContinueBackend.stream(request).await;
         }
-        use crate::runtime::{LlmEvent, LlmStopEvent};
+        use mink::runtime::{LlmEvent, LlmStopEvent};
         let schema = request
             .tools
             .iter()
@@ -1413,7 +1399,7 @@ impl LlmBackend for SimpleConclusionBackend {
         );
         Ok(LlmResponseStream {
             events: Box::pin(futures::stream::iter(vec![
-                Ok(LlmEvent::ToolCall(crate::protocol::ToolCallEvent {
+                Ok(LlmEvent::ToolCall(mink::runtime::LlmToolCallEvent {
                     id: format!("conclude-{}", request.messages.len()),
                     name: "GoalReview".into(),
                     input_json: serde_json::json!({"decision":"continue","summary":"Independent report confirms necessary work remains","next_step":"Implement the missing deliverable","remaining_requirements":["criterion-1"]}),
@@ -1439,19 +1425,19 @@ async fn simple_host_conclusion_continues_after_screening_and_inspection() {
     let cwd = root.join("work");
     std::fs::create_dir_all(&cwd).unwrap();
     std::fs::write(cwd.join("proof.txt"), "partial").unwrap();
-    let runtime = AgentRuntime::start(
+    let (runtime, goals) = start_with_goal(
         AgentOptions::new(root.join("home"), &cwd)
             .with_llm_backend(Arc::new(SimpleConclusionBackend)),
+        GoalPlugin::new(),
     )
     .await
     .unwrap();
-    let handle = runtime.handle();
-    handle.goals().start_driver().unwrap();
+    goals.start_driver().unwrap();
     let mut spec = GoalSpec::new("Implement deliverable");
     spec.limits.max_turns = 3;
-    let draft = handle.goals().draft(spec, 3600).unwrap();
-    handle.goals().confirm(&draft.id, draft.revision).unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
+    let draft = goals.draft(spec, 3600).unwrap();
+    goals.confirm(&draft.id, draft.revision).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), goals.wait())
         .await
         .unwrap()
         .unwrap();
@@ -1473,7 +1459,7 @@ impl LlmBackend for RepeatedContinueBackend {
         "repeated-continue-review"
     }
     async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream> {
-        use crate::runtime::{LlmEvent, LlmStopEvent, LlmTextEvent};
+        use mink::runtime::{LlmEvent, LlmStopEvent, LlmTextEvent};
         let prompt = request
             .messages
             .iter()
@@ -1482,7 +1468,7 @@ impl LlmBackend for RepeatedContinueBackend {
             .unwrap_or("");
         let forced = prompt.contains("Full evidence review required: true");
         let call = |name: &str, input_json| {
-            Ok(LlmEvent::ToolCall(crate::protocol::ToolCallEvent {
+            Ok(LlmEvent::ToolCall(mink::runtime::LlmToolCallEvent {
                 id: format!("{name}-{}", request.messages.len()),
                 name: name.into(),
                 input_json,
@@ -1556,19 +1542,19 @@ async fn third_repeated_continue_inspects_in_same_reviewer_and_counts_once() {
     let cwd = root.join("work");
     std::fs::create_dir_all(&cwd).unwrap();
     std::fs::write(cwd.join("proof.txt"), "partial").unwrap();
-    let runtime = AgentRuntime::start(
+    let (runtime, goals) = start_with_goal(
         AgentOptions::new(root.join("home"), &cwd)
             .with_llm_backend(Arc::new(RepeatedContinueBackend)),
+        GoalPlugin::new(),
     )
     .await
     .unwrap();
-    let handle = runtime.handle();
-    handle.goals().start_driver().unwrap();
+    goals.start_driver().unwrap();
     let mut spec = GoalSpec::new("Implement deliverable");
     spec.limits.max_turns = 3;
-    let draft = handle.goals().draft(spec, 3600).unwrap();
-    handle.goals().confirm(&draft.id, draft.revision).unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
+    let draft = goals.draft(spec, 3600).unwrap();
+    goals.confirm(&draft.id, draft.revision).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), goals.wait())
         .await
         .unwrap()
         .unwrap();
@@ -1592,8 +1578,7 @@ async fn third_repeated_continue_inspects_in_same_reviewer_and_counts_once() {
         .usage_records
         .iter()
         .filter(|r| {
-            r.billing_turn_id == last_billing
-                && r.kind == crate::session::usage::UsageKind::SubAgent
+            r.billing_turn_id == last_billing && r.kind == mink::runtime::UsageKind::SubAgent
         })
         .map(|r| r.origin_session_id.clone())
         .collect();
@@ -1611,22 +1596,17 @@ async fn third_repeated_continue_inspects_in_same_reviewer_and_counts_once() {
 
 #[tokio::test]
 async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
-    use crate::tools::runner::ToolExec;
-    let (runtime, handle, root, goal) = blocked_review_fixture().await;
+    let (runtime, goals, root, goal) = blocked_review_fixture().await;
+    let handle = goals.handle.clone();
     let artifact = handle
-        .goal_ctx
-        .stores
-        .artifacts
-        .write_text(
+        .write_artifact(
             "IndependentGoalReview",
             "screening",
             "criterion-1 remains unfinished; implement it next",
         )
         .unwrap();
     let candidate = goal.review_candidate.clone().unwrap();
-    let current = handle
-        .goal_ctx
-        .stores
+    let current = goals
         .goal_store
         .change(&goal.id, goal.revision, |g| {
             g.reviews.clear();
@@ -1642,12 +1622,12 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
             Ok(())
         })
         .unwrap();
+    let handle_for_usage = handle.clone();
     let session = Arc::new(super::review::GoalReviewSession::new(
         current.clone(),
-        handle.goal_ctx.stores.goal_store.clone(),
-        handle.goal_ctx.stores.usage.clone(),
+        goals.goal_store.clone(),
+        Arc::new(move || handle_for_usage.usage_records()),
     ));
-    let mut ctx = crate::context::ToolContext::from(handle.goal_ctx.as_ref());
     let proposal = GoalContinueProposal {
         candidate: candidate.clone(),
         summary: "partial work".into(),
@@ -1655,12 +1635,21 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
         next_step: "implement remainder".into(),
     };
     let payload = serde_json::to_value(GoalReviewSubmission::Continue(proposal.clone())).unwrap();
+    let exec_ctx = mink::runtime::ToolExecutionContext::new(
+        handle.session_info().cwd.clone(),
+        handle.interrupt_flag(),
+    );
+    let no_session_tool =
+        crate::tools::GoalReviewTool::for_test_adjudication(None, handle.artifact_reader());
     assert!(
-        crate::tools::goal::GoalReviewTool
-            .execute(&payload, &ctx)
+        mink::runtime::AgentTool::execute(&no_session_tool, payload.clone(), exec_ctx.clone(),)
+            .await
             .is_err()
     );
-    ctx.goal_adjudication = Some(session.clone());
+    let tool = crate::tools::GoalReviewTool::for_test_adjudication(
+        Some(session.clone()),
+        handle.artifact_reader(),
+    );
     for ids in [
         vec![],
         vec!["unknown".into()],
@@ -1668,12 +1657,13 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
     ] {
         let mut bad = proposal.clone();
         bad.remaining_requirements = ids;
-        let output = crate::tools::goal::GoalReviewTool
-            .execute(
-                &serde_json::to_value(GoalReviewSubmission::Continue(bad)).unwrap(),
-                &ctx,
-            )
-            .unwrap();
+        let output = mink::runtime::AgentTool::execute(
+            &tool,
+            serde_json::to_value(GoalReviewSubmission::Continue(bad)).unwrap(),
+            exec_ctx.clone(),
+        )
+        .await
+        .unwrap();
         assert!(!output.success);
         assert!(!session.has_submission());
     }
@@ -1681,66 +1671,56 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
     injected["verdict"] = serde_json::json!("satisfied");
     assert!(serde_json::from_value::<GoalReviewSubmission>(injected).is_err());
     assert!(
-        crate::tools::goal::GoalReviewTool
-            .execute(&payload, &ctx)
+        mink::runtime::AgentTool::execute(&tool, payload, exec_ctx)
+            .await
             .unwrap()
             .success
     );
     assert_eq!(
-        handle.goals().snapshot().unwrap(),
+        goals.snapshot().unwrap(),
         current,
         "mailbox does not publish parent state"
     );
-    handle.commit_goal_continue(1, proposal.clone(), 0).unwrap();
-    handle.commit_goal_continue(1, proposal, 0).unwrap();
-    let after = handle.goals().snapshot().unwrap();
+    goals.commit_goal_continue(1, proposal.clone(), 0).unwrap();
+    goals.commit_goal_continue(1, proposal, 0).unwrap();
+    let after = goals.snapshot().unwrap();
     assert_eq!(after.continuations.len(), 1);
     assert_eq!(after.continuation_rounds, 1);
     assert!(after.reviews.is_empty());
     assert!(after.completion_basis.is_none());
-    handle
-        .goal_ctx
-        .stores
+    goals
         .goal_store
         .recover(&after.environment, &[], 0)
         .unwrap();
-    let restored = handle.goals().snapshot().unwrap();
+    let restored = goals.snapshot().unwrap();
     assert_eq!(restored.phase, GoalPhase::Idle);
     assert_eq!(restored.continuation_rounds, 1);
     assert!(matches!(
         restored.latest_round_decision(),
         Some(GoalRoundDecision::Continue(_))
     ));
-    let replay = handle
-        .goal_ctx
-        .stores
+    let replay = goals
         .goal_store
         .change(&restored.id, restored.revision, |g| {
             g.phase = GoalPhase::Verifying;
             Ok(())
         })
         .unwrap();
-    handle.accept_goal(1, replay).await.unwrap();
-    let replayed = handle.goals().snapshot().unwrap();
+    goals.accept_goal(1, replay).await.unwrap();
+    let replayed = goals.snapshot().unwrap();
     assert_eq!(replayed.phase, GoalPhase::Idle);
     assert_eq!(replayed.continuation_rounds, 1);
     assert_eq!(replayed.continuations.len(), 1);
     assert!(
-        handle
-            .goal_ctx
-            .stores
-            .usage
-            .all_records()
-            .unwrap()
-            .is_empty(),
+        handle.usage_records().unwrap().is_empty(),
         "replay sends no provider requests"
     );
-    close_fixture(runtime, &handle, root).await;
+    close_fixture(runtime, &goals, root).await;
 }
 
 #[tokio::test]
 async fn continuation_streak_ignores_wording_but_changes_with_requirements() {
-    let (runtime, handle, root, goal) = blocked_review_fixture().await;
+    let (runtime, goals, root, goal) = blocked_review_fixture().await;
     let candidate = goal.review_candidate.clone().unwrap();
     let a = GoalContinueProposal {
         candidate,
@@ -1761,7 +1741,7 @@ async fn continuation_streak_ignores_wording_but_changes_with_requirements() {
     let mut forced = goal;
     forced.review_requires_full = true;
     assert!(a.validate(&forced).is_err());
-    close_fixture(runtime, &handle, root).await;
+    close_fixture(runtime, &goals, root).await;
 }
 
 struct RetryHostOnlyBackend {
@@ -1794,7 +1774,7 @@ impl LlmBackend for RetryHostOnlyBackend {
 
 #[tokio::test]
 async fn restart_reuses_successful_screening_report_and_retries_only_host() {
-    use crate::runtime::SessionPolicy;
+    use mink::runtime::SessionPolicy;
     let root = std::env::temp_dir().join(format!(
         "mink-report-restart-{}",
         time::OffsetDateTime::now_utc().unix_timestamp_nanos()
@@ -1806,14 +1786,14 @@ async fn restart_reuses_successful_screening_report_and_retries_only_host() {
         host_calls: AtomicUsize::new(0),
     });
     let options = || AgentOptions::new(root.join("home"), &cwd).with_llm_backend(backend.clone());
-    let runtime = AgentRuntime::start(options()).await.unwrap();
+    let (runtime, goals) = start_with_goal(options(), GoalPlugin::new()).await.unwrap();
     let handle = runtime.handle();
-    handle.goals().start_driver().unwrap();
+    goals.start_driver().unwrap();
     let mut spec = GoalSpec::new("Implement deliverable");
     spec.limits.max_turns = 1;
-    let draft = handle.goals().draft(spec, 3600).unwrap();
-    handle.goals().confirm(&draft.id, draft.revision).unwrap();
-    let blocked = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
+    let draft = goals.draft(spec, 3600).unwrap();
+    goals.confirm(&draft.id, draft.revision).unwrap();
+    let blocked = tokio::time::timeout(std::time::Duration::from_secs(20), goals.wait())
         .await
         .unwrap()
         .unwrap();
@@ -1826,17 +1806,16 @@ async fn restart_reuses_successful_screening_report_and_retries_only_host() {
     let sid = handle.session_info().session_id.clone();
     runtime.shutdown().await.unwrap();
     drop(handle);
-    let reopened = AgentRuntime::start(options().with_session(SessionPolicy::Resume(sid)))
-        .await
-        .unwrap();
-    let handle = reopened.handle();
-    handle.goals().start_driver().unwrap();
-    let current = handle.goals().snapshot().unwrap();
-    handle
-        .goals()
-        .resume(&current.id, current.revision)
-        .unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(20), handle.goals().wait())
+    let (reopened, goals) = start_with_goal(
+        options().with_session(SessionPolicy::Resume(sid)),
+        GoalPlugin::new(),
+    )
+    .await
+    .unwrap();
+    goals.start_driver().unwrap();
+    let current = goals.snapshot().unwrap();
+    goals.resume(&current.id, current.revision).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), goals.wait())
         .await
         .unwrap()
         .unwrap();
@@ -1854,7 +1833,7 @@ async fn restart_reuses_successful_screening_report_and_retries_only_host() {
 
 #[tokio::test]
 async fn unknown_goal_format_version_fails_closed() {
-    use crate::runtime::SessionPolicy;
+    use mink::runtime::SessionPolicy;
     let root = std::env::temp_dir().join(format!(
         "mink-goal-version-{}",
         time::OffsetDateTime::now_utc().unix_timestamp_nanos()
@@ -1863,25 +1842,16 @@ async fn unknown_goal_format_version_fails_closed() {
     std::fs::create_dir_all(&cwd).unwrap();
     let options =
         || AgentOptions::new(root.join("home"), &cwd).with_llm_backend(Arc::new(NoRequest));
-    let runtime = AgentRuntime::start(options()).await.unwrap();
+    let (runtime, goals) = start_with_goal(options(), GoalPlugin::new()).await.unwrap();
     let handle = runtime.handle();
-    handle
-        .goal_ctx
-        .stores
+    goals
         .goal_store
         .create(
             GoalSpec::new("reject unknown formats"),
-            goal_environment(&cwd, &handle.goal_ctx.tools.tool_surface),
+            goal_environment_from_parts(&cwd, &handle.tool_surface_fingerprint()),
         )
         .unwrap();
-    let directory = handle
-        .goal_ctx
-        .stores
-        .store
-        .path()
-        .parent()
-        .unwrap()
-        .to_path_buf();
+    let directory = handle.session_dir();
     let sid = handle.session_info().session_id.clone();
     runtime.shutdown().await.unwrap();
     drop(handle);
@@ -1896,9 +1866,12 @@ async fn unknown_goal_format_version_fails_closed() {
         std::fs::write(directory.join("goal.json"), &bytes).unwrap();
         std::fs::write(directory.join("goal-transaction.json"), &bytes).unwrap();
         assert!(
-            AgentRuntime::start(options().with_session(SessionPolicy::Resume(sid.clone())))
-                .await
-                .is_err(),
+            start_with_goal(
+                options().with_session(SessionPolicy::Resume(sid.clone())),
+                GoalPlugin::new(),
+            )
+            .await
+            .is_err(),
             "format version {version} must be rejected"
         );
     }
@@ -1936,7 +1909,7 @@ impl LlmBackend for HoldingBackend {
         "holding-goal-execution"
     }
     async fn stream(&self, _: LlmRequest) -> Result<LlmResponseStream> {
-        use crate::runtime::{LlmEvent, LlmStopEvent, LlmTextEvent};
+        use mink::runtime::{LlmEvent, LlmStopEvent, LlmTextEvent};
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             self.entered.notify_one();
             self.release.notified().await;
@@ -1972,19 +1945,18 @@ async fn a_live_execution_refuses_a_replacement_until_it_settles() {
         entered: Arc::new(tokio::sync::Notify::new()),
         release: Arc::new(tokio::sync::Notify::new()),
     });
-    let runtime = AgentRuntime::start(
+    let (runtime, goals) = start_with_goal(
         AgentOptions::new(root.join("home"), &cwd).with_llm_backend(backend.clone()),
+        GoalPlugin::new(),
     )
     .await
     .unwrap();
-    let handle = runtime.handle();
-    handle.goals().start_driver().unwrap();
-    let draft = handle
-        .goals()
+    goals.start_driver().unwrap();
+    let draft = goals
         .draft(GoalSpec::new("hold the execution"), 3600)
         .unwrap();
     let entered = backend.entered.notified();
-    handle.goals().confirm(&draft.id, draft.revision).unwrap();
+    goals.confirm(&draft.id, draft.revision).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(10), entered)
         .await
         .expect("the execution request must reach the backend");
@@ -1992,24 +1964,15 @@ async fn a_live_execution_refuses_a_replacement_until_it_settles() {
     // While the turn is in flight the run owns the driver and the turn gate:
     // a replacement can be neither drafted nor confirmed, and no late reply can
     // be attributed to a goal that did not start it.
-    let busy = handle
-        .goals()
-        .draft(GoalSpec::new("replacement"), 3600)
-        .unwrap_err();
+    let busy = goals.draft(GoalSpec::new("replacement"), 3600).unwrap_err();
     assert!(matches!(busy, RuntimeError::Busy { .. }), "{busy:?}");
-    let stale = handle
-        .goals()
-        .confirm(&draft.id, draft.revision)
-        .unwrap_err();
+    let stale = goals.confirm(&draft.id, draft.revision).unwrap_err();
     assert!(matches!(stale, RuntimeError::Busy { .. }), "{stale:?}");
 
     // Cancelling stops the run; the held execution is released and the run
     // settles by itself instead of retrying.
-    let current = handle.goals().snapshot().unwrap();
-    let cancelled = handle
-        .goals()
-        .cancel(&current.id, current.revision)
-        .unwrap();
+    let current = goals.snapshot().unwrap();
+    let cancelled = goals.cancel(&current.id, current.revision).unwrap();
     assert_eq!(cancelled.status, GoalStatus::Cancelled);
     assert_eq!(
         cancelled.phase,
@@ -2017,7 +1980,7 @@ async fn a_live_execution_refuses_a_replacement_until_it_settles() {
         "a cancelled goal must not stay verifying"
     );
     backend.release.notify_one();
-    let settled = tokio::time::timeout(std::time::Duration::from_secs(10), handle.goals().wait())
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(10), goals.wait())
         .await
         .expect("the run must settle after its execution exits")
         .unwrap();
@@ -2047,18 +2010,18 @@ async fn interrupt_during_an_active_round_pauses_without_admitting_another() {
         entered: Arc::new(tokio::sync::Notify::new()),
         release: Arc::new(tokio::sync::Notify::new()),
     });
-    let runtime = AgentRuntime::start(
+    let (runtime, goals) = start_with_goal(
         AgentOptions::new(root.join("home"), &cwd).with_llm_backend(backend.clone()),
+        GoalPlugin::new(),
     )
     .await
     .unwrap();
-    let handle = runtime.handle();
-    handle.goals().start_driver().unwrap();
+    goals.start_driver().unwrap();
     let mut spec = GoalSpec::new("interrupt the only round");
     spec.limits.max_turns = 1;
-    let draft = handle.goals().draft(spec, 3600).unwrap();
+    let draft = goals.draft(spec, 3600).unwrap();
     let entered = backend.entered.notified();
-    handle.goals().confirm(&draft.id, draft.revision).unwrap();
+    goals.confirm(&draft.id, draft.revision).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(10), entered)
         .await
         .expect("the execution request must reach the backend");
@@ -2066,14 +2029,14 @@ async fn interrupt_during_an_active_round_pauses_without_admitting_another() {
     // The run is scheduled and the goal is still `active`: the interrupt is
     // set while execution owns the turn.
     assert_eq!(
-        handle.goals().snapshot().unwrap().status,
+        goals.snapshot().unwrap().status,
         GoalStatus::Active,
         "the goal must still be active when the interrupt is set"
     );
-    handle.goal_ctx.interrupt.trigger();
+    runtime.handle().interrupt_turn_gate();
     backend.release.notify_one();
 
-    let settled = tokio::time::timeout(std::time::Duration::from_secs(10), handle.goals().wait())
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(10), goals.wait())
         .await
         .expect("an interrupt must settle the run instead of spinning")
         .unwrap();
@@ -2090,7 +2053,7 @@ async fn interrupt_during_an_active_round_pauses_without_admitting_another() {
     );
     assert_eq!(
         settled.iterations[0].outcome_status,
-        Some(crate::runtime::TurnStatus::Interrupted),
+        Some(mink::runtime::TurnStatus::Interrupted),
         "the round must settle as interrupted: {settled:?}"
     );
     assert_eq!(
@@ -2104,24 +2067,17 @@ async fn interrupt_during_an_active_round_pauses_without_admitting_another() {
 
 #[test]
 fn inconclusive_review_keeps_active_and_preserves_candidate() {
-    use crate::session::goal::{GoalPhase, GoalStatus, GoalStore, GoalTransition};
-    use crate::session::goal_protocol::{GoalReview, GoalReviewVerdict};
+    use crate::store::{GoalPhase, GoalStatus, GoalStore, GoalTransition};
+    use crate::store::{GoalReview, GoalReviewVerdict};
 
     let dir = std::env::temp_dir().join(format!(
         "mink-goal-inconclusive-{}",
         time::OffsetDateTime::now_utc().unix_timestamp_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = GoalStore::load(
-        &dir,
-        crate::session::persistence::PersistenceFault::default(),
-    )
-    .unwrap();
+    let store = GoalStore::load(&dir, mink::runtime::PersistenceFault::default()).unwrap();
     let goal = store
-        .create(
-            crate::session::goal::GoalSpec::new("inconclusive"),
-            "env".into(),
-        )
+        .create(crate::store::GoalSpec::new("inconclusive"), "env".into())
         .unwrap();
     let goal = store
         .transition(
@@ -2177,7 +2133,7 @@ fn inconclusive_review_keeps_active_and_preserves_candidate() {
     );
     assert_eq!(
         goal.review_failure_stage,
-        Some(crate::session::goal_protocol::GoalReviewStage::Adjudicating)
+        Some(crate::store::GoalReviewStage::Adjudicating)
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -2213,46 +2169,34 @@ async fn confirm_goal_with_disabled_driver_outside_tokio_does_not_fault_driver()
     ));
     std::fs::create_dir_all(&root).unwrap();
     let options = AgentOptions::new(root.join("home"), &root).with_llm_backend(Arc::new(NoRequest));
-    let runtime = AgentRuntime::start(options).await.unwrap();
-    let handle = runtime.handle();
-    let draft = handle
-        .goal_ctx
-        .stores
+    let (runtime, goals) = start_with_goal(options, GoalPlugin::new()).await.unwrap();
+    let draft = goals
         .goal_store
         .draft(GoalSpec::new("sync confirm check"), "env".into(), 60)
         .unwrap();
     // Call `confirm_goal` from a plain OS thread with no Tokio runtime context
     // while the goal driver has not been enabled yet.
-    let sync_handle = handle.clone();
-    let confirmed =
-        std::thread::spawn(move || sync_handle.goals().confirm(&draft.id, draft.revision))
-            .join()
-            .expect("sync thread")
-            .expect("confirm_goal must succeed when driver is disabled outside Tokio");
+    let sync_goals = goals.clone();
+    let confirmed = std::thread::spawn(move || sync_goals.confirm(&draft.id, draft.revision))
+        .join()
+        .expect("sync thread")
+        .expect("confirm_goal must succeed when driver is disabled outside Tokio");
     assert_eq!(confirmed.status, GoalStatus::Active);
     // Subsequent control operations must still work (driver must not be Faulted).
-    let paused = handle
-        .goals()
-        .pause(&confirmed.id, confirmed.revision)
-        .unwrap();
+    let paused = goals.pause(&confirmed.id, confirmed.revision).unwrap();
     assert_eq!(paused.status, GoalStatus::Paused);
-    close_fixture(runtime, &handle, root).await;
+    close_fixture(runtime, &goals, root).await;
 }
 
 #[test]
 fn settle_iteration_increments_revision_once_per_applied_settlement() {
-    use crate::agent::orchestrator::{TurnRunResult, TurnStatus};
-    use crate::session::goal::{ApplyResult, GoalStore, IterationKey, SettlementFacts};
+    use mink::runtime::TurnStatus;
     let dir = std::env::temp_dir().join(format!(
         "mink-settle-rev-{}",
         time::OffsetDateTime::now_utc().unix_timestamp_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = GoalStore::load(
-        &dir,
-        crate::session::persistence::PersistenceFault::default(),
-    )
-    .unwrap();
+    let store = GoalStore::load(&dir, mink::runtime::PersistenceFault::default()).unwrap();
     let active = store
         .create(GoalSpec::new("bump revision"), "env".into())
         .unwrap();
@@ -2263,20 +2207,15 @@ fn settle_iteration_increments_revision_once_per_applied_settlement() {
         turn_id: "turn-1".into(),
     };
     let before = store.snapshot().unwrap();
-    let result = TurnRunResult {
-        billing_turn_id: "bill-1".into(),
-        status: TurnStatus::Ok,
-        failure: None,
-        tool_call_count: 0,
-        tool_error_count: 0,
-        error: None,
-        usage_records: vec![],
-        usage: Default::default(),
-        text: "done".into(),
-        thinking: String::new(),
-    };
     let first = store
-        .settle_iteration(&key, &result, &SettlementFacts::default())
+        .settle_iteration_from_parts(
+            &key,
+            "bill-1",
+            TurnStatus::Ok,
+            None,
+            &[],
+            &SettlementFacts::default(),
+        )
         .unwrap();
     assert_eq!(first, ApplyResult::Applied);
     let after = store.snapshot().unwrap();
@@ -2286,7 +2225,14 @@ fn settle_iteration_increments_revision_once_per_applied_settlement() {
         "settling the current goal iteration must advance revision for CAS safety"
     );
     let repeat = store
-        .settle_iteration(&key, &result, &SettlementFacts::default())
+        .settle_iteration_from_parts(
+            &key,
+            "bill-1",
+            TurnStatus::Ok,
+            None,
+            &[],
+            &SettlementFacts::default(),
+        )
         .unwrap();
     assert_eq!(repeat, ApplyResult::AlreadyApplied);
     assert_eq!(store.snapshot().unwrap().revision, after.revision);

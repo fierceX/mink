@@ -11,10 +11,6 @@ use std::time::SystemTime;
 use crate::events::{EventLog as SessionEvent, SessionEventBatch};
 
 pub use crate::session::artifacts::{ArtifactManager, ArtifactRecord};
-pub use crate::session::goal::{GoalBudget, GoalSnapshot};
-pub use crate::session::goal::{
-    default_limits as default_goal_limits, read_snapshot as read_goal_snapshot,
-};
 pub use crate::session::metadata::{SessionMetadata, SessionReferenceError, SessionSeed};
 pub use crate::session::paths::Paths as SessionPaths;
 pub use crate::session::subagent_catalog::{
@@ -106,12 +102,6 @@ pub struct SessionUsage {
     pub last_context_tokens: u64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum GoalBoundaryEvent {
-    Card(Box<crate::session::goal::GoalMessage>),
-    Ended { goal_id: String, revision: u64 },
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppliedGuidanceEvent {
     pub input_id: String,
@@ -123,11 +113,6 @@ pub enum TranscriptEntry {
     User {
         text: String,
         guidance: bool,
-    },
-    GoalCard(Box<crate::session::goal::GoalMessage>),
-    GoalEnded {
-        goal_id: String,
-        revision: u64,
     },
     Thinking(String),
     Text(String),
@@ -155,7 +140,6 @@ pub struct SessionUiSnapshot {
     pub image_input: Option<crate::capabilities::model_capabilities::OpenAiChatImageUrlLimits>,
     pub plan_draft: Option<String>,
     pub plan_active: Option<String>,
-    pub goal: Option<GoalSnapshot>,
     pub todos: Option<TodoSnapshot>,
 }
 
@@ -169,11 +153,7 @@ fn is_internal_conversation_row(row: &serde_json::Value) -> bool {
     }
     metadata.get("todo_state_kind").is_some()
         || metadata.get("plan_transaction_id").is_some()
-        || metadata.get("goal_state_kind").is_some()
-        || metadata
-            .get("source")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|source| source.starts_with("goal_"))
+        || metadata.get("source").is_some()
 }
 
 impl SessionReader {
@@ -251,8 +231,8 @@ impl SessionReader {
 
     /// Read committed conversation rows with their physical JSONL sequence.
     /// The returned boundary includes blank physical lines, which still occupy
-    /// sequence positions for persisted goal and reader cursors.
-    pub(crate) fn conversation_with_sequence(&self) -> Result<(Vec<serde_json::Value>, usize)> {
+    /// sequence positions for persisted extension and reader cursors.
+    pub fn conversation_with_sequence(&self) -> Result<(Vec<serde_json::Value>, usize)> {
         let path = self.directory.join("conversation.jsonl");
         let data = std::fs::read_to_string(&path)?;
         let mut rows = Vec::new();
@@ -432,41 +412,14 @@ impl SessionReader {
     }
 
     /// Whether a committed conversation row contains structures that only
-    /// `conversation.jsonl` carries (guidance, goal boundaries, native web calls).
+    /// `conversation.jsonl` carries (guidance, extension replay markers, native web calls).
     pub fn row_needs_conversation_replay(row: &serde_json::Value) -> bool {
         let metadata = &row["_mink"];
         metadata["guidance"] == true
-            || metadata.get("goal_message").is_some()
-            || metadata.get("goal_state_kind").is_some()
+            || metadata["replay"] == true
             || row["content"]
                 .as_array()
                 .is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "deepseek_web"))
-    }
-
-    /// Decode a goal boundary carried on a committed conversation row, if any.
-    pub fn decode_goal_boundary(row: &serde_json::Value) -> Option<GoalBoundaryEvent> {
-        let metadata = row.get("_mink")?;
-        if let Some(raw) = metadata.get("goal_message") {
-            let parsed: crate::session::goal::GoalMessage =
-                serde_json::from_value(raw.clone()).ok()?;
-            return Some(GoalBoundaryEvent::Card(Box::new(parsed)));
-        }
-        if metadata
-            .get("goal_state_kind")
-            .and_then(serde_json::Value::as_str)
-            == Some("ended")
-        {
-            let goal_id = metadata
-                .get("goal_id")
-                .and_then(serde_json::Value::as_str)?
-                .to_string();
-            let revision = metadata
-                .get("goal_revision")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            return Some(GoalBoundaryEvent::Ended { goal_id, revision });
-        }
-        None
     }
 
     /// Decode an applied human guidance row from a committed conversation message.
@@ -484,22 +437,12 @@ impl SessionReader {
         let mut entries = Vec::new();
         if row["role"] == "user"
             && let Some(text) = row["content"].as_str()
+            && !is_internal_conversation_row(row)
         {
-            if let Some(boundary) = Self::decode_goal_boundary(row) {
-                match boundary {
-                    GoalBoundaryEvent::Card(message) => {
-                        entries.push(TranscriptEntry::GoalCard(message));
-                    }
-                    GoalBoundaryEvent::Ended { goal_id, revision } => {
-                        entries.push(TranscriptEntry::GoalEnded { goal_id, revision });
-                    }
-                }
-            } else if !is_internal_conversation_row(row) {
-                entries.push(TranscriptEntry::User {
-                    text: text.to_string(),
-                    guidance: row["_mink"]["guidance"] == true,
-                });
-            }
+            entries.push(TranscriptEntry::User {
+                text: text.to_string(),
+                guidance: row["_mink"]["guidance"] == true,
+            });
         }
         if let Some(blocks) = row["content"].as_array() {
             let mut citations: Option<&Vec<serde_json::Value>> = None;
@@ -666,7 +609,7 @@ impl SessionReader {
         snapshot.image_input.limits().cloned()
     }
 
-    /// Read persisted UI mirrors (image limits, plan draft/active, goal, todos)
+    /// Read persisted UI mirrors (image limits, plan draft/active, todos)
     /// without exposing internal session filenames to consumers.
     pub fn read_ui_snapshot(&self) -> SessionUiSnapshot {
         let image_input = self.read_image_limits();
@@ -676,13 +619,11 @@ impl SessionReader {
         let plan_active = std::fs::read_to_string(self.directory.join("plan.md"))
             .ok()
             .filter(|content| !content.trim().is_empty());
-        let goal = crate::session::goal::read_snapshot(&self.directory.join("goal.json"));
         let todos = self.todo().ok();
         SessionUiSnapshot {
             image_input,
             plan_draft,
             plan_active,
-            goal,
             todos,
         }
     }

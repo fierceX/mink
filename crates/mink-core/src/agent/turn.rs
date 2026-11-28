@@ -112,11 +112,43 @@ struct TurnLocalState {
     scavenge_seq: u32,
 }
 
+pub(crate) struct TurnExecutionScope {
+    pub internal_entry: Option<(String, serde_json::Value)>,
+    pub skip_add_user: bool,
+    pub count_as_user_turn: bool,
+    pub consume_inbox: bool,
+    pub enable_belief: bool,
+    pub disable_native_web: bool,
+    pub tool_mask: Option<crate::tools::policy_hook::ToolExecutionMask>,
+    pub tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolExecutionObserver>>,
+    pub budget_check: Option<Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync>>,
+    pub stop_when: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    pub continue_prompt_when_not_stopped: Option<String>,
+}
+
+impl Default for TurnExecutionScope {
+    fn default() -> Self {
+        Self {
+            internal_entry: None,
+            skip_add_user: false,
+            count_as_user_turn: true,
+            consume_inbox: true,
+            enable_belief: true,
+            disable_native_web: false,
+            tool_mask: None,
+            tool_observer: None,
+            budget_check: None,
+            stop_when: None,
+            continue_prompt_when_not_stopped: None,
+        }
+    }
+}
+
 /// TurnExecutor runs a single "turn" of the agent loop:
 ///   Stream (LLM response) → Persist → Tools → Decide (continue/stop)
 pub struct TurnExecutor {
     ctx: Arc<AgentSharedContext>,
-    goal_adjudication: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
+    scope: TurnExecutionScope,
     model_name: String,
     model_alias: Option<String>,
     tools: Arc<ToolRunner>,
@@ -159,22 +191,34 @@ impl TurnExecutor {
         ctx: Arc<AgentSharedContext>,
         resolved: crate::config::ResolvedModel,
     ) -> Self {
-        Self::for_scope(ctx, resolved, None)
+        Self::for_scope(ctx, resolved, TurnExecutionScope::default())
     }
 
-    fn for_scope(
+    pub(crate) fn new_for_scope(ctx: Arc<AgentSharedContext>, scope: TurnExecutionScope) -> Self {
+        let active = ctx
+            .active_model
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        Self::for_scope(ctx, active, scope)
+    }
+
+    pub(crate) fn for_scope(
         ctx: Arc<AgentSharedContext>,
         resolved: crate::config::ResolvedModel,
-        goal_adjudication: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
+        scope: TurnExecutionScope,
     ) -> Self {
         let mut tool_context = crate::context::ToolContext::from_shared(&ctx);
-        if let Some(session) = &goal_adjudication {
-            tool_context.goal_adjudication = Some(session.clone());
+        if let Some(mask) = &scope.tool_mask {
+            tool_context.tool_mask = Some(mask.clone());
+        }
+        if let Some(observer) = &scope.tool_observer {
+            tool_context.tool_observer = Some(observer.clone());
         }
         let tools = Arc::new(ToolRunner::new(Arc::new(tool_context)));
         let prefix = crate::agent::prefix::PrefixManager::with_native_web(
             ctx.clone(),
-            goal_adjudication.is_none(),
+            !scope.disable_native_web,
         );
         let mut sub_agent_config = ctx.config.clone();
         if let Some(alias) = resolved.alias.as_deref() {
@@ -187,7 +231,7 @@ impl TurnExecutor {
         }
         Self {
             ctx: ctx.clone(),
-            goal_adjudication,
+            scope,
             model_name: resolved.actual,
             model_alias: resolved.alias,
             tools,
@@ -210,20 +254,6 @@ impl TurnExecutor {
                     &ctx.tools.tool_surface,
                 ),
         }
-    }
-
-    /// Use the main agent, store and fixed tool schema to commit a conclusion.
-    /// The turn-local dispatch scope permits only inspection and GoalReview.
-    pub(crate) fn new_for_goal_adjudication(
-        ctx: Arc<AgentSharedContext>,
-        session: Arc<crate::runtime::goal::review::GoalReviewSession>,
-    ) -> Self {
-        let active = ctx
-            .active_model
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        Self::for_scope(ctx, active, Some(session))
     }
 
     fn model_label(&self) -> &str {
@@ -294,8 +324,8 @@ impl TurnExecutor {
         tools_json: &mut Vec<serde_json::Value>,
         round_deadline: Option<std::time::Instant>,
     ) -> Result<Arc<crate::llm::request::RequestProjection>> {
-        if let Some(session) = &self.goal_adjudication {
-            session.check_budget()?;
+        if let Some(check) = &self.scope.budget_check {
+            check()?;
         }
         let mut projection = Arc::new(crate::llm::request::RequestProjection::build(
             messages,
@@ -482,6 +512,9 @@ impl TurnExecutor {
         mut belief: Option<&mut crate::agent::belief::BeliefTracker>,
         human: bool,
     ) -> Result<(TurnDecision, Vec<TurnEffect>)> {
+        if !self.scope.enable_belief {
+            belief = None;
+        }
         // A latched persistence fault means the session must not accept new
         // work: refuse before the model request, history append or tools.
         self.ctx.stores.persistence_fault.check()?;
@@ -496,12 +529,28 @@ impl TurnExecutor {
         let mut messages = self.ctx.stores.compaction.active_messages().await?;
         self.reconcile_todo_state(&mut messages).await?;
         let mut primary = None;
-        if let Some(session) = &self.goal_adjudication {
-            self.ctx.stores.store.append_runtime_message(serde_json::json!({
-                "role":"user", "content":user_input, "internal":true,
-                "_mink":{"internal":true,"source":"goal_adjudication","candidate":session.goal.review_candidate}
-            })).await?;
-        } else if self.ctx.stores.input_inbox.active_turn().is_some() {
+        if let Some((content, metadata)) = &self.scope.internal_entry {
+            self.ctx
+                .stores
+                .store
+                .append_runtime_message(serde_json::json!({
+                    "role": "user",
+                    "content": content,
+                    "internal": true,
+                    "_mink": metadata,
+                }))
+                .await?;
+        } else if self.scope.skip_add_user {
+            if self.scope.consume_inbox && self.ctx.stores.input_inbox.active_turn().is_some() {
+                self.ctx
+                    .stores
+                    .input_inbox
+                    .apply_pending(&self.ctx.stores.store, || {
+                        self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set()
+                    })
+                    .await?;
+            }
+        } else if self.scope.consume_inbox && self.ctx.stores.input_inbox.active_turn().is_some() {
             self.ctx
                 .stores
                 .input_inbox
@@ -528,7 +577,7 @@ impl TurnExecutor {
             }
             None => user_input,
         };
-        if self.goal_adjudication.is_none() {
+        if self.scope.count_as_user_turn {
             self.ctx.stores.stats.record_turn().await;
             self.ctx.log_event(crate::events::EventLog::UserInput {
                 version: None,
@@ -567,7 +616,7 @@ impl TurnExecutor {
                 self.ctx.io.display.render_stop("interrupted");
                 return Ok((TurnDecision::Interrupted, effects));
             }
-            if self.goal_adjudication.is_none()
+            if self.scope.consume_inbox
                 && self
                     .ctx
                     .stores
@@ -937,12 +986,14 @@ impl TurnExecutor {
                     effects,
                 ));
             }
-            if let Some(session) = &self.goal_adjudication {
-                if session.has_submission() {
+            if let Some(stop_when) = &self.scope.stop_when {
+                if stop_when() {
                     return Ok((TurnDecision::Stop, effects));
                 }
-                if matches!(kind, RoundKind::Complete) {
-                    self.ctx.stores.store.add_runtime_user("<goal-conclusion-required>The independent review is available, but no valid host conclusion has been recorded. Submit GoalReview for the bound candidate. If a previous call was rejected, correct its specific tool-result diagnostic and call again. Do not end this adjudication with a prose-only declaration.</goal-conclusion-required>").await?;
+                if matches!(kind, RoundKind::Complete)
+                    && let Some(prompt) = &self.scope.continue_prompt_when_not_stopped
+                {
+                    self.ctx.stores.store.add_runtime_user(prompt).await?;
                 }
                 messages = self.ctx.stores.compaction.active_messages().await?;
                 continue;

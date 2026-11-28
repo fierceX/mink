@@ -261,13 +261,14 @@ impl PtcDispatchBridge {
             .iter()
             .find(|t| t.definition.name == name)
         {
+            let tracks_effects = self
+                .ctx
+                .tool_observer
+                .as_ref()
+                .is_some_and(|observer| observer.tracks_durable_effects());
             return custom.definition.execution
                 == crate::tools::extension::ToolExecutionMode::Sequential
-                || (self
-                    .ctx
-                    .goal_store
-                    .snapshot()
-                    .is_some_and(|g| g.phase == crate::session::goal::GoalPhase::Executing));
+                || (tracks_effects && !custom.definition.side_effect_exempt);
         }
         let metadata = self
             .ctx
@@ -338,20 +339,19 @@ impl PtcBindingDispatcher for PtcDispatchBridge {
                 ),
             });
         }
-        if self.ctx.goal_review.is_some() {
-            return Err(PtcBindingError {
-                tool_name: tool_name.to_string(),
-                kind: ToolFailureKind::SafetyBlocked,
-                message: "RunCode is unavailable during goal review".to_string(),
-            });
-        }
-        if self.ctx.goal_drafting || self.ctx.goal_adjudication.is_some() {
+        if let Some(mask) = &self.ctx.tool_mask {
+            if !mask.allow_exclusive_ptc {
+                return Err(PtcBindingError {
+                    tool_name: tool_name.to_string(),
+                    kind: ToolFailureKind::SafetyBlocked,
+                    message: mask.block_reason.clone(),
+                });
+            }
             if self.ctx.tool_config.ptc.mode != super::PtcMode::Exclusive {
                 return Err(PtcBindingError {
                     tool_name: tool_name.to_string(),
                     kind: ToolFailureKind::SafetyBlocked,
-                    message: "RunCode is unavailable during goal drafting or adjudication"
-                        .to_string(),
+                    message: "RunCode is unavailable under the current turn policy".to_string(),
                 });
             }
             let is_custom = self
@@ -359,16 +359,17 @@ impl PtcBindingDispatcher for PtcDispatchBridge {
                 .custom_tools
                 .iter()
                 .any(|t| t.definition.name == tool_name);
-            if !matches!(tool_name, "Read" | "Glob" | "Grep") || is_custom {
+            if !mask.ptc_allowed_tools.contains(tool_name) || is_custom {
                 return Err(PtcBindingError {
                     tool_name: tool_name.to_string(),
                     kind: ToolFailureKind::SafetyBlocked,
                     message: format!(
-                        "Tool '{tool_name}' is blocked inside RunCode during goal drafting or adjudication"
+                        "Tool '{tool_name}' is blocked inside RunCode under the current turn policy"
                     ),
                 });
             }
-            if tool_name == "Read"
+            if mask.block_custom_resource_schemes
+                && tool_name == "Read"
                 && args.get("path").and_then(Value::as_str).is_some_and(|p| {
                     p.contains("://")
                         && !["artifact://", "skill://", "rule://", "session://"]
@@ -702,7 +703,7 @@ mod tests {
         assert_eq!(err.kind, ToolFailureKind::SafetyBlocked);
 
         let err2 = bridge
-            .invoke("GoalDraft", serde_json::json!({}))
+            .invoke("PlanDraft", serde_json::json!({}))
             .await
             .unwrap_err();
         assert_eq!(err2.kind, ToolFailureKind::SafetyBlocked);
@@ -714,7 +715,7 @@ mod tests {
         assert_eq!(err3.kind, ToolFailureKind::SafetyBlocked);
 
         let err4 = bridge
-            .invoke("GoalRead", serde_json::json!({}))
+            .invoke("PlanConfirm", serde_json::json!({}))
             .await
             .unwrap_err();
         assert_eq!(err4.kind, ToolFailureKind::SafetyBlocked);
@@ -855,7 +856,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bridge_allows_readonly_exploration_only_during_exclusive_goal_drafting() {
+    async fn bridge_allows_readonly_exploration_only_under_exclusive_readonly_mask() {
         let shared =
             crate::regression::test_context_for_agent_with_config("ptc-bridge-draft", |cfg| {
                 cfg.ptc = PtcConfig {
@@ -866,7 +867,14 @@ mod tests {
             .await
             .unwrap();
         let mut ctx_val = ToolContext::from_shared(&shared);
-        ctx_val.goal_drafting = true;
+        ctx_val.tool_mask = Some(
+            crate::tools::policy_hook::ToolExecutionMask::allow_only(["Read", "Glob", "Grep"])
+                .with_exclusive_ptc(true)
+                .with_block_custom_resource_schemes(true)
+                .with_disable_native_web(true)
+                .with_disable_replan(true)
+                .with_block_reason("read-only exploration only"),
+        );
         std::fs::write(ctx_val.cwd.join("draft_info.txt"), "draft data\n").unwrap();
         let ctx = Arc::new(ctx_val);
 

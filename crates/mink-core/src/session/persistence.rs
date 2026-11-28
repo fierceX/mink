@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PersistenceFaultInfo {
+pub struct PersistenceFaultInfo {
     pub path: PathBuf,
     pub detail: String,
 }
@@ -27,12 +27,12 @@ pub(crate) struct PersistenceFaultInfo {
 /// (todo/plan) hold clones so a fault raised by any store is visible to the
 /// execution layer.
 #[derive(Clone, Default)]
-pub(crate) struct PersistenceFault {
+pub struct PersistenceFault {
     inner: Arc<Mutex<Option<PersistenceFaultInfo>>>,
 }
 
 impl PersistenceFault {
-    pub(crate) fn info(&self) -> Option<PersistenceFaultInfo> {
+    pub fn info(&self) -> Option<PersistenceFaultInfo> {
         self.inner
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -40,7 +40,7 @@ impl PersistenceFault {
     }
 
     /// Fail closed if the session is already latched.
-    pub(crate) fn check(&self) -> anyhow::Result<()> {
+    pub fn check(&self) -> anyhow::Result<()> {
         match self.info() {
             Some(info) => Err(fault_error(&info.path, &info.detail)),
             None => Ok(()),
@@ -48,7 +48,7 @@ impl PersistenceFault {
     }
 
     /// Latch the session and return the fatal error to propagate.
-    pub(crate) fn raise(&self, path: &Path, detail: impl Into<String>) -> anyhow::Error {
+    pub fn raise(&self, path: &Path, detail: impl Into<String>) -> anyhow::Error {
         let detail = detail.into();
         let mut slot = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(existing) = slot.as_ref() {
@@ -75,9 +75,9 @@ fn fault_error(path: &Path, detail: &str) -> anyhow::Error {
 /// Typed marker for a latched session. Callers classify it without parsing
 /// the display text.
 #[derive(Debug)]
-pub(crate) struct PersistenceFaultError {
-    pub(crate) path: PathBuf,
-    pub(crate) detail: String,
+pub struct PersistenceFaultError {
+    pub path: PathBuf,
+    pub detail: String,
 }
 
 impl std::fmt::Display for PersistenceFaultError {
@@ -95,11 +95,7 @@ impl std::error::Error for PersistenceFaultError {}
 
 /// Publish `content` at `path`, recovering from a published-but-unsynced
 /// failure or latching the session when recovery is impossible.
-pub(crate) fn publish_state(
-    path: &Path,
-    content: &[u8],
-    fault: &PersistenceFault,
-) -> anyhow::Result<()> {
+pub fn publish_state(path: &Path, content: &[u8], fault: &PersistenceFault) -> anyhow::Result<()> {
     publish_state_with(
         path,
         content,

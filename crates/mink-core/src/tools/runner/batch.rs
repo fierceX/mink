@@ -35,18 +35,17 @@ impl ToolRunner {
                 continue;
             }
             let metadata = self.metadata_for(&call.name);
-            let custom_sequential = self.find_custom_tool(&call.name).is_some_and(|tool| {
-                tool.definition.execution == crate::tools::extension::ToolExecutionMode::Sequential
+            let custom_def = self.find_custom_tool(&call.name).map(|t| &t.definition);
+            let tracks_effects = self
+                .ctx
+                .tool_observer
+                .as_ref()
+                .is_some_and(|observer| observer.tracks_durable_effects());
+            let custom_sequential = custom_def.is_some_and(|def| {
+                def.execution == crate::tools::extension::ToolExecutionMode::Sequential
+                    || (tracks_effects && !def.side_effect_exempt)
             });
-            if custom_sequential
-                || (self
-                    .ctx
-                    .goal_store
-                    .snapshot()
-                    .is_some_and(|g| g.phase == crate::session::goal::GoalPhase::Executing)
-                    && self.find_custom_tool(&call.name).is_some())
-                || requires_sequential_execution(metadata.as_ref())
-            {
+            if custom_sequential || requires_sequential_execution(metadata.as_ref()) {
                 match self
                     .execute_read_batch(std::mem::take(&mut read_batch), &mut image_budget)
                     .await
@@ -67,11 +66,10 @@ impl ToolRunner {
                     }
                     PreparedCall::Execute(call) => call,
                 };
-                if records_goal_effect(
-                    &call.name,
-                    metadata.as_ref(),
-                    self.find_custom_tool(&call.name).is_some(),
-                ) && let Err(error) = self.ctx.goal_store.mark_effect(&call.id)
+                if tracks_effects
+                    && records_durable_effect(metadata.as_ref(), custom_def)
+                    && let Some(observer) = &self.ctx.tool_observer
+                    && let Err(error) = observer.before_side_effect(&call.id, &call.name)
                 {
                     results.push(not_executed_tool_result(
                         call,
@@ -394,27 +392,23 @@ impl ToolRunner {
             Ok(prepared) => prepared,
             Err(error) => return prepare_error(error),
         };
-        let review_capture = if let Some(review) = self.ctx.review_evidence() {
-            let evidence_context = match self.ctx.goal_review_tool_context() {
+        let observer_capture = if let Some(observer) = &self.ctx.tool_observer {
+            let evidence_context = match self.ctx.read_evidence_context() {
                 Ok(context) => context,
                 Err(error) => return prepare_error(error),
             };
-            match review.capture_read(&call, &evidence_context) {
+            match observer.before_read(&call.name, &call.id, &call.input_json, &evidence_context) {
                 Ok(capture) => capture,
                 Err(error) => return prepare_error(error),
             }
         } else {
             None
         };
-        if let Some((_, _, hash)) = &review_capture {
-            use sha2::{Digest, Sha256};
-            let actual = Sha256::digest(&prepared.bytes)
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>();
-            if hash != &actual {
-                return prepare_error(anyhow::anyhow!("image evidence changed during read"));
-            }
+        if let (Some(observer), Some(token)) =
+            (&self.ctx.tool_observer, observer_capture.as_deref())
+            && let Err(error) = observer.verify_read_bytes(token, &prepared.bytes)
+        {
+            return prepare_error(error);
         }
         let bytes = prepared.bytes.len() as u64;
         // Per-`execute_all` admission (v7 §7.3): the budget starts at zero
@@ -467,8 +461,8 @@ impl ToolRunner {
             .unwrap_or_else(|error| error.into_inner())
             .insert(image_id.clone());
 
-        if let (Some(review), Some(captured)) = (self.ctx.review_evidence(), review_capture)
-            && let Err(error) = review.finish_read(captured)
+        if let (Some(observer), Some(captured)) = (&self.ctx.tool_observer, observer_capture)
+            && let Err(error) = observer.after_read_succeeded(captured)
         {
             return prepare_error(error);
         }
@@ -509,7 +503,7 @@ impl ToolRunner {
         }
     }
 
-    /// Execute an internal verification call (e.g. `CommandGoalVerifier` running
+    /// Execute an internal verification call (e.g. a scoped external checker running
     /// `Bash`) as long as the tool is reachable via either wire or PTC SDK.
     pub(crate) async fn execute_verifier_call(&self, call: ToolCallEvent) -> Result<ToolExecution> {
         anyhow::ensure!(
@@ -593,17 +587,22 @@ impl ToolRunner {
         call: &ToolCallEvent,
         tool_fn: Option<&dyn ToolExec>,
     ) -> Result<ToolExecution> {
-        let review = ctx.review_evidence();
-        let captured = if let Some(review) = review {
-            review.capture_read(call, &ctx.goal_review_tool_context()?)?
+        let observer = ctx.tool_observer.as_ref();
+        let captured = if let Some(observer) = observer {
+            observer.before_read(
+                &call.name,
+                &call.id,
+                &call.input_json,
+                &ctx.read_evidence_context()?,
+            )?
         } else {
             None
         };
         let raw = dispatch_tool(ctx, call, tool_fn);
         if raw.status == ToolStatus::Succeeded
-            && let (Some(review), Some(captured)) = (review, captured)
+            && let (Some(observer), Some(captured)) = (observer, captured)
         {
-            review.finish_read(captured)?;
+            observer.after_read_succeeded(captured)?;
         }
         let mut result = format_dispatched_result(ctx, call, raw);
         ctx.plan_store.bind_transition(&mut result)?;
@@ -708,14 +707,14 @@ async fn execute_custom_raw(
     let result = match result {
         Ok(returned) => returned,
         Err(reason) => {
-            // Goal journals every extension before dispatch, including those
+            // Tracked extensions are journaled before dispatch, including those
             // declared read-only. An abandoned future cannot confirm its effect.
             if unknown_effect_bail
                 && (definition.mutating
                     || ctx
-                        .goal_store
-                        .snapshot()
-                        .is_some_and(|goal| goal.pending_effects.contains(&call.id)))
+                        .tool_observer
+                        .as_ref()
+                        .is_some_and(|observer| observer.has_pending_effect(&call.id)))
             {
                 anyhow::bail!("{reason}");
             }

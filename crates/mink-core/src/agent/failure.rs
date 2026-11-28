@@ -35,8 +35,8 @@ pub enum TurnFailureReason {
     SignalAborted,
     /// The reliability policy handed the turn over to the user/host.
     SignalHandover,
-    /// The goal review budget is exhausted.
-    GoalBudgetExhausted,
+    /// A host/extension budget check exhausted its allowance.
+    BudgetExhausted,
     /// An explicit user Search/Fetch request failed.
     WebRetrievalFailed,
     /// A session state publication fault latched the session.
@@ -59,7 +59,7 @@ impl TurnFailureReason {
             Self::MaxTurnsExceeded => "max_turns_exceeded",
             Self::SignalAborted => "signal_aborted",
             Self::SignalHandover => "signal_handover",
-            Self::GoalBudgetExhausted => "goal_budget_exhausted",
+            Self::BudgetExhausted => "budget_exhausted",
             Self::WebRetrievalFailed => "web_retrieval_failed",
             Self::Persistence => "persistence",
             Self::Internal => "internal",
@@ -72,6 +72,29 @@ impl std::fmt::Display for TurnFailureReason {
         f.write_str(self.as_str())
     }
 }
+
+/// Typed marker returned by host budget checks to fail a turn with
+/// [`TurnFailureReason::BudgetExhausted`].
+#[derive(Debug)]
+pub struct BudgetExhaustedError {
+    pub reason: String,
+}
+
+impl BudgetExhaustedError {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for BudgetExhaustedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "budget exhausted: {}", self.reason)
+    }
+}
+
+impl std::error::Error for BudgetExhaustedError {}
 
 /// Internal marker attached to an error at the point where the cause is known.
 #[derive(Debug)]
@@ -122,11 +145,8 @@ pub(crate) fn classify_turn_error(error: &anyhow::Error) -> TurnFailureReason {
         if cause.downcast_ref::<PersistenceFaultError>().is_some() {
             return TurnFailureReason::Persistence;
         }
-        if cause
-            .downcast_ref::<crate::runtime::goal::review::GoalReviewBudgetExhausted>()
-            .is_some()
-        {
-            return TurnFailureReason::GoalBudgetExhausted;
+        if cause.downcast_ref::<BudgetExhaustedError>().is_some() {
+            return TurnFailureReason::BudgetExhausted;
         }
         if let Some(upstream) = cause.downcast_ref::<LlmUpstreamError>() {
             return match upstream.kind() {
@@ -155,7 +175,7 @@ mod tests {
             TurnFailureReason::MaxTurnsExceeded,
             TurnFailureReason::SignalAborted,
             TurnFailureReason::SignalHandover,
-            TurnFailureReason::GoalBudgetExhausted,
+            TurnFailureReason::BudgetExhausted,
             TurnFailureReason::WebRetrievalFailed,
             TurnFailureReason::Persistence,
             TurnFailureReason::Internal,
@@ -216,12 +236,10 @@ mod tests {
             TurnFailureReason::Persistence
         );
 
-        let goal = anyhow::Error::new(crate::runtime::goal::review::GoalReviewBudgetExhausted {
-            reason: "token budget".into(),
-        });
+        let budget = anyhow::Error::new(BudgetExhaustedError::new("token budget"));
         assert_eq!(
-            classify_turn_error(&goal),
-            TurnFailureReason::GoalBudgetExhausted
+            classify_turn_error(&budget),
+            TurnFailureReason::BudgetExhausted
         );
     }
 }

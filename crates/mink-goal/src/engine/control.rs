@@ -1,38 +1,25 @@
 //! Goal control surface: contract lifecycle, leases and admission.
 
 use super::*;
+use mink::runtime::{InternalTurnRequest, PreparedInternalTurn, TurnId, TurnPermit, TurnStatus};
 
-/// Scoped controller for Goal contract lifecycle, leases, review and execution waiting.
-#[derive(Clone, Copy)]
-pub struct GoalController<'a> {
-    handle: &'a AgentRuntimeHandle,
-}
-
-impl AgentRuntimeHandle {
-    /// Access goal lifecycle and scheduling controls for this session.
-    pub fn goals(&self) -> GoalController<'_> {
-        GoalController { handle: self }
-    }
-}
-
-impl<'a> GoalController<'a> {
+impl GoalEngine {
     pub fn verifier_ids(&self) -> Vec<String> {
-        self.handle
-            .goal_driver
+        self.goal_driver
             .verifiers
             .iter()
             .map(|v| v.id().to_string())
             .collect()
     }
     pub fn snapshot(&self) -> Option<GoalSnapshot> {
-        self.handle.goal_snapshot()
+        self.goal_store.snapshot()
     }
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Option<GoalSnapshot>> {
-        self.handle.subscribe_goal()
+        self.goal_store.subscribe()
     }
     /// Save a host-prepared contract, still requiring explicit confirmation.
     pub fn draft(&self, spec: GoalSpec, duration_secs: u64) -> RuntimeResult<GoalDraftSnapshot> {
-        self.handle.draft_goal_inner(spec, duration_secs, true)
+        self.draft_goal_inner(spec, duration_secs, true)
     }
     /// Save a request awaiting model decomposition; not confirmable yet.
     pub fn request_draft(
@@ -40,17 +27,16 @@ impl<'a> GoalController<'a> {
         spec: GoalSpec,
         duration_secs: u64,
     ) -> RuntimeResult<GoalDraftSnapshot> {
-        self.handle.draft_goal_inner(spec, duration_secs, false)
+        self.draft_goal_inner(spec, duration_secs, false)
     }
     pub fn draft_snapshot(&self) -> Option<GoalDraftSnapshot> {
-        self.handle.goal_draft_snapshot()
+        self.goal_draft_snapshot()
     }
     pub fn cancel_draft(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
-        self.handle
-            .goal_control(id, revision, GoalTransition::CancelDraft, true)
+        self.goal_control(id, revision, GoalTransition::CancelDraft, true)
     }
     pub fn confirm(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
-        self.handle.confirm_goal_inner(id, revision, None)
+        self.confirm_goal_inner(id, revision, None)
     }
     pub fn confirm_and_start(
         &self,
@@ -58,7 +44,7 @@ impl<'a> GoalController<'a> {
         revision: u64,
         lease: Box<dyn GoalRunLease>,
     ) -> RuntimeResult<GoalSnapshot> {
-        self.handle.confirm_goal_inner(id, revision, Some(lease))
+        self.confirm_goal_inner(id, revision, Some(lease))
     }
     /// Read-only exploration and proposal generation; no activation occurs.
     pub async fn generate_draft(&self, feedback: &str) -> RuntimeResult<GoalDraftSnapshot> {
@@ -86,20 +72,17 @@ impl<'a> GoalController<'a> {
         feedback: &str,
         timeout: Option<std::time::Duration>,
     ) -> RuntimeResult<GoalDraftSnapshot> {
-        self.handle
-            .generate_goal_draft_at_with_timeout_inner(id, revision, feedback, timeout)
+        self.generate_goal_draft_at_with_timeout_inner(id, revision, feedback, timeout)
             .await
     }
     pub fn pause(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
-        self.handle
-            .goal_control(id, revision, GoalTransition::Pause, true)
+        self.goal_control(id, revision, GoalTransition::Pause, true)
     }
     pub fn cancel(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
-        self.handle
-            .goal_control(id, revision, GoalTransition::Cancel, true)
+        self.goal_control(id, revision, GoalTransition::Cancel, true)
     }
     pub fn resume(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
-        self.handle.resume_goal_inner(id, revision, None)
+        self.resume_goal_inner(id, revision, None)
     }
     /// Resume a goal and hand its run a host-managed capacity lease.
     pub fn resume_and_start(
@@ -108,7 +91,7 @@ impl<'a> GoalController<'a> {
         revision: u64,
         lease: Box<dyn GoalRunLease>,
     ) -> RuntimeResult<GoalSnapshot> {
-        self.handle.resume_goal_inner(id, revision, Some(lease))
+        self.resume_goal_inner(id, revision, Some(lease))
     }
     pub fn update_limits(
         &self,
@@ -117,8 +100,7 @@ impl<'a> GoalController<'a> {
         limits: GoalLimits,
     ) -> RuntimeResult<GoalSnapshot> {
         limits.validate().map_err(command_error)?;
-        self.handle
-            .goal_control(id, revision, GoalTransition::UpdateLimits { limits }, false)
+        self.goal_control(id, revision, GoalTransition::UpdateLimits { limits }, false)
     }
     /// Explicit host reconciliation after investigating an unknown side effect.
     /// Does not synthesize tool results or automatically resume execution.
@@ -128,7 +110,7 @@ impl<'a> GoalController<'a> {
         revision: u64,
         evidence: String,
     ) -> RuntimeResult<GoalSnapshot> {
-        self.handle.goal_control(
+        self.goal_control(
             id,
             revision,
             GoalTransition::ReconcileEffects { evidence },
@@ -136,8 +118,7 @@ impl<'a> GoalController<'a> {
         )
     }
     pub fn clear(&self, id: &str, revision: u64) -> RuntimeResult<GoalSnapshot> {
-        self.handle
-            .goal_control(id, revision, GoalTransition::Clear, false)
+        self.goal_control(id, revision, GoalTransition::Clear, false)
     }
     pub fn approve(
         &self,
@@ -145,7 +126,7 @@ impl<'a> GoalController<'a> {
         revision: u64,
         evidence: Vec<String>,
     ) -> RuntimeResult<GoalSnapshot> {
-        self.handle.approve_goal_inner(id, revision, evidence)
+        self.approve_goal_inner(id, revision, evidence)
     }
     pub async fn approve_async(
         &self,
@@ -153,13 +134,17 @@ impl<'a> GoalController<'a> {
         revision: u64,
         evidence: Vec<String>,
     ) -> RuntimeResult<GoalSnapshot> {
-        self.handle
-            .approve_goal_async_inner(id, revision, evidence)
-            .await
+        self.approve_goal_async_inner(id, revision, evidence).await
     }
     /// Watch whether a goal turn is currently executing.
     pub fn subscribe_turns(&self) -> tokio::sync::watch::Receiver<bool> {
-        self.handle.goal_driver.turn_active.subscribe()
+        self.goal_driver.turn_active.subscribe()
+    }
+    pub fn is_turn_active(&self) -> bool {
+        *self.goal_driver.turn_active.borrow()
+    }
+    pub fn is_running(&self) -> bool {
+        self.goal_driver.is_active()
     }
     /// Enable goal scheduling. Rust starts with scheduling disabled.
     ///
@@ -169,7 +154,7 @@ impl<'a> GoalController<'a> {
     /// lease; lifecycle hosts without a capacity ledger use
     /// [`Self::start_driver_and_run`] to pick up a restored `active` goal.
     pub fn start_driver(&self) -> RuntimeResult<()> {
-        self.handle.start_goal_driver_inner()
+        self.start_goal_driver_inner()
     }
     /// Enable scheduling and start a run for the current `active` goal.
     ///
@@ -180,19 +165,43 @@ impl<'a> GoalController<'a> {
     /// [`Self::confirm_and_start`] / [`Self::resume_and_start`].
     pub fn start_driver_and_run(&self) -> RuntimeResult<()> {
         self.start_driver()?;
-        self.handle.schedule_goal()
+        self.schedule_goal()
+    }
+    pub fn run_if_active(&self) -> RuntimeResult<()> {
+        self.schedule_goal()
     }
     pub async fn wait(&self) -> RuntimeResult<GoalOutcome> {
-        self.handle.wait_goal().await
+        self.wait_goal().await
     }
-}
 
-impl AgentRuntimeHandle {
     pub(crate) fn goal_snapshot(&self) -> Option<GoalSnapshot> {
-        self.goal_ctx.stores.goal_store.snapshot()
+        self.goal_store.snapshot()
     }
     pub(crate) fn subscribe_goal(&self) -> tokio::sync::watch::Receiver<Option<GoalSnapshot>> {
-        self.goal_ctx.stores.goal_store.subscribe()
+        self.goal_store.subscribe()
+    }
+    pub(crate) fn ensure_goal_control_open(&self) -> RuntimeResult<()> {
+        if self.handle.is_closed() {
+            return Err(RuntimeError::Closed);
+        }
+        self.handle
+            .check_persistence_fault()
+            .map_err(|e| RuntimeError::Command(format!("{e:#}")))
+    }
+    pub(crate) fn begin_goal_verification(
+        &self,
+        id: &str,
+        revision: u64,
+    ) -> RuntimeResult<TurnPermit> {
+        self.handle
+            .acquire_turn_permit_when(Some("goal-verification"), || {
+                if !self.goal_snapshot().is_some_and(|g| {
+                    g.id == id && g.revision == revision && g.status == GoalStatus::Active
+                }) {
+                    return Err(RuntimeError::Command("goal acceptance superseded".into()));
+                }
+                Ok(())
+            })
     }
     fn draft_goal_inner(
         &self,
@@ -200,51 +209,40 @@ impl AgentRuntimeHandle {
         duration_secs: u64,
         ready: bool,
     ) -> RuntimeResult<GoalDraftSnapshot> {
-        let _guard = self
-            .goal_driver
-            .admission
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        self.ensure_goal_activation_allowed()?;
-        self.ensure_goal_driver_idle()?;
-        if let Some(active_turn_id) = self.active_turn_id() {
-            return Err(RuntimeError::Busy { active_turn_id });
-        }
-        if !self
-            .goal_ctx
-            .tools
-            .tool_surface
-            .has_any_reachable("GoalRead")
-        {
-            return Err(RuntimeError::Configuration(
-                "goal requires GoalRead in the resolved tool surface".into(),
-            ));
-        }
-        if spec.checker_id.is_none() && self.goal_driver.verifiers.len() == 1 {
-            spec.checker_id = Some(self.goal_driver.verifiers[0].id().into());
-        }
-        if spec.checker_id.is_none()
-            && self.goal_driver.verifiers.len() > 1
-            && !matches!(spec.acceptance, GoalAcceptance::Verifier { .. })
-        {
-            return Err(RuntimeError::Configuration(
-                "select a checker_id when multiple goal checkers are registered".into(),
-            ));
-        }
-        let environment =
-            goal_environment(&self.goal_ctx.paths.cwd, &self.goal_ctx.tools.tool_surface);
-        let goal = if ready {
-            self.goal_ctx
-                .stores
-                .goal_store
-                .draft(spec, environment, duration_secs)
-        } else {
-            self.goal_ctx
-                .stores
-                .goal_store
-                .draft_pending(spec, environment, duration_secs)
-        }
-        .map_err(command_error)?;
+        let goal = self.handle.with_admission_lock(|| {
+            self.ensure_goal_activation_allowed()?;
+            self.ensure_goal_driver_idle()?;
+            if let Some(active_turn_id) = self.handle.active_turn_id() {
+                return Err(RuntimeError::Busy { active_turn_id });
+            }
+            if !self.handle.has_reachable_tool("GoalRead") {
+                return Err(RuntimeError::Configuration(
+                    "goal requires GoalRead in the resolved tool surface".into(),
+                ));
+            }
+            if spec.checker_id.is_none() && self.goal_driver.verifiers.len() == 1 {
+                spec.checker_id = Some(self.goal_driver.verifiers[0].id().into());
+            }
+            if spec.checker_id.is_none()
+                && self.goal_driver.verifiers.len() > 1
+                && !matches!(spec.acceptance, GoalAcceptance::Verifier { .. })
+            {
+                return Err(RuntimeError::Configuration(
+                    "select a checker_id when multiple goal checkers are registered".into(),
+                ));
+            }
+            let environment = goal_environment_from_parts(
+                &self.handle.session_info().cwd,
+                &self.handle.tool_surface_fingerprint(),
+            );
+            if ready {
+                self.goal_store.draft(spec, environment, duration_secs)
+            } else {
+                self.goal_store
+                    .draft_pending(spec, environment, duration_secs)
+            }
+            .map_err(command_error)
+        })?;
         self.announce_goal(&goal);
         Ok(goal)
     }
@@ -265,37 +263,28 @@ impl AgentRuntimeHandle {
         } else if self.goal_driver.lock_control().enabled {
             self.ensure_goal_executor_available()?;
         }
-        let goal = {
-            let _guard = self
-                .goal_driver
-                .admission
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+        let goal = self.handle.with_admission_lock(|| {
             self.ensure_goal_activation_allowed()?;
             self.ensure_goal_driver_idle()?;
-            if let Some(active_turn_id) = self.active_turn_id() {
+            if let Some(active_turn_id) = self.handle.active_turn_id() {
                 return Err(RuntimeError::Busy { active_turn_id });
             }
-            if !self
-                .goal_ctx
-                .tools
-                .tool_surface
-                .has_any_reachable("GoalRead")
-            {
+            if !self.handle.has_reachable_tool("GoalRead") {
                 return Err(RuntimeError::Configuration(
                     "goal requires GoalRead in the resolved tool surface".into(),
                 ));
             }
-            self.goal_ctx
-                .stores
-                .goal_store
+            self.goal_store
                 .confirm(
                     id,
                     revision,
-                    goal_environment(&self.goal_ctx.paths.cwd, &self.goal_ctx.tools.tool_surface),
+                    goal_environment_from_parts(
+                        &self.handle.session_info().cwd,
+                        &self.handle.tool_surface_fingerprint(),
+                    ),
                 )
-                .map_err(command_error)?
-        };
+                .map_err(command_error)
+        })?;
         self.announce_goal(&goal);
         if let Err(error) = self.start_goal_run(lease) {
             self.fault_after_failed_activation(&goal, &error);
@@ -311,19 +300,14 @@ impl AgentRuntimeHandle {
         feedback: &str,
         timeout: Option<std::time::Duration>,
     ) -> RuntimeResult<GoalDraftSnapshot> {
-        if !self.goal_ctx.tools.tool_surface.has("GoalDraft") {
+        if !self.handle.has_tool("GoalDraft") {
             return Err(RuntimeError::Configuration(
                 "draft generation requires GoalDraft in the resolved tool surface".into(),
             ));
         }
-        let goal = {
-            let _guard = self
-                .goal_driver
-                .admission
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+        let goal = self.handle.with_admission_lock(|| {
             self.ensure_goal_activation_allowed()?;
-            if let Some(active_turn_id) = self.active_turn_id() {
+            if let Some(active_turn_id) = self.handle.active_turn_id() {
                 return Err(RuntimeError::Busy { active_turn_id });
             }
             let current = self
@@ -334,29 +318,56 @@ impl AgentRuntimeHandle {
                     "stale draft; reread before refining".into(),
                 ));
             }
-            self.goal_ctx
-                .stores
-                .goal_store
+            self.goal_store
                 .transition(
                     &current.id,
                     current.revision,
                     GoalTransition::SetDraftReady { ready: false },
                 )
-                .map_err(command_error)?
-        };
+                .map_err(command_error)
+        })?;
         self.announce_goal(&goal);
         let prompt = format!(
             "<goal-draft>\nOriginal request: {}\nFeedback: {}\nRead GoalRead. Explore only as needed, preserve every original requirement, and propose a one-level hierarchy of subgoals and observable acceptance criteria with required evidence. Save the full proposal with GoalDraft using the current ID and revision. Ask for clarification if needed; do not execute the proposed work. End by showing the contract and asking the human to confirm its exact version. Only the host can confirm.\n</goal-draft>",
             goal.spec.original_request, feedback
         );
-        let mut stream = self.stream_goal_draft_discussion(
-            prompt,
-            GoalDraftDiscussion {
-                goal_id: goal.id.clone(),
-                revision: goal.revision,
-                feedback: feedback.into(),
-            },
-        )?;
+        let source = GoalDraftDiscussion {
+            goal_id: goal.id.clone(),
+            revision: goal.revision,
+            feedback: feedback.into(),
+        };
+        let store = self.goal_store.clone();
+        let expected_id = source.goal_id.clone();
+        let expected_rev = source.revision;
+        let prompt_for_prepare = prompt.clone();
+        let source_for_prepare = source.clone();
+        let mut req = InternalTurnRequest::new("goal_draft", prompt);
+        req.accept_guidance = true;
+        req.count_as_user_turn = true;
+        req.consume_inbox = false;
+        req.prepare_on_admit = Some(Arc::new(move |_turn_id| {
+            let current = store
+                .snapshot()
+                .filter(|g| g.status == GoalStatus::Draft)
+                .ok_or_else(|| RuntimeError::Command("goal is not a draft".into()))?;
+            if current.id != expected_id || current.revision != expected_rev {
+                return Err(RuntimeError::Command(
+                    "draft changed before discussion".into(),
+                ));
+            }
+            let mut message = current.message(GoalMessageKind::Draft, 0);
+            message.objective = current.spec.original_request.clone();
+            message.feedback = Some(source_for_prepare.feedback.clone());
+            Ok(PreparedInternalTurn {
+                content: prompt_for_prepare.clone(),
+                metadata: serde_json::json!({
+                    "goal_draft": source_for_prepare,
+                    "goal_message": message,
+                }),
+                on_rollback: None,
+            })
+        }));
+        let mut stream = self.handle.stream_internal_turn(req)?;
         let turn_id = stream.turn_id().clone();
         let discussion = async {
             while let Some(event) = stream.recv().await {
@@ -375,7 +386,7 @@ impl AgentRuntimeHandle {
             match tokio::time::timeout(timeout, &mut discussion).await {
                 Ok(result) => result?,
                 Err(_) => {
-                    self.turn_gate.interrupt_if_owner(&turn_id);
+                    self.handle.interrupt_turn_if_owner(&turn_id);
                     discussion.await?;
                     return Err(RuntimeError::Command("draft generation timed out".into()));
                 }
@@ -383,7 +394,7 @@ impl AgentRuntimeHandle {
         } else {
             discussion.await?
         };
-        if outcome.status != crate::runtime::TurnStatus::Ok {
+        if outcome.status != TurnStatus::Ok {
             return Err(RuntimeError::Command(format!(
                 "draft generation stopped: {:?}",
                 outcome.status
@@ -413,9 +424,9 @@ impl AgentRuntimeHandle {
             id,
             revision,
             GoalTransition::Resume {
-                environment: goal_environment(
-                    &self.goal_ctx.paths.cwd,
-                    &self.goal_ctx.tools.tool_surface,
+                environment: goal_environment_from_parts(
+                    &self.handle.session_info().cwd,
+                    &self.handle.tool_surface_fingerprint(),
                 ),
             },
             false,
@@ -428,7 +439,7 @@ impl AgentRuntimeHandle {
     }
 
     fn ensure_goal_submission_available(&self) -> RuntimeResult<()> {
-        if !self.goal_ctx.tools.tool_surface.has("GoalReview") {
+        if !self.handle.has_tool("GoalReview") {
             return Err(RuntimeError::Configuration(
                 "goal requires GoalReview in the host's resolved tool surface".into(),
             ));
@@ -555,94 +566,62 @@ impl AgentRuntimeHandle {
         interrupt: bool,
         check_idle_turn: bool,
     ) -> RuntimeResult<GoalSnapshot> {
-        let _guard = self
-            .goal_driver
-            .admission
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Err(error) = self.ensure_goal_control_open() {
-            // A latched session cannot persist a stop intent either: latch the
-            // stop so the run does not keep executing on a command that was
-            // refused.
-            if interrupt {
-                self.stop_run_after_failed_stop_intent(&format!("{error}"));
-            }
-            return Err(error);
-        }
-        let g = match self
-            .goal_ctx
-            .stores.goal_store
-            .transition_from_snapshot_classified(id, revision, |goal| {
-                if check_idle_turn {
-                    ensure!(
-                        goal.status.can_resume(),
-                        "goal cannot resume from status {:?}; drafts require confirmation and completed/cancelled goals cannot resume. Original reason: {}",
-                        goal.status,
-                        goal.reason.as_deref().unwrap_or("not recorded")
-                    );
-                    ensure!(
-                        self.active_turn_id().is_none(),
-                        "previous goal execution has not exited"
-                    );
-                }
-                prepare(goal)
-            })
-        {
-            Ok(goal) => goal,
-            Err(GoalChangeError::Rejected(error)) => {
-                // A stale revision or an invalid transition rejects the
-                // command, not the run: it must not stop a live execution.
-                return Err(command_error(error));
-            }
-            Err(GoalChangeError::Publish(error)) => {
-                // The intent could not be stored. A stop command must not read
-                // as a saved pause: latch the stop for the current run so it
-                // cannot keep scheduling or commit success, and report the
-                // refusal instead of a success.
+        let g = self.handle.with_admission_lock(|| {
+            if let Err(error) = self.ensure_goal_control_open() {
+                // A latched session cannot persist a stop intent either: latch the
+                // stop so the run does not keep executing on a command that was
+                // refused.
                 if interrupt {
-                    self.stop_run_after_failed_stop_intent(&format!("{error:#}"));
+                    self.stop_run_after_failed_stop_intent(&format!("{error}"));
                 }
-                return Err(command_error(error));
+                return Err(error);
             }
-        };
-        if interrupt {
-            self.turn_gate.interrupt();
-        }
+            let g = match self
+                .goal_store
+                .transition_from_snapshot_classified(id, revision, |goal| {
+                    if check_idle_turn {
+                        ensure!(
+                            goal.status.can_resume(),
+                            "goal cannot resume from status {:?}; drafts require confirmation and completed/cancelled goals cannot resume. Original reason: {}",
+                            goal.status,
+                            goal.reason.as_deref().unwrap_or("not recorded")
+                        );
+                        ensure!(
+                            self.handle.active_turn_id().is_none(),
+                            "previous goal execution has not exited"
+                        );
+                    }
+                    prepare(goal)
+                }) {
+                Ok(goal) => goal,
+                Err(GoalChangeError::Rejected(error)) => {
+                    // A stale revision or an invalid transition rejects the
+                    // command, not the run: it must not stop a live execution.
+                    return Err(command_error(error));
+                }
+                Err(GoalChangeError::Publish(error)) => {
+                    // The intent could not be stored. A stop command must not read
+                    // as a saved pause: latch the stop for the current run so it
+                    // cannot keep scheduling or commit success, and report the
+                    // refusal instead of a success.
+                    if interrupt {
+                        self.stop_run_after_failed_stop_intent(&format!("{error:#}"));
+                    }
+                    return Err(command_error(error));
+                }
+            };
+            if interrupt {
+                self.handle.interrupt_turn_gate();
+            }
+            Ok(g)
+        })?;
         self.announce_goal(&g);
         Ok(g)
     }
 
-    /// Latch a stop decision after a pause/cancel could not be persisted.
-    ///
-    /// The command layer cannot publish `Paused`/`Cancelled`, so the run must
-    /// not keep scheduling or commit an acceptance result. The current run
-    /// moves to `Stopping` with the original error (identity-bound), and the
-    /// turn is interrupted; the run's single settlement publishes the stable
-    /// `Faulted` state only after whatever holds the turn gate has actually
-    /// exited.
     pub(crate) fn stop_run_after_failed_stop_intent(&self, error: &str) {
-        let fault = format!("goal stop intent could not be persisted: {error}");
-        {
-            let mut control = self.goal_driver.lock_control();
-            match &control.driver {
-                DriverState::Running { run_id, goal_id } => {
-                    let (run_id, goal_id) = (*run_id, goal_id.clone());
-                    self.goal_driver.set_driver_locked(
-                        &mut control,
-                        DriverState::Stopping {
-                            run_id,
-                            goal_id,
-                            reason: fault,
-                        },
-                    );
-                }
-                // The first failed stop already latched this run and its
-                // reason; a second one must not rewrite it.
-                DriverState::Stopping { .. } => {}
-                _ => {}
-            }
-        }
-        self.turn_gate.interrupt();
+        latch_stopping_after_failed_stop_intent(&self.goal_driver, error);
+        self.handle.interrupt_turn_gate();
     }
 
     /// A run can only be started from a scheduler, and the contract must never
@@ -680,32 +659,23 @@ impl AgentRuntimeHandle {
         );
     }
     pub(crate) fn announce_goal(&self, goal: &GoalSnapshot) {
-        self.event_display
-            .emit(crate::runtime::AgentEventKind::GoalUpdated {
-                goal: Box::new(goal.clone()),
-            });
+        let payload = serde_json::json!({ "goal": goal });
+        self.handle
+            .emit_extension_event(crate::events::GOAL_UPDATED_EVENT, payload.clone());
         if goal.status.is_terminal() {
-            self.event_display
-                .emit(crate::runtime::AgentEventKind::GoalFinished {
-                    goal: Box::new(goal.clone()),
-                });
+            self.handle
+                .emit_live_extension_event(crate::events::GOAL_FINISHED_EVENT, payload);
         }
-        self.goal_ctx
-            .log_event(crate::events::EventLog::GoalUpdated {
-                goal: Box::new(goal.clone()),
-            });
         if let Some(stage) = goal.review_stage {
             let label = match stage {
                 GoalReviewStage::Screening => "screening completion",
                 GoalReviewStage::Inspecting => "inspecting evidence",
                 GoalReviewStage::Adjudicating => "adjudicating review",
             };
-            self.goal_ctx
-                .io
-                .display
+            self.handle
                 .render_info(&format!("Goal {}: {label}", goal.id));
         }
-        self.goal_ctx.io.display.render_info(&format!(
+        self.handle.render_info(&format!(
             "Goal {:?}: {} ({} turns remaining; acceptance {:?}; basis {:?})",
             goal.status,
             goal.reason.as_deref().unwrap_or(&goal.spec.objective),
@@ -769,7 +739,7 @@ impl AgentRuntimeHandle {
                 "goal driver stopped after an unrecoverable failure: {error}"
             ))),
             DriverState::Running { .. } | DriverState::Stopping { .. } => Err(RuntimeError::Busy {
-                active_turn_id: crate::runtime::TurnId::new("goal run in progress"),
+                active_turn_id: TurnId::new("goal run in progress"),
             }),
         }
     }
@@ -804,9 +774,9 @@ impl AgentRuntimeHandle {
                 }
                 DriverState::Idle => {}
             }
-            if !control.enabled || self.is_closed() {
+            if !control.enabled || self.handle.is_closed() {
                 if lease.is_some() {
-                    return Err(if self.is_closed() {
+                    return Err(if self.handle.is_closed() {
                         RuntimeError::Closed
                     } else {
                         RuntimeError::Command("goal driver is not enabled".into())
@@ -851,5 +821,25 @@ impl AgentRuntimeHandle {
             handle.run_goal_worker(run_id, goal_id, lease).await;
         });
         Ok(())
+    }
+}
+
+pub(crate) fn latch_stopping_after_failed_stop_intent(goal_driver: &GoalDriver, error: &str) {
+    let fault = format!("goal stop intent could not be persisted: {error}");
+    let mut control = goal_driver.lock_control();
+    match &control.driver {
+        DriverState::Running { run_id, goal_id } => {
+            let (run_id, goal_id) = (*run_id, goal_id.clone());
+            goal_driver.set_driver_locked(
+                &mut control,
+                DriverState::Stopping {
+                    run_id,
+                    goal_id,
+                    reason: fault,
+                },
+            );
+        }
+        DriverState::Stopping { .. } => {}
+        _ => {}
     }
 }

@@ -223,7 +223,7 @@ pub struct GoalIteration {
     #[serde(default)]
     pub conversation_start: usize,
     #[serde(default)]
-    pub outcome_status: Option<crate::runtime::TurnStatus>,
+    pub outcome_status: Option<mink::runtime::TurnStatus>,
     #[serde(default)]
     pub outcome_error: Option<String>,
 }
@@ -262,8 +262,8 @@ pub struct GoalSnapshot {
     pub iterations: Vec<GoalIteration>,
     pub report: Option<GoalReport>,
     pub report_repair_used: bool,
-    pub usage_records: Vec<crate::session::usage::UsageRecord>,
-    pub usage: crate::session::usage::UsageSummary,
+    pub usage_records: Vec<mink::runtime::UsageRecord>,
+    pub usage: mink::runtime::UsageSummary,
     pub pending_effects: Vec<String>,
     pub failure_fingerprint: Option<String>,
     #[serde(default)]

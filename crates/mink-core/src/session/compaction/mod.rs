@@ -42,9 +42,33 @@ use types::{
     map_shared_deadline, unpaired_tool_exchange,
 };
 
+/// A low-frequency, byte-stable checkpoint rendered at the front of the
+/// compacted active window.
+#[derive(Debug, Clone)]
+pub struct CompactionCheckpoint {
+    pub content: String,
+    pub metadata: Value,
+}
+
+/// Supplies an optional dynamic checkpoint mounted after `<compacted-summary>`
+/// and active plan checkpoints when the history has been compacted.
+pub trait CompactionCheckpointProvider: Send + Sync {
+    fn render_checkpoint(&self, max_chars: usize) -> Result<Option<CompactionCheckpoint>>;
+}
+
+/// Compute the character budget allocated to each compaction checkpoint
+/// (`max_context_tokens / 8`, clamped to `[128, 8192]`, or `8192` when unlimited).
+pub fn checkpoint_budget_chars(max_context_tokens: usize) -> usize {
+    if max_context_tokens == 0 {
+        8192
+    } else {
+        (max_context_tokens / 8).clamp(128, 8192)
+    }
+}
+
 pub struct CompactionEngine {
-    goal_store: Option<Arc<crate::session::goal::GoalStore>>,
-    review_session: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
+    checkpoint_providers: Vec<Arc<dyn CompactionCheckpointProvider>>,
+    budget_check: Option<Arc<dyn Fn() -> Result<()> + Send + Sync>>,
     store: Arc<ConversationStore>,
     summary_path: PathBuf,
     state_path: PathBuf,
@@ -110,8 +134,8 @@ impl CompactionEngine {
             )?;
         }
         Ok(Self {
-            goal_store: None,
-            review_session: None,
+            checkpoint_providers: Vec::new(),
+            budget_check: None,
             store,
             summary_path,
             state_path,
@@ -138,20 +162,22 @@ impl CompactionEngine {
         })
     }
 
-    /// Attach the current goal's bounded checkpoint projection.
-    pub(crate) fn with_goal_store(
+    /// Attach external compaction checkpoint providers (rendered in order after
+    /// `<compacted-summary>` and `<active-plan-checkpoint>`).
+    pub(crate) fn with_checkpoint_providers(
         mut self,
-        store: Option<Arc<crate::session::goal::GoalStore>>,
+        providers: Vec<Arc<dyn CompactionCheckpointProvider>>,
     ) -> Self {
-        self.goal_store = store;
+        self.checkpoint_providers = providers;
         self
     }
-    /// Attach the parent budget owner when this compactor belongs to a Goal reviewer.
-    pub(crate) fn with_review_session(
+
+    /// Attach a budget check invoked before each compaction summary attempt.
+    pub(crate) fn with_budget_check(
         mut self,
-        review: Option<Arc<crate::runtime::goal::review::GoalReviewSession>>,
+        check: Option<Arc<dyn Fn() -> Result<()> + Send + Sync>>,
     ) -> Self {
-        self.review_session = review;
+        self.budget_check = check;
         self
     }
     /// Attach the session-wide publish-fault latch.
@@ -263,21 +289,33 @@ impl CompactionEngine {
         {
             checkpoints.push(plan);
         }
-        if let Some(goals) = &self.goal_store
-            && let Some(checkpoint) = goals.checkpoint(
-                crate::runtime::goal::goal_projection_chars(self.config.max_context_tokens),
-            )?
-        {
-            checkpoints.push(checkpoint);
-        }
+        self.append_provider_checkpoints(&mut checkpoints)?;
         Ok(checkpoints)
     }
 
-    /// 动态 checkpoint 前缀（摘要 + 权威 plan/goal 派生片段）。权威投影与候选验收必须共用
+    fn append_provider_checkpoints(&self, checkpoints: &mut Vec<Value>) -> Result<()> {
+        let max_chars = checkpoint_budget_chars(self.config.max_context_tokens);
+        for provider in &self.checkpoint_providers {
+            if let Some(cp) = provider.render_checkpoint(max_chars)? {
+                let mut msg = json!({
+                    "role": "user",
+                    "content": cp.content,
+                    "_mink": cp.metadata,
+                });
+                if let Some(obj) = msg["_mink"].as_object_mut() {
+                    obj.entry("internal").or_insert(Value::Bool(true));
+                }
+                checkpoints.push(msg);
+            }
+        }
+        Ok(())
+    }
+
+    /// 动态 checkpoint 前缀（摘要 + 权威 plan/extension 派生片段）。权威投影与候选验收必须共用
     /// 同一实现，否则候选预算与实际请求会漂移。
     ///
     /// 只有压缩后的窗口才挂这些 checkpoint：未压缩时请求就是历史本身，
-    /// goal 的每轮事实走尾部追加的 round prompt，绝不改写已经发出的前缀。
+    /// 扩展状态若每轮变化则走尾部追加，绝不改写已经发出的前缀。
     fn checkpoint_prefix(&self, summary: &str) -> Result<Vec<Value>> {
         let mut checkpoints = Vec::new();
         if !summary.trim().is_empty() {
@@ -288,13 +326,7 @@ impl CompactionEngine {
         {
             checkpoints.push(plan);
         }
-        if let Some(goals) = &self.goal_store
-            && let Some(checkpoint) = goals.checkpoint(
-                crate::runtime::goal::goal_projection_chars(self.config.max_context_tokens),
-            )?
-        {
-            checkpoints.push(checkpoint);
-        }
+        self.append_provider_checkpoints(&mut checkpoints)?;
         Ok(checkpoints)
     }
 
@@ -356,7 +388,7 @@ impl CompactionEngine {
         let input_limit = ctx
             .target_limit
             .unwrap_or_else(|| request_input_limit(&self.config));
-        // Pre-read authoritative plan & goal checkpoints once outside the shrink
+        // Pre-read authoritative plan & extension checkpoints once outside the shrink
         // loop instead of re-reading `plan.md` from disk on every iteration.
         let static_tail_checkpoints = {
             let mut extra = Vec::new();
@@ -366,13 +398,7 @@ impl CompactionEngine {
             )? {
                 extra.push(plan);
             }
-            if let Some(goals) = &self.goal_store
-                && let Some(checkpoint) = goals.checkpoint(
-                    crate::runtime::goal::goal_projection_chars(self.config.max_context_tokens),
-                )?
-            {
-                extra.push(checkpoint);
-            }
+            self.append_provider_checkpoints(&mut extra)?;
             extra
         };
         loop {

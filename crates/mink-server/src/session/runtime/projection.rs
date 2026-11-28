@@ -21,7 +21,7 @@ pub(super) struct Projection {
     /// watermark and the `goal_updated` payload, so a snapshot never has to
     /// reach for the state lock while holding the projection: the lock order
     /// state -> projection stays one-way and cannot invert.
-    pub(super) goal: Option<mink::runtime::GoalSnapshot>,
+    pub(super) goal: Option<mink_goal::GoalSnapshot>,
 }
 impl Projection {
     /// Seed a newly opened projection. Only the retained tail is serialized:

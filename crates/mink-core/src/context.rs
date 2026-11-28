@@ -126,10 +126,8 @@ pub(crate) fn resolve_tool_runtime(
 pub struct ToolContext {
     pub(crate) web_api_key: Option<Arc<str>>,
     pub(crate) human_web_command: bool,
-    pub(crate) goal_drafting: bool,
-    pub(crate) goal_review: Option<Arc<dyn crate::goal_review::GoalReviewToolSession>>,
-    /// Present only in the host's candidate-bound adjudication turn.
-    pub(crate) goal_adjudication: Option<Arc<dyn crate::goal_review::GoalReviewToolSession>>,
+    pub(crate) tool_mask: Option<crate::tools::policy_hook::ToolExecutionMask>,
+    pub(crate) tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolExecutionObserver>>,
     pub(crate) _session_lease: Option<Arc<crate::session::lease::SessionLease>>,
     pub cwd: PathBuf,
     pub home: PathBuf,
@@ -141,7 +139,6 @@ pub struct ToolContext {
     pub snapshots: Arc<Mutex<FileSnapshotStore>>,
     pub plan_store: Arc<PlanStore>,
     pub todo_store: Arc<TodoStore>,
-    pub(crate) goal_store: Arc<crate::session::goal::GoalStore>,
     /// Session publish-fault latch (shared with `AgentSharedContext`): the
     /// tool runner refuses to dispatch any tool while latched.
     pub(crate) persistence_fault: crate::session::persistence::PersistenceFault,
@@ -189,16 +186,24 @@ impl FileEditContext<'_> {
 
 impl From<&AgentSharedContext> for ToolContext {
     fn from(ctx: &AgentSharedContext) -> Self {
+        let tool_mask = ctx.tools.default_tool_mask.clone().or_else(|| {
+            ctx.tools
+                .turn_policies
+                .iter()
+                .find_map(|policy| policy.ordinary_turn_mask())
+        });
+        let tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolExecutionObserver>> =
+            ctx.tools.default_tool_observer.clone().or_else(|| {
+                ctx.tools
+                    .turn_policies
+                    .iter()
+                    .find_map(|policy| policy.ordinary_tool_observer())
+            });
         Self {
             web_api_key: crate::tools::web::api_key(&ctx.config),
             human_web_command: false,
-            goal_drafting: ctx
-                .stores
-                .goal_store
-                .snapshot()
-                .is_some_and(|g| g.status == crate::session::goal::GoalStatus::Draft),
-            goal_review: ctx.stores.goal_review.as_ref().cloned(),
-            goal_adjudication: None,
+            tool_mask,
+            tool_observer,
             _session_lease: ctx
                 .stores
                 .session_lease
@@ -215,7 +220,6 @@ impl From<&AgentSharedContext> for ToolContext {
             snapshots: ctx.tools.snapshots.clone(),
             plan_store: ctx.stores.plan_store.clone(),
             todo_store: ctx.stores.todo_store.clone(),
-            goal_store: ctx.stores.goal_store.clone(),
             persistence_fault: ctx.stores.persistence_fault.clone(),
             tool_config: ctx.tools.tool_config.clone(),
             interrupt: ctx.interrupt.clone(),
@@ -258,32 +262,20 @@ impl ToolContext {
         }
     }
 
-    pub(crate) fn review_evidence(
+    pub(crate) fn read_evidence_context(
         &self,
-    ) -> Option<&Arc<dyn crate::goal_review::GoalReviewToolSession>> {
-        self.goal_review
-            .as_ref()
-            .or(self.goal_adjudication.as_ref())
-    }
-
-    pub(crate) fn goal_review_tool_context(
-        &self,
-    ) -> anyhow::Result<crate::goal_review::GoalReviewToolContext<'_>> {
+    ) -> anyhow::Result<crate::tools::policy_hook::ReadEvidenceContext<'_>> {
         let artifact_dir = self
             .store
             .path()
             .parent()
             .ok_or_else(|| anyhow::anyhow!("session directory missing"))?
             .join("artifacts");
-        Ok(crate::goal_review::GoalReviewToolContext {
-            cwd: &self.cwd,
+        Ok(crate::tools::policy_hook::ReadEvidenceContext::new(
+            &self.cwd,
             artifact_dir,
-            artifacts: &self.artifacts,
-        })
-    }
-
-    pub(crate) fn is_review_agent(&self) -> bool {
-        self.goal_review.is_some()
+            &self.artifacts,
+        ))
     }
     /// When the file is byte-identical and an earlier read covers the requested
     /// range, return a short behavioral "reuse that content" response. This is
@@ -422,7 +414,6 @@ pub struct SessionStores {
     pub todo_store: Arc<TodoStore>,
     /// Session-lifetime Plan store: one journal/transition lock per session.
     pub(crate) plan_store: Arc<PlanStore>,
-    pub(crate) goal_store: Arc<crate::session::goal::GoalStore>,
     pub input_inbox: Arc<crate::session::input::InputInbox>,
     pub stats: Arc<StatsTracker>,
     pub usage: Arc<UsageJournal>,
@@ -430,7 +421,8 @@ pub struct SessionStores {
     /// Session-wide publish-fault latch (see `session::persistence`).
     pub(crate) persistence_fault: crate::session::persistence::PersistenceFault,
     pub(crate) session_lease: Arc<Mutex<Option<Arc<crate::session::lease::SessionLease>>>>,
-    pub(crate) goal_review: Option<Arc<dyn crate::goal_review::GoalReviewToolSession>>,
+    pub(crate) billing_turn_id_override: Option<String>,
+    pub(crate) budget_check: Option<Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync>>,
 }
 
 /// Resolved tool surface, capabilities, snapshots, and resource routing for the session.
@@ -448,6 +440,10 @@ pub struct ToolRuntimeContext {
     pub tool_surface: Arc<ModelToolSurface>,
     pub tool_capabilities: Arc<ResolvedToolCapabilities>,
     pub(crate) custom_tools: Arc<Vec<crate::tools::extension::RegisteredCustomTool>>,
+    pub(crate) turn_policies: Arc<Vec<Arc<dyn crate::tools::policy_hook::TurnPolicyProvider>>>,
+    pub(crate) default_tool_mask: Option<crate::tools::policy_hook::ToolExecutionMask>,
+    pub(crate) default_tool_observer:
+        Option<Arc<dyn crate::tools::policy_hook::ToolExecutionObserver>>,
     pub(crate) prefix_source: Option<Arc<dyn crate::runtime::PrefixSource>>,
     pub(crate) model_capabilities:
         Arc<crate::capabilities::model_capabilities::SessionModelCapabilities>,
@@ -593,8 +589,8 @@ impl AgentSharedContext {
             .stores
             .usage
             .scope(kind, self.config.session_id.clone());
-        if let Some(review) = &self.stores.goal_review {
-            scope.billing_turn_id = review.billing_turn_id();
+        if let Some(id) = &self.stores.billing_turn_id_override {
+            scope.billing_turn_id = id.clone();
         }
         scope
     }

@@ -7,49 +7,93 @@ fn resolve(config: &ToolConfig, role: AgentRole, vfs: bool) -> Result<ModelToolS
 }
 
 #[test]
-fn reviewer_role_is_closed_even_with_a_broad_whitelist() {
+fn scoped_child_and_role_scope_filter_custom_and_builtin_surfaces() {
+    struct StubTool;
+    #[async_trait::async_trait]
+    impl crate::runtime::AgentTool for StubTool {
+        fn definition(&self) -> crate::runtime::ToolDefinition {
+            unreachable!("surface_tests constructs RegisteredCustomTool directly")
+        }
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::runtime::ToolExecutionContext,
+        ) -> std::result::Result<crate::runtime::ToolOutput, crate::runtime::ToolError> {
+            Ok(crate::runtime::ToolOutput::text("ok"))
+        }
+    }
+    let make_custom = |name: &str, role_scope: crate::tools::extension::ToolRoleScope| {
+        let def = crate::tools::extension::ToolDefinition::new(
+            name,
+            "custom",
+            serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false}),
+        )
+        .with_role_scope(role_scope)
+        .with_ptc_exposure(crate::tools::extension::ToolPtcExposure::DirectOnly);
+        crate::tools::extension::RegisteredCustomTool {
+            definition: def,
+            executor: std::sync::Arc::new(StubTool),
+        }
+    };
+    let custom_tools = vec![
+        make_custom("AllCustom", crate::tools::extension::ToolRoleScope::All),
+        make_custom(
+            "StandardCustom",
+            crate::tools::extension::ToolRoleScope::PrimaryAndSubAgent,
+        ),
+        make_custom(
+            "PrimaryCustom",
+            crate::tools::extension::ToolRoleScope::PrimaryOnly,
+        ),
+    ];
+
     let mut config = ToolConfig::from_config(&Config::default());
     config.enabled_tools = Some(
         [
             "Read",
             "Write",
             "Bash",
-            "GoalRead",
-            "GoalDraft",
-            "GoalReview",
+            "AllCustom",
+            "StandardCustom",
+            "PrimaryCustom",
             "SubAgent",
         ]
         .into_iter()
         .map(str::to_string)
         .collect(),
     );
+    let resolve_custom = |role: AgentRole, cfg: &ToolConfig| {
+        let context = ToolResolutionContext::from_runtime(role, cfg, false);
+        ModelToolSurface::resolve_with_custom(
+            ToolCatalog::builtin().unwrap(),
+            cfg,
+            &context,
+            &custom_tools,
+        )
+        .unwrap()
+    };
+
+    let primary = resolve_custom(AgentRole::Primary, &config);
+    assert!(primary.has_all(&["AllCustom", "StandardCustom", "PrimaryCustom"]));
+
+    let sub = resolve_custom(AgentRole::SubAgent, &config);
+    assert!(sub.has_all(&["AllCustom", "StandardCustom"]));
+    assert!(!sub.has("PrimaryCustom"));
+
+    let mut scoped_cfg = config.clone();
+    scoped_cfg.enabled_tools = Some(vec![
+        "Read".into(),
+        "AllCustom".into(),
+        "PrimaryCustom".into(),
+    ]);
+    let scoped = resolve_custom(AgentRole::ScopedChild, &scoped_cfg);
+    assert!(scoped.has_all(&["Read", "AllCustom"]));
+    assert!(!scoped.has("PrimaryCustom"));
+    assert!(!scoped.has("StandardCustom"));
     assert!(
-        resolve(&config, AgentRole::Primary, false)
-            .unwrap()
-            .has("GoalReview")
-    );
-    assert!(
-        !resolve(&config, AgentRole::SubAgent, false)
-            .unwrap()
-            .has("GoalReview")
-    );
-    let surface = resolve(&config, AgentRole::GoalReviewer, false).unwrap();
-    assert!(surface.has_all(&["Read", "GoalRead"]));
-    assert!(!surface.has("GoalReview"));
-    assert!(
-        surface
+        scoped
             .names()
-            .all(|name| matches!(name, "Read" | "GoalRead"))
-    );
-    assert!(
-        resolve(&config, AgentRole::Primary, false)
-            .unwrap()
-            .get("GoalReview")
-            .unwrap()
-            .schema["input_schema"]["properties"]
-            .get("decision")
-            .is_some(),
-        "only the host agent submits the goal decision"
+            .all(|name| matches!(name, "Read" | "AllCustom"))
     );
 }
 
@@ -305,7 +349,6 @@ fn delegation_depth_controls_the_sub_agent_surface() {
         ModelToolSurface::resolve(ToolCatalog::builtin().unwrap(), &config, &child_with_budget)
             .unwrap();
     assert!(surface.has("SubAgent"));
-    assert!(!surface.has("GoalDraft"));
 }
 
 #[test]
@@ -338,24 +381,20 @@ fn ptc_modes_partition_wire_and_programmatic_surfaces() {
         "TodoRead",
         "TodoWrite",
         "TodoAdvance",
-        "GoalRead",
-        "GoalDraft",
         "SubAgent"
     ]));
     assert!(tool_surface.has_programmatic("Read"));
-    assert!(!tool_surface.has_programmatic("GoalRead"));
     assert!(!tool_surface.has_programmatic("TodoRead"));
     assert!(!tool_surface.has_programmatic("TodoWrite"));
     assert!(!tool_surface.has_programmatic("TodoAdvance"));
     assert!(!tool_surface.has_programmatic("RunCode"));
     assert!(!tool_surface.has_programmatic("Python"));
     assert!(!tool_surface.has_programmatic("PlanDraft"));
-    assert!(!tool_surface.has_programmatic("GoalDraft"));
     assert!(!tool_surface.has_programmatic("SubAgent"));
     assert_ne!(off_surface.fingerprint(), tool_surface.fingerprint());
 
     // Exclusive: wire has RunCode + planning/control tools only; programmatic has workspace/exec/custom tools;
-    // Python/PythonSandbox hidden; GoalReviewer forced back to Off.
+    // Python/PythonSandbox hidden; ScopedChild forced back to Off.
     let mut exc_cfg = ToolConfig::from_config(&Config::default());
     exc_cfg.ptc.mode = crate::ptc::PtcMode::Exclusive;
     let exc_surface = resolve(&exc_cfg, AgentRole::Primary, false).unwrap();
@@ -365,9 +404,6 @@ fn ptc_modes_partition_wire_and_programmatic_surfaces() {
         "TodoWrite",
         "TodoAdvance",
         "PlanDraft",
-        "GoalRead",
-        "GoalDraft",
-        "GoalReview",
         "SubAgent"
     ]));
     assert!(!exc_surface.has("Read"));
@@ -377,16 +413,17 @@ fn ptc_modes_partition_wire_and_programmatic_surfaces() {
     assert!(exc_surface.has_programmatic("Read"));
     assert!(exc_surface.has_programmatic("Edit"));
     assert!(exc_surface.has_programmatic("Bash"));
-    assert!(!exc_surface.has_programmatic("GoalRead"));
     assert!(!exc_surface.has_programmatic("TodoRead"));
     assert!(exc_surface.has_any_reachable("Read"));
     assert!(exc_surface.has_any_reachable("Bash"));
     assert!(!exc_surface.has_any_reachable("Python"));
 
-    let reviewer = resolve(&exc_cfg, AgentRole::GoalReviewer, false).unwrap();
-    assert_eq!(reviewer.ptc_mode(), crate::ptc::PtcMode::Off);
-    assert!(!reviewer.has("RunCode"));
-    assert!(reviewer.has_all(&["Read", "GoalRead"]));
+    let mut scoped_cfg = exc_cfg.clone();
+    scoped_cfg.enabled_tools = Some(vec!["Read".into()]);
+    let scoped = resolve(&scoped_cfg, AgentRole::ScopedChild, false).unwrap();
+    assert_eq!(scoped.ptc_mode(), crate::ptc::PtcMode::Off);
+    assert!(!scoped.has("RunCode"));
+    assert!(scoped.has("Read"));
 
     // Narrow enabled_tools + Exclusive keeps RunCode reachable on wire.
     let mut narrowed = exc_cfg.clone();

@@ -251,7 +251,7 @@ pub fn render_ptc_mode_section(wire_tools: &[ModelTool]) -> String {
         .map(|tool| tool.metadata.name.as_ref())
         .collect();
     format!(
-        "`RunCode` is the primary programmatic execution tool. Direct wire tools ({}) — including planning, task-tracking (`Todo*`), goal, and delegation tools — MUST be called directly; calling any SDK-only tool directly is rejected. Invoke tools declared in `<ptc-sdk>` inside `RunCode` via `await tools.<Name>(...)`. Batch exploratory reads/greps into one `RunCode` (`await gather(...)`) rather than wrapping single trivial calls.",
+        "`RunCode` is the primary programmatic execution tool. Direct wire tools ({}) — including planning, task-tracking (`Todo*`), control extension, and delegation tools — MUST be called directly; calling any SDK-only tool directly is rejected. Invoke tools declared in `<ptc-sdk>` inside `RunCode` via `await tools.<Name>(...)`. Batch exploratory reads/greps into one `RunCode` (`await gather(...)`) rather than wrapping single trivial calls.",
         direct_names.join(", ")
     )
 }

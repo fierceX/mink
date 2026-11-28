@@ -278,27 +278,42 @@ async fn main_entry_with_preparsed(
     if let Some(sub_stream_tx) = sub_stream_tx {
         runtime_options = runtime_options.with_sub_stream_tx(sub_stream_tx);
     }
-    if !cfg.agent_jsonl {
+    let goal_plugin = if !cfg.agent_jsonl {
+        let mut plugin = mink_goal::GoalPlugin::new();
         if let Ok(command) = std::env::var("MINK_GOAL_CHECK") {
-            runtime_options = runtime_options.with_goal_verifier(Arc::new(
-                crate::runtime::CommandGoalVerifier::new(command, 60)?,
-            ));
+            plugin =
+                plugin.with_verifier(Arc::new(mink_goal::CommandGoalVerifier::new(command, 60)?));
         }
+        plugin = plugin.with_event_sink(Arc::new(GoalTerminalSink {
+            turns: true,
+            display: display.clone(),
+            #[cfg(feature = "tui")]
+            signals: tui_tx.as_ref().map(|(tx, ..)| tx.clone()),
+        }));
+        plugin.install_into(&mut runtime_options);
         runtime_options = runtime_options.with_event_sink(Arc::new(GoalTerminalSink {
             turns: false,
             display: display.clone(),
             #[cfg(feature = "tui")]
             signals: tui_tx.as_ref().map(|(tx, ..)| tx.clone()),
         }));
-        runtime_options = runtime_options.with_goal_event_sink(Arc::new(GoalTerminalSink {
-            turns: true,
-            display: display.clone(),
-            #[cfg(feature = "tui")]
-            signals: tui_tx.as_ref().map(|(tx, ..)| tx.clone()),
-        }));
-    }
+        Some(plugin)
+    } else {
+        None
+    };
     let runtime = AgentRuntime::start(runtime_options).await?;
     let runtime_handle = runtime.handle();
+    let goals = if let Some(plugin) = goal_plugin {
+        match mink_goal::GoalEngine::attach(runtime_handle.clone(), plugin) {
+            Ok(goals) => Some(goals),
+            Err(error) => {
+                finish_turn(Err(error.into()), runtime.shutdown()).await?;
+                unreachable!("finish_turn always propagates Err")
+            }
+        }
+    } else {
+        None
+    };
     let session = runtime.session_info().clone();
 
     let mut process_exit_code = 0i32;
@@ -317,7 +332,8 @@ async fn main_entry_with_preparsed(
         } else if cfg.tui_mode.enabled() {
             #[cfg(feature = "tui")]
             {
-                let cmd_tx = start_runtime_broker(runtime_handle.clone(), display.clone());
+                let cmd_tx =
+                    start_runtime_broker(runtime_handle.clone(), goals.clone(), display.clone());
                 if let Some((signal_tx, signal_rx)) = tui_tx {
                     let model_label = crate::config::resolve_model_label(
                         &cfg.provider.model,
@@ -332,6 +348,7 @@ async fn main_entry_with_preparsed(
                         &cfg.sandbox,
                         crate::tui::TuiRuntime {
                             handle: runtime_handle.clone(),
+                            goals: goals.clone(),
                             signals: signal_tx,
                         },
                     ))
@@ -341,6 +358,9 @@ async fn main_entry_with_preparsed(
             #[cfg(not(feature = "tui"))]
             anyhow::bail!("this mink binary was built without the `tui` feature");
         } else if cfg.prompt == "/goal" || cfg.prompt.starts_with("/goal ") {
+            let goals = goals
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("goal engine is unavailable in this mode"))?;
             // Parse before touching the driver: a status or control command must
             // neither start goal execution nor block waiting for it.
             let command = crate::local::parse_goal_command(&cfg.prompt)?;
@@ -348,23 +368,25 @@ async fn main_entry_with_preparsed(
             if drives {
                 // Arm only: the create/resume command itself starts the run,
                 // so this path never schedules a second one.
-                runtime_handle.goals().start_driver()?;
+                goals.start_driver()?;
             }
-            display
-                .render_info(&crate::local::execute_goal_command(&runtime_handle, command).await?);
+            display.render_info(&crate::local::execute_goal_command(goals, command).await?);
             if drives {
-                let outcome = runtime_handle.goals().wait().await?;
-                process_exit_code = if outcome.status == crate::runtime::GoalStatus::Completed {
+                let outcome = goals.wait().await?;
+                process_exit_code = if outcome.status == mink_goal::GoalStatus::Completed {
                     0
                 } else {
                     1
                 };
             }
         } else if is_interactive {
-            let cmd_tx = start_runtime_broker(runtime_handle.clone(), display.clone());
+            let cmd_tx =
+                start_runtime_broker(runtime_handle.clone(), goals.clone(), display.clone());
             // UI and input wiring are ready: enable scheduling and pick up a
             // goal the previous session left active.
-            runtime_handle.goals().start_driver_and_run()?;
+            if let Some(goals) = &goals {
+                goals.start_driver_and_run()?;
+            }
             display.render_info("mink interactive mode (type 'exit' or Ctrl+D to quit)");
             if !session.is_new {
                 let events_path = session.events_path.clone();

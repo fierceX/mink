@@ -84,8 +84,7 @@ pub(super) fn render_agent_event(display: &dyn Display, kind: AgentEventKind) {
         ),
         AgentEventKind::Prompt => display.render_prompt(),
         AgentEventKind::ClearLine => display.render_clear_line(),
-        AgentEventKind::GoalUpdated { .. }
-        | AgentEventKind::GoalFinished { .. }
+        AgentEventKind::Extension { .. }
         | AgentEventKind::TurnStarted
         | AgentEventKind::ConversationCommitted { .. }
         | AgentEventKind::Final { .. } => {}
@@ -106,11 +105,9 @@ pub(super) async fn run_turn_rendered(
 
 #[cfg(feature = "tui")]
 pub(super) fn goal_boundary_signal(message: &serde_json::Value) -> Option<crate::tui::TuiSignal> {
-    match crate::runtime::session::SessionReader::decode_goal_boundary(message)? {
-        crate::runtime::session::GoalBoundaryEvent::Card(parsed) => {
-            Some(crate::tui::TuiSignal::GoalCard(parsed))
-        }
-        crate::runtime::session::GoalBoundaryEvent::Ended { goal_id, revision } => {
+    match mink_goal::decode_goal_boundary(message)? {
+        mink_goal::GoalBoundaryEvent::Card(parsed) => Some(crate::tui::TuiSignal::GoalCard(parsed)),
+        mink_goal::GoalBoundaryEvent::Ended { goal_id, revision } => {
             Some(crate::tui::TuiSignal::GoalEnded { goal_id, revision })
         }
     }
@@ -157,11 +154,14 @@ async fn render_tui_stream(
 
 pub(crate) fn start_runtime_broker(
     handle: AgentRuntimeHandle,
+    goals: Option<Arc<mink_goal::GoalEngine>>,
     display: Arc<dyn Display>,
 ) -> mpsc::UnboundedSender<RuntimeCmd> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let (work_tx, mut work_rx) = mpsc::unbounded_channel();
     let work_handle = handle.clone();
+    let work_goals = goals.clone();
+    let control_goals = goals;
     let control_display = display.clone();
     tokio::spawn(async move {
         while let Some(command) = work_rx.recv().await {
@@ -182,12 +182,15 @@ pub(crate) fn start_runtime_broker(
                     }
                     continue;
                 }
-                RuntimeCmd::Goal(command) => {
-                    crate::local::execute_goal_command(&work_handle, command)
+                RuntimeCmd::Goal(command) => match &work_goals {
+                    Some(goals) => crate::local::execute_goal_command(goals, command)
                         .await
                         .map(|message| display.render_info(&message))
-                        .map_err(|e| crate::runtime::RuntimeError::Command(e.to_string()))
-                }
+                        .map_err(|e| crate::runtime::RuntimeError::Command(e.to_string())),
+                    None => Err(crate::runtime::RuntimeError::Command(
+                        "goal controller is unavailable in this mode".into(),
+                    )),
+                },
                 RuntimeCmd::Compact => work_handle.compact().await.map(|outcome| match outcome {
                     crate::runtime::CompactOutcome::Compacted { reason } => {
                         display.render_info(&format!("Context compacted ({reason})."))
@@ -236,10 +239,15 @@ pub(crate) fn start_runtime_broker(
                     let _ = work_tx.send(RuntimeCmd::Goal(command));
                 }
                 RuntimeCmd::Goal(command) => {
-                    let handle = handle.clone();
+                    let goals = control_goals.clone();
                     let display = control_display.clone();
                     tokio::spawn(async move {
-                        let result = crate::local::execute_goal_command(&handle, command).await;
+                        let result = match &goals {
+                            Some(goals) => crate::local::execute_goal_command(goals, command).await,
+                            None => Err(anyhow::anyhow!(
+                                "goal controller is unavailable in this mode"
+                            )),
+                        };
                         match result {
                             Ok(message) => display.render_info(&message),
                             Err(error) => display.render_error(&error.to_string()),
@@ -266,25 +274,32 @@ pub(super) struct GoalTerminalSink {
 #[async_trait::async_trait]
 impl crate::runtime::EventSink for GoalTerminalSink {
     async fn on_event(&self, event: crate::runtime::AgentEvent) -> Result<(), String> {
-        let goal_turn = self.turns && event.turn_id.as_ref().is_some_and(|id| id.is_goal_turn());
-        let goal_notice = event.kind.is_goal_notice();
+        let goal_turn = self.turns
+            && event
+                .turn_id
+                .as_ref()
+                .is_some_and(mink_goal::is_goal_turn_id);
+        let goal_notice = matches!(
+            &event.kind,
+            AgentEventKind::Info { message } if message.starts_with("Goal ")
+        );
         // Lifecycle events drive the TUI status marker and detail view, so they
         // pass on the non-turn sink. The turn sink already renders its own
         // notices and must not double-report them.
-        let lifecycle = matches!(
-            &event.kind,
-            AgentEventKind::GoalUpdated { .. } | AgentEventKind::GoalFinished { .. }
-        );
-        if lifecycle {
+        if let AgentEventKind::Extension { kind, payload } = &event.kind
+            && let Some(goal_event) = mink_goal::parse_goal_event(kind, payload)
+        {
             #[cfg(feature = "tui")]
             if !self.turns
                 && let Some(signals) = &self.signals
-                && let AgentEventKind::GoalUpdated { goal } = &event.kind
+                && let mink_goal::GoalEvent::Updated(goal) = goal_event
             {
                 let _ = signals.send(crate::tui::TuiSignal::GoalUpdated(Box::new(
                     crate::ui::GoalDisplay::from(goal.as_ref()),
                 )));
             }
+            #[cfg(not(feature = "tui"))]
+            let _ = goal_event;
             render_agent_event(self.display.as_ref(), event.kind);
             return Ok(());
         }

@@ -4,7 +4,7 @@ use super::*;
 #[test]
 pub(super) fn control_error_uses_runtime_error_variants() {
     assert_eq!(
-        control_error(&mink::runtime::RuntimeError::GoalActive),
+        control_error(&mink::runtime::RuntimeError::ExternallyControlled { owner: "goal" }),
         "当前目标执行中，先暂停目标再操作"
     );
     assert_eq!(

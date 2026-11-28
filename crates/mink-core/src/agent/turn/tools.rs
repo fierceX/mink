@@ -296,12 +296,8 @@ impl super::TurnExecutor {
                 .await;
         }
 
-        if self
-            .ctx
-            .stores
-            .goal_store
-            .snapshot()
-            .is_some_and(|g| g.phase == crate::session::goal::GoalPhase::Executing)
+        if let Some(observer) = self.tools.tool_observer()
+            && observer.tracks_durable_effects()
         {
             let message =
                 crate::session::store::ConversationStore::tool_results_message(&processed_results);
@@ -310,15 +306,12 @@ impl super::TurnExecutor {
                 .store
                 .append_runtime_message_durable(message)
                 .await?;
-            self.ctx.stores.goal_store.close_effects(
-                &processed_results
-                    .iter()
-                    .filter(|r| {
-                        crate::session::goal::effect_outcome_known(r.state_metadata.as_ref())
-                    })
-                    .map(|r| r.tool_use_id.clone())
-                    .collect::<Vec<_>>(),
-            )?;
+            let known_ids = processed_results
+                .iter()
+                .filter(|r| crate::tools::metadata::effect_outcome_known(r.state_metadata.as_ref()))
+                .map(|r| r.tool_use_id.clone())
+                .collect::<Vec<_>>();
+            observer.after_known_effects(&known_ids)?;
         } else {
             self.ctx
                 .stores

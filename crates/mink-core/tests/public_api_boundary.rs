@@ -32,6 +32,7 @@ fn workspace_consumers_only_use_supported_mink_modules() {
     let roots = [
         workspace.join("crates/mink-cli/src"),
         workspace.join("crates/mink-server/src"),
+        workspace.join("crates/mink-goal/src"),
         core.join("examples"),
     ];
     let mut files = Vec::new();
@@ -74,6 +75,40 @@ fn workspace_consumers_only_use_supported_mink_modules() {
     assert!(
         violations.is_empty(),
         "unsupported mink module imports:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn mink_core_sources_contain_no_goal_coupling() {
+    let core = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let src = core.join("src");
+    let mut files = Vec::new();
+    rust_files(&src, &mut files);
+    assert!(!files.is_empty(), "mink-core src directory had no files");
+
+    let forbidden = regex::Regex::new(
+        r"GoalStore|GoalController|GoalDriver|GoalEngine|GoalPlugin|GoalReview|GoalDraft|GoalRead|GoalSnapshot|GoalDisplay|goal_updated|goal_finished|goal_adjudication|goal\.json|mink_goal",
+    )
+    .unwrap();
+    let mut violations = Vec::new();
+    for path in files {
+        let text = fs::read_to_string(&path).unwrap();
+        for (line_idx, line) in text.lines().enumerate() {
+            if let Some(found) = forbidden.find(line) {
+                violations.push(format!(
+                    "{}:{}: {}",
+                    path.display(),
+                    line_idx + 1,
+                    found.as_str()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "goal coupling must not remain in mink-core:\n{}",
         violations.join("\n")
     );
 }

@@ -217,7 +217,7 @@ impl InputInbox {
     pub fn outstanding(&self) -> Vec<InputReceipt> {
         self.inner.changes.borrow().as_ref().clone()
     }
-    pub(crate) fn begin_goal_turn(&self, turn_id: &str) -> Result<()> {
+    pub(crate) fn begin_internal_turn(&self, turn_id: &str) -> Result<()> {
         self.inner.fault.check()?;
         let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
         anyhow::ensure!(state.active.is_none(), "input inbox already owns a turn");

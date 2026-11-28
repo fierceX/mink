@@ -193,10 +193,10 @@ impl super::TurnExecutor {
             }
             // A latched session must not open new requests.
             self.ctx.stores.persistence_fault.check()?;
-            if let Some(review) = self.ctx.stores.goal_review.as_ref() {
-                review.check_budget()?;
-            } else if let Some(review) = self.goal_adjudication.as_ref() {
-                review.check_budget()?;
+            if let Some(check) = &self.scope.budget_check {
+                check()?;
+            } else if let Some(check) = &self.ctx.stores.budget_check {
+                check()?;
             }
             if retry.deadline_expired() {
                 self.log_recovery(

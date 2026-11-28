@@ -100,9 +100,6 @@ pub trait ToolExec: Send + Sync {
 /// Built-in tool table, initialized once at first access.
 static TOOL_REGISTRY: LazyLock<Vec<Box<dyn ToolExec>>> = LazyLock::new(|| {
     vec![
-        Box::new(crate::tools::goal::GoalReadTool),
-        Box::new(crate::tools::goal::GoalDraftTool),
-        Box::new(crate::tools::goal::GoalReviewTool),
         Box::new(file::ReadTool),
         Box::new(file::WriteTool),
         Box::new(file::EditTool),
@@ -269,21 +266,18 @@ impl std::fmt::Display for FatalBatchError {
 
 impl std::error::Error for FatalBatchError {}
 
-/// Goal side-effect ledger: `GoalDraft` / `GoalReview` is a control record rather than a side
-/// effect, read-only builtins are safe, and custom tools are recorded
-/// conservatively because their declared metadata is host-supplied.
-///
-/// The goal-control exclusion is checked first so a custom tool registered under
-/// the same name cannot slip past it through the custom-tool branch.
-pub(crate) fn records_goal_effect(
-    name: &str,
+/// Durable side-effect ledger: custom tools marked `side_effect_exempt`
+/// are control records rather than workspace side effects, read-only builtins
+/// are safe, and other custom tools are recorded conservatively because their
+/// declared metadata is host-supplied.
+pub(crate) fn records_durable_effect(
     metadata: Option<&ToolMetadata>,
-    is_custom: bool,
+    custom_def: Option<&crate::tools::extension::ToolDefinition>,
 ) -> bool {
-    if matches!(name, "GoalDraft" | "GoalReview") {
-        return false;
+    if let Some(def) = custom_def {
+        return !def.side_effect_exempt;
     }
-    is_custom || metadata.is_none_or(|m| m.approval != ApprovalTier::Read || m.mutating)
+    metadata.is_none_or(|m| m.approval != ApprovalTier::Read || m.mutating)
 }
 
 impl ToolRunner {
@@ -328,8 +322,17 @@ impl ToolRunner {
         self.storm.lock().unwrap_or_else(|e| e.into_inner()).reset();
     }
 
-    pub(crate) fn goal_read_only(&self) -> bool {
-        self.ctx.goal_drafting || self.ctx.review_evidence().is_some()
+    pub(crate) fn replan_disabled(&self) -> bool {
+        self.ctx
+            .tool_mask
+            .as_ref()
+            .is_some_and(|m| m.disable_replan)
+    }
+
+    pub(crate) fn tool_observer(
+        &self,
+    ) -> Option<&Arc<dyn crate::tools::policy_hook::ToolExecutionObserver>> {
+        self.ctx.tool_observer.as_ref()
     }
 }
 

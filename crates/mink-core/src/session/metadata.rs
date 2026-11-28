@@ -43,7 +43,7 @@ pub struct SessionMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubAgentMetadata {
     pub version: u8,
-    /// `sub_agent`, `goal_review`, or `replan`.
+    /// `sub_agent`, `replan`, or a custom origin tag.
     pub origin: String,
     /// `fresh` or `fork`.
     pub mode: String,
