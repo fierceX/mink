@@ -107,6 +107,9 @@ struct TurnLocalState {
     final_thinking: String,
     /// 当前用户输入内的 round 序号（1-based），用于恢复诊断记录。
     round: u32,
+    /// Single-request ephemeral blocks injected by `ModelRequestHook`s for the
+    /// active round. Reset each round and never persisted to conversation history.
+    round_ephemeral_blocks: Vec<crate::tools::rim_hooks::EphemeralContextBlock>,
     /// 本输入内 scavenge 批次序号：回收调用的 id 必须跨轮唯一，
     /// 否则 conversation.jsonl 中会出现重复 tool_use_id 干扰配对修复。
     scavenge_seq: u32,
@@ -233,13 +236,25 @@ impl TurnExecutor {
     ) -> Self {
         let mut tool_context = crate::context::ToolContext::from_shared(&ctx);
         if let Some(mask) = &scope.tool_mask {
-            tool_context.tool_mask = Some(mask.clone());
+            tool_context.tool_mask = Some(match tool_context.tool_mask {
+                Some(existing) => existing.intersect(mask),
+                None => mask.clone(),
+            });
         }
+        // Scoped internal orchestrators (e.g. Goal verification/recovery turns)
+        // deliberately supply their own durable effect journal for that turn.
         if let Some(journal) = &scope.effect_journal {
             tool_context.effect_journal = Some(journal.clone());
         }
         if let Some(observer) = &scope.tool_observer {
-            tool_context.tool_observer = Some(observer.clone());
+            tool_context.tool_observer = Some(match tool_context.tool_observer {
+                Some(existing) => {
+                    Arc::new(crate::tools::policy_hook::CompositeToolCallObserver::new(
+                        vec![existing, observer.clone()],
+                    ))
+                }
+                None => observer.clone(),
+            });
         }
         let tools = Arc::new(ToolRunner::new(Arc::new(tool_context)));
         let prefix = crate::agent::prefix::PrefixManager::with_native_web(
@@ -328,6 +343,32 @@ impl TurnExecutor {
     }
 }
 
+fn project_messages_with_ephemeral<'a>(
+    messages: &'a [serde_json::Value],
+    blocks: &[crate::tools::rim_hooks::EphemeralContextBlock],
+) -> std::borrow::Cow<'a, [serde_json::Value]> {
+    if blocks.is_empty() {
+        return std::borrow::Cow::Borrowed(messages);
+    }
+    let rendered = blocks
+        .iter()
+        .map(|block| {
+            format!(
+                "<rim-context tag=\"{}\">\n{}\n</rim-context>",
+                block.tag, block.content
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let mut projected = messages.to_vec();
+    projected.push(serde_json::json!({
+        "role": "user",
+        "content": rendered,
+        "_mink": { "internal": true, "ephemeral": true }
+    }));
+    std::borrow::Cow::Owned(projected)
+}
+
 // `prepare_request` 的强制压缩循环不设次数上限：每次迭代必须严格降低投影估算
 // （否则 break），有限整数度量自然终止；不得用隐藏常量给用户输入封顶。
 
@@ -335,6 +376,130 @@ impl TurnExecutor {
 // 转应急），并由 round 绝对期限约束总时长；不得用隐藏常量给恢复封顶。
 
 impl TurnExecutor {
+    async fn evaluate_model_request_hooks(
+        &self,
+        round: u32,
+        messages: &[serde_json::Value],
+        system_prompt: &str,
+        tools_json: &[serde_json::Value],
+    ) -> Result<Vec<crate::tools::rim_hooks::EphemeralContextBlock>> {
+        let hooks = self
+            .ctx
+            .tools
+            .tool_hooks
+            .snapshot_model_request_hooks_for(&self.ctx.scope_path);
+        if hooks.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
+            return Err(anyhow::Error::new(TurnInterrupted));
+        }
+        let openai_tools = crate::llm::transport::convert_tools_to_openai(tools_json);
+        let estimated_prefix_tokens =
+            crate::llm::transport::estimate_openai_converted(&[], &openai_tools, system_prompt)
+                .unwrap_or(0);
+        let hook_ctx = crate::tools::rim_hooks::ModelRequestHookContext {
+            session_id: &self.ctx.config.session_id,
+            scope_path: &self.ctx.scope_path,
+            round,
+            model_name: &self.model_name,
+            is_sub_agent: self.ctx.delegation.is_sub_agent,
+            message_count: messages.len(),
+            estimated_prefix_tokens,
+        };
+        let mut patch = crate::tools::rim_hooks::ModelRequestPatch::default();
+        for hook in hooks {
+            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set() {
+                return Err(anyhow::Error::new(TurnInterrupted));
+            }
+            patch.clear_step_flag();
+            let prev_len = patch.blocks().len();
+            let child_cancel = self.ctx.cancel.linked_child_token();
+            let timeout = hook.timeout();
+            let outcome = {
+                let hook_fut = hook.before_request(&hook_ctx, &mut patch, &child_cancel);
+                tokio::pin!(hook_fut);
+                let sleep_fut = tokio::time::sleep(timeout);
+                tokio::pin!(sleep_fut);
+
+                tokio::select! {
+                    biased;
+                    _ = self.ctx.cancel.cancelled() => {
+                        child_cancel.cancel();
+                        return Err(anyhow::Error::new(TurnInterrupted));
+                    }
+                    _ = self.ctx.interrupt.notified() => {
+                        child_cancel.cancel();
+                        return Err(anyhow::Error::new(TurnInterrupted));
+                    }
+                    res = &mut hook_fut => res.map_err(|error| (false, error)),
+                    _ = &mut sleep_fut => {
+                        child_cancel.cancel();
+                        Err((
+                            true,
+                            anyhow::anyhow!(
+                                "model request hook '{}' timed out after {}ms",
+                                hook.id(),
+                                timeout.as_millis()
+                            ),
+                        ))
+                    }
+                }
+            };
+
+            match outcome {
+                Ok(()) => {
+                    let added = patch.blocks().len() > prev_len;
+                    if added || patch.is_mutated() {
+                        let code = patch
+                            .code
+                            .take()
+                            .unwrap_or_else(|| "MODEL_REQUEST_CONTEXT_INJECTED".to_string());
+                        let reason = patch.reason.take();
+                        self.ctx
+                            .log_critical_event(crate::events::EventLog::PolicyEffect {
+                                version: Some(1),
+                                anchor: "before_model_request".to_string(),
+                                policy_id: hook.id().to_string(),
+                                call_id: format!("round-{round}"),
+                                tool_name: self.model_name.clone(),
+                                action: "inject".to_string(),
+                                code,
+                                reason,
+                                is_sub_agent: self.ctx.delegation.is_sub_agent,
+                                is_ptc_nested: false,
+                            })
+                            .await?;
+                    }
+                }
+                Err((timed_out, error)) => {
+                    let (action, code) = if timed_out {
+                        ("timeout_fail_closed", "MODEL_REQUEST_HOOK_TIMEOUT")
+                    } else {
+                        ("error_fail_closed", "MODEL_REQUEST_HOOK_ERROR")
+                    };
+                    let _ = self
+                        .ctx
+                        .log_critical_event(crate::events::EventLog::PolicyEffect {
+                            version: Some(1),
+                            anchor: "before_model_request".to_string(),
+                            policy_id: hook.id().to_string(),
+                            call_id: format!("round-{round}"),
+                            tool_name: self.model_name.clone(),
+                            action: action.to_string(),
+                            code: code.to_string(),
+                            reason: Some(format!("{error:#}")),
+                            is_sub_agent: self.ctx.delegation.is_sub_agent,
+                            is_ptc_nested: false,
+                        })
+                        .await;
+                    return Err(error);
+                }
+            }
+        }
+        Ok(patch.blocks().to_vec())
+    }
+
     /// Execute a full turn: send user input, stream response, execute tools, decide next.
     /// Phase 0 for one inner iteration: auto compaction, forced compaction and
     /// the hard input-budget check.
@@ -353,11 +518,17 @@ impl TurnExecutor {
         if let Some(check) = &self.scope.budget_check {
             check()?;
         }
+        self.local.round_ephemeral_blocks = self
+            .evaluate_model_request_hooks(self.local.round, messages, system_prompt, tools_json)
+            .await?;
+        let projected_messages =
+            project_messages_with_ephemeral(messages, &self.local.round_ephemeral_blocks);
         let mut projection = Arc::new(crate::llm::request::RequestProjection::build(
-            messages,
+            &projected_messages,
             system_prompt,
             tools_json,
         )?);
+        drop(projected_messages);
         // Phase 0: 上下文压缩（auto 按压力阈值触发，可多次）。可选提前压缩失败不得
         // 阻断本来可以发送的请求：只有摘要不可用类错误被放行并继续。
         let auto_compacted = match self
@@ -390,8 +561,10 @@ impl TurnExecutor {
             Err(error) => return Err(error),
         };
         if auto_compacted {
+            let projected_messages =
+                project_messages_with_ephemeral(messages, &self.local.round_ephemeral_blocks);
             projection = Arc::new(crate::llm::request::RequestProjection::build(
-                messages,
+                &projected_messages,
                 system_prompt,
                 tools_json,
             )?);
@@ -437,8 +610,10 @@ impl TurnExecutor {
             if !compacted {
                 break;
             }
+            let projected_messages =
+                project_messages_with_ephemeral(messages, &self.local.round_ephemeral_blocks);
             projection = Arc::new(crate::llm::request::RequestProjection::build(
-                messages,
+                &projected_messages,
                 system_prompt,
                 tools_json,
             )?);
@@ -478,8 +653,10 @@ impl TurnExecutor {
             };
             emergency_refused = !emergency;
             if emergency {
+                let projected_messages =
+                    project_messages_with_ephemeral(messages, &self.local.round_ephemeral_blocks);
                 projection = Arc::new(crate::llm::request::RequestProjection::build(
-                    messages,
+                    &projected_messages,
                     system_prompt,
                     tools_json,
                 )?);
@@ -655,6 +832,7 @@ impl TurnExecutor {
             }
             turn += 1;
             self.local.round = turn as u32;
+            self.local.round_ephemeral_blocks.clear();
 
             // 一个 round = 一个逻辑请求：绝对期限在 round 入口创建，stream、overflow
             // 收缩与它们的摘要请求都共享；`request_timeout_secs` 未配置时为 None。
@@ -755,8 +933,12 @@ impl TurnExecutor {
                             self.ctx.io.display.render_info(
                                 "Context summary committed; verifying the request actually shrank.",
                             );
-                            projection = Arc::new(crate::llm::request::RequestProjection::build(
+                            let projected_messages = project_messages_with_ephemeral(
                                 &messages,
+                                &self.local.round_ephemeral_blocks,
+                            );
+                            projection = Arc::new(crate::llm::request::RequestProjection::build(
+                                &projected_messages,
                                 &system_prompt,
                                 &tools_json,
                             )?);
@@ -791,8 +973,12 @@ impl TurnExecutor {
                             if !committed {
                                 return Err(error);
                             }
-                            projection = Arc::new(crate::llm::request::RequestProjection::build(
+                            let projected_messages = project_messages_with_ephemeral(
                                 &messages,
+                                &self.local.round_ephemeral_blocks,
+                            );
+                            projection = Arc::new(crate::llm::request::RequestProjection::build(
+                                &projected_messages,
                                 &system_prompt,
                                 &tools_json,
                             )?);

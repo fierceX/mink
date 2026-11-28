@@ -1195,7 +1195,25 @@ impl<'a> RuntimeExtHandle<'a> {
         &self,
         sink: Arc<dyn crate::runtime::SessionEventSink>,
     ) -> crate::tools::rim_hooks::RegistrationGuard {
-        self.0.ctx.io.session_event_sinks.register(sink)
+        self.register_session_event_sink_scoped("", sink)
+    }
+
+    /// Dynamically attach a scope-filtered [`SessionEventSink`](crate::runtime::SessionEventSink).
+    /// An empty `scope_origin` matches every scope in the session.
+    pub fn register_session_event_sink_scoped(
+        &self,
+        scope_origin: &str,
+        sink: Arc<dyn crate::runtime::SessionEventSink>,
+    ) -> crate::tools::rim_hooks::RegistrationGuard {
+        if self.0.ctx.lifecycle.is_disposed() {
+            return crate::tools::rim_hooks::RegistrationGuard::noop();
+        }
+        let origin = crate::tools::rim_hooks::normalize_scope_origin(scope_origin);
+        self.0
+            .ctx
+            .io
+            .session_event_sinks
+            .register_scoped(origin, sink)
     }
 
     /// Dynamically attach a [`ToolExecutionGate`](crate::tools::rim_hooks::ToolExecutionGate)
@@ -1204,7 +1222,25 @@ impl<'a> RuntimeExtHandle<'a> {
         &self,
         gate: Arc<dyn crate::tools::rim_hooks::ToolExecutionGate>,
     ) -> crate::tools::rim_hooks::RegistrationGuard {
-        self.0.ctx.tools.tool_hooks.register_gate(gate)
+        self.register_tool_execution_gate_scoped("", gate)
+    }
+
+    /// Dynamically attach a scope-filtered [`ToolExecutionGate`](crate::tools::rim_hooks::ToolExecutionGate).
+    /// An empty `scope_origin` matches every scope in the session.
+    pub fn register_tool_execution_gate_scoped(
+        &self,
+        scope_origin: &str,
+        gate: Arc<dyn crate::tools::rim_hooks::ToolExecutionGate>,
+    ) -> crate::tools::rim_hooks::RegistrationGuard {
+        if self.0.ctx.lifecycle.is_disposed() {
+            return crate::tools::rim_hooks::RegistrationGuard::noop();
+        }
+        let origin = crate::tools::rim_hooks::normalize_scope_origin(scope_origin);
+        self.0
+            .ctx
+            .tools
+            .tool_hooks
+            .register_gate_scoped(origin, gate)
     }
 
     /// Dynamically attach a [`ToolOutputFilter`](crate::tools::rim_hooks::ToolOutputFilter)
@@ -1213,7 +1249,73 @@ impl<'a> RuntimeExtHandle<'a> {
         &self,
         filter: Arc<dyn crate::tools::rim_hooks::ToolOutputFilter>,
     ) -> crate::tools::rim_hooks::RegistrationGuard {
-        self.0.ctx.tools.tool_hooks.register_filter(filter)
+        self.register_tool_output_filter_scoped("", filter)
+    }
+
+    /// Dynamically attach a scope-filtered [`ToolOutputFilter`](crate::tools::rim_hooks::ToolOutputFilter).
+    /// An empty `scope_origin` matches every scope in the session.
+    pub fn register_tool_output_filter_scoped(
+        &self,
+        scope_origin: &str,
+        filter: Arc<dyn crate::tools::rim_hooks::ToolOutputFilter>,
+    ) -> crate::tools::rim_hooks::RegistrationGuard {
+        if self.0.ctx.lifecycle.is_disposed() {
+            return crate::tools::rim_hooks::RegistrationGuard::noop();
+        }
+        // Newly attached output filters may redact previously read files: bump
+        // memo_mutation so stale ReadMemo entries do not bypass redaction.
+        self.0
+            .ctx
+            .tools
+            .memo_mutation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let origin = crate::tools::rim_hooks::normalize_scope_origin(scope_origin);
+        self.0
+            .ctx
+            .tools
+            .tool_hooks
+            .register_filter_scoped(origin, filter)
+    }
+
+    /// Dynamically attach a [`ModelRequestHook`](crate::tools::rim_hooks::ModelRequestHook)
+    /// to this runtime (inherited by sub-agents); dropping the returned guard removes it.
+    pub fn register_model_request_hook(
+        &self,
+        hook: Arc<dyn crate::tools::rim_hooks::ModelRequestHook>,
+    ) -> crate::tools::rim_hooks::RegistrationGuard {
+        self.register_model_request_hook_scoped("", hook)
+    }
+
+    /// Dynamically attach a scope-filtered [`ModelRequestHook`](crate::tools::rim_hooks::ModelRequestHook).
+    /// An empty `scope_origin` matches every scope in the session.
+    pub fn register_model_request_hook_scoped(
+        &self,
+        scope_origin: &str,
+        hook: Arc<dyn crate::tools::rim_hooks::ModelRequestHook>,
+    ) -> crate::tools::rim_hooks::RegistrationGuard {
+        if self.0.ctx.lifecycle.is_disposed() {
+            return crate::tools::rim_hooks::RegistrationGuard::noop();
+        }
+        let origin = crate::tools::rim_hooks::normalize_scope_origin(scope_origin);
+        self.0
+            .ctx
+            .tools
+            .tool_hooks
+            .register_model_request_hook_scoped(origin, hook)
+    }
+
+    pub fn is_closing(&self) -> bool {
+        self.0.ctx.lifecycle.is_closing()
+    }
+
+    pub fn scope_path(&self) -> &str {
+        &self.0.ctx.scope_path
+    }
+
+    /// Register a LIFO closing callback executed once when the runtime enters
+    /// the closing phase (or immediately if already closing).
+    pub fn register_on_closing(&self, label: impl Into<String>, f: impl FnOnce() + Send + 'static) {
+        self.0.ctx.lifecycle.register_on_closing(label, f);
     }
 
     /// Register a LIFO teardown callback executed on `AgentRuntime::shutdown()`

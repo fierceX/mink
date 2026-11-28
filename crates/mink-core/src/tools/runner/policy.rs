@@ -337,9 +337,13 @@ pub(crate) async fn evaluate_tool_gates(
     metadata: Option<&ToolMetadata>,
     is_ptc_nested: bool,
 ) -> anyhow::Result<GateOutcome> {
-    let gates = ctx.tool_hooks.snapshot_gates();
-    if gates.is_empty() {
+    let gates = ctx.tool_hooks.snapshot_gates_for(&ctx.scope_path);
+    if gates.is_empty() && !ctx.lifecycle.is_closing() {
         return Ok(GateOutcome::Allow);
+    }
+
+    if ctx.cancel.is_cancelled() || ctx.interrupt.is_set() {
+        return Ok(GateOutcome::Interrupted);
     }
 
     let make_blocked = |policy_id: String,
@@ -377,7 +381,10 @@ pub(crate) async fn evaluate_tool_gates(
             "RUNTIME_CLOSING".to_string(),
             "runtime is closing; tool execution is blocked".to_string(),
         );
-        ctx.emit_policy_effect(effect).await?;
+        // Best-effort audit during shutdown closing so an already-draining
+        // event writer does not escalate clean lifecycle blocking into a fatal
+        // batch error.
+        let _ = ctx.emit_policy_effect(effect).await;
         return Ok(GateOutcome::Blocked(Box::new(blocked)));
     }
 

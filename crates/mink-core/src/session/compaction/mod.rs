@@ -79,6 +79,7 @@ pub struct CompactionEngine {
     stats: Arc<StatsTracker>,
     usage: Arc<UsageJournal>,
     session_id: String,
+    scope_path: Arc<str>,
     display: Arc<dyn Display>,
     cancel: crate::cancel::CancellationToken,
     interrupt: crate::cancel::InterruptSignal,
@@ -146,6 +147,7 @@ impl CompactionEngine {
             stats,
             usage,
             session_id,
+            scope_path: Arc::from("primary"),
             display,
             cancel,
             interrupt,
@@ -180,6 +182,11 @@ impl CompactionEngine {
         self.budget_check = check;
         self
     }
+    pub(crate) fn with_scope_path(mut self, scope_path: Arc<str>) -> Self {
+        self.scope_path = scope_path;
+        self
+    }
+
     /// Attach the session-wide publish-fault latch.
     pub(crate) fn with_fault(
         mut self,
@@ -854,7 +861,7 @@ impl CompactionEngine {
         // `log_events=false` still receives compaction diagnostics through the
         // sink. The writer remains the optional durable outlet.
         self.session_event_sinks
-            .notify(self.session_id.as_str(), &event);
+            .notify(self.session_id.as_str(), &self.scope_path, &event);
         if !self.config.log_events {
             return;
         }

@@ -13,6 +13,9 @@ use std::sync::Arc;
 
 pub(crate) async fn build_runtime(mut config: AgentRuntimeConfig) -> Result<AgentRuntime> {
     let lifecycle = Arc::new(crate::tools::rim_hooks::RuntimeLifecycle::new());
+    for (label, cb) in std::mem::take(&mut config.on_closing) {
+        lifecycle.register_on_closing(label, cb);
+    }
     for (label, teardown) in std::mem::take(&mut config.teardowns) {
         lifecycle.register_teardown(label, teardown);
     }
@@ -53,6 +56,8 @@ async fn build_runtime_inner(
         post_init_hooks,
         tool_execution_gates,
         tool_output_filters,
+        model_request_hooks,
+        on_closing: _,
         teardowns: _,
         ptc_runtime,
     } = config;
@@ -98,6 +103,7 @@ async fn build_runtime_inner(
     let tool_hooks = Arc::new(crate::tools::rim_hooks::ToolHookRegistry::new(
         tool_execution_gates,
         tool_output_filters,
+        model_request_hooks,
     ));
     let built = build_agent_context(AgentContextBuild {
         role_override: None,
@@ -107,6 +113,7 @@ async fn build_runtime_inner(
         environment_home: None,
         cwd: cwd.clone(),
         session_id: sid.clone(),
+        scope_path: Arc::from("primary"),
         session_layout,
         resolved_paths: Some(resolved_paths),
         api_url: api_url_str.clone(),

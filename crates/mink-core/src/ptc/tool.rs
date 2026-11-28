@@ -311,7 +311,7 @@ pub(crate) async fn execute_run_code(
         outcome_label,
     );
 
-    let (filtered_composed, _, _, _, policy_effects) =
+    let (filtered_composed, _, _, _, _, policy_effects) =
         crate::tools::runner::apply_tool_output_filters(
             ctx,
             crate::tools::rim_hooks::ToolOutputFilterContext {

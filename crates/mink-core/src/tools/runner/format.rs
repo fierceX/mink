@@ -105,11 +105,19 @@ pub(crate) fn apply_tool_output_filters(
     String,
     Option<serde_json::Value>,
     bool,
+    bool,
     Vec<crate::events::EventLog>,
 ) {
-    let filters = ctx.tool_hooks.snapshot_filters();
+    let filters = ctx.tool_hooks.snapshot_filters_for(&ctx.scope_path);
     if filters.is_empty() {
-        return (content, conv_content, structured_value, false, Vec::new());
+        return (
+            content,
+            conv_content,
+            structured_value,
+            false,
+            false,
+            Vec::new(),
+        );
     }
     let call_id = filter_ctx.call_id;
     let tool_name = filter_ctx.tool_name;
@@ -117,6 +125,7 @@ pub(crate) fn apply_tool_output_filters(
     let mut mutation =
         crate::tools::rim_hooks::ToolOutputMutation::new(content, conv_content, structured_value);
     let mut any_mutated = false;
+    let mut any_conv_mutated = false;
     let mut effects = Vec::new();
     for filter in filters {
         let prev_content = mutation.content.clone();
@@ -125,10 +134,20 @@ pub(crate) fn apply_tool_output_filters(
         mutation.clear_step_flag();
         match filter.filter(&filter_ctx, &mut mutation) {
             Ok(()) => {
-                let changed = mutation.is_mutated()
-                    || mutation.content != prev_content
-                    || mutation.conv_content != prev_conv
-                    || mutation.structured_value != prev_structured;
+                let content_changed = mutation.content != prev_content;
+                let conv_changed = mutation.conv_content != prev_conv;
+                let structured_changed = mutation.structured_value != prev_structured;
+                let changed =
+                    mutation.is_mutated() || content_changed || conv_changed || structured_changed;
+                if content_changed && !conv_changed && !mutation.conv_content.is_empty() {
+                    // Prevent unredacted `conv_content` from shadowing a
+                    // redacted `content` when a filter only rewrites `content`.
+                    mutation.conv_content.clear();
+                    any_conv_mutated = true;
+                }
+                if conv_changed {
+                    any_conv_mutated = true;
+                }
                 if changed {
                     any_mutated = true;
                     let code = mutation
@@ -152,6 +171,7 @@ pub(crate) fn apply_tool_output_filters(
             }
             Err(error) => {
                 any_mutated = true;
+                any_conv_mutated = true;
                 mutation.content = format!(
                     "Error: tool output blocked by policy filter '{}' (fail-closed): {error:#}",
                     filter.id()
@@ -179,6 +199,7 @@ pub(crate) fn apply_tool_output_filters(
         mutation.conv_content,
         mutation.structured_value,
         any_mutated,
+        any_conv_mutated,
         effects,
     )
 }
@@ -252,42 +273,60 @@ pub(super) fn format_dispatched_result(
             file_summary_metrics,
         },
     );
-    let (filtered_composed, mut conv_content, _, output_mutated, policy_effects) =
-        apply_tool_output_filters(
-            ctx,
-            crate::tools::rim_hooks::ToolOutputFilterContext {
-                session_id: &ctx.session_id,
-                call_id: &call.id,
-                tool_name: &call.name,
-                is_sub_agent: ctx.is_sub_agent,
-                is_ptc_nested: false,
-                succeeded: success,
-            },
-            composed,
-            conv_content,
-            None,
-        );
-    if output_mutated && call.name == "Read" {
-        invalidate_read_snapshot_if_needed(
-            ctx,
-            call,
-            memo_candidate.as_ref().map(|c| c.path.as_path()),
-        );
-    } else if let Some(candidate) = memo_candidate
-        && filtered_composed.len() <= ctx.tool_config.tool_result_max_bytes
-    {
-        ctx.memo_record(
-            &candidate.path,
-            candidate.raw,
-            candidate.start_line,
-            candidate.end_line,
-            candidate.content_hash,
-        );
-    }
-    for effect in &policy_effects {
-        crate::tools::runner::merge_policy_effect_metadata(&mut state_metadata, effect);
-    }
+    let composed = if is_bash {
+        strip_bash_ansi(&composed)
+    } else {
+        composed
+    };
     let needs_finalization = plan_command.is_some() || spawns_sub_agent;
+    let (filtered_composed, mut conv_content, conv_mutated, policy_effects) = if needs_finalization
+    {
+        // Deferred tools (`Plan*` / `SubAgent`) are filtered once in
+        // `finalize_deferred_results` after state/sub-agent resolution.
+        (composed, conv_content, false, Vec::new())
+    } else {
+        let (filtered_composed, conv_content, _, output_mutated, conv_mutated, policy_effects) =
+            apply_tool_output_filters(
+                ctx,
+                crate::tools::rim_hooks::ToolOutputFilterContext {
+                    session_id: &ctx.session_id,
+                    call_id: &call.id,
+                    tool_name: &call.name,
+                    is_sub_agent: ctx.is_sub_agent,
+                    is_ptc_nested: false,
+                    succeeded: success,
+                },
+                composed,
+                conv_content,
+                None,
+            );
+        if output_mutated && call.name == "Read" {
+            invalidate_read_snapshot_if_needed(
+                ctx,
+                call,
+                memo_candidate.as_ref().map(|c| c.path.as_path()),
+            );
+        } else if let Some(candidate) = memo_candidate
+            && filtered_composed.len() <= ctx.tool_config.tool_result_max_bytes
+        {
+            ctx.memo_record(
+                &candidate.path,
+                candidate.raw,
+                candidate.start_line,
+                candidate.end_line,
+                candidate.content_hash,
+            );
+        }
+        for effect in &policy_effects {
+            crate::tools::runner::merge_policy_effect_metadata(&mut state_metadata, effect);
+        }
+        (
+            filtered_composed,
+            conv_content,
+            conv_mutated,
+            policy_effects,
+        )
+    };
     let formatted = if needs_finalization {
         FormattedToolOutput {
             content: filtered_composed,
@@ -303,7 +342,7 @@ pub(super) fn format_dispatched_result(
     };
 
     let final_output = if is_bash {
-        filter_bash_noise(&formatted.content)
+        compress_repeated_lines(&formatted.content)
     } else {
         formatted.content
     };
@@ -311,9 +350,13 @@ pub(super) fn format_dispatched_result(
     // Edit diagnostics are continuation state, not a terminal-only summary:
     // the next model request needs new tags, changed lines, warnings and diffs.
     // Use the already size-protected/artifact-spilled output for both success
-    // and failure so conversation and UI cannot diverge or bypass the limit.
-    if call.name == "Edit" {
+    // and failure so conversation and UI cannot diverge or bypass the limit,
+    // unless an output filter explicitly customized `conv_content`.
+    if call.name == "Edit" && !conv_mutated {
         conv_content = final_output.clone();
+    } else if !conv_content.is_empty() && conv_content.len() > ctx.tool_config.tool_result_max_bytes
+    {
+        conv_content = format_tool_result(&conv_content, ctx.tool_config.tool_result_max_bytes);
     }
 
     // Signals collected later by TurnExecutor (needs shared SignalCollector for EditLoop)
@@ -416,7 +459,12 @@ pub(super) fn format_nested_dispatched_result(
             file_summary_metrics,
         },
     );
-    let (filtered_composed, _, structured_value, output_mutated, policy_effects) =
+    let composed = if is_bash {
+        strip_bash_ansi(&composed)
+    } else {
+        composed
+    };
+    let (filtered_composed, _, structured_value, output_mutated, _, policy_effects) =
         apply_tool_output_filters(
             ctx,
             crate::tools::rim_hooks::ToolOutputFilterContext {
@@ -449,7 +497,7 @@ pub(super) fn format_nested_dispatched_result(
         );
     }
     let rendered_text = if is_bash {
-        filter_bash_noise(&filtered_composed)
+        compress_repeated_lines(&filtered_composed)
     } else {
         filtered_composed
     };
@@ -712,12 +760,12 @@ static RE_ANSI_ESCAPE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::
     .expect("valid ANSI regex")
 });
 
-pub(super) fn filter_bash_noise(s: &str) -> String {
-    // Strip ANSI escape sequences
-    let no_ansi = RE_ANSI_ESCAPE.replace_all(s, "");
+pub(super) fn strip_bash_ansi(s: &str) -> String {
+    RE_ANSI_ESCAPE.replace_all(s, "").into_owned()
+}
 
-    // Compress consecutive identical lines
-    let lines: Vec<&str> = no_ansi.lines().collect();
+pub(super) fn compress_repeated_lines(s: &str) -> String {
+    let lines: Vec<&str> = s.lines().collect();
     let mut out = Vec::new();
     let mut repeat_count: usize = 0;
     for i in 0..lines.len() {
@@ -735,6 +783,12 @@ pub(super) fn filter_bash_noise(s: &str) -> String {
         out.push(format!("  [previous line repeated {} times]", repeat_count));
     }
     out.join("\n")
+}
+
+#[cfg(test)]
+pub(super) fn filter_bash_noise(s: &str) -> String {
+    let no_ansi = strip_bash_ansi(s);
+    compress_repeated_lines(&no_ansi)
 }
 
 #[cfg(test)]

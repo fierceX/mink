@@ -470,6 +470,7 @@ async fn harness_inner_ext(
             environment_home: None,
             cwd: cwd.clone(),
             session_id: "regression".into(),
+            scope_path: Arc::from("primary"),
             session_layout: paths::SessionLayout::ProjectScoped,
             resolved_paths: None,
             api_url,

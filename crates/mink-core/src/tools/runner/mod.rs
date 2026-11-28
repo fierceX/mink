@@ -385,7 +385,10 @@ pub(super) fn metadata_for_tool(
     if let Some(tool) = tools.iter().find(|t| t.metadata().name == name) {
         return Some(tool.metadata());
     }
-    ctx.tool_surface.get(name).map(|tool| tool.metadata.clone())
+    ctx.tool_surface
+        .get(name)
+        .or_else(|| ctx.tool_surface.programmatic_get(name))
+        .map(|tool| tool.metadata.clone())
 }
 
 #[allow(unused_imports)]

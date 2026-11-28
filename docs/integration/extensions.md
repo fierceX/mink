@@ -1,6 +1,6 @@
 # 扩展契约
 
-> 更新日期：2026-10-19
+> 更新日期：2026-11-28
 
 LLM backend、只读 VFS 与初始化扩展。
 
@@ -120,8 +120,8 @@ let runtime = AgentRuntime::start(
 
 ## 初始化与策略扩展
 
-- **启动与观察组合**：宿主可注册多个 `PostInitHook`（按序 fail-closed 执行）、多个 `SessionEventSink`（读锁外快照派发）、多个 `TurnPolicyProvider`（`ToolExecutionMask` 取严格交集、`ToolCallObserver` 组合触发，最多允许一个 `ToolEffectJournal`），以及 `RuntimePlugin` 与 LIFO `teardown` 回调。
-- **运行期工具策略接缝**：`ToolExecutionGate`（异步 bail，超时/报错/关闭均 fail-closed 为 `ToolBlocker::Policy`）覆盖直调、PTC 嵌套与子代理；`ToolOutputFilter`（同步脱敏/改写，在 `artifact://` 落盘前运行，改写 `Read` 自动失效 `FileSnapshotStore` 与 `ReadMemo`）。策略拒绝与输出改写均同步写入关键事件 `EventLog::PolicyEffect` 与 `_mink.policy_effect`。
-- **可选声明式外环 (`crates/mink-rim`)**：在 `mink-core` 接缝之上按需提供 `Scope`/`Disposer`、`SeatRegistry<P>` 三态仲裁与 `RimProfile`/`RimBundle`/`RuntimeAssembler`（含 `RegistrationGuard` 绑定作用域零残留卸载）。
+- **启动与观察组合**：宿主可注册多个 `PostInitHook`（按序 fail-closed 执行）、多个 `SessionEventSink`（读锁外快照派发）、多个 `TurnPolicyProvider`（`ToolExecutionMask` 取严格交集、`ToolCallObserver` 组合触发，最多允许一个 `ToolEffectJournal`），以及零配置纯 Rust 快捷入口 `RuntimePlugin` 与 LIFO `on_closing`/`teardown` 回调。
+- **运行期策略与作用域隔离**：`ToolExecutionGate`（异步 bail，超时/报错/关闭均 fail-closed 为 `ToolBlocker::Policy`）覆盖直调、内部 verifier、PTC 嵌套与子代理；`ToolOutputFilter`（同步脱敏/改写，在 Bash ANSI 清洗后、`artifact://` 落盘前运行，改写 `Read` 自动失效 `FileSnapshotStore` 与 `ReadMemo`）；`ModelRequestHook`（异步请求前注入单次 `EphemeralContextBlock`，不改写 `ImmutablePrefix` 且不持久化到 `conversation.jsonl`，超时/报错 fail-closed）。以上扩展与 `SessionEventSink` 均支持按路径段前缀（`scopes_related`）隔离主代理（`primary/...`）、子代理（`subagent/<id>`）或全局作用域，并产出关键事件 `EventLog::PolicyEffect`（工具阶段同时写入 `_mink.policy_effect`）。
+- **可选声明式外环 (`crates/mink-rim`)**：在 `mink-core` 接缝之上按需提供 `Scope`/`Disposer`（联动 `on_closing`/`teardown`）、`SeatRegistry<P>`/`SeatHub`（fail-closed 去重与三态仲裁）与 `RimProfile`/`RimBundle`/`RuntimeAssembler`（带 `RegistrationGuard` 作用域隔离零残留卸载）。
 
 完整可运行扩展见 [custom_llm_backend.rs](../../crates/mink-core/examples/custom_llm_backend.rs)、[redb_vfs.rs](../../crates/mink-core/examples/redb_vfs.rs) 和 [web_api.rs](../../crates/mink-core/examples/web_api.rs)。

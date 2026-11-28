@@ -35,6 +35,7 @@ pub struct AgentContextBuild {
     pub environment_home: Option<PathBuf>,
     pub cwd: PathBuf,
     pub session_id: String,
+    pub scope_path: Arc<str>,
     pub session_layout: SessionLayout,
     pub resolved_paths: Option<paths::Paths>,
     pub api_url: String,
@@ -212,6 +213,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
             event_log_writer.clone(),
             params.session_event_sinks.clone(),
         )?
+        .with_scope_path(params.scope_path.clone())
         .with_fault(persistence_fault.clone())
         .with_checkpoint_providers(params.checkpoint_providers)
         .with_budget_check(params.budget_check.clone()),
@@ -300,6 +302,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
             prefix_build_lock: tokio::sync::Mutex::new(()),
             stream_flush_last: Mutex::new(None),
         },
+        scope_path: params.scope_path,
         lifecycle: params.lifecycle,
     });
     ctx.log_event(crate::events::EventLog::ToolSurface {

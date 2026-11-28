@@ -1,15 +1,17 @@
 use anyhow::{Result, anyhow};
 use mink::runtime::ext::{
-    ReadEvidenceContext, ReadObservation, ToolCallObserver, ToolEffectJournal, ToolExecutionMask,
-    TurnPolicyProvider,
+    InternalTurnPolicy, InternalTurnRequest, ReadEvidenceContext, ReadObservation,
+    ToolCallObserver, ToolEffectJournal, ToolExecutionMask, TurnPolicyProvider,
 };
 use mink::runtime::ptc::{PtcBackendKind, PtcMode};
 use mink::runtime::{
-    AgentOptions, AgentRuntime, AgentRuntimeHandle, CancellationToken, LlmBackend, LlmEvent,
-    LlmRequest, LlmResponseStream, LlmStopEvent, LlmTextEvent, LlmToolCallEvent, PostInitContext,
-    PostInitHook, RuntimeError, SessionEvent, SessionEventSink, ToolExecutionGate,
-    ToolGateDecision, ToolGateRequest, ToolOutputFilter, ToolOutputFilterContext,
-    ToolOutputMutation, TurnStatus,
+    AgentOptions, AgentRuntime, AgentRuntimeHandle, AgentTool, ApprovalTier, CancellationToken,
+    LlmBackend, LlmEvent, LlmRequest, LlmResponseStream, LlmStopEvent, LlmTextEvent,
+    LlmToolCallEvent, ModelRequestHook, ModelRequestHookContext, ModelRequestPatch,
+    PostInitContext, PostInitHook, RuntimeError, SessionEvent, SessionEventSink, ToolDefinition,
+    ToolError, ToolExecutionContext, ToolExecutionGate, ToolExecutionMode, ToolGateDecision,
+    ToolGateRequest, ToolOutput, ToolOutputFilter, ToolOutputFilterContext, ToolOutputMutation,
+    ToolPtcExposure, TurnStatus,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
@@ -831,5 +833,713 @@ async fn output_filter_redacts_before_artifact_spill_and_invalidates_read_snapsh
 
     let _ = std::fs::remove_dir_all(home.parent().unwrap());
     let _ = std::fs::remove_dir_all(home_fail.parent().unwrap());
+    Ok(())
+}
+
+struct EditConvFilter;
+
+impl ToolOutputFilter for EditConvFilter {
+    fn id(&self) -> &str {
+        "edit-conv-customizer"
+    }
+
+    fn filter(
+        &self,
+        ctx: &ToolOutputFilterContext<'_>,
+        output: &mut ToolOutputMutation,
+    ) -> Result<()> {
+        if ctx.tool_name == "PlanDraft" && output.content.contains("Plan draft saved.") {
+            output.content = output
+                .content
+                .replace("Plan draft saved.", "Plan draft saved [FILTERED].");
+            output.mark_mutated("PLAN_FILTERED", None);
+        }
+        if ctx.tool_name == "Edit" && ctx.succeeded {
+            output.conv_content = "[CONV_REDACTED_EDIT]".to_string();
+            output.mark_mutated("EDIT_CONV_REDACTED", None);
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn deferred_plan_filtered_once_bash_ansi_redacted_and_edit_conv_preserved() -> Result<()> {
+    let (home, cwd) = unique_pair("deferred-ansi-edit");
+    std::fs::write(cwd.join("edit_me.txt"), "line one\n")?;
+
+    let backend = Arc::new(ScriptedBackend::new(vec![
+        // 1. PlanDraft (deferred finalization) -> must filter ONCE
+        tool_stop(vec![tool_call(
+            "PlanDraft",
+            "plan-1",
+            serde_json::json!({
+                "content": "Plan step 1"
+            }),
+        )]),
+        // 2. Bash printing ANSI-wrapped SECRET_TOKEN_XYZ (constructed at runtime so input command doesn't embed it) -> ANSI stripped before filter
+        tool_stop(vec![tool_call(
+            "Bash",
+            "bash-ansi-1",
+            serde_json::json!({
+                "command": "printf '\\033[31m%s%s\\033[0m\\n' 'SECRET_' 'TOKEN_XYZ'"
+            }),
+        )]),
+        // 3. Read edit_me.txt first so Edit is authorized cleanly
+        tool_stop(vec![tool_call(
+            "Read",
+            "read-edit-1",
+            serde_json::json!({"path": "edit_me.txt"}),
+        )]),
+        // 4. Edit edit_me.txt in Replace mode
+        tool_stop(vec![tool_call(
+            "Edit",
+            "edit-1",
+            serde_json::json!({
+                "path": "edit_me.txt",
+                "edits": [{"old_text": "line one", "new_text": "line two"}]
+            }),
+        )]),
+        text_stop("done"),
+    ]));
+
+    let rt = AgentRuntime::start(
+        AgentOptions::new(&home, &cwd)
+            .with_api_key("test-key")
+            .with_base_url("https://example.invalid/v1")
+            .with_model("flash")
+            .with_max_context_tokens(1_000_000)
+            .with_tool_options(mink::runtime::ToolOptions {
+                edit_mode: mink::runtime::EditMode::Replace,
+                ..Default::default()
+            })
+            .with_llm_backend(backend)
+            .with_tool_output_filter(Arc::new(SecretRedactingFilter))
+            .with_tool_output_filter(Arc::new(EditConvFilter)),
+    )
+    .await?;
+    let info = rt.session_info().clone();
+    assert_eq!(rt.run_turn("check filters").await?.status, TurnStatus::Ok);
+    rt.shutdown().await?;
+
+    let events = std::fs::read_to_string(&info.events_path)?;
+    let plan_effects = events
+        .lines()
+        .filter(|line| {
+            line.contains("\"type\":\"policy_effect\"") && line.contains("\"call_id\":\"plan-1\"")
+        })
+        .count();
+    assert_eq!(
+        plan_effects, 1,
+        "deferred PlanDraft must be filtered exactly once, got {plan_effects}: {events}"
+    );
+
+    let conv = std::fs::read_to_string(&info.conversation_path)?;
+    assert!(
+        !conv.contains("SECRET_TOKEN_XYZ"),
+        "ANSI-wrapped secret must be redacted before conversation persistence: {conv}"
+    );
+    assert!(
+        conv.contains("[REDACTED]"),
+        "expected redacted placeholder in conversation: {conv}"
+    );
+    assert!(
+        conv.contains("[CONV_REDACTED_EDIT]"),
+        "Edit custom conv_content from filter must not be overwritten: {conv}"
+    );
+    let plan_line = conv
+        .lines()
+        .find(|line| line.contains("\"tool_use_id\":\"plan-1\""))
+        .expect("plan-1 tool_result line present");
+    let plan_json: Value = serde_json::from_str(plan_line)?;
+    assert_eq!(
+        plan_json["content"][0]["_mink"]["policy_effects"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "plan-1 _mink.policy_effects must have exactly 1 entry: {plan_line}"
+    );
+
+    let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    Ok(())
+}
+
+struct GateBatchInterruptSpy {
+    saw_second_read: Arc<AtomicUsize>,
+    saw_bash: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl ToolExecutionGate for GateBatchInterruptSpy {
+    fn id(&self) -> &str {
+        "batch-interrupt-spy"
+    }
+
+    async fn check(
+        &self,
+        req: &ToolGateRequest<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<ToolGateDecision> {
+        if req.call_id == "r1" {
+            return Ok(ToolGateDecision::Allow);
+        }
+        if req.call_id == "r2" {
+            self.saw_second_read.fetch_add(1, Ordering::SeqCst);
+            cancel.cancelled().await;
+            return Ok(ToolGateDecision::Deny {
+                code: "UNEXPECTED".into(),
+                reason: "should be interrupted".into(),
+            });
+        }
+        self.saw_bash.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolGateDecision::Allow)
+    }
+}
+
+struct CountingPolicyProvider {
+    allowed: Vec<String>,
+    observer_calls: Arc<Mutex<Vec<String>>>,
+    reads_finished: Arc<AtomicUsize>,
+}
+
+impl TurnPolicyProvider for CountingPolicyProvider {
+    fn ordinary_turn_mask(&self) -> Option<ToolExecutionMask> {
+        Some(ToolExecutionMask::allow_only(self.allowed.iter().cloned()))
+    }
+
+    fn ordinary_tool_observer(&self) -> Option<Arc<dyn ToolCallObserver>> {
+        Some(Arc::new(ObserverImpl {
+            observed: Arc::clone(&self.observer_calls),
+            reads_finished: Arc::clone(&self.reads_finished),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn batch_gate_interrupt_short_circuits_unstarted_reads_and_subsequent_calls() -> Result<()> {
+    let (home, cwd) = unique_pair("batch-interrupt");
+    std::fs::write(cwd.join("a.txt"), "alpha\n")?;
+    std::fs::write(cwd.join("b.txt"), "beta\n")?;
+
+    let saw_second_read = Arc::new(AtomicUsize::new(0));
+    let saw_bash = Arc::new(AtomicUsize::new(0));
+    let observer_calls = Arc::new(Mutex::new(Vec::new()));
+    let reads_finished = Arc::new(AtomicUsize::new(0));
+
+    let backend = Arc::new(ScriptedBackend::new(vec![tool_stop(vec![
+        tool_call("Read", "r1", serde_json::json!({"path": "a.txt"})),
+        tool_call("Read", "r2", serde_json::json!({"path": "b.txt"})),
+        tool_call("Bash", "b3", serde_json::json!({"command": "echo nope"})),
+    ])]));
+
+    let rt = AgentRuntime::start(
+        AgentOptions::new(&home, &cwd)
+            .with_api_key("test-key")
+            .with_base_url("https://example.invalid/v1")
+            .with_model("flash")
+            .with_max_context_tokens(1_000_000)
+            .with_llm_backend(backend)
+            .with_turn_policy(Arc::new(CountingPolicyProvider {
+                allowed: vec!["Read".into(), "Bash".into()],
+                observer_calls: Arc::clone(&observer_calls),
+                reads_finished: Arc::clone(&reads_finished),
+            }))
+            .with_tool_execution_gate(Arc::new(GateBatchInterruptSpy {
+                saw_second_read: Arc::clone(&saw_second_read),
+                saw_bash: Arc::clone(&saw_bash),
+            })),
+    )
+    .await?;
+
+    let handle = rt.handle();
+    let seen_flag = Arc::clone(&saw_second_read);
+    let interrupt_task = tokio::spawn(async move {
+        while seen_flag.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        handle.interrupt_current_turn();
+    });
+
+    let outcome = tokio::time::timeout(Duration::from_secs(3), rt.run_turn("batch"))
+        .await
+        .expect("interrupt must unblock batch")?;
+    interrupt_task.await?;
+    assert_eq!(outcome.status, TurnStatus::Interrupted);
+    let info = rt.session_info().clone();
+    rt.shutdown().await?;
+
+    // r1's Read execution was short-circuited before text/observer dispatch,
+    // and b3 never even entered prepare_call / gate!
+    assert_eq!(reads_finished.load(Ordering::SeqCst), 0);
+    assert_eq!(saw_bash.load(Ordering::SeqCst), 0);
+    assert!(
+        !observer_calls.lock().unwrap().iter().any(|t| t == "Bash"),
+        "Bash after interrupted Read batch must not run prepare_call: {:?}",
+        observer_calls.lock().unwrap()
+    );
+    let conv = std::fs::read_to_string(&info.conversation_path)?;
+    assert!(!conv.contains("alpha"));
+
+    let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    Ok(())
+}
+
+type CapturedRequestList = Arc<Mutex<Vec<(String, Vec<Value>, Vec<Value>)>>>;
+
+struct CapturingLlmBackend {
+    scripts: Mutex<VecDeque<Vec<LlmEvent>>>,
+    seen_requests: CapturedRequestList,
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for CapturingLlmBackend {
+    fn name(&self) -> &str {
+        "capturing"
+    }
+
+    async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream> {
+        self.seen_requests.lock().unwrap().push((
+            request.system_prompt.to_string(),
+            request.tools.as_ref().clone(),
+            request.messages.as_ref().clone(),
+        ));
+        let events = self
+            .scripts
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| anyhow!("out of scripts"))?;
+        let items: Vec<Result<LlmEvent>> = events.into_iter().map(Ok).collect();
+        Ok(LlmResponseStream {
+            events: Box::pin(futures::stream::iter(items)),
+            attempt_count: 1,
+        })
+    }
+}
+
+struct EphemeralHintHook {
+    id: &'static str,
+    tag: &'static str,
+    hint: String,
+}
+
+#[async_trait::async_trait]
+impl ModelRequestHook for EphemeralHintHook {
+    fn id(&self) -> &str {
+        self.id
+    }
+
+    async fn before_request(
+        &self,
+        _ctx: &ModelRequestHookContext<'_>,
+        patch: &mut ModelRequestPatch,
+        _cancel: &CancellationToken,
+    ) -> Result<()> {
+        patch.push_ephemeral_block(self.tag, self.hint.clone());
+        patch.mark_mutated("EPHEMERAL_HINT_ADDED", Some("policy reminder".into()));
+        Ok(())
+    }
+}
+
+struct FailingModelHook;
+
+#[async_trait::async_trait]
+impl ModelRequestHook for FailingModelHook {
+    fn id(&self) -> &str {
+        "failing-model-hook"
+    }
+
+    async fn before_request(
+        &self,
+        _ctx: &ModelRequestHookContext<'_>,
+        _patch: &mut ModelRequestPatch,
+        _cancel: &CancellationToken,
+    ) -> Result<()> {
+        anyhow::bail!("model hook unavailable")
+    }
+}
+
+#[tokio::test]
+async fn model_request_hook_keeps_prefix_and_history_clean_and_fails_closed() -> Result<()> {
+    let (home, cwd) = unique_pair("model-hook");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let backend = Arc::new(CapturingLlmBackend {
+        scripts: Mutex::new(vec![text_stop("ok")].into_iter().collect()),
+        seen_requests: Arc::clone(&seen),
+    });
+
+    let rt = AgentRuntime::start(
+        AgentOptions::new(&home, &cwd)
+            .with_api_key("test-key")
+            .with_base_url("https://example.invalid/v1")
+            .with_model("flash")
+            .with_max_context_tokens(1_000_000)
+            .with_llm_backend(backend)
+            .with_model_request_hook(Arc::new(EphemeralHintHook {
+                id: "hint-hook",
+                tag: "live-rule",
+                hint: "EPHEMERAL_POLICY_HINT_123".into(),
+            })),
+    )
+    .await?;
+    assert_eq!(rt.run_turn("hello").await?.status, TurnStatus::Ok);
+    let info = rt.session_info().clone();
+    rt.shutdown().await?;
+
+    {
+        let reqs = seen.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        let (sys, tools, msgs) = &reqs[0];
+        assert!(!sys.contains("EPHEMERAL_POLICY_HINT_123"));
+        assert!(!serde_json::to_string(tools)?.contains("EPHEMERAL_POLICY_HINT_123"));
+        assert!(
+            msgs.iter()
+                .any(|m| m.to_string().contains("EPHEMERAL_POLICY_HINT_123"))
+        );
+    }
+
+    let conv = std::fs::read_to_string(&info.conversation_path)?;
+    assert!(!conv.contains("EPHEMERAL_POLICY_HINT_123"));
+
+    let events = std::fs::read_to_string(&info.events_path)?;
+    assert!(events.contains("\"anchor\":\"before_model_request\""));
+    assert!(events.contains("\"action\":\"inject\""));
+    assert!(events.contains("EPHEMERAL_HINT_ADDED"));
+
+    // Failing ModelRequestHook must fail closed BEFORE calling LlmBackend::stream.
+    let (home_f, cwd_f) = unique_pair("model-hook-fail");
+    let seen_f = Arc::new(Mutex::new(Vec::new()));
+    let fail_rt = AgentRuntime::start(
+        AgentOptions::new(&home_f, &cwd_f)
+            .with_api_key("test-key")
+            .with_base_url("https://example.invalid/v1")
+            .with_model("flash")
+            .with_max_context_tokens(1_000_000)
+            .with_llm_backend(Arc::new(CapturingLlmBackend {
+                scripts: Mutex::new(vec![text_stop("should-not-run")].into_iter().collect()),
+                seen_requests: Arc::clone(&seen_f),
+            }))
+            .with_model_request_hook(Arc::new(FailingModelHook)),
+    )
+    .await?;
+    let fail_info = fail_rt.session_info().clone();
+    let fail_outcome = fail_rt.run_turn("hello").await?;
+    assert_eq!(fail_outcome.status, TurnStatus::Failed);
+    fail_rt.shutdown().await?;
+    assert!(seen_f.lock().unwrap().is_empty());
+    let fail_events = std::fs::read_to_string(&fail_info.events_path)?;
+    assert!(fail_events.contains("MODEL_REQUEST_HOOK_ERROR"));
+
+    let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    let _ = std::fs::remove_dir_all(home_f.parent().unwrap());
+    Ok(())
+}
+
+#[tokio::test]
+async fn scope_origin_isolates_primary_from_subagent_and_for_scope_composes_policies() -> Result<()>
+{
+    let (home, cwd) = unique_pair("scope-for-scope");
+    std::fs::write(cwd.join("note.txt"), "hello\n")?;
+
+    let seen_reqs = Arc::new(Mutex::new(Vec::new()));
+    let backend = Arc::new(CapturingLlmBackend {
+        scripts: Mutex::new(
+            vec![
+                // Turn 1: primary -> SubAgent
+                tool_stop(vec![tool_call(
+                    "SubAgent",
+                    "sub-call",
+                    serde_json::json!({
+                        "prompt": "run primary_only command",
+                        "description": "subtask"
+                    }),
+                )]),
+                // SubAgent runs Bash("echo primary_only")
+                tool_stop(vec![tool_call(
+                    "Bash",
+                    "sub-bash",
+                    serde_json::json!({"command": "echo primary_only"}),
+                )]),
+                text_stop("sub done"),
+                text_stop("primary done"),
+                // Turn 2 (internal scoped turn): Read (allowed by intersection) + Glob (blocked by intersection)
+                tool_stop(vec![
+                    tool_call("Read", "s-read", serde_json::json!({"path": "note.txt"})),
+                    tool_call("Glob", "s-glob", serde_json::json!({"pattern": "*.txt"})),
+                ]),
+                text_stop("internal done"),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        seen_requests: Arc::clone(&seen_reqs),
+    });
+
+    let global_sink_events = Arc::new(AtomicUsize::new(0));
+    let provider_obs = Arc::new(Mutex::new(Vec::new()));
+    let provider_reads = Arc::new(AtomicUsize::new(0));
+    let scope_obs = Arc::new(Mutex::new(Vec::new()));
+    let scope_reads = Arc::new(AtomicUsize::new(0));
+
+    let rt = AgentRuntime::start(
+        AgentOptions::new(&home, &cwd)
+            .with_api_key("test-key")
+            .with_base_url("https://example.invalid/v1")
+            .with_model("flash")
+            .with_max_context_tokens(1_000_000)
+            .with_llm_backend(backend)
+            .with_turn_policy(Arc::new(CountingPolicyProvider {
+                allowed: vec![
+                    "Read".into(),
+                    "Glob".into(),
+                    "Bash".into(),
+                    "SubAgent".into(),
+                ],
+                observer_calls: Arc::clone(&provider_obs),
+                reads_finished: Arc::clone(&provider_reads),
+            })),
+    )
+    .await?;
+    assert_eq!(rt.handle().ext().scope_path(), "primary");
+
+    let g_sink = rt.handle().ext().register_session_event_sink_scoped(
+        "",
+        Arc::new(CountingSink(Arc::clone(&global_sink_events))),
+    );
+    let g_gate = rt.handle().ext().register_tool_execution_gate_scoped(
+        "primary/task-1",
+        Arc::new(BlockingBashGate {
+            id: "primary-only-gate",
+            seen_ptc_flags: Arc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    let g_hook = rt.handle().ext().register_model_request_hook_scoped(
+        "primary/task-1",
+        Arc::new(EphemeralHintHook {
+            id: "primary-hint",
+            tag: "p",
+            hint: "PRIMARY_ONLY_HINT".into(),
+        }),
+    );
+    let g_foreign = rt.handle().ext().register_model_request_hook_scoped(
+        "subagent/other",
+        Arc::new(EphemeralHintHook {
+            id: "foreign-sub-hint",
+            tag: "f",
+            hint: "FOREIGN_SUB_HINT".into(),
+        }),
+    );
+
+    assert_eq!(rt.run_turn("delegate").await?.status, TurnStatus::Ok);
+    assert!(global_sink_events.load(Ordering::SeqCst) > 0);
+    drop((g_gate, g_hook, g_foreign, g_sink));
+
+    // Scoped InternalTurnRequest must INTERSECT tool_mask and COMPOSE tool_observer
+    // with runtime TurnPolicyProvider (never silently shadow it).
+    let internal_req =
+        InternalTurnRequest::new("audit", "scoped turn").with_policy(InternalTurnPolicy {
+            tool_mask: Some(ToolExecutionMask::allow_only(["Read", "Grep"])),
+            tool_observer: Some(Arc::new(ObserverImpl {
+                observed: Arc::clone(&scope_obs),
+                reads_finished: Arc::clone(&scope_reads),
+            })),
+            ..Default::default()
+        });
+    let internal_outcome = rt
+        .handle()
+        .ext()
+        .stream_internal_turn(internal_req)?
+        .outcome()
+        .await?;
+    assert_eq!(internal_outcome.status, TurnStatus::Ok);
+
+    let info = rt.session_info().clone();
+    rt.shutdown().await?;
+
+    let reqs = seen_reqs.lock().unwrap();
+    // Primary rounds (0, 3) saw PRIMARY_ONLY_HINT; SubAgent rounds (1, 2) did NOT.
+    assert!(
+        reqs[0]
+            .2
+            .iter()
+            .any(|m| m.to_string().contains("PRIMARY_ONLY_HINT"))
+    );
+    assert!(
+        !reqs[1]
+            .2
+            .iter()
+            .any(|m| m.to_string().contains("PRIMARY_ONLY_HINT"))
+    );
+    assert!(
+        !reqs[2]
+            .2
+            .iter()
+            .any(|m| m.to_string().contains("PRIMARY_ONLY_HINT"))
+    );
+    assert!(
+        reqs[3]
+            .2
+            .iter()
+            .any(|m| m.to_string().contains("PRIMARY_ONLY_HINT"))
+    );
+    for (_, _, msgs) in reqs.iter() {
+        assert!(
+            !msgs
+                .iter()
+                .any(|m| m.to_string().contains("FOREIGN_SUB_HINT"))
+        );
+    }
+
+    // Both TurnPolicyProvider and InternalTurnPolicy observers ran on `Read` (`Glob` was blocked by mask intersection).
+    assert_eq!(scope_reads.load(Ordering::SeqCst), 1);
+    assert!(provider_reads.load(Ordering::SeqCst) >= 1);
+    let conv = std::fs::read_to_string(&info.conversation_path)?;
+    assert!(conv.contains("\"reason\":\"tool_surface\"") && conv.contains("s-glob"));
+
+    let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    Ok(())
+}
+
+struct ReadOnlyProgrammaticTool;
+
+#[async_trait::async_trait]
+impl AgentTool for ReadOnlyProgrammaticTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "InspectCustom",
+            "Read-only programmatic helper",
+            serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false}),
+        )
+        .with_approval(ApprovalTier::Read)
+        .with_mutating(false)
+        .with_execution(ToolExecutionMode::ParallelReadOnly)
+        .with_ptc_exposure(ToolPtcExposure::ProgrammaticOnly)
+    }
+
+    async fn execute(
+        &self,
+        _input: Value,
+        _ctx: ToolExecutionContext,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::text("custom ok"))
+    }
+}
+
+type RecordedGateMeta = Arc<Mutex<Vec<(String, bool, ApprovalTier, bool)>>>;
+
+struct MetadataRecordingGate {
+    records: RecordedGateMeta,
+}
+
+#[async_trait::async_trait]
+impl ToolExecutionGate for MetadataRecordingGate {
+    fn id(&self) -> &str {
+        "metadata-recorder"
+    }
+
+    async fn check(
+        &self,
+        req: &ToolGateRequest<'_>,
+        _cancel: &CancellationToken,
+    ) -> Result<ToolGateDecision> {
+        self.records.lock().unwrap().push((
+            req.tool_name.to_string(),
+            req.is_ptc_nested,
+            req.approval_tier,
+            req.mutating,
+        ));
+        Ok(ToolGateDecision::Allow)
+    }
+}
+
+#[tokio::test]
+async fn ptc_programmatic_only_preserves_metadata_and_drop_lifecycle_disposes_lifo() -> Result<()> {
+    // 1. ProgrammaticOnly tool metadata check under PtcMode::Exclusive
+    let (home, cwd) = unique_pair("ptc-prog-meta");
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let backend = Arc::new(ScriptedBackend::new(vec![
+        tool_stop(vec![tool_call(
+            "RunCode",
+            "rc-prog",
+            serde_json::json!({
+                "description": "call programmatic custom tool",
+                "code": "res = await tools.InspectCustom()\nprint(res)"
+            }),
+        )]),
+        text_stop("done"),
+    ]));
+    let rt = AgentRuntime::start(
+        AgentOptions::new(&home, &cwd)
+            .with_api_key("test-key")
+            .with_base_url("https://example.invalid/v1")
+            .with_model("flash")
+            .with_max_context_tokens(1_000_000)
+            .with_ptc_mode(PtcMode::Exclusive)
+            .with_ptc_backend(PtcBackendKind::SubprocessPython)
+            .with_tool(Arc::new(ReadOnlyProgrammaticTool))
+            .with_llm_backend(backend)
+            .with_tool_execution_gate(Arc::new(MetadataRecordingGate {
+                records: Arc::clone(&records),
+            })),
+    )
+    .await?;
+    assert_eq!(rt.run_turn("run custom").await?.status, TurnStatus::Ok);
+    let handle = rt.handle();
+    rt.shutdown().await?;
+
+    // Post-shutdown registrations return noop without mutating registries.
+    let before_stats = handle.ext().tool_hook_stats();
+    let before_sinks = handle.ext().session_event_sink_count();
+    let _g1 = handle
+        .ext()
+        .register_tool_execution_gate(Arc::new(FailingGate));
+    let _g2 = handle
+        .ext()
+        .register_tool_output_filter(Arc::new(FailingFilter));
+    let _g3 = handle
+        .ext()
+        .register_model_request_hook(Arc::new(FailingModelHook));
+    let _g4 = handle
+        .ext()
+        .register_session_event_sink(Arc::new(CountingSink(Arc::new(AtomicUsize::new(0)))));
+    assert_eq!(handle.ext().tool_hook_stats(), before_stats);
+    assert_eq!(handle.ext().session_event_sink_count(), before_sinks);
+
+    {
+        let recs = records.lock().unwrap();
+        assert!(
+            recs.iter()
+                .any(|(name, nested, tier, mutating)| name == "InspectCustom"
+                    && *nested
+                    && *tier == ApprovalTier::Read
+                    && !*mutating),
+            "ProgrammaticOnly tool must preserve Read/non-mutating metadata in PTC gate: {recs:?}"
+        );
+    }
+
+    // 2. AgentRuntime::drop() without shutdown runs on_closing and teardowns in LIFO order.
+    let (home_d, cwd_d) = unique_pair("drop-lifecycle");
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let c1 = Arc::clone(&order);
+    let c2 = Arc::clone(&order);
+    let t1 = Arc::clone(&order);
+    let t2 = Arc::clone(&order);
+    let rt_drop = AgentRuntime::start(
+        AgentOptions::new(&home_d, &cwd_d)
+            .with_api_key("test-key")
+            .with_base_url("https://example.invalid/v1")
+            .with_model("flash")
+            .with_llm_backend(Arc::new(ScriptedBackend::new(vec![])))
+            .with_on_closing("c1", move || c1.lock().unwrap().push("c1"))
+            .with_on_closing("c2", move || c2.lock().unwrap().push("c2"))
+            .with_teardown("t1", move || t1.lock().unwrap().push("t1"))
+            .with_teardown("t2", move || t2.lock().unwrap().push("t2")),
+    )
+    .await?;
+    drop(rt_drop);
+    assert_eq!(order.lock().unwrap().as_slice(), &["c2", "c1", "t2", "t1"]);
+
+    let _ = std::fs::remove_dir_all(home.parent().unwrap());
+    let _ = std::fs::remove_dir_all(home_d.parent().unwrap());
     Ok(())
 }

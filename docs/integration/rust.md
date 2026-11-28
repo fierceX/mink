@@ -207,7 +207,7 @@ match outcome.failure {
 | 多模态 | `with_image_input(ImageInputCapability)` / `with_vision_models(Vec<String>)` / `with_image_limits(ImageLimitsOverrides)` |
 | 能力 | `with_mission_content()` / `with_selected_skills()` / `with_runtime_skill_content()` / `with_skill_discovery_policy()` / `with_resource_handler()` / `with_read_only_file_system()` / `with_resource_session_id()` |
 | PTC | `with_ptc()` / `with_ptc_mode()` / `with_ptc_backend()` / `with_ptc_python_executable()` / `with_ptc_timeout_secs()` / `with_ptc_max_timeout_secs()` / `with_ptc_max_parallel_sub_calls()` / `with_ptc_max_sub_calls_per_minute()` / `with_ptc_max_output_bytes()` / `with_ptc_max_message_bytes()` / `with_ptc_max_pending_calls()` / `with_ptc_stop_grace_ms()` / `with_ptc_runtime()` |
-| 扩展与策略 | `with_plugin()` / `with_tool()` / `with_turn_policy()` / `with_post_init_hook()` / `with_session_event_sink()` / `with_tool_execution_gate()` / `with_tool_output_filter()` / `with_teardown()` |
+| 扩展与策略 | `with_plugin()` / `with_tool()` / `with_turn_policy()` / `with_post_init_hook()` / `with_session_event_sink()` / `with_tool_execution_gate()` / `with_tool_output_filter()` / `with_model_request_hook()` / `with_on_closing()` / `with_teardown()` |
 | 后端 | `with_llm_backend()` / `with_sandbox()` / `with_sandbox_python()` |
 
 ### PTC 嵌入

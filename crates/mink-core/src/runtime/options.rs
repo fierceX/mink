@@ -169,6 +169,8 @@ pub struct AgentOptions {
     post_init_hooks: Vec<Arc<dyn PostInitHook>>,
     tool_execution_gates: Vec<Arc<dyn crate::tools::rim_hooks::ToolExecutionGate>>,
     tool_output_filters: Vec<Arc<dyn crate::tools::rim_hooks::ToolOutputFilter>>,
+    model_request_hooks: Vec<Arc<dyn crate::tools::rim_hooks::ModelRequestHook>>,
+    on_closing: Vec<(String, Box<dyn FnOnce() + Send>)>,
     teardowns: Vec<(String, Box<dyn FnOnce() + Send>)>,
     ptc_runtime: Option<Arc<dyn crate::ptc::PtcRuntime>>,
 }
@@ -215,6 +217,8 @@ impl AgentOptions {
             post_init_hooks: Vec::new(),
             tool_execution_gates: Vec::new(),
             tool_output_filters: Vec::new(),
+            model_request_hooks: Vec::new(),
+            on_closing: Vec::new(),
             teardowns: Vec::new(),
             ptc_runtime: None,
         }
@@ -601,6 +605,38 @@ impl AgentOptions {
         self.tool_output_filters.push(filter);
     }
 
+    /// Attach an asynchronous pre-model-request hook injecting single-request
+    /// ephemeral context blocks without modifying `ImmutablePrefix`.
+    pub fn with_model_request_hook(
+        mut self,
+        hook: Arc<dyn crate::tools::rim_hooks::ModelRequestHook>,
+    ) -> Self {
+        self.add_model_request_hook(hook);
+        self
+    }
+
+    pub fn add_model_request_hook(
+        &mut self,
+        hook: Arc<dyn crate::tools::rim_hooks::ModelRequestHook>,
+    ) {
+        self.model_request_hooks.push(hook);
+    }
+
+    /// Register a LIFO closing callback executed once when the runtime enters
+    /// the closing phase (before active turns finish draining).
+    pub fn add_on_closing(&mut self, label: impl Into<String>, f: impl FnOnce() + Send + 'static) {
+        self.on_closing.push((label.into(), Box::new(f)));
+    }
+
+    pub fn with_on_closing(
+        mut self,
+        label: impl Into<String>,
+        f: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        self.add_on_closing(label, f);
+        self
+    }
+
     /// Register a LIFO teardown callback executed on startup failure rollback,
     /// `AgentRuntime::shutdown()`, or `AgentRuntime::drop()`.
     pub fn add_teardown(&mut self, label: impl Into<String>, f: impl FnOnce() + Send + 'static) {
@@ -942,6 +978,8 @@ impl AgentOptions {
             post_init_hooks: self.post_init_hooks,
             tool_execution_gates: self.tool_execution_gates,
             tool_output_filters: self.tool_output_filters,
+            model_request_hooks: self.model_request_hooks,
+            on_closing: self.on_closing,
             teardowns: self.teardowns,
             ptc_runtime: self.ptc_runtime,
         }

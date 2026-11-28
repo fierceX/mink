@@ -133,6 +133,7 @@ pub(crate) fn resolve_tool_runtime(
 #[derive(Clone)]
 pub struct ToolContext {
     pub(crate) session_id: String,
+    pub(crate) scope_path: Arc<str>,
     pub(crate) is_sub_agent: bool,
     pub(crate) web_api_key: Option<Arc<str>>,
     pub(crate) human_web_command: bool,
@@ -210,6 +211,7 @@ impl From<&AgentSharedContext> for ToolContext {
             .expect("turn policy composition validated during context build");
         Self {
             session_id: ctx.config.session_id.clone(),
+            scope_path: ctx.scope_path.clone(),
             is_sub_agent: ctx.delegation.is_sub_agent,
             web_api_key: crate::tools::web::api_key(&ctx.config),
             human_web_command: false,
@@ -537,6 +539,7 @@ pub struct AgentSharedContext {
     pub media: TurnMediaState,
     pub delegation: DelegationContext,
     pub io: EventIoContext,
+    pub(crate) scope_path: Arc<str>,
     pub(crate) lifecycle: Arc<crate::tools::rim_hooks::RuntimeLifecycle>,
 }
 
@@ -692,9 +695,11 @@ impl AgentSharedContext {
     /// Forward one typed event to all registered live observers. Delivery is
     /// independent of `log_events`, runs outside locks, and must not affect turn state.
     fn notify_session_event(&self, event: &crate::events::EventLog) {
-        self.io
-            .session_event_sinks
-            .notify(self.config.session_id.as_str(), event);
+        self.io.session_event_sinks.notify(
+            self.config.session_id.as_str(),
+            &self.scope_path,
+            event,
+        );
     }
 
     /// Append a typed event to events.jsonl. In stream-json mode, also emit

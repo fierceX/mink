@@ -1,7 +1,28 @@
 //! Hierarchical reversible disposer scopes (`Scope` / `Disposer` / `ScopeGuard`).
 
+pub use mink::runtime::ext::scopes_related;
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+
+/// Validation error returned by [`Scope::try_fork`] when a segment is empty
+/// or contains `'/'`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeSegmentError {
+    pub segment: String,
+}
+
+impl fmt::Display for ScopeSegmentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "SCOPE_SEGMENT_INVALID: scope segment {:?} must be non-empty and must not contain '/'",
+            self.segment
+        )
+    }
+}
+
+impl std::error::Error for ScopeSegmentError {}
 
 /// Single-use reversible cleanup action.
 ///
@@ -29,20 +50,6 @@ impl From<mink::runtime::ext::RegistrationGuard> for Disposer {
     fn from(guard: mink::runtime::ext::RegistrationGuard) -> Self {
         Self::new(move || guard.unregister())
     }
-}
-
-/// Segment-aware scope path relation:
-/// - Root `""` relates to every scope.
-/// - Equal paths relate.
-/// - Strict `/` segment prefixes relate; sibling or partial-name prefixes
-///   (e.g. `"session/s1/ext/a"` vs `"session/s1/ext/a2"`) do NOT relate.
-pub fn scopes_related(a: &str, b: &str) -> bool {
-    fn is_prefix(longer: &str, shorter: &str) -> bool {
-        longer.len() > shorter.len()
-            && longer.as_bytes()[shorter.len()] == b'/'
-            && longer.starts_with(shorter)
-    }
-    a.is_empty() || b.is_empty() || a == b || is_prefix(a, b) || is_prefix(b, a)
 }
 
 struct ScopeEntry {
@@ -85,14 +92,14 @@ impl Scope {
         self.disposed.load(Ordering::SeqCst)
     }
 
-    /// Fork a child scope under `segment`.
-    ///
-    /// Panics if `segment` is empty or contains `'/'`.
-    pub fn fork(self: &Arc<Self>, segment: &str) -> Arc<Self> {
-        assert!(
-            !segment.is_empty() && !segment.contains('/'),
-            "scope segment must be non-empty and must not contain '/': {segment:?}"
-        );
+    /// Fallibly fork a child scope under `segment`, returning
+    /// [`ScopeSegmentError`] when `segment` is empty or contains `'/'`.
+    pub fn try_fork(self: &Arc<Self>, segment: &str) -> Result<Arc<Self>, ScopeSegmentError> {
+        if segment.is_empty() || segment.contains('/') {
+            return Err(ScopeSegmentError {
+                segment: segment.to_string(),
+            });
+        }
         let child_path: Arc<str> = if self.path.is_empty() {
             Arc::from(segment)
         } else {
@@ -121,6 +128,12 @@ impl Scope {
             children.push(Arc::downgrade(&child));
             drop(children);
 
+            // Re-check `self.is_closing()` after registering into `children` so a
+            // concurrent `parent.close()` can never miss this new child.
+            if self.is_closing() {
+                child.close();
+            }
+
             let mut items = self.items.lock().unwrap_or_else(|error| error.into_inner());
             prune_spent(&mut items);
             if self.disposed.load(Ordering::SeqCst) {
@@ -133,7 +146,42 @@ impl Scope {
         if let Some(disposer) = immediate {
             disposer.dispose();
         }
-        child
+        Ok(child)
+    }
+
+    /// Fork a child scope under `segment`.
+    ///
+    /// Panics if `segment` is empty or contains `'/'`. Prefer
+    /// [`Scope::try_fork`] when `segment` comes from external/untrusted input.
+    pub fn fork(self: &Arc<Self>, segment: &str) -> Arc<Self> {
+        self.try_fork(segment)
+            .expect("scope segment must be non-empty and must not contain '/'")
+    }
+
+    /// Atomically attach `disposer` only if this scope is still live (neither
+    /// `closing` nor `disposed`). If closing/disposed, executes `disposer`
+    /// immediately outside locks and returns `false`.
+    pub fn try_push_labeled(&self, label: impl Into<String>, disposer: Disposer) -> bool {
+        let label = label.into();
+        let immediate = {
+            let mut items = self.items.lock().unwrap_or_else(|error| error.into_inner());
+            prune_spent(&mut items);
+            if self.closing.load(Ordering::SeqCst) || self.disposed.load(Ordering::SeqCst) {
+                Some(disposer)
+            } else {
+                items.push(ScopeEntry {
+                    label,
+                    disposer,
+                    spent_when: None,
+                });
+                None
+            }
+        };
+        if let Some(disposer) = immediate {
+            disposer.dispose();
+            return false;
+        }
+        true
     }
 
     /// Push a labeled disposer into this scope. If the scope is already

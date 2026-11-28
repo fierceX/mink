@@ -18,8 +18,10 @@ impl ToolRunner {
         // next call and report every remaining call as explicitly not
         // executed so the tool_call/result protocol stays complete.
         let mut halted: Option<String> = None;
+        let mut gate_interrupted = false;
 
-        for call in calls {
+        let mut calls_iter = calls.into_iter();
+        while let Some(call) = calls_iter.next() {
             if halted.is_none()
                 && let Err(error) = self.ctx.persistence_fault.check()
             {
@@ -50,7 +52,22 @@ impl ToolRunner {
                     .execute_read_batch(std::mem::take(&mut read_batch), &mut image_budget)
                     .await
                 {
-                    Ok(mut batch) => results.append(&mut batch),
+                    Ok(mut batch) => {
+                        let batch_interrupted = batch
+                            .iter()
+                            .any(|r| r.status == crate::tools::metadata::ToolStatus::Interrupted);
+                        results.append(&mut batch);
+                        if batch_interrupted
+                            && (self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set())
+                        {
+                            gate_interrupted = true;
+                            results.push(interrupted_tool_result(call));
+                            for remaining in calls_iter {
+                                results.push(interrupted_tool_result(remaining));
+                            }
+                            break;
+                        }
+                    }
                     Err(FatalBatchError { error, completed }) => {
                         results.extend(completed);
                         return Err(FatalBatchError {
@@ -73,8 +90,12 @@ impl ToolRunner {
                         continue;
                     }
                     Ok(GateOutcome::Interrupted) => {
+                        gate_interrupted = true;
                         results.push(interrupted_tool_result(call));
-                        continue;
+                        for remaining in calls_iter {
+                            results.push(interrupted_tool_result(remaining));
+                        }
+                        break;
                     }
                     Err(error) => {
                         results.push(not_executed_tool_result(
@@ -119,14 +140,16 @@ impl ToolRunner {
             }
         }
 
-        match self.execute_read_batch(read_batch, &mut image_budget).await {
-            Ok(mut batch) => results.append(&mut batch),
-            Err(FatalBatchError { error, completed }) => {
-                results.extend(completed);
-                return Err(FatalBatchError {
-                    error,
-                    completed: results,
-                });
+        if !gate_interrupted {
+            match self.execute_read_batch(read_batch, &mut image_budget).await {
+                Ok(mut batch) => results.append(&mut batch),
+                Err(FatalBatchError { error, completed }) => {
+                    results.extend(completed);
+                    return Err(FatalBatchError {
+                        error,
+                        completed: results,
+                    });
+                }
             }
         }
         let pending_effects: Vec<crate::events::EventLog> = results
@@ -149,7 +172,7 @@ impl ToolRunner {
             if !result.needs_finalization {
                 continue;
             }
-            let (filtered_content, filtered_conv, _, _, policy_effects) =
+            let (filtered_content, mut filtered_conv, _, _, _, policy_effects) =
                 super::format::apply_tool_output_filters(
                     &self.ctx,
                     crate::tools::rim_hooks::ToolOutputFilterContext {
@@ -164,6 +187,12 @@ impl ToolRunner {
                     std::mem::take(&mut result.conv_content),
                     None,
                 );
+            if !filtered_conv.is_empty()
+                && filtered_conv.len() > self.ctx.tool_config.tool_result_max_bytes
+            {
+                filtered_conv =
+                    format_tool_result(&filtered_conv, self.ctx.tool_config.tool_result_max_bytes);
+            }
             result.conv_content = filtered_conv;
             for effect in &policy_effects {
                 merge_policy_effect_metadata(&mut result.state_metadata, effect);
@@ -209,7 +238,9 @@ impl ToolRunner {
         }
         let mut slots: Vec<Option<PreparedSlot>> = Vec::with_capacity(calls.len());
         let mut read_classifies = Vec::new();
-        for call in calls {
+        let mut gate_interrupted = false;
+        let mut calls_iter = calls.into_iter();
+        while let Some(call) = calls_iter.next() {
             let idx = slots.len();
             match self.prepare_call(call) {
                 PreparedCall::Immediate(result) => {
@@ -224,9 +255,15 @@ impl ToolRunner {
                             continue;
                         }
                         Ok(GateOutcome::Interrupted) => {
+                            gate_interrupted = true;
                             slots
                                 .push(Some(PreparedSlot::Immediate(interrupted_tool_result(call))));
-                            continue;
+                            for remaining in calls_iter {
+                                slots.push(Some(PreparedSlot::Immediate(interrupted_tool_result(
+                                    remaining,
+                                ))));
+                            }
+                            break;
                         }
                         Err(error) => {
                             let mut completed: Vec<ToolExecution> = slots
@@ -267,14 +304,34 @@ impl ToolRunner {
                                 };
                             crate::tools::file::classify_image_read(&ctx, &path, &selection)
                         });
-                        read_classifies.push(async move { (idx, call, join.await) });
+                        read_classifies.push((idx, call, join));
                     } else {
                         slots.push(Some(PreparedSlot::Text(call)));
                     }
                 }
             }
         }
-        for (idx, call, classified) in futures::future::join_all(read_classifies).await {
+        if gate_interrupted {
+            for (idx, call, join) in read_classifies {
+                join.abort();
+                slots[idx] = Some(PreparedSlot::Immediate(interrupted_tool_result(call)));
+            }
+            let results = slots
+                .into_iter()
+                .map(|slot| match slot.expect("every call fills a slot") {
+                    PreparedSlot::Immediate(exec) => exec,
+                    PreparedSlot::Text(call) => interrupted_tool_result(call),
+                    PreparedSlot::Image { call, .. } | PreparedSlot::ClassifyError { call, .. } => {
+                        interrupted_tool_result(call)
+                    }
+                })
+                .collect();
+            return Ok(results);
+        }
+        let classify_futs = read_classifies
+            .into_iter()
+            .map(|(idx, call, join)| async move { (idx, call, join.await) });
+        for (idx, call, classified) in futures::future::join_all(classify_futs).await {
             let slot = match classified {
                 Ok(Ok(kind)) if !matches!(kind, crate::tools::file::ImageReadKind::NotImage) => {
                     PreparedSlot::Image { call, kind }
@@ -592,15 +649,25 @@ impl ToolRunner {
             "checker tool '{}' is unavailable in resolved surface",
             call.name
         );
+        let metadata = self.metadata_for(&call.name);
+        match evaluate_tool_gates(&self.ctx, &call, metadata.as_ref(), false).await? {
+            GateOutcome::Allow => {}
+            GateOutcome::Blocked(blocked) => return Ok(*blocked),
+            GateOutcome::Interrupted => return Ok(interrupted_tool_result(call)),
+        }
         let ctx = self.ctx.clone();
         let tool_name = call.name.clone();
-        tokio::task::spawn_blocking(move || {
+        let mut exec = tokio::task::spawn_blocking(move || {
             let tool = tool_registry()
                 .iter()
                 .find(|t| t.metadata().name == tool_name);
             Self::execute_one_sync(&ctx, &call, tool.map(|t| t.as_ref()))
         })
-        .await?
+        .await??;
+        for effect in exec.policy_effects.drain(..) {
+            self.ctx.emit_policy_effect(effect).await?;
+        }
+        Ok(exec)
     }
 
     async fn dispatch_sequential(

@@ -1,12 +1,23 @@
-//! Explicit three-state single-slot provider arbitration (`SeatRegistry<P>`).
+//! Explicit fail-closed single-slot provider arbitration (`SeatRegistry<P>` &
+//! `SeatHub`).
 
 use crate::scope::{Disposer, Scope};
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeatError {
+    DuplicateProvider {
+        seat: &'static str,
+        id: String,
+    },
+    ScopeClosed {
+        seat: &'static str,
+        scope: String,
+    },
     UnknownProvider {
         seat: &'static str,
         configured: String,
@@ -24,6 +35,14 @@ pub enum SeatError {
 impl fmt::Display for SeatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DuplicateProvider { seat, id } => write!(
+                f,
+                "SEAT_PROVIDER_DUPLICATE: seat `{seat}` already has a registered provider `{id}`"
+            ),
+            Self::ScopeClosed { seat, scope } => write!(
+                f,
+                "SEAT_SCOPE_CLOSED: cannot register provider on seat `{seat}` into closing/disposed scope `{scope}`"
+            ),
             Self::UnknownProvider {
                 seat,
                 configured,
@@ -57,8 +76,9 @@ struct SeatEntry<P: ?Sized> {
     available: AvailabilityProbe<P>,
 }
 
-/// Single-slot capability registry enforcing explicit selection or unambiguous
-/// single-provider arbitration with token-guarded removal.
+/// Single-slot capability registry enforcing explicit selection, fail-closed
+/// duplicate rejection, and unambiguous single-provider arbitration with
+/// token-guarded removal.
 pub struct SeatRegistry<P: ?Sized + Send + Sync + 'static> {
     seat: &'static str,
     entries: Arc<RwLock<Vec<SeatEntry<P>>>>,
@@ -79,14 +99,16 @@ impl<P: ?Sized + Send + Sync + 'static> SeatRegistry<P> {
     }
 
     /// Register a provider under `id`, returning a token-guarded [`Disposer`].
-    /// Re-registering an existing `id` replaces the prior slot while ensuring
-    /// stale disposers cannot remove newer registrations.
+    ///
+    /// Fails closed with [`SeatError::DuplicateProvider`] if `id` is already
+    /// registered (no silent shadowing). Once the prior [`Disposer`] runs, the
+    /// same `id` may be registered again.
     pub fn register(
         &self,
         id: impl Into<String>,
         provider: Arc<P>,
         available: impl Fn(&P) -> bool + Send + Sync + 'static,
-    ) -> Disposer {
+    ) -> Result<Disposer, SeatError> {
         let id = id.into();
         let token = self.next_token.fetch_add(1, Ordering::Relaxed);
         {
@@ -94,7 +116,12 @@ impl<P: ?Sized + Send + Sync + 'static> SeatRegistry<P> {
                 .entries
                 .write()
                 .unwrap_or_else(|error| error.into_inner());
-            guard.retain(|entry| entry.id != id);
+            if guard.iter().any(|entry| entry.id == id) {
+                return Err(SeatError::DuplicateProvider {
+                    seat: self.seat,
+                    id,
+                });
+            }
             guard.push(SeatEntry {
                 token,
                 id,
@@ -103,24 +130,37 @@ impl<P: ?Sized + Send + Sync + 'static> SeatRegistry<P> {
             });
         }
         let entries = Arc::clone(&self.entries);
-        Disposer::new(move || {
+        Ok(Disposer::new(move || {
             let mut guard = entries.write().unwrap_or_else(|error| error.into_inner());
             guard.retain(|entry| entry.token != token);
-        })
+        }))
     }
 
     /// Register a provider and attach its disposer directly to `scope`.
+    /// Fails closed if `id` is duplicated or if `scope` is closing/disposed.
     pub fn register_in(
         &self,
         scope: &Scope,
         id: impl Into<String>,
         provider: Arc<P>,
         available: impl Fn(&P) -> bool + Send + Sync + 'static,
-    ) {
+    ) -> Result<(), SeatError> {
+        if scope.is_closing() || scope.is_disposed() {
+            return Err(SeatError::ScopeClosed {
+                seat: self.seat,
+                scope: scope.path().to_string(),
+            });
+        }
         let id = id.into();
         let label = format!("seat:{}:{id}", self.seat);
-        let disposer = self.register(id, provider, available);
-        scope.push_labeled(label, disposer);
+        let disposer = self.register(id, provider, available)?;
+        if !scope.try_push_labeled(label, disposer) {
+            return Err(SeatError::ScopeClosed {
+                seat: self.seat,
+                scope: scope.path().to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// Resolve a provider deterministically:
@@ -196,5 +236,77 @@ impl<P: ?Sized + Send + Sync + 'static> SeatRegistry<P> {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// Heterogeneous container of typed [`SeatRegistry<P>`] instances shared across
+/// [`RimInstallContext`](crate::RimInstallContext) and [`RimSession`](crate::RimSession).
+#[derive(Default)]
+pub struct SeatHub {
+    registries: RwLock<HashMap<(TypeId, String), Arc<dyn Any + Send + Sync>>>,
+}
+
+impl SeatHub {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the typed [`SeatRegistry<P>`] for `seat`, creating it lazily if
+    /// absent.
+    pub fn registry<P: ?Sized + Send + Sync + 'static>(
+        &self,
+        seat: &'static str,
+    ) -> Arc<SeatRegistry<P>> {
+        let key = (TypeId::of::<P>(), seat.to_string());
+        {
+            let guard = self
+                .registries
+                .read()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(existing) = guard.get(&key)
+                && let Ok(typed) = Arc::clone(existing).downcast::<SeatRegistry<P>>()
+            {
+                return typed;
+            }
+        }
+        let mut guard = self
+            .registries
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let entry = guard
+            .entry(key)
+            .or_insert_with(|| Arc::new(SeatRegistry::<P>::new(seat)));
+        Arc::clone(entry)
+            .downcast::<SeatRegistry<P>>()
+            .expect("seat registry type keyed by TypeId::<P>")
+    }
+
+    /// Resolve a provider from the typed seat registry for `(P, seat)`.
+    pub fn resolve<P: ?Sized + Send + Sync + 'static>(
+        &self,
+        seat: &'static str,
+        configured: Option<&str>,
+    ) -> Result<Arc<P>, SeatError> {
+        let key = (TypeId::of::<P>(), seat.to_string());
+        let registry = {
+            let guard = self
+                .registries
+                .read()
+                .unwrap_or_else(|error| error.into_inner());
+            guard
+                .get(&key)
+                .and_then(|existing| Arc::clone(existing).downcast::<SeatRegistry<P>>().ok())
+        };
+        match registry {
+            Some(reg) => reg.resolve(configured),
+            None => match configured {
+                Some(target) => Err(SeatError::UnknownProvider {
+                    seat,
+                    configured: target.to_string(),
+                    known: Vec::new(),
+                }),
+                None => Err(SeatError::Unavailable { seat }),
+            },
+        }
     }
 }

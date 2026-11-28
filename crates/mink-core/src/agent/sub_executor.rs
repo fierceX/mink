@@ -411,6 +411,13 @@ impl SubAgentExecutor {
             }
         };
 
+        let child_scope_path: Arc<str> =
+            if parent_ctx.scope_path.is_empty() || parent_ctx.scope_path.as_ref() == "primary" {
+                Arc::from(format!("subagent/{session_id}"))
+            } else {
+                Arc::from(format!("{}/subagent/{session_id}", parent_ctx.scope_path))
+            };
+
         let built = match build_agent_context(AgentContextBuild {
             role_override,
             session_lease: Some(child_lease),
@@ -422,6 +429,7 @@ impl SubAgentExecutor {
             environment_home: Some(parent_ctx.paths.environment_home.clone()),
             cwd: parent_ctx.paths.cwd.clone(),
             session_id: session_id.clone(),
+            scope_path: child_scope_path,
             session_layout: SessionLayout::Isolated,
             resolved_paths: None,
             api_url: parent_ctx.paths.api_url.clone(),
@@ -470,7 +478,9 @@ impl SubAgentExecutor {
             default_effect_journal: None,
             default_tool_observer,
             tool_hooks: parent_ctx.tools.tool_hooks.clone(),
-            lifecycle: Arc::new(crate::tools::rim_hooks::RuntimeLifecycle::new()),
+            lifecycle: Arc::new(crate::tools::rim_hooks::RuntimeLifecycle::child_of(
+                &parent_ctx.lifecycle,
+            )),
             budget_check,
         })
         .await

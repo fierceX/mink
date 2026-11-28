@@ -42,6 +42,8 @@ pub(crate) struct AgentRuntimeConfig {
     pub post_init_hooks: Vec<Arc<dyn PostInitHook>>,
     pub tool_execution_gates: Vec<Arc<dyn crate::tools::rim_hooks::ToolExecutionGate>>,
     pub tool_output_filters: Vec<Arc<dyn crate::tools::rim_hooks::ToolOutputFilter>>,
+    pub model_request_hooks: Vec<Arc<dyn crate::tools::rim_hooks::ModelRequestHook>>,
+    pub on_closing: Vec<(String, Box<dyn FnOnce() + Send>)>,
     pub teardowns: Vec<(String, Box<dyn FnOnce() + Send>)>,
     pub ptc_runtime: Option<Arc<dyn crate::ptc::PtcRuntime>>,
 }
@@ -82,6 +84,8 @@ impl AgentRuntimeConfig {
             post_init_hooks: Vec::new(),
             tool_execution_gates: Vec::new(),
             tool_output_filters: Vec::new(),
+            model_request_hooks: Vec::new(),
+            on_closing: Vec::new(),
             teardowns: Vec::new(),
             ptc_runtime: None,
         }

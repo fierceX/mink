@@ -35,6 +35,7 @@ pub mod tools {
         ApprovalTier, ToolBlocker, ToolFailureKind, ToolResultKind, ToolStatus,
     };
     pub use crate::tools::rim_hooks::{
+        EphemeralContextBlock, ModelRequestHook, ModelRequestHookContext, ModelRequestPatch,
         RuntimePlugin, ToolExecutionGate, ToolGateDecision, ToolGateRequest, ToolOutputFilter,
         ToolOutputFilterContext, ToolOutputMutation,
     };
@@ -124,6 +125,7 @@ pub use crate::tools::metadata::{
     ApprovalTier, ToolBlocker, ToolFailureKind, ToolResultKind, ToolStatus,
 };
 pub use crate::tools::rim_hooks::{
+    EphemeralContextBlock, ModelRequestHook, ModelRequestHookContext, ModelRequestPatch,
     RuntimePlugin, ToolExecutionGate, ToolGateDecision, ToolGateRequest, ToolOutputFilter,
     ToolOutputFilterContext, ToolOutputMutation,
 };
@@ -239,7 +241,7 @@ pub mod ext {
         ReadEvidenceContext, ReadObservation, ToolCallObserver, ToolEffectJournal,
         ToolExecutionMask, TurnPolicyProvider,
     };
-    pub use crate::tools::rim_hooks::{RegistrationGuard, ToolHookStats};
+    pub use crate::tools::rim_hooks::{RegistrationGuard, ToolHookStats, scopes_related};
     pub use crate::tools::runner::format_tool_result;
 }
 
