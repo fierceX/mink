@@ -412,6 +412,7 @@ runtime 启动时 fail closed。
 | `description` | string | 5–10 词程序摘要，必需 |
 | `timeout` | integer | 单次运行超时秒数，可选（默认 120s，默认上限 3600s；必须 >= 1） |
 
+- `subprocess-python` 后端默认调用 `PATH` 中的 `python3`（可通过 `[ptc].python_executable` 覆盖），要求 **Python ≥ 3.10**（原生支持 PEP 604 联合类型、`match`/`case` 与 `zip(..., strict=True)` 等现代语法；启动期在 `PtcConfig::validate` 探测版本，低于 3.10 直接 fail-closed 报错；macOS 15 系统 `/usr/bin/python3` 为 3.9.6，请使用 Homebrew/pyenv/uv 安装的 Python 3.10+ 或改用 `wasi-python` 后端）。
 - 运行时内预注入全局对象 `tools`、`await gather(*aws)`、`inspect(*values)`、`ToolCallError` 与不可变 `Image` 句柄，同时注册合成模块 `sys.modules["tools"]` 兼容 `import tools` / `from tools import ...` 写法。
 - 只读工具可按 `max_parallel_sub_calls` 滚动并发执行；写类、命令与自定义顺序工具自动在读锁/写锁屏障上串行化；嵌套 `Bash` 超时自动按外层 `RunCode` 剩余预算收紧（保留 2s 余量）。
 - `tools.Bash(...)` 正常非零退出返回结构化 `BashResult`（含 `exit_code`/`stdout`/`stderr`/`timed_out`）而不中断整段 `RunCode`；`SafetyBlocked`/`Timeout`/`ArgumentInvalid`/`Aborted` 及其他工具失败抛出 `ToolCallError`。

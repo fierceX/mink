@@ -591,4 +591,125 @@ inspect(a["echo"]["via"], b["echo"]["via"])
         assert!(text.contains("from-import"), "{text}");
         assert!(text.contains("module-import"), "{text}");
     }
+
+    #[tokio::test]
+    async fn supports_python_3_10_runtime_features_without_leaking_future_annotations() {
+        let rt = test_runtime();
+        let cwd = std::env::current_dir().unwrap();
+        let spec = rt
+            .resolve(PtcRunRequest {
+                code: r#"
+def format_tag(tag: str | None) -> str:
+    return tag or "none"
+
+# User code should keep native Python 3.10+ annotation evaluation (dont_inherit=True).
+assert format_tag.__annotations__["return"] is str
+res = await tools.Echo(tag=format_tag("ok"))
+assert isinstance(res, dict | list)
+pairs = list(zip(["k"], [res["echo"]["tag"]], strict=True))
+match pairs:
+    case [("k", val)]:
+        inspect(f"matched:{val}")
+    case _:
+        raise AssertionError("unexpected match")
+"#
+                .to_string(),
+                cwd,
+                tool_names: vec!["Echo".into()],
+                timeout_secs: Some(15),
+                cancel: CancellationToken::new(),
+                interrupt: InterruptSignal::new(),
+                sandbox: None,
+            })
+            .unwrap();
+        let disp = Arc::new(MockDispatcher {
+            calls: AtomicUsize::new(0),
+        });
+        let res = rt.run(spec, disp.clone()).await.unwrap();
+        assert!(
+            res.error.is_none(),
+            "unexpected error: {:?} (output: {:?})",
+            res.error,
+            res.output
+        );
+        assert_eq!(disp.calls.load(Ordering::SeqCst), 1);
+        let text: String = res
+            .output
+            .iter()
+            .filter_map(|item| match item {
+                PtcOutputItem::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.contains("matched:ok"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn rejects_python_below_3_10_with_clear_version_diagnostic() {
+        let candidate = std::env::var("MINK_TEST_OLD_PYTHON")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                Path::new("/usr/bin/python3")
+                    .exists()
+                    .then(|| "/usr/bin/python3".to_string())
+            });
+        let Some(old_py) = candidate else {
+            return;
+        };
+        let is_old = std::process::Command::new(&old_py)
+            .args([
+                "-c",
+                "import sys; raise SystemExit(0 if sys.version_info < (3, 10) else 1)",
+            ])
+            .status()
+            .is_ok_and(|s| s.success());
+        if !is_old {
+            return;
+        }
+
+        let cfg = PtcConfig {
+            mode: super::super::PtcMode::Exclusive,
+            python_executable: Some(old_py),
+            ..PtcConfig::default()
+        };
+        let sp = crate::config::SandboxPythonConfig::default();
+        let validate_err = cfg.validate(&sp).unwrap_err().to_string();
+        assert!(
+            validate_err.contains("requires Python >= 3.10"),
+            "{validate_err}"
+        );
+
+        // Even if SubprocessPythonPtcRuntime is called directly, bootstrap.py fails closed with a clear diagnostic.
+        let rt = SubprocessPythonPtcRuntime::new(cfg);
+        let cwd = std::env::current_dir().unwrap();
+        let spec = rt
+            .resolve(PtcRunRequest {
+                code: "inspect(1)".to_string(),
+                cwd,
+                tool_names: vec![],
+                timeout_secs: Some(15),
+                cancel: CancellationToken::new(),
+                interrupt: InterruptSignal::new(),
+                sandbox: None,
+            })
+            .unwrap();
+        let disp = Arc::new(MockDispatcher {
+            calls: AtomicUsize::new(0),
+        });
+        let res = rt.run(spec, disp).await.unwrap();
+        assert_eq!(
+            res.error.as_ref().map(|e| e.kind),
+            Some(PtcFailureKind::WorkerExit)
+        );
+        let text: String = res
+            .output
+            .iter()
+            .filter_map(|item| match item {
+                PtcOutputItem::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.contains("PTC requires Python >= 3.10"), "{text}");
+    }
 }

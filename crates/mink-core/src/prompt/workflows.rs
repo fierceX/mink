@@ -1,8 +1,8 @@
 use super::PromptBuildContext;
 use crate::tools::semantic_capabilities::{
-    ProviderTier, ResolvedToolCapabilities, ToolSemanticCapability,
+    CapabilityProvider, ProviderTier, ResolvedToolCapabilities, ToolSemanticCapability,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Result, anyhow, ensure};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
@@ -377,12 +377,24 @@ fn facts_from_capabilities(tools: &ResolvedToolCapabilities) -> BTreeSet<PromptF
     facts
 }
 
+fn require_primary_provider<'a>(
+    tools: &'a ResolvedToolCapabilities,
+    workflow_id: &str,
+    capability: ToolSemanticCapability,
+) -> Result<&'a CapabilityProvider> {
+    tools.primary_provider(capability).ok_or_else(|| {
+        anyhow!(
+            "workflow '{workflow_id}' requires resolved capability {capability:?}, but no primary provider is bound"
+        )
+    })
+}
+
 fn render_search_then_inspect(
     _: &PromptBuildContext,
     tools: &ResolvedToolCapabilities,
 ) -> Result<RenderedPromptPack> {
-    let search = tools.primary_provider(ContentSearch).unwrap();
-    let read = tools.primary_provider(PathRead).unwrap();
+    let search = require_primary_provider(tools, "search-then-inspect", ContentSearch)?;
+    let read = require_primary_provider(tools, "search-then-inspect", PathRead)?;
     Ok(RenderedPromptPack {
         content: include_str!("../assets/prompts/workflows/search_then_inspect.md")
             .replace("{{SEARCH_PROVIDER}}", search.tool.as_str())
@@ -400,8 +412,8 @@ fn render_memory_recall(
     _: &PromptBuildContext,
     tools: &ResolvedToolCapabilities,
 ) -> Result<RenderedPromptPack> {
-    let search = tools.primary_provider(ContentSearch).unwrap();
-    let read = tools.primary_provider(PathRead).unwrap();
+    let search = require_primary_provider(tools, "memory-recall", ContentSearch)?;
+    let read = require_primary_provider(tools, "memory-recall", PathRead)?;
     Ok(RenderedPromptPack {
         content: include_str!("../assets/prompts/workflows/memory_recall.md")
             .replace("{{SEARCH_PROVIDER}}", search.tool.as_str())
@@ -423,8 +435,8 @@ fn render_hashline_edit(
         context.edit_mode == crate::config::EditMode::Hashline,
         "hashline workflow/config mismatch"
     );
-    let read = tools.primary_provider(EditableSnapshotRead).unwrap();
-    let edit = tools.primary_provider(HashlineEdit).unwrap();
+    let read = require_primary_provider(tools, "hashline-edit", EditableSnapshotRead)?;
+    let edit = require_primary_provider(tools, "hashline-edit", HashlineEdit)?;
     let mut content = include_str!("../assets/prompts/workflows/hashline_edit.md")
         .replace("{{READ_PROVIDER}}", read.tool.as_str())
         .replace("{{EDIT_PROVIDER}}", edit.tool.as_str())
@@ -475,8 +487,8 @@ fn render_replace_edit(
         context.edit_mode == crate::config::EditMode::Replace,
         "replace workflow/config mismatch"
     );
-    let read = tools.primary_provider(PathRead).unwrap();
-    let edit = tools.primary_provider(ContentReplaceEdit).unwrap();
+    let read = require_primary_provider(tools, "replace-edit", PathRead)?;
+    let edit = require_primary_provider(tools, "replace-edit", ContentReplaceEdit)?;
     Ok(RenderedPromptPack {
         content: include_str!("../assets/prompts/workflows/replace_edit.md")
             .replace("{{READ_PROVIDER}}", read.tool.as_str())
@@ -557,7 +569,7 @@ fn render_specialized_mutation_routing(
     _: &PromptBuildContext,
     tools: &ResolvedToolCapabilities,
 ) -> Result<RenderedPromptPack> {
-    let shell = tools.primary_provider(ShellExec).unwrap();
+    let shell = require_primary_provider(tools, "specialized-mutation-routing", ShellExec)?;
     let mut lines = Vec::new();
     let mut referenced_tools = BTreeSet::from([shell.tool.clone()]);
     let mut consumed_facts = BTreeSet::from([ToolCapability(ShellExec)]);
@@ -624,6 +636,10 @@ fn render_python_routing(
             consumed_facts.insert(ToolCapability(capability));
         }
     }
+    ensure!(
+        !providers.is_empty(),
+        "workflow 'python-execution-routing' activated without a python execution provider"
+    );
     Ok(RenderedPromptPack {
         content: format!(
             "{}\n{}",
@@ -639,9 +655,9 @@ fn render_plan_lifecycle(
     _context: &PromptBuildContext,
     tools: &ResolvedToolCapabilities,
 ) -> Result<RenderedPromptPack> {
-    let draft = tools.primary_provider(PlanDraft).unwrap();
-    let confirm = tools.primary_provider(PlanConfirm).unwrap();
-    let clear = tools.primary_provider(PlanClear).unwrap();
+    let draft = require_primary_provider(tools, "plan-lifecycle", PlanDraft)?;
+    let confirm = require_primary_provider(tools, "plan-lifecycle", PlanConfirm)?;
+    let clear = require_primary_provider(tools, "plan-lifecycle", PlanClear)?;
     let referenced_tools: BTreeSet<_> =
         [draft.tool.clone(), confirm.tool.clone(), clear.tool.clone()]
             .into_iter()
@@ -668,7 +684,7 @@ fn render_todo_inspection(
     _: &PromptBuildContext,
     tools: &ResolvedToolCapabilities,
 ) -> Result<RenderedPromptPack> {
-    let read = tools.primary_provider(TodoInspect).unwrap();
+    let read = require_primary_provider(tools, "todo-inspection", TodoInspect)?;
     Ok(RenderedPromptPack {
         content: include_str!("../assets/prompts/workflows/todo_inspection.md")
             .replace("{{TODO_READ_PROVIDER}}", read.tool.as_str())
@@ -683,8 +699,8 @@ fn render_todo_structure(
     _: &PromptBuildContext,
     tools: &ResolvedToolCapabilities,
 ) -> Result<RenderedPromptPack> {
-    let read = tools.primary_provider(TodoInspect).unwrap();
-    let write = tools.primary_provider(TodoStructureMutation).unwrap();
+    let read = require_primary_provider(tools, "todo-structure", TodoInspect)?;
+    let write = require_primary_provider(tools, "todo-structure", TodoStructureMutation)?;
     Ok(RenderedPromptPack {
         content: include_str!("../assets/prompts/workflows/todo_structure.md")
             .replace("{{TODO_READ_PROVIDER}}", read.tool.as_str())
@@ -702,8 +718,8 @@ fn render_todo_progress(
     _: &PromptBuildContext,
     tools: &ResolvedToolCapabilities,
 ) -> Result<RenderedPromptPack> {
-    let read = tools.primary_provider(TodoInspect).unwrap();
-    let advance = tools.primary_provider(TodoProgressTransition).unwrap();
+    let read = require_primary_provider(tools, "todo-progress", TodoInspect)?;
+    let advance = require_primary_provider(tools, "todo-progress", TodoProgressTransition)?;
     Ok(RenderedPromptPack {
         content: include_str!("../assets/prompts/workflows/todo_progress.md")
             .replace("{{TODO_READ_PROVIDER}}", read.tool.as_str())
@@ -854,5 +870,55 @@ mod tests {
             100,
         )]);
         assert!(PromptWorkflowResolver { specs: empty }.validate().is_err());
+    }
+
+    #[test]
+    fn workflow_renderers_return_diagnostic_errors_instead_of_panicking_when_capabilities_missing()
+    {
+        let config = crate::config::ResolvedConfig {
+            enabled_tools: Some(Vec::new()),
+            ..Default::default()
+        };
+        let tool_config = crate::context::ToolConfig::from_config(&config);
+        let (_, _, empty_caps) = crate::context::resolve_tool_runtime(
+            &tool_config,
+            crate::tools::surface::AgentRole::Primary,
+            false,
+            0,
+            &[],
+        )
+        .expect("empty tool surface should resolve");
+        assert!(empty_caps.iter().next().is_none());
+
+        let hashline_ctx = PromptBuildContext {
+            edit_mode: crate::config::EditMode::Hashline,
+            edit_fuzzy_match: true,
+            edit_fuzzy_threshold: 0.95,
+            edit_enforce_seen_lines: false,
+        };
+        let replace_ctx = PromptBuildContext {
+            edit_mode: crate::config::EditMode::Replace,
+            ..hashline_ctx
+        };
+
+        for spec in WORKFLOWS {
+            let ctx = if spec.id == "replace-edit" {
+                &replace_ctx
+            } else {
+                &hashline_ctx
+            };
+            let err = (spec.render)(ctx, &empty_caps).err().unwrap_or_else(|| {
+                panic!(
+                    "workflow '{}' unexpectedly succeeded on empty caps",
+                    spec.id
+                )
+            });
+            let msg = err.to_string();
+            assert!(
+                !msg.is_empty(),
+                "workflow '{}' returned empty error message",
+                spec.id
+            );
+        }
     }
 }

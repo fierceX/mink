@@ -1,10 +1,20 @@
+from __future__ import annotations
+
+import sys
+
+if sys.version_info < (3, 10):
+    sys.stderr.write(
+        "PTC requires Python >= 3.10, found "
+        f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\n"
+    )
+    raise SystemExit(1)
+
 import ast
 import asyncio
 import inspect as _py_inspect
 import json
 import math
 import os
-import sys
 import threading
 import traceback
 import types
@@ -501,6 +511,7 @@ def _main() -> int:
                 "<run_code>",
                 "exec",
                 flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
+                dont_inherit=True,
             )
             env = {
                 "__name__": "__main__",

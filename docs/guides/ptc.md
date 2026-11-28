@@ -48,7 +48,7 @@ backend = "subprocess-python" # subprocess-python | wasi-python（需启用 pyth
 - **内置异步 API**：运行时预注入 `tools`（支持 `await tools.<Name>(...)`）、`await gather(*aws)`、`inspect(*values)`、`ToolCallError` 与 `Image` 句柄，同时兼容 `import tools`。
 - **并发与串行屏障**：只读工具按 `max_parallel_sub_calls` 滚动并发执行；写入与命令工具自动在读写锁屏障上串行化。
 - **结构化回传**：推荐用 `inspect(...)` 返回关键摘要而非全量 `print(...)`；超长输出自动落盘为 `artifact://`，多张图片仅在 `inspect(img)` 时计入图片预算。
-- **沙箱隔离**：默认通过受控 `python3` 子进程经独立 FD 3 通道通信（不挂载 `$HOME`）；开启 `python-sandbox` feature 时支持 WASI CPython 后端及线性内存上限（`max_memory_mb`，默认 `256`）。禁止在 `RunCode` 内递归调用 `RunCode`、`Python` 或规划/控制类工具。
+- **沙箱隔离与解释器要求**：默认通过受控 `python3` 子进程经独立 FD 3 通道通信（不挂载 `$HOME`），要求 **`python3` ≥ 3.10**（启动校验会主动探测版本，低于 3.10 直接报错并给出诊断；macOS 15 自带 `/usr/bin/python3` 为 3.9.6，需安装 Python 3.10+ 并通过 `[ptc].python_executable` 指定或确保其位于 `PATH` 前部，亦可启用 `wasi-python` 后端）；开启 `python-sandbox` feature 时支持 WASI CPython 后端及线性内存上限（`max_memory_mb`，默认 `256`）。禁止在 `RunCode` 内递归调用 `RunCode`、`Python` 或规划/控制类工具。
 
 ---
 

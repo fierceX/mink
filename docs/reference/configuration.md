@@ -673,6 +673,8 @@ macOS `write_dirs`、临时目录和会话存储的写入规则包含字面路�
 
 ### `[ptc]`
 
+`subprocess-python` 后端要求 **`python3` ≥ 3.10**（启动校验探测版本，低于 3.10 fail-closed；可通过 `python_executable` 指定解释器路径，macOS 15 系统 `/usr/bin/python3` 3.9.6 需指向 3.10+ 解释器）。
+
 | 字段 | Rust 解析类型 |
 |---|---|
 | `mode` | `Option<String>` |

@@ -12,6 +12,70 @@ pub mod wasi_py;
 use crate::config::SandboxPythonConfig;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use std::process::{Command, Stdio};
+
+/// Minimum Python `(major, minor)` version required by the `subprocess_python` PTC backend.
+pub const MIN_SUBPROCESS_PYTHON_VERSION: (u32, u32) = (3, 10);
+
+const PYTHON_VERSION_PROBE: &str =
+    r#"import sys; sys.stdout.write("%d.%d.%d\n" % sys.version_info[:3])"#;
+
+fn parse_python_version(output: &str) -> Option<(u32, u32, u32)> {
+    let line = output.lines().find(|l| !l.trim().is_empty())?.trim();
+    let mut parts = line.split('.');
+    let major = parts.next()?.parse::<u32>().ok()?;
+    let minor = parts.next()?.parse::<u32>().ok()?;
+    let micro = parts.next()?.parse::<u32>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, micro))
+}
+
+fn validate_subprocess_python_version(executable: &str) -> Result<()> {
+    let output = Command::new(executable)
+        .args(["-c", PYTHON_VERSION_PROBE])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "ptc backend 'subprocess_python' could not execute '{executable}': {err}; install Python >= {}.{} or set [ptc].python_executable (or use backend = 'wasi_python')",
+                MIN_SUBPROCESS_PYTHON_VERSION.0,
+                MIN_SUBPROCESS_PYTHON_VERSION.1,
+            )
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            bail!(
+                "ptc backend 'subprocess_python' failed to probe Python version from '{executable}' (exit {})",
+                output.status
+            );
+        }
+        bail!(
+            "ptc backend 'subprocess_python' failed to probe Python version from '{executable}' (exit {}): {detail}",
+            output.status
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some((major, minor, micro)) = parse_python_version(&stdout) else {
+        bail!(
+            "ptc backend 'subprocess_python' could not parse Python version from '{executable}': {:?}",
+            stdout.trim()
+        );
+    };
+    if (major, minor) < MIN_SUBPROCESS_PYTHON_VERSION {
+        bail!(
+            "ptc backend 'subprocess_python' requires Python >= {}.{}, but '{executable}' is Python {major}.{minor}.{micro}; install Python >= {}.{} or set [ptc].python_executable (or use backend = 'wasi_python')",
+            MIN_SUBPROCESS_PYTHON_VERSION.0,
+            MIN_SUBPROCESS_PYTHON_VERSION.1,
+            MIN_SUBPROCESS_PYTHON_VERSION.0,
+            MIN_SUBPROCESS_PYTHON_VERSION.1,
+        );
+    }
+    Ok(())
+}
 
 pub use runtime::{
     PtcBindingDispatcher, PtcBindingError, PtcBindingSuccess, PtcFailureKind, PtcImageDescriptor,
@@ -249,15 +313,25 @@ impl PtcConfig {
         {
             bail!("ptc.python_executable must not be empty when set");
         }
-        if !has_custom_runtime
-            && self.mode != PtcMode::Off
-            && self.backend == PtcBackendKind::WasiPython
-        {
-            #[cfg(not(feature = "python-sandbox"))]
-            bail!("ptc backend 'wasi_python' requires the 'python-sandbox' feature");
-            #[cfg(feature = "python-sandbox")]
-            if sandbox_python.wasm_path.trim().is_empty() {
-                bail!("ptc backend 'wasi_python' requires sandbox_python.wasm_path");
+        if !has_custom_runtime && self.mode != PtcMode::Off {
+            match self.backend {
+                PtcBackendKind::SubprocessPython => {
+                    let exe = self
+                        .python_executable
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("python3");
+                    validate_subprocess_python_version(exe)?;
+                }
+                PtcBackendKind::WasiPython => {
+                    #[cfg(not(feature = "python-sandbox"))]
+                    bail!("ptc backend 'wasi_python' requires the 'python-sandbox' feature");
+                    #[cfg(feature = "python-sandbox")]
+                    if sandbox_python.wasm_path.trim().is_empty() {
+                        bail!("ptc backend 'wasi_python' requires sandbox_python.wasm_path");
+                    }
+                }
             }
         }
         let _ = sandbox_python;
@@ -372,5 +446,69 @@ mod tests {
             .unwrap();
         assert_eq!(spec.timeout, std::time::Duration::from_secs(45));
         assert!(spec.cwd.is_absolute());
+    }
+
+    #[test]
+    fn ptc_config_validate_rejects_missing_python_executable() {
+        let sp = SandboxPythonConfig::default();
+        let cfg = PtcConfig::tool().with_python_executable("/nonexistent/mink-missing-python3");
+        let err = cfg.validate(&sp).unwrap_err().to_string();
+        assert!(err.contains("could not execute"), "{err}");
+        // Custom PtcRuntime skips host subprocess python probing.
+        assert!(cfg.validate_for_runtime(&sp, true).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ptc_config_validate_enforces_python_3_10_minimum() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sp = SandboxPythonConfig::default();
+        let dir = std::env::temp_dir().join(format!(
+            "mink-ptc-pyver-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let write_fake_py = |name: &str, version: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\nprintf '%s\\n' '{version}'\n")).unwrap();
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+            path
+        };
+
+        let old_py = write_fake_py("python3.9", "3.9.6");
+        let err = PtcConfig::tool()
+            .with_python_executable(old_py.to_string_lossy())
+            .validate(&sp)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("requires Python >= 3.10"), "{err}");
+        assert!(err.contains("3.9.6"), "{err}");
+
+        let ok_py = write_fake_py("python3.10", "3.10.0");
+        PtcConfig::tool()
+            .with_python_executable(ok_py.to_string_lossy())
+            .validate(&sp)
+            .expect("Python 3.10.0 should satisfy minimum");
+
+        // When explicitly pointed at an older real Python (e.g. CI Python 3.9 lane or macOS /usr/bin/python3),
+        // confirm real probing also rejects it cleanly.
+        if let Ok(real_old) = std::env::var("MINK_TEST_OLD_PYTHON") {
+            let err = PtcConfig::tool()
+                .with_python_executable(&real_old)
+                .validate(&sp)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("requires Python >= 3.10"), "{err}");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

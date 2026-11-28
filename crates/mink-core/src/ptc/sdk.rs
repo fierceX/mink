@@ -279,7 +279,7 @@ pub fn render_python_sdk(
     let mut out = String::new();
     out.push_str("## Writing Python code for RunCode\n\n");
     out.push_str(&format!(
-        "`RunCode` takes required `code` (Python 3 supporting top-level `await`) and `description` (5-10 words), plus optional `timeout` (seconds; default {default_timeout_secs}s, max {max_timeout_secs}s).\n"
+        "`RunCode` takes required `code` (Python 3.10+ supporting top-level `await`) and `description` (5-10 words), plus optional `timeout` (seconds; default {default_timeout_secs}s, max {max_timeout_secs}s).\n"
     ));
     if mode == PtcMode::Tool {
         out.push_str("Routing (Hybrid mode): use a direct tool for a single trivial read/edit/command; whenever a step needs 3+ reads/searches, loops, conditional branching, filtering/aggregation, read-then-edit pipelines, or large intermediate outputs, SHOULD consolidate it into one `RunCode` call and `inspect()` only the summary. For tools already in the direct schema, docstrings are omitted below while parameter signatures are preserved.\n");
@@ -575,5 +575,104 @@ mod tests {
         assert!(rendered.contains("class CustomBatchItemsItem(TypedDict):"));
         assert!(rendered.contains("items: list[CustomBatchItemsItem]"));
         assert!(rendered.contains("Custom SDK-only batch tool."));
+    }
+
+    #[test]
+    fn rendered_sdk_stub_executes_natively_under_python_3_10_plus() {
+        let tools = vec![
+            model_tool(
+                "Read",
+                serde_json::json!({
+                    "name": "Read",
+                    "description": "Read a file.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"]
+                    }
+                }),
+            ),
+            model_tool(
+                "Grep",
+                serde_json::json!({
+                    "name": "Grep",
+                    "description": "Search files.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"pattern": {"type": "string"}},
+                        "required": ["pattern"]
+                    }
+                }),
+            ),
+            model_tool(
+                "Write",
+                serde_json::json!({
+                    "name": "Write",
+                    "description": "Write a file.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "content": {"type": "string"}
+                        },
+                        "required": ["path", "content"]
+                    }
+                }),
+            ),
+            model_tool(
+                "Edit",
+                serde_json::json!({
+                    "name": "Edit",
+                    "description": "Edit a file.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"input": {"type": "string"}},
+                        "required": ["input"]
+                    }
+                }),
+            ),
+            model_tool(
+                "Bash",
+                serde_json::json!({
+                    "name": "Bash",
+                    "description": "Run shell command.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string"},
+                            "timeout": {"anyOf": [{"type": "integer"}, {"type": "null"}]}
+                        },
+                        "required": ["command"]
+                    }
+                }),
+            ),
+        ];
+        let rendered = render_python_sdk(
+            &tools,
+            &BTreeSet::new(),
+            PtcMode::Exclusive,
+            true,
+            120,
+            3600,
+        );
+        let (_, after_open) = rendered
+            .split_once("Python SDK bindings:\n\n```python\n")
+            .expect("SDK python fence missing");
+        let stub = after_open
+            .strip_suffix("```")
+            .expect("SDK closing fence missing");
+        assert!(stub.contains("tag: str | None"));
+        assert!(stub.contains("exit_code: int | None"));
+
+        let output = std::process::Command::new("python3")
+            .args(["-B", "-c", stub])
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "python3 failed to execute rendered PTC SDK stub:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
