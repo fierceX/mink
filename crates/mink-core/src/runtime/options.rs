@@ -153,7 +153,7 @@ pub struct AgentOptions {
     first_prompt: Option<String>,
     first_prompt_overridden: bool,
     event_sink: Option<Arc<dyn EventSink>>,
-    session_event_sink: Option<Arc<dyn crate::runtime::SessionEventSink>>,
+    session_event_sinks: Vec<Arc<dyn crate::runtime::SessionEventSink>>,
     sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
     read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
     resource_handlers: Vec<Arc<dyn ResourceHandler>>,
@@ -166,7 +166,10 @@ pub struct AgentOptions {
     turn_policies: Vec<Arc<dyn crate::tools::policy_hook::TurnPolicyProvider>>,
     checkpoint_providers: Vec<Arc<dyn crate::session::compaction::CompactionCheckpointProvider>>,
     prefix_source: Option<Arc<dyn PrefixSource>>,
-    post_init_hook: Option<Arc<dyn PostInitHook>>,
+    post_init_hooks: Vec<Arc<dyn PostInitHook>>,
+    tool_execution_gates: Vec<Arc<dyn crate::tools::rim_hooks::ToolExecutionGate>>,
+    tool_output_filters: Vec<Arc<dyn crate::tools::rim_hooks::ToolOutputFilter>>,
+    teardowns: Vec<(String, Box<dyn FnOnce() + Send>)>,
     ptc_runtime: Option<Arc<dyn crate::ptc::PtcRuntime>>,
 }
 
@@ -196,7 +199,7 @@ impl AgentOptions {
             first_prompt,
             first_prompt_overridden: false,
             event_sink: None,
-            session_event_sink: None,
+            session_event_sinks: Vec::new(),
             sub_stream_tx: None,
             read_only_fs: None,
             resource_handlers: Vec::new(),
@@ -209,7 +212,10 @@ impl AgentOptions {
             turn_policies: Vec::new(),
             checkpoint_providers: Vec::new(),
             prefix_source: None,
-            post_init_hook: None,
+            post_init_hooks: Vec::new(),
+            tool_execution_gates: Vec::new(),
+            tool_output_filters: Vec::new(),
+            teardowns: Vec::new(),
             ptc_runtime: None,
         }
     }
@@ -358,8 +364,12 @@ impl AgentOptions {
         mut self,
         sink: Arc<dyn crate::runtime::SessionEventSink>,
     ) -> Self {
-        self.session_event_sink = Some(sink);
+        self.add_session_event_sink(sink);
         self
+    }
+
+    pub fn add_session_event_sink(&mut self, sink: Arc<dyn crate::runtime::SessionEventSink>) {
+        self.session_event_sinks.push(sink);
     }
 
     pub fn with_sub_stream_tx(mut self, sub_stream_tx: Arc<dyn SubAgentStreamSink>) -> Self {
@@ -546,10 +556,81 @@ impl AgentOptions {
 
     /// Run a hook once after the session context is built, before the first
     /// LLM request, with a read-only view of the resolved prompt/tools and an
-    /// event appender (see [`PostInitContext`]).
+    /// event appender (see [`PostInitContext`]). Multiple hooks run in order;
+    /// any failure aborts startup (fail-closed).
     pub fn with_post_init_hook(mut self, hook: Arc<dyn PostInitHook>) -> Self {
-        self.post_init_hook = Some(hook);
+        self.add_post_init_hook(hook);
         self
+    }
+
+    pub fn add_post_init_hook(&mut self, hook: Arc<dyn PostInitHook>) {
+        self.post_init_hooks.push(hook);
+    }
+
+    /// Attach an asynchronous pre-execution tool gate (covering direct, PTC
+    /// nested, and sub-agent tool executions).
+    pub fn with_tool_execution_gate(
+        mut self,
+        gate: Arc<dyn crate::tools::rim_hooks::ToolExecutionGate>,
+    ) -> Self {
+        self.add_tool_execution_gate(gate);
+        self
+    }
+
+    pub fn add_tool_execution_gate(
+        &mut self,
+        gate: Arc<dyn crate::tools::rim_hooks::ToolExecutionGate>,
+    ) {
+        self.tool_execution_gates.push(gate);
+    }
+
+    /// Attach a synchronous tool output filter running before artifact spill
+    /// and conversation persistence.
+    pub fn with_tool_output_filter(
+        mut self,
+        filter: Arc<dyn crate::tools::rim_hooks::ToolOutputFilter>,
+    ) -> Self {
+        self.add_tool_output_filter(filter);
+        self
+    }
+
+    pub fn add_tool_output_filter(
+        &mut self,
+        filter: Arc<dyn crate::tools::rim_hooks::ToolOutputFilter>,
+    ) {
+        self.tool_output_filters.push(filter);
+    }
+
+    /// Register a LIFO teardown callback executed on startup failure rollback,
+    /// `AgentRuntime::shutdown()`, or `AgentRuntime::drop()`.
+    pub fn add_teardown(&mut self, label: impl Into<String>, f: impl FnOnce() + Send + 'static) {
+        self.teardowns.push((label.into(), Box::new(f)));
+    }
+
+    pub fn with_teardown(
+        mut self,
+        label: impl Into<String>,
+        f: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        self.add_teardown(label, f);
+        self
+    }
+
+    /// Apply a composable [`RuntimePlugin`](crate::tools::rim_hooks::RuntimePlugin)
+    /// to these options.
+    pub fn apply_plugin(
+        &mut self,
+        plugin: &dyn crate::tools::rim_hooks::RuntimePlugin,
+    ) -> anyhow::Result<()> {
+        plugin.install_into(self)
+    }
+
+    pub fn with_plugin(
+        mut self,
+        plugin: &dyn crate::tools::rim_hooks::RuntimePlugin,
+    ) -> anyhow::Result<Self> {
+        self.apply_plugin(plugin)?;
+        Ok(self)
     }
 
     pub fn with_tools<I>(mut self, tools: I) -> Self
@@ -845,7 +926,7 @@ impl AgentOptions {
             session_layout: self.session_layout,
             first_prompt: self.first_prompt,
             event_sink: self.event_sink,
-            session_event_sink: self.session_event_sink,
+            session_event_sinks: self.session_event_sinks,
             sub_stream_tx: self.sub_stream_tx,
             read_only_fs: self.read_only_fs,
             resource_handlers: self.resource_handlers,
@@ -858,7 +939,10 @@ impl AgentOptions {
             turn_policies: self.turn_policies,
             checkpoint_providers: self.checkpoint_providers,
             prefix_source: self.prefix_source,
-            post_init_hook: self.post_init_hook,
+            post_init_hooks: self.post_init_hooks,
+            tool_execution_gates: self.tool_execution_gates,
+            tool_output_filters: self.tool_output_filters,
+            teardowns: self.teardowns,
             ptc_runtime: self.ptc_runtime,
         }
     }

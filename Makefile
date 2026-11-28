@@ -28,13 +28,14 @@ bench-check:
 
 feature-matrix:
 	cargo check -p mink-core --no-default-features --features runtime
+	cargo check -p mink-rim
 	cargo check -p mink-goal
 	cargo check -p mink-cli --no-default-features --features sdk-bin --bin mink-core
 	cargo check -p mink-cli --no-default-features --features "sdk-bin python-sandbox" --bin mink-core
 	cargo test -p mink-cli --all-features
 	@cargo tree -p mink-core --no-default-features --features runtime -e normal > /tmp/mink-core-runtime-tree.txt; \
-	if grep -E 'ratatui|crossterm|rustyline|unicode-width|mink-goal' /tmp/mink-core-runtime-tree.txt; then \
-		echo "mink-core runtime dependency tree must not include terminal UI/rendering or goal crates"; \
+	if grep -E 'ratatui|crossterm|rustyline|unicode-width|mink-goal|mink-rim' /tmp/mink-core-runtime-tree.txt; then \
+		echo "mink-core runtime dependency tree must not include terminal UI/rendering, goal, or rim crates"; \
 		exit 1; \
 	fi
 

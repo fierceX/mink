@@ -23,7 +23,7 @@ pub(crate) struct AgentRuntimeConfig {
     pub session_layout: SessionLayout,
     pub first_prompt: Option<String>,
     pub event_sink: Option<Arc<dyn EventSink>>,
-    pub session_event_sink: Option<Arc<dyn crate::runtime::SessionEventSink>>,
+    pub session_event_sinks: Vec<Arc<dyn crate::runtime::SessionEventSink>>,
     pub sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
     pub read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
     pub resource_handlers: Vec<Arc<dyn ResourceHandler>>,
@@ -39,7 +39,10 @@ pub(crate) struct AgentRuntimeConfig {
     pub checkpoint_providers:
         Vec<Arc<dyn crate::session::compaction::CompactionCheckpointProvider>>,
     pub prefix_source: Option<Arc<dyn PrefixSource>>,
-    pub post_init_hook: Option<Arc<dyn PostInitHook>>,
+    pub post_init_hooks: Vec<Arc<dyn PostInitHook>>,
+    pub tool_execution_gates: Vec<Arc<dyn crate::tools::rim_hooks::ToolExecutionGate>>,
+    pub tool_output_filters: Vec<Arc<dyn crate::tools::rim_hooks::ToolOutputFilter>>,
+    pub teardowns: Vec<(String, Box<dyn FnOnce() + Send>)>,
     pub ptc_runtime: Option<Arc<dyn crate::ptc::PtcRuntime>>,
 }
 
@@ -63,7 +66,7 @@ impl AgentRuntimeConfig {
             session_layout: SessionLayout::ProjectScoped,
             first_prompt,
             event_sink: None,
-            session_event_sink: None,
+            session_event_sinks: Vec::new(),
             sub_stream_tx: None,
             read_only_fs: None,
             resource_handlers: Vec::new(),
@@ -76,7 +79,10 @@ impl AgentRuntimeConfig {
             turn_policies: Vec::new(),
             checkpoint_providers: Vec::new(),
             prefix_source: None,
-            post_init_hook: None,
+            post_init_hooks: Vec::new(),
+            tool_execution_gates: Vec::new(),
+            tool_output_filters: Vec::new(),
+            teardowns: Vec::new(),
             ptc_runtime: None,
         }
     }

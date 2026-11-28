@@ -11,7 +11,24 @@ use crate::session::paths;
 use anyhow::{Result, bail};
 use std::sync::Arc;
 
-pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
+pub(crate) async fn build_runtime(mut config: AgentRuntimeConfig) -> Result<AgentRuntime> {
+    let lifecycle = Arc::new(crate::tools::rim_hooks::RuntimeLifecycle::new());
+    for (label, teardown) in std::mem::take(&mut config.teardowns) {
+        lifecycle.register_teardown(label, teardown);
+    }
+    match build_runtime_inner(config, lifecycle.clone()).await {
+        Ok(runtime) => Ok(runtime),
+        Err(error) => {
+            lifecycle.dispose();
+            Err(error)
+        }
+    }
+}
+
+async fn build_runtime_inner(
+    config: AgentRuntimeConfig,
+    lifecycle: Arc<crate::tools::rim_hooks::RuntimeLifecycle>,
+) -> Result<AgentRuntime> {
     let AgentRuntimeConfig {
         mut config,
         home,
@@ -20,7 +37,7 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         session_layout,
         first_prompt,
         event_sink,
-        session_event_sink,
+        session_event_sinks,
         sub_stream_tx,
         read_only_fs,
         resource_handlers,
@@ -33,7 +50,10 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         turn_policies,
         checkpoint_providers,
         prefix_source,
-        post_init_hook,
+        post_init_hooks,
+        tool_execution_gates,
+        tool_output_filters,
+        teardowns: _,
         ptc_runtime,
     } = config;
 
@@ -72,6 +92,13 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
     let llm_backend =
         llm_backend.unwrap_or_else(|| Arc::new(OpenAiCompatibleBackend::from_config(&config)));
     let resource_session_id = resource_session_id.unwrap_or_else(|| sid.clone());
+    let session_event_sinks = Arc::new(crate::tools::rim_hooks::SessionEventSinkRegistry::new(
+        session_event_sinks,
+    ));
+    let tool_hooks = Arc::new(crate::tools::rim_hooks::ToolHookRegistry::new(
+        tool_execution_gates,
+        tool_output_filters,
+    ));
     let built = build_agent_context(AgentContextBuild {
         role_override: None,
         session_lease: Some(lease.clone()),
@@ -84,7 +111,7 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         resolved_paths: Some(resolved_paths),
         api_url: api_url_str.clone(),
         display: display.clone(),
-        session_event_sink,
+        session_event_sinks,
         sub_stream_tx,
         cancel: cancel.clone(),
         interrupt: interrupt.clone(),
@@ -109,6 +136,8 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         default_tool_mask: None,
         default_effect_journal: None,
         default_tool_observer: None,
+        tool_hooks,
+        lifecycle,
         budget_check: None,
     })
     .await?;
@@ -116,7 +145,7 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
     let spaths = built.paths;
     let new_session = built.is_new;
 
-    if let Some(hook) = &post_init_hook {
+    if !post_init_hooks.is_empty() {
         let system_prompt = ctx.build_system_prompt()?;
         let tools_json = ctx.tools.tool_surface.schemas();
         let workflows = crate::prompt::workflows::PromptWorkflowResolver::builtin()
@@ -148,7 +177,9 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
             dependency_fingerprint: &dependency_fingerprint,
             log_event: &log_event,
         };
-        hook.run(&view)?;
+        for hook in &post_init_hooks {
+            hook.run(&view)?;
+        }
         ctx.flush_event_log().await?;
     }
 

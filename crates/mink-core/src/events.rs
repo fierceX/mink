@@ -22,6 +22,7 @@ impl EventLog {
                 | EventLog::SignalReplan { .. }
                 | EventLog::SignalReplanError { .. }
                 | EventLog::SignalHandover { .. }
+                | EventLog::PolicyEffect { .. }
         )
     }
 }
@@ -297,6 +298,21 @@ pub enum EventLog {
     },
     Stop {
         reason: String,
+    },
+    /// Authoritative record of an outer policy gate or output filter mutation.
+    PolicyEffect {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<u8>,
+        anchor: String,
+        policy_id: String,
+        call_id: String,
+        tool_name: String,
+        action: String,
+        code: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        is_sub_agent: bool,
+        is_ptc_nested: bool,
     },
     Extension {
         kind: String,

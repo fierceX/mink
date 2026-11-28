@@ -224,15 +224,14 @@ impl SignalCollector {
             ToolStatus::Blocked(blocker) => {
                 // RecoveryGuard is a strong corrective signal, but not an
                 // actual executor failure. Preserve its established 0.9 weight.
-                let severity = match blocker {
-                    ToolBlocker::RecoveryGuard => 0.9,
-                    ToolBlocker::ToolSurface | ToolBlocker::StormBreaker => 1.0,
+                let (kind, severity) = match blocker {
+                    ToolBlocker::RecoveryGuard => (SignalKind::ToolFailed, 0.9),
+                    ToolBlocker::ToolSurface | ToolBlocker::StormBreaker => {
+                        (SignalKind::ToolFailed, 1.0)
+                    }
+                    ToolBlocker::Policy => (SignalKind::SafetyBlocked, 1.0),
                 };
-                Some((
-                    SignalKind::ToolFailed,
-                    format!("blocked by {blocker:?}"),
-                    severity,
-                ))
+                Some((kind, format!("blocked by {blocker:?}"), severity))
             }
             // 用户主动中断不是模型失败：不产生信号、不喂信念。
             ToolStatus::Interrupted => None,

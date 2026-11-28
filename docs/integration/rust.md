@@ -24,7 +24,7 @@ anyhow = "1"
 
 公开入口为 `mink::prelude`、`mink::runtime`（含 `llm`/`tools`/`vfs`/`ptc`/`ui` 分组子模块）和 `mink::sdk_protocol`。启用
 `config-file` feature 后还可使用 `mink::config_file`，它提供与 CLI/server 共用的
-`.minkrc` schema 解析入口。可选跨轮 Goal 编排由同仓库 crate `mink-goal` 提供。
+`.minkrc` schema 解析入口。可选跨轮 Goal 编排由同仓库 crate `mink-goal` 提供；可选声明式微内核外壳（`Scope`/`Disposer`、`SeatRegistry`、`RimProfile`/`RuntimeAssembler`）由 `mink-rim` 提供。
 
 `RuntimeError` 包含 `ExternallyControlled { owner }`，表示当前会话已由外部控制器（如 `GoalEngine`）接管执行所有权而拒绝该 runtime 操作。
 新增公开 enum 变体会要求下游穷举 `match` 增加对应分支。
@@ -207,6 +207,7 @@ match outcome.failure {
 | 多模态 | `with_image_input(ImageInputCapability)` / `with_vision_models(Vec<String>)` / `with_image_limits(ImageLimitsOverrides)` |
 | 能力 | `with_mission_content()` / `with_selected_skills()` / `with_runtime_skill_content()` / `with_skill_discovery_policy()` / `with_resource_handler()` / `with_read_only_file_system()` / `with_resource_session_id()` |
 | PTC | `with_ptc()` / `with_ptc_mode()` / `with_ptc_backend()` / `with_ptc_python_executable()` / `with_ptc_timeout_secs()` / `with_ptc_max_timeout_secs()` / `with_ptc_max_parallel_sub_calls()` / `with_ptc_max_sub_calls_per_minute()` / `with_ptc_max_output_bytes()` / `with_ptc_max_message_bytes()` / `with_ptc_max_pending_calls()` / `with_ptc_stop_grace_ms()` / `with_ptc_runtime()` |
+| 扩展与策略 | `with_plugin()` / `with_tool()` / `with_turn_policy()` / `with_post_init_hook()` / `with_session_event_sink()` / `with_tool_execution_gate()` / `with_tool_output_filter()` / `with_teardown()` |
 | 后端 | `with_llm_backend()` / `with_sandbox()` / `with_sandbox_python()` |
 
 ### PTC 嵌入

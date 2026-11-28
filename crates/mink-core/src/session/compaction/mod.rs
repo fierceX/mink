@@ -89,10 +89,10 @@ pub struct CompactionEngine {
     prompt_usage: Mutex<PromptUsageState>,
     projection_dirty: AtomicBool,
     event_log_writer: Option<EventLogWriter>,
-    /// Optional live observer for the durable event vocabulary. Kept beside the
+    /// Optional live observers for the durable event vocabulary. Kept beside the
     /// writer so compaction events use the same outlet as the rest of the
     /// session instead of bypassing the sink.
-    session_event_sink: Option<Arc<dyn crate::runtime::SessionEventSink>>,
+    session_event_sinks: Arc<crate::tools::rim_hooks::SessionEventSinkRegistry>,
     /// Shared session publish-fault latch for context-state and projection
     /// writes.
     fault: crate::session::persistence::PersistenceFault,
@@ -118,7 +118,7 @@ impl CompactionEngine {
         interrupt: crate::cancel::InterruptSignal,
         llm_backend: Arc<dyn LlmBackend>,
         event_log_writer: Option<EventLogWriter>,
-        session_event_sink: Option<Arc<dyn crate::runtime::SessionEventSink>>,
+        session_event_sinks: Arc<crate::tools::rim_hooks::SessionEventSinkRegistry>,
     ) -> Result<Self> {
         let state_path = summary_path.with_file_name("context-state.json");
         let state = load_state(&state_path)?;
@@ -156,7 +156,7 @@ impl CompactionEngine {
             prompt_usage: Mutex::new(PromptUsageState::default()),
             projection_dirty: AtomicBool::new(false),
             event_log_writer,
-            session_event_sink,
+            session_event_sinks,
             fault: Default::default(),
             startup_repair_loss: Mutex::new(Vec::new()),
         })
@@ -853,12 +853,8 @@ impl CompactionEngine {
         // Observability is independent of disk logging: a host that runs with
         // `log_events=false` still receives compaction diagnostics through the
         // sink. The writer remains the optional durable outlet.
-        if let Some(sink) = &self.session_event_sink {
-            let session_id = self.session_id.as_str();
-            if sink.wants(session_id, &event) {
-                sink.on_session_event(session_id, &event);
-            }
-        }
+        self.session_event_sinks
+            .notify(self.session_id.as_str(), &event);
         if !self.config.log_events {
             return;
         }

@@ -371,6 +371,23 @@ impl FileSnapshotStore {
         self.noop_by_path.remove(&canonical_snapshot_path(path));
     }
 
+    /// Evict all recorded snapshots and read baselines for `path` (e.g. when
+    /// an output policy filter mutated `Read` content so stale hashline tags
+    /// must not be used for edits).
+    pub fn invalidate(&mut self, path: &Path) {
+        let canonical = canonical_snapshot_path(path);
+        if let Some(versions) = self.by_path.remove(&canonical) {
+            self.total_bytes = self
+                .total_bytes
+                .saturating_sub(versions.iter().map(|item| item.text.len()).sum());
+        }
+        self.read_latest.remove(&canonical);
+        self.read_latest_order.retain(|item| item != &canonical);
+        self.path_recency.retain(|item| item != &canonical);
+        self.noop_by_path.remove(&canonical);
+        self.edit_result_tags.remove(&canonical);
+    }
+
     fn touch_path(&mut self, path: &Path) {
         self.path_recency.retain(|candidate| candidate != path);
         self.path_recency.push_back(path.to_path_buf());

@@ -165,6 +165,7 @@ pub struct ToolExecution {
     pub extra_image_attachments: Vec<crate::tools::image::ImageAttachment>,
     pub(crate) todo_advanced: bool,
     pub(crate) edited_paths: Vec<String>,
+    pub(crate) policy_effects: Vec<crate::events::EventLog>,
 }
 
 pub struct SubAgentRequest {
@@ -223,6 +224,7 @@ impl ToolExecution {
             extra_image_attachments: Vec::new(),
             todo_advanced: false,
             edited_paths: Vec::new(),
+            policy_effects: Vec::new(),
         }
     }
 }
@@ -237,6 +239,7 @@ pub(crate) struct NestedToolOutcome {
     pub todo_advanced: bool,
     pub edited_paths: Vec<String>,
     pub image: Option<(crate::tools::image::ImageAttachment, String)>,
+    pub(crate) policy_effects: Vec<crate::events::EventLog>,
 }
 
 /// Infrastructure failure while executing a tool batch.
@@ -289,14 +292,6 @@ impl ToolRunner {
         }
     }
 
-    /// Find a tool by name.
-    fn find_tool(&self, name: &str) -> Option<&dyn ToolExec> {
-        self.tools
-            .iter()
-            .find(|t| t.metadata().name == name)
-            .map(|t| t.as_ref())
-    }
-
     fn find_custom_tool(
         &self,
         name: &str,
@@ -308,13 +303,7 @@ impl ToolRunner {
     }
 
     fn metadata_for(&self, name: &str) -> Option<ToolMetadata> {
-        if let Some(tool) = self.find_tool(name) {
-            return Some(tool.metadata());
-        }
-        self.ctx
-            .tool_surface
-            .get(name)
-            .map(|tool| tool.metadata.clone())
+        metadata_for_tool(&self.ctx, self.tools, name)
     }
 
     /// Reset storm breaker window — call at the start of each user turn.
@@ -376,7 +365,10 @@ pub(crate) fn extract_edited_paths(
 }
 
 pub(crate) use batch::execute_nested_tool_call;
-pub(crate) use format::format_tool_result_with_artifact as format_tool_result_with_artifact_pub;
+pub(crate) use format::{
+    apply_tool_output_filters,
+    format_tool_result_with_artifact as format_tool_result_with_artifact_pub,
+};
 #[cfg(test)]
 use format::{filter_bash_noise, format_dispatched_result, format_tool_result_with_artifact};
 pub(crate) use policy::requires_sequential_execution;
@@ -385,8 +377,22 @@ use policy::{
     ImageBatchBudget, PreparedCall, ToolExecOutput, ToolPolicyGate, mark_format_confirmed,
     not_executed_tool_result,
 };
+pub(super) fn metadata_for_tool(
+    ctx: &ToolContext,
+    tools: &[Box<dyn ToolExec>],
+    name: &str,
+) -> Option<ToolMetadata> {
+    if let Some(tool) = tools.iter().find(|t| t.metadata().name == name) {
+        return Some(tool.metadata());
+    }
+    ctx.tool_surface.get(name).map(|tool| tool.metadata.clone())
+}
+
 #[allow(unused_imports)]
-pub(crate) use policy::{blocked_tool_result, failed_tool_result, model_format_failed_result};
+pub(crate) use policy::{
+    GateOutcome, blocked_tool_result, evaluate_tool_gates, failed_tool_result,
+    interrupted_tool_result, merge_policy_effect_metadata, model_format_failed_result,
+};
 pub use sub_agent::SubAgentTool;
 
 #[cfg(test)]

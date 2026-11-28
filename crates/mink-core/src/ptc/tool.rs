@@ -311,9 +311,25 @@ pub(crate) async fn execute_run_code(
         outcome_label,
     );
 
+    let (filtered_composed, _, _, _, policy_effects) =
+        crate::tools::runner::apply_tool_output_filters(
+            ctx,
+            crate::tools::rim_hooks::ToolOutputFilterContext {
+                session_id: &ctx.session_id,
+                call_id: &call.id,
+                tool_name: &call.name,
+                is_sub_agent: ctx.is_sub_agent,
+                is_ptc_nested: false,
+                succeeded: status.is_success(),
+            },
+            composed,
+            String::new(),
+            None,
+        );
+
     let formatted = crate::tools::runner::format_tool_result_with_artifact_pub(
         "RunCode",
-        &composed,
+        &filtered_composed,
         ctx.tool_config.tool_result_max_bytes,
         ctx,
     );
@@ -327,6 +343,12 @@ pub(crate) async fn execute_run_code(
         sub_calls,
         output_truncated: result.output_truncated,
     });
+
+    let mut state_metadata =
+        unknown_effect.then(|| serde_json::json!({"execution_outcome": "unknown"}));
+    for effect in &policy_effects {
+        crate::tools::runner::merge_policy_effect_metadata(&mut state_metadata, effect);
+    }
 
     let exec = ToolExecution {
         tool_use_id: call.id,
@@ -359,11 +381,12 @@ pub(crate) async fn execute_run_code(
         failure_source: None,
         plan_command: None,
         needs_finalization: false,
-        state_metadata: unknown_effect.then(|| serde_json::json!({"execution_outcome": "unknown"})),
+        state_metadata,
         image_attachment: primary_image,
         extra_image_attachments: extra_images,
         todo_advanced,
         edited_paths,
+        policy_effects,
     };
     (exec, added_images, added_bytes)
 }

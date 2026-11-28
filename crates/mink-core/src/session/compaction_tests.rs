@@ -1929,7 +1929,7 @@ async fn startup_rebuilds_missing_or_stale_summary_projection() -> anyhow::Resul
         ctx.interrupt.clone(),
         summary_backend(),
         None,
-        None,
+        Arc::new(crate::tools::rim_hooks::SessionEventSinkRegistry::default()),
     )?;
 
     assert_eq!(
@@ -1978,7 +1978,9 @@ async fn compaction_events_reach_the_sink_without_disk_logging() -> anyhow::Resu
         ctx.interrupt.clone(),
         summary_backend(),
         None,
-        Some(sink.clone()),
+        Arc::new(crate::tools::rim_hooks::SessionEventSinkRegistry::new(
+            vec![sink.clone()],
+        )),
     )?;
 
     engine.write_event(crate::events::EventLog::Compact {
@@ -2058,7 +2060,9 @@ async fn real_compaction_check_emits_through_the_sink_without_disk_logging() -> 
         ctx.interrupt.clone(),
         summary_backend(),
         None,
-        Some(sink.clone()),
+        Arc::new(crate::tools::rim_hooks::SessionEventSinkRegistry::new(
+            vec![sink.clone()],
+        )),
     )?;
 
     let (compacted, reason) = engine
@@ -2170,7 +2174,7 @@ async fn startup_repairs_legacy_cut_on_internal_user_message() -> anyhow::Result
         ctx.interrupt.clone(),
         summary_backend(),
         Some(writer.clone()),
-        None,
+        Arc::new(crate::tools::rim_hooks::SessionEventSinkRegistry::default()),
     )?;
     engine.validate_startup().await?;
     assert_eq!(engine.current_state()?.active_start, 3);
@@ -2899,7 +2903,7 @@ async fn startup_repair_loss_cleared_only_after_successful_commit() -> anyhow::R
         ctx.interrupt.clone(),
         summary_backend(),
         None,
-        None,
+        Arc::new(crate::tools::rim_hooks::SessionEventSinkRegistry::default()),
     )?;
     engine.validate_startup().await?;
 

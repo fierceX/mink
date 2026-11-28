@@ -171,9 +171,8 @@ echo '{"version":3,"prompt":"scan this repo"}' | mink-core --agent-jsonl
 `events.jsonl` 的词汇表以 `mink::runtime::SessionEvent`（内部 `EventLog`）公开，每行一个
 `type` 标签的 JSON 对象。宿主用 `SessionReader::events` / `events_since(offset, max_events)`
 读取：只消费完整行，末尾半截行留在 `next_offset`；未知类型与坏 JSON 计入 `skipped`；
-偏移超出文件时 `truncated=true`、`next_offset=0`。`SessionEventSink` 提供同一词汇表的
-实时同步回调（`wants` 可过滤），不依赖磁盘日志；压缩产生的 `compaction_check`、`compact`
-与摘要 usage 也经该出口。
+偏移超出文件时 `truncated=true`、`next_offset=0`。`SessionEventSink` 支持多订阅者同步回调（`wants` 可过滤），不依赖磁盘日志；压缩产生的 `compaction_check`、`compact`
+与摘要 usage 也经该出口。策略门控与输出脱敏产生的 `policy_effect`（`EventLog::PolicyEffect`）属关键事件，与工具结果 `_mink.policy_effect` 同步落盘。
 
 `turn_final` 与 `turn_error` 均可带可选 `failure`（同上 code 集）；旧记录没有该字段仍可解码。
 其余事件字段（`llm_recovery` 的 `category`/`terminal`、`turn_error` 的 `category`、

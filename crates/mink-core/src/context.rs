@@ -31,6 +31,14 @@ use std::time::{Duration, Instant};
 use crate::config::SandboxPythonConfig;
 
 pub(crate) type PtcEventSink = Arc<dyn Fn(crate::events::EventLog) + Send + Sync>;
+pub(crate) type PolicyCriticalEventSink = Arc<
+    dyn Fn(
+            crate::events::EventLog,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Clone)]
 pub struct ToolConfig {
@@ -124,11 +132,16 @@ pub(crate) fn resolve_tool_runtime(
 /// 从 `AgentSharedContext` 通过 `From` trait 创建。
 #[derive(Clone)]
 pub struct ToolContext {
+    pub(crate) session_id: String,
+    pub(crate) is_sub_agent: bool,
     pub(crate) web_api_key: Option<Arc<str>>,
     pub(crate) human_web_command: bool,
     pub(crate) tool_mask: Option<crate::tools::policy_hook::ToolExecutionMask>,
     pub(crate) effect_journal: Option<Arc<dyn crate::tools::policy_hook::ToolEffectJournal>>,
     pub(crate) tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolCallObserver>>,
+    pub(crate) tool_hooks: Arc<crate::tools::rim_hooks::ToolHookRegistry>,
+    pub(crate) lifecycle: Arc<crate::tools::rim_hooks::RuntimeLifecycle>,
+    pub(crate) policy_critical_event_sink: Option<PolicyCriticalEventSink>,
     pub(crate) _session_lease: Option<Arc<crate::session::lease::SessionLease>>,
     pub cwd: PathBuf,
     pub home: PathBuf,
@@ -187,32 +200,25 @@ impl FileEditContext<'_> {
 
 impl From<&AgentSharedContext> for ToolContext {
     fn from(ctx: &AgentSharedContext) -> Self {
-        let tool_mask = ctx.tools.default_tool_mask.clone().or_else(|| {
-            ctx.tools
-                .turn_policies
-                .iter()
-                .find_map(|policy| policy.ordinary_turn_mask())
-        });
-        let effect_journal: Option<Arc<dyn crate::tools::policy_hook::ToolEffectJournal>> =
-            ctx.tools.default_effect_journal.clone().or_else(|| {
-                ctx.tools
-                    .turn_policies
-                    .iter()
-                    .find_map(|policy| policy.ordinary_effect_journal())
-            });
-        let tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolCallObserver>> =
-            ctx.tools.default_tool_observer.clone().or_else(|| {
-                ctx.tools
-                    .turn_policies
-                    .iter()
-                    .find_map(|policy| policy.ordinary_tool_observer())
-            });
+        let (tool_mask, effect_journal, tool_observer) =
+            crate::tools::policy_hook::compose_turn_policies(
+                &ctx.tools.turn_policies,
+                ctx.tools.default_tool_mask.clone(),
+                ctx.tools.default_effect_journal.clone(),
+                ctx.tools.default_tool_observer.clone(),
+            )
+            .expect("turn policy composition validated during context build");
         Self {
+            session_id: ctx.config.session_id.clone(),
+            is_sub_agent: ctx.delegation.is_sub_agent,
             web_api_key: crate::tools::web::api_key(&ctx.config),
             human_web_command: false,
             tool_mask,
             effect_journal,
             tool_observer,
+            tool_hooks: ctx.tools.tool_hooks.clone(),
+            lifecycle: ctx.lifecycle.clone(),
+            policy_critical_event_sink: None,
             _session_lease: ctx
                 .stores
                 .session_lease
@@ -256,7 +262,22 @@ impl ToolContext {
         let mut tool_ctx = Self::from(ctx.as_ref());
         let shared = ctx.clone();
         tool_ctx.ptc_event_sink = Some(Arc::new(move |event| shared.log_event(event)));
+        let shared_crit = ctx.clone();
+        tool_ctx.policy_critical_event_sink = Some(Arc::new(move |event| {
+            let shared_inner = shared_crit.clone();
+            Box::pin(async move { shared_inner.log_critical_event(event).await })
+        }));
         tool_ctx
+    }
+
+    pub(crate) async fn emit_policy_effect(
+        &self,
+        event: crate::events::EventLog,
+    ) -> anyhow::Result<()> {
+        if let Some(sink) = &self.policy_critical_event_sink {
+            sink(event).await?;
+        }
+        Ok(())
     }
     pub(crate) fn file_edit_context(&self) -> FileEditContext<'_> {
         FileEditContext {
@@ -454,6 +475,7 @@ pub struct ToolRuntimeContext {
     pub(crate) default_effect_journal:
         Option<Arc<dyn crate::tools::policy_hook::ToolEffectJournal>>,
     pub(crate) default_tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolCallObserver>>,
+    pub(crate) tool_hooks: Arc<crate::tools::rim_hooks::ToolHookRegistry>,
     pub(crate) prefix_source: Option<Arc<dyn crate::runtime::PrefixSource>>,
     pub(crate) model_capabilities:
         Arc<crate::capabilities::model_capabilities::SessionModelCapabilities>,
@@ -484,8 +506,8 @@ pub struct DelegationContext {
 /// Terminal display, event log writer, prefix lock, and stream-json flush state.
 pub struct EventIoContext {
     pub display: Arc<dyn Display>,
-    /// Optional live observer for the durable event vocabulary (`events.jsonl`).
-    pub(crate) session_event_sink: Option<Arc<dyn crate::runtime::SessionEventSink>>,
+    /// Live observers for the durable event vocabulary (`events.jsonl`).
+    pub(crate) session_event_sinks: Arc<crate::tools::rim_hooks::SessionEventSinkRegistry>,
     pub immutable_prefix: Mutex<Option<ImmutablePrefix>>,
     /// Avoid repeated stderr warnings if event logging starts failing.
     pub event_log_warned: AtomicBool,
@@ -515,6 +537,7 @@ pub struct AgentSharedContext {
     pub media: TurnMediaState,
     pub delegation: DelegationContext,
     pub io: EventIoContext,
+    pub(crate) lifecycle: Arc<crate::tools::rim_hooks::RuntimeLifecycle>,
 }
 
 impl AgentSharedContext {
@@ -666,16 +689,12 @@ impl AgentSharedContext {
         }
     }
 
-    /// Forward one typed event to the optional live observer. Delivery is
-    /// independent of `log_events` and must not affect turn state.
+    /// Forward one typed event to all registered live observers. Delivery is
+    /// independent of `log_events`, runs outside locks, and must not affect turn state.
     fn notify_session_event(&self, event: &crate::events::EventLog) {
-        let Some(sink) = &self.io.session_event_sink else {
-            return;
-        };
-        let session_id = self.config.session_id.as_str();
-        if sink.wants(session_id, event) {
-            sink.on_session_event(session_id, event);
-        }
+        self.io
+            .session_event_sinks
+            .notify(self.config.session_id.as_str(), event);
     }
 
     /// Append a typed event to events.jsonl. In stream-json mode, also emit

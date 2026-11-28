@@ -290,7 +290,159 @@ pub(crate) fn blocked_tool_result(
         extra_image_attachments: Vec::new(),
         todo_advanced: false,
         edited_paths: Vec::new(),
+        policy_effects: Vec::new(),
     }
+}
+
+pub(crate) enum GateOutcome {
+    Allow,
+    Blocked(Box<ToolExecution>),
+    Interrupted,
+}
+
+pub(crate) fn merge_policy_effect_metadata(
+    state_metadata: &mut Option<serde_json::Value>,
+    effect: &crate::events::EventLog,
+) {
+    let Ok(effect_json) = serde_json::to_value(effect) else {
+        return;
+    };
+    let root = state_metadata.get_or_insert_with(|| serde_json::json!({}));
+    if let Some(obj) = root.as_object_mut() {
+        obj.entry("policy_effect")
+            .or_insert_with(|| effect_json.clone());
+        let list = obj
+            .entry("policy_effects")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        if let Some(arr) = list.as_array_mut() {
+            arr.push(effect_json);
+        }
+    }
+}
+
+pub(crate) fn interrupted_tool_result(call: ToolCallEvent) -> ToolExecution {
+    let mut result = failed_tool_result(
+        call.id,
+        call.name,
+        call.fields,
+        "tool execution interrupted".to_string(),
+    );
+    result.status = ToolStatus::Interrupted;
+    result
+}
+
+pub(crate) async fn evaluate_tool_gates(
+    ctx: &ToolContext,
+    call: &ToolCallEvent,
+    metadata: Option<&ToolMetadata>,
+    is_ptc_nested: bool,
+) -> anyhow::Result<GateOutcome> {
+    let gates = ctx.tool_hooks.snapshot_gates();
+    if gates.is_empty() {
+        return Ok(GateOutcome::Allow);
+    }
+
+    let make_blocked = |policy_id: String,
+                        action: &str,
+                        code: String,
+                        reason: String|
+     -> (crate::events::EventLog, ToolExecution) {
+        let effect = crate::events::EventLog::PolicyEffect {
+            version: Some(1),
+            anchor: "before_tool_exec".to_string(),
+            policy_id,
+            call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            action: action.to_string(),
+            code: code.clone(),
+            reason: Some(reason.clone()),
+            is_sub_agent: ctx.is_sub_agent,
+            is_ptc_nested,
+        };
+        let mut blocked = blocked_tool_result(
+            call.id.clone(),
+            call.name.clone(),
+            call.fields.clone(),
+            format!("blocked by policy ({code}): {reason}"),
+            ToolBlocker::Policy,
+        );
+        merge_policy_effect_metadata(&mut blocked.state_metadata, &effect);
+        (effect, blocked)
+    };
+
+    if ctx.lifecycle.is_closing() {
+        let (effect, blocked) = make_blocked(
+            "runtime_lifecycle".to_string(),
+            "deny",
+            "RUNTIME_CLOSING".to_string(),
+            "runtime is closing; tool execution is blocked".to_string(),
+        );
+        ctx.emit_policy_effect(effect).await?;
+        return Ok(GateOutcome::Blocked(Box::new(blocked)));
+    }
+
+    let req = crate::tools::rim_hooks::ToolGateRequest {
+        session_id: &ctx.session_id,
+        call_id: &call.id,
+        tool_name: &call.name,
+        input: &call.input_json,
+        cwd: &ctx.cwd,
+        is_sub_agent: ctx.is_sub_agent,
+        is_ptc_nested,
+        approval_tier: metadata.map_or(ApprovalTier::Exec, |m| m.approval),
+        mutating: metadata.is_none_or(|m| m.mutating),
+    };
+
+    for gate in gates {
+        if ctx.cancel.is_cancelled() || ctx.interrupt.is_set() {
+            return Ok(GateOutcome::Interrupted);
+        }
+        let child_cancel = ctx.cancel.linked_child_token();
+        let timeout = gate.timeout();
+        let check_fut = gate.check(&req, &child_cancel);
+        tokio::pin!(check_fut);
+        let sleep_fut = tokio::time::sleep(timeout);
+        tokio::pin!(sleep_fut);
+
+        let decision = tokio::select! {
+            biased;
+            _ = ctx.cancel.cancelled() => {
+                child_cancel.cancel();
+                return Ok(GateOutcome::Interrupted);
+            }
+            _ = ctx.interrupt.notified() => {
+                child_cancel.cancel();
+                return Ok(GateOutcome::Interrupted);
+            }
+            res = &mut check_fut => match res {
+                Ok(crate::tools::rim_hooks::ToolGateDecision::Allow) => None,
+                Ok(crate::tools::rim_hooks::ToolGateDecision::Deny { code, reason }) => {
+                    Some(("deny", code, reason))
+                }
+                Err(error) => Some((
+                    "error_fail_closed",
+                    "POLICY_GATE_ERROR".to_string(),
+                    format!("{error:#}"),
+                )),
+            },
+            _ = &mut sleep_fut => {
+                child_cancel.cancel();
+                Some((
+                    "timeout_fail_closed",
+                    "POLICY_GATE_TIMEOUT".to_string(),
+                    format!("policy gate '{}' timed out after {}ms", gate.id(), timeout.as_millis()),
+                ))
+            }
+        };
+
+        if let Some((action, code, reason)) = decision {
+            let (effect, blocked) = make_blocked(gate.id().to_string(), action, code, reason);
+            ctx.emit_policy_effect(effect).await?;
+            return Ok(GateOutcome::Blocked(Box::new(blocked)));
+        }
+    }
+
+    Ok(GateOutcome::Allow)
 }
 
 pub(crate) fn failed_tool_result(

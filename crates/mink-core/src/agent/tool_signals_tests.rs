@@ -38,6 +38,7 @@ fn tool_result(content: &str) -> ToolExecution {
         extra_image_attachments: Vec::new(),
         todo_advanced: false,
         edited_paths: Vec::new(),
+        policy_effects: Vec::new(),
     }
 }
 

@@ -133,6 +133,7 @@ pub enum ToolBlocker {
     RecoveryGuard,
     ToolSurface,
     StormBreaker,
+    Policy,
 }
 
 /// Internal provenance marker for a failed tool call produced by model output

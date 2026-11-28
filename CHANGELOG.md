@@ -5,6 +5,7 @@
 ### 架构与破坏性变更
 
 - **Goal 子系统解耦为独立包 `mink-goal`**：将原内置于 `mink-core` 的 Goal 领域模型、持久化存储（`GoalStore`）、状态机与审核引擎（`GoalEngine` / `GoalDriver` / `GoalReview`）物理拆出至 `crates/mink-goal`，`mink-core` 只保留 5 组通用扩展原语（动态 `AgentTool` 与 `ToolExecutionMask`、`ExternalOwnerGuard`、`StopCause`、`InternalTurnRequest` / `ExtensionEmitter` / `ArtifactReader` / ephemeral child、`CompactionCheckpointProvider`）及静态边界守卫 `mink_core_sources_contain_no_goal_coupling`；`mink-cli`、`mink-server` 与相关示例改为通过 `GoalPlugin::install_into` + `GoalEngine::attach` 外挂组合，不需要 Goal 的纯 `mink-core` 宿主零 Goal 工具与状态开销；`RuntimeError::GoalActive` 泛化为 `RuntimeError::ExternallyControlled { owner }`。
+- **可逆外环接缝与独立可选包 `mink-rim`**：`mink-core` 消除 `SessionEventSink`/`PostInitHook`/`TurnPolicyProvider` 单槽与静默覆盖限制（`ToolExecutionMask` 取交集、`ToolCallObserver` 组合、`ToolEffectJournal` 冲突 fail-closed），新增实例级 LIFO `RuntimeLifecycle`（覆盖启动失败回滚、`shutdown()` 与 `Drop`）、`RuntimePlugin`、异步策略门控 `ToolExecutionGate`（覆盖直调、`RunCode` 嵌套与子代理继承，超时/出错/关闭均 fail-closed 为 `ToolBlocker::Policy`）、落盘前输出过滤 `ToolOutputFilter`（改写 `Read` 时自动失效快照与 memo）以及关键审计事件 `EventLog::PolicyEffect`（同步写入 `_mink.policy_effect`），并通过 `handle.ext()` 提供返回 RAII `RegistrationGuard` 的运行期动态注册入口；在此之上新增独立可选 workspace crate `crates/mink-rim`，提供 `Scope`/`Disposer`、`SeatRegistry<P>` 三态仲裁与声明式 `RimProfile`/`RimBundle`/`RuntimeAssembler`（含启动原子回滚与 `RimSession` 作用域零残留绑定）。
 
 ### 变更与修复
 

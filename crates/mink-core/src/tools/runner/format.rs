@@ -13,11 +13,16 @@ struct DispatchTextInput {
     file_summary_metrics: Option<(usize, usize)>,
 }
 
+struct DispatchTextResult {
+    composed: String,
+    memo_candidate: Option<MemoCandidate>,
+}
+
 fn compose_dispatched_text(
     ctx: &ToolContext,
     call: &ToolCallEvent,
     input: DispatchTextInput,
-) -> String {
+) -> DispatchTextResult {
     let DispatchTextInput {
         mut output,
         is_bash,
@@ -76,17 +81,6 @@ fn compose_dispatched_text(
     if let Some(note) = json_note {
         composed.push_str(&note);
     }
-    if let Some(candidate) = memo_candidate
-        && composed.len() <= ctx.tool_config.tool_result_max_bytes
-    {
-        ctx.memo_record(
-            &candidate.path,
-            candidate.raw,
-            candidate.start_line,
-            candidate.end_line,
-            candidate.content_hash,
-        );
-    }
     let mutating = crate::tools::runner::tool_registry()
         .iter()
         .find(|tool| tool.metadata().name == call.name)
@@ -94,7 +88,125 @@ fn compose_dispatched_text(
     if mutating && success && !no_mutation {
         ctx.bump_mutation();
     }
-    composed
+    DispatchTextResult {
+        composed,
+        memo_candidate,
+    }
+}
+
+pub(crate) fn apply_tool_output_filters(
+    ctx: &ToolContext,
+    filter_ctx: crate::tools::rim_hooks::ToolOutputFilterContext<'_>,
+    content: String,
+    conv_content: String,
+    structured_value: Option<serde_json::Value>,
+) -> (
+    String,
+    String,
+    Option<serde_json::Value>,
+    bool,
+    Vec<crate::events::EventLog>,
+) {
+    let filters = ctx.tool_hooks.snapshot_filters();
+    if filters.is_empty() {
+        return (content, conv_content, structured_value, false, Vec::new());
+    }
+    let call_id = filter_ctx.call_id;
+    let tool_name = filter_ctx.tool_name;
+    let is_ptc_nested = filter_ctx.is_ptc_nested;
+    let mut mutation =
+        crate::tools::rim_hooks::ToolOutputMutation::new(content, conv_content, structured_value);
+    let mut any_mutated = false;
+    let mut effects = Vec::new();
+    for filter in filters {
+        let prev_content = mutation.content.clone();
+        let prev_conv = mutation.conv_content.clone();
+        let prev_structured = mutation.structured_value.clone();
+        mutation.clear_step_flag();
+        match filter.filter(&filter_ctx, &mut mutation) {
+            Ok(()) => {
+                let changed = mutation.is_mutated()
+                    || mutation.content != prev_content
+                    || mutation.conv_content != prev_conv
+                    || mutation.structured_value != prev_structured;
+                if changed {
+                    any_mutated = true;
+                    let code = mutation
+                        .code
+                        .take()
+                        .unwrap_or_else(|| "POLICY_OUTPUT_REDACTED".to_string());
+                    let reason = mutation.reason.take();
+                    effects.push(crate::events::EventLog::PolicyEffect {
+                        version: Some(1),
+                        anchor: "after_tool_output".to_string(),
+                        policy_id: filter.id().to_string(),
+                        call_id: call_id.to_string(),
+                        tool_name: tool_name.to_string(),
+                        action: "redact".to_string(),
+                        code,
+                        reason,
+                        is_sub_agent: ctx.is_sub_agent,
+                        is_ptc_nested,
+                    });
+                }
+            }
+            Err(error) => {
+                any_mutated = true;
+                mutation.content = format!(
+                    "Error: tool output blocked by policy filter '{}' (fail-closed): {error:#}",
+                    filter.id()
+                );
+                mutation.conv_content.clear();
+                mutation.structured_value = None;
+                effects.push(crate::events::EventLog::PolicyEffect {
+                    version: Some(1),
+                    anchor: "after_tool_output".to_string(),
+                    policy_id: filter.id().to_string(),
+                    call_id: call_id.to_string(),
+                    tool_name: tool_name.to_string(),
+                    action: "error_fail_closed".to_string(),
+                    code: "POLICY_FILTER_ERROR".to_string(),
+                    reason: Some(format!("{error:#}")),
+                    is_sub_agent: ctx.is_sub_agent,
+                    is_ptc_nested,
+                });
+                break;
+            }
+        }
+    }
+    (
+        mutation.content,
+        mutation.conv_content,
+        mutation.structured_value,
+        any_mutated,
+        effects,
+    )
+}
+
+fn invalidate_read_snapshot_if_needed(
+    ctx: &ToolContext,
+    call: &ToolCallEvent,
+    memo_path: Option<&Path>,
+) {
+    if call.name != "Read" {
+        return;
+    }
+    let resolved = if let Some(path) = memo_path {
+        Some(path.to_path_buf())
+    } else if let Some(raw) = call.fields.get("path") {
+        let base = crate::resources::selector::split_read_path_selection(raw)
+            .map(|sel| sel.path)
+            .unwrap_or_else(|_| raw.clone());
+        (!base.contains("://")).then(|| resolve_summary_path(&ctx.cwd, &base))
+    } else {
+        None
+    };
+    if let Some(path) = resolved {
+        ctx.snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .invalidate(&path);
+    }
 }
 
 pub(super) fn format_dispatched_result(
@@ -105,7 +217,7 @@ pub(super) fn format_dispatched_result(
     let ToolExecOutput {
         content: output,
         is_bash,
-        mut conv_content,
+        conv_content,
         exit_code,
         wall_ms,
         no_mutation,
@@ -114,7 +226,7 @@ pub(super) fn format_dispatched_result(
         status,
         diagnostics,
         plan_command,
-        state_metadata,
+        mut state_metadata,
         result_kind,
         presentation,
         structured_value: _,
@@ -122,7 +234,10 @@ pub(super) fn format_dispatched_result(
         file_summary_metrics,
     } = raw;
     let success = status.is_success();
-    let composed = compose_dispatched_text(
+    let DispatchTextResult {
+        composed,
+        memo_candidate,
+    } = compose_dispatched_text(
         ctx,
         call,
         DispatchTextInput {
@@ -137,16 +252,51 @@ pub(super) fn format_dispatched_result(
             file_summary_metrics,
         },
     );
+    let (filtered_composed, mut conv_content, _, output_mutated, policy_effects) =
+        apply_tool_output_filters(
+            ctx,
+            crate::tools::rim_hooks::ToolOutputFilterContext {
+                session_id: &ctx.session_id,
+                call_id: &call.id,
+                tool_name: &call.name,
+                is_sub_agent: ctx.is_sub_agent,
+                is_ptc_nested: false,
+                succeeded: success,
+            },
+            composed,
+            conv_content,
+            None,
+        );
+    if output_mutated && call.name == "Read" {
+        invalidate_read_snapshot_if_needed(
+            ctx,
+            call,
+            memo_candidate.as_ref().map(|c| c.path.as_path()),
+        );
+    } else if let Some(candidate) = memo_candidate
+        && filtered_composed.len() <= ctx.tool_config.tool_result_max_bytes
+    {
+        ctx.memo_record(
+            &candidate.path,
+            candidate.raw,
+            candidate.start_line,
+            candidate.end_line,
+            candidate.content_hash,
+        );
+    }
+    for effect in &policy_effects {
+        crate::tools::runner::merge_policy_effect_metadata(&mut state_metadata, effect);
+    }
     let needs_finalization = plan_command.is_some() || spawns_sub_agent;
     let formatted = if needs_finalization {
         FormattedToolOutput {
-            content: composed,
+            content: filtered_composed,
             artifacts: Vec::new(),
         }
     } else {
         format_tool_result_with_artifact(
             &call.name,
-            &composed,
+            &filtered_composed,
             ctx.tool_config.tool_result_max_bytes,
             ctx,
         )
@@ -218,6 +368,7 @@ pub(super) fn format_dispatched_result(
         extra_image_attachments: Vec::new(),
         todo_advanced: false,
         edited_paths: Vec::new(),
+        policy_effects,
     }
 }
 
@@ -247,7 +398,10 @@ pub(super) fn format_nested_dispatched_result(
         file_summary_metrics,
     } = raw;
     let success = status.is_success();
-    let composed = compose_dispatched_text(
+    let DispatchTextResult {
+        composed,
+        memo_candidate,
+    } = compose_dispatched_text(
         ctx,
         call,
         DispatchTextInput {
@@ -262,10 +416,42 @@ pub(super) fn format_nested_dispatched_result(
             file_summary_metrics,
         },
     );
+    let (filtered_composed, _, structured_value, output_mutated, policy_effects) =
+        apply_tool_output_filters(
+            ctx,
+            crate::tools::rim_hooks::ToolOutputFilterContext {
+                session_id: &ctx.session_id,
+                call_id: &call.id,
+                tool_name: &call.name,
+                is_sub_agent: ctx.is_sub_agent,
+                is_ptc_nested: true,
+                succeeded: success,
+            },
+            composed,
+            String::new(),
+            structured_value,
+        );
+    if output_mutated && call.name == "Read" {
+        invalidate_read_snapshot_if_needed(
+            ctx,
+            call,
+            memo_candidate.as_ref().map(|c| c.path.as_path()),
+        );
+    } else if let Some(candidate) = memo_candidate
+        && filtered_composed.len() <= ctx.tool_config.tool_result_max_bytes
+    {
+        ctx.memo_record(
+            &candidate.path,
+            candidate.raw,
+            candidate.start_line,
+            candidate.end_line,
+            candidate.content_hash,
+        );
+    }
     let rendered_text = if is_bash {
-        filter_bash_noise(&composed)
+        filter_bash_noise(&filtered_composed)
     } else {
-        composed
+        filtered_composed
     };
     let unknown_effect = is_mutating
         && matches!(
@@ -291,6 +477,7 @@ pub(super) fn format_nested_dispatched_result(
         todo_advanced,
         edited_paths,
         image: None,
+        policy_effects,
     }
 }
 

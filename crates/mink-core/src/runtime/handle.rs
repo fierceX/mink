@@ -330,6 +330,7 @@ impl Drop for AgentRuntime {
         if let Some(controller) = &controller {
             controller.on_shutdown_disable();
         }
+        self.ctx.lifecycle.mark_closing();
         let _ = self
             .handle
             .external_control
@@ -340,6 +341,7 @@ impl Drop for AgentRuntime {
         if let Some(controller) = &controller {
             controller.on_shutdown_close();
         }
+        self.ctx.lifecycle.dispose();
         if let Some(orch_handle) = self.orch_handle.take() {
             orch_handle.abort();
         }
@@ -1186,6 +1188,47 @@ impl<'a> RuntimeExtHandle<'a> {
     pub fn render_error(&self, message: &str) {
         self.0.ctx.io.display.render_error(message);
     }
+
+    /// Dynamically attach an additional [`SessionEventSink`](crate::runtime::SessionEventSink)
+    /// to this runtime; dropping the returned guard removes it.
+    pub fn register_session_event_sink(
+        &self,
+        sink: Arc<dyn crate::runtime::SessionEventSink>,
+    ) -> crate::tools::rim_hooks::RegistrationGuard {
+        self.0.ctx.io.session_event_sinks.register(sink)
+    }
+
+    /// Dynamically attach a [`ToolExecutionGate`](crate::tools::rim_hooks::ToolExecutionGate)
+    /// to this runtime (inherited by sub-agents); dropping the returned guard removes it.
+    pub fn register_tool_execution_gate(
+        &self,
+        gate: Arc<dyn crate::tools::rim_hooks::ToolExecutionGate>,
+    ) -> crate::tools::rim_hooks::RegistrationGuard {
+        self.0.ctx.tools.tool_hooks.register_gate(gate)
+    }
+
+    /// Dynamically attach a [`ToolOutputFilter`](crate::tools::rim_hooks::ToolOutputFilter)
+    /// to this runtime (inherited by sub-agents); dropping the returned guard removes it.
+    pub fn register_tool_output_filter(
+        &self,
+        filter: Arc<dyn crate::tools::rim_hooks::ToolOutputFilter>,
+    ) -> crate::tools::rim_hooks::RegistrationGuard {
+        self.0.ctx.tools.tool_hooks.register_filter(filter)
+    }
+
+    /// Register a LIFO teardown callback executed on `AgentRuntime::shutdown()`
+    /// or `AgentRuntime::drop()` (or immediately if already disposed).
+    pub fn register_teardown(&self, label: impl Into<String>, f: impl FnOnce() + Send + 'static) {
+        self.0.ctx.lifecycle.register_teardown(label, f);
+    }
+
+    pub fn session_event_sink_count(&self) -> usize {
+        self.0.ctx.io.session_event_sinks.len()
+    }
+
+    pub fn tool_hook_stats(&self) -> crate::tools::rim_hooks::ToolHookStats {
+        self.0.ctx.tools.tool_hooks.stats()
+    }
 }
 
 /// Per-stage budget for shutdown flush/teardown work.
@@ -1282,6 +1325,7 @@ impl AgentRuntime {
         if let Some(controller) = &controller {
             controller.on_shutdown_disable();
         }
+        self.ctx.lifecycle.mark_closing();
         let _ = self
             .handle
             .external_control
@@ -1310,6 +1354,7 @@ impl AgentRuntime {
         if let Some(controller) = &controller {
             controller.on_shutdown_close();
         }
+        self.ctx.lifecycle.dispose();
         self.handle
             .external_control
             .admission

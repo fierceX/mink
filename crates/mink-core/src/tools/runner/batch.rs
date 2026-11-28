@@ -66,6 +66,27 @@ impl ToolRunner {
                     }
                     PreparedCall::Execute(call) => call,
                 };
+                match evaluate_tool_gates(&self.ctx, &call, metadata.as_ref(), false).await {
+                    Ok(GateOutcome::Allow) => {}
+                    Ok(GateOutcome::Blocked(blocked)) => {
+                        results.push(*blocked);
+                        continue;
+                    }
+                    Ok(GateOutcome::Interrupted) => {
+                        results.push(interrupted_tool_result(call));
+                        continue;
+                    }
+                    Err(error) => {
+                        results.push(not_executed_tool_result(
+                            call,
+                            &format!("not executed: {error:#}"),
+                        ));
+                        return Err(FatalBatchError {
+                            error,
+                            completed: results,
+                        });
+                    }
+                }
                 if tracks_effects
                     && records_durable_effect(metadata.as_ref(), custom_def)
                     && let Some(journal) = &self.ctx.effect_journal
@@ -108,6 +129,18 @@ impl ToolRunner {
                 });
             }
         }
+        let pending_effects: Vec<crate::events::EventLog> = results
+            .iter_mut()
+            .flat_map(|result| result.policy_effects.drain(..))
+            .collect();
+        for effect in pending_effects {
+            if let Err(error) = self.ctx.emit_policy_effect(effect).await {
+                return Err(FatalBatchError {
+                    error,
+                    completed: results,
+                });
+            }
+        }
         Ok(results)
     }
 
@@ -116,9 +149,29 @@ impl ToolRunner {
             if !result.needs_finalization {
                 continue;
             }
+            let (filtered_content, filtered_conv, _, _, policy_effects) =
+                super::format::apply_tool_output_filters(
+                    &self.ctx,
+                    crate::tools::rim_hooks::ToolOutputFilterContext {
+                        session_id: &self.ctx.session_id,
+                        call_id: &result.tool_use_id,
+                        tool_name: &result.tool_name,
+                        is_sub_agent: self.ctx.is_sub_agent,
+                        is_ptc_nested: false,
+                        succeeded: result.succeeded(),
+                    },
+                    std::mem::take(&mut result.content),
+                    std::mem::take(&mut result.conv_content),
+                    None,
+                );
+            result.conv_content = filtered_conv;
+            for effect in &policy_effects {
+                merge_policy_effect_metadata(&mut result.state_metadata, effect);
+            }
+            result.policy_effects.extend(policy_effects);
             let formatted = format_tool_result_with_artifact(
                 &result.tool_name,
-                &result.content,
+                &filtered_content,
                 self.ctx.tool_config.tool_result_max_bytes,
                 &self.ctx,
             );
@@ -163,6 +216,34 @@ impl ToolRunner {
                     slots.push(Some(PreparedSlot::Immediate(result)));
                 }
                 PreparedCall::Execute(call) => {
+                    let metadata = self.metadata_for(&call.name);
+                    match evaluate_tool_gates(&self.ctx, &call, metadata.as_ref(), false).await {
+                        Ok(GateOutcome::Allow) => {}
+                        Ok(GateOutcome::Blocked(blocked)) => {
+                            slots.push(Some(PreparedSlot::Immediate(*blocked)));
+                            continue;
+                        }
+                        Ok(GateOutcome::Interrupted) => {
+                            slots
+                                .push(Some(PreparedSlot::Immediate(interrupted_tool_result(call))));
+                            continue;
+                        }
+                        Err(error) => {
+                            let mut completed: Vec<ToolExecution> = slots
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|slot| match slot {
+                                    PreparedSlot::Immediate(exec) => Some(exec),
+                                    _ => None,
+                                })
+                                .collect();
+                            completed.push(not_executed_tool_result(
+                                call,
+                                &format!("not executed: {error:#}"),
+                            ));
+                            return Err(FatalBatchError { error, completed });
+                        }
+                    }
                     if call.name == "Read" {
                         slots.push(None);
                         let path = call
@@ -499,6 +580,7 @@ impl ToolRunner {
             extra_image_attachments: Vec::new(),
             todo_advanced: false,
             edited_paths: Vec::new(),
+            policy_effects: Vec::new(),
         }
     }
 
@@ -796,6 +878,40 @@ pub(crate) async fn execute_nested_tool_call(
         call.name
     );
     ctx.persistence_fault.check()?;
+    let metadata = super::metadata_for_tool(ctx, tool_registry(), &call.name);
+    match evaluate_tool_gates(ctx, &call, metadata.as_ref(), true).await? {
+        GateOutcome::Allow => {}
+        GateOutcome::Blocked(exec) => {
+            return Ok(NestedToolOutcome {
+                rendered_text: exec.content,
+                structured_value: None,
+                status: exec.status,
+                exit_code: None,
+                result_kind: exec.result_kind,
+                unknown_effect: false,
+                todo_advanced: false,
+                edited_paths: Vec::new(),
+                image: None,
+                policy_effects: Vec::new(),
+            });
+        }
+        GateOutcome::Interrupted => {
+            return Ok(NestedToolOutcome {
+                rendered_text: "Error: tool execution interrupted".to_string(),
+                structured_value: None,
+                status: ToolStatus::Interrupted,
+                exit_code: None,
+                result_kind: metadata
+                    .as_ref()
+                    .map_or(ToolResultKind::Text, |m| m.result_kind),
+                unknown_effect: false,
+                todo_advanced: false,
+                edited_paths: Vec::new(),
+                image: None,
+                policy_effects: Vec::new(),
+            });
+        }
+    }
 
     if call.name == "Read" {
         let path_str = call
@@ -872,6 +988,7 @@ pub(crate) async fn execute_nested_tool_call(
                     todo_advanced: false,
                     edited_paths: Vec::new(),
                     image: Some((attachment, prepared.display_path)),
+                    policy_effects: Vec::new(),
                 });
             }
         }
@@ -891,25 +1008,33 @@ pub(crate) async fn execute_nested_tool_call(
         if mutating && succeeded {
             ctx.bump_mutation();
         }
-        return Ok(format_nested_dispatched_result(ctx, &call, raw, mutating));
+        let mut outcome = format_nested_dispatched_result(ctx, &call, raw, mutating);
+        for effect in outcome.policy_effects.drain(..) {
+            ctx.emit_policy_effect(effect).await?;
+        }
+        return Ok(outcome);
     }
 
     let ctx_sync = ctx.clone();
-    tokio::task::spawn_blocking(move || {
+    let mut outcome = tokio::task::spawn_blocking(move || {
         let tool_fn = tool_registry()
             .iter()
             .find(|t| t.metadata().name == call.name)
             .map(|t| t.as_ref());
         let is_mutating = tool_fn.is_some_and(|t| t.metadata().mutating);
         let raw = dispatch_tool(&ctx_sync, &call, tool_fn);
-        Ok(format_nested_dispatched_result(
+        Ok::<_, anyhow::Error>(format_nested_dispatched_result(
             &ctx_sync,
             &call,
             raw,
             is_mutating,
         ))
     })
-    .await?
+    .await??;
+    for effect in outcome.policy_effects.drain(..) {
+        ctx.emit_policy_effect(effect).await?;
+    }
+    Ok(outcome)
 }
 
 fn failed_status(

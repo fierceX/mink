@@ -474,7 +474,9 @@ async fn harness_inner_ext(
             resolved_paths: None,
             api_url,
             display: display.clone(),
-            session_event_sink: None,
+            session_event_sinks: Arc::new(
+                crate::tools::rim_hooks::SessionEventSinkRegistry::default(),
+            ),
             sub_stream_tx: None,
             cancel: crate::cancel::CancellationToken::new(),
             interrupt: crate::cancel::InterruptSignal::new(),
@@ -499,6 +501,8 @@ async fn harness_inner_ext(
             default_tool_mask: None,
             default_effect_journal: None,
             default_tool_observer: None,
+            tool_hooks: Arc::new(crate::tools::rim_hooks::ToolHookRegistry::default()),
+            lifecycle: Arc::new(crate::tools::rim_hooks::RuntimeLifecycle::new()),
             budget_check: None,
         },
     );
@@ -604,6 +608,7 @@ fn internal_result(name: &str) -> ToolExecution {
         extra_image_attachments: Vec::new(),
         todo_advanced: false,
         edited_paths: Vec::new(),
+        policy_effects: Vec::new(),
     }
 }
 

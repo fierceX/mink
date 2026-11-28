@@ -13,6 +13,7 @@ pub(crate) mod process;
 pub mod python;
 pub mod read_memo;
 pub mod replace;
+pub mod rim_hooks;
 pub mod runner;
 pub mod runtime_guidance;
 #[cfg(feature = "python-sandbox")]

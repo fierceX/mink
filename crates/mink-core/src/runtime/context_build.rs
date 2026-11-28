@@ -39,7 +39,7 @@ pub struct AgentContextBuild {
     pub resolved_paths: Option<paths::Paths>,
     pub api_url: String,
     pub display: Arc<dyn Display>,
-    pub session_event_sink: Option<Arc<dyn crate::runtime::SessionEventSink>>,
+    pub session_event_sinks: Arc<crate::tools::rim_hooks::SessionEventSinkRegistry>,
     pub sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
     pub cancel: CancellationToken,
     pub interrupt: crate::cancel::InterruptSignal,
@@ -66,6 +66,8 @@ pub struct AgentContextBuild {
     pub default_tool_mask: Option<crate::tools::policy_hook::ToolExecutionMask>,
     pub default_effect_journal: Option<Arc<dyn crate::tools::policy_hook::ToolEffectJournal>>,
     pub default_tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolCallObserver>>,
+    pub tool_hooks: Arc<crate::tools::rim_hooks::ToolHookRegistry>,
+    pub lifecycle: Arc<crate::tools::rim_hooks::RuntimeLifecycle>,
     pub budget_check: Option<Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync>>,
 }
 
@@ -123,6 +125,12 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
             params.sub_agent_depth,
             &params.custom_tools,
         )?;
+    let _ = crate::tools::policy_hook::compose_turn_policies(
+        &params.turn_policies,
+        params.default_tool_mask.clone(),
+        params.default_effect_journal.clone(),
+        params.default_tool_observer.clone(),
+    )?;
     let paths = params.resolved_paths.unwrap_or_else(|| {
         paths::paths_for_layout(
             &params.home,
@@ -202,7 +210,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
             params.interrupt.clone(),
             params.llm_backend.clone(),
             event_log_writer.clone(),
-            params.session_event_sink.clone(),
+            params.session_event_sinks.clone(),
         )?
         .with_fault(persistence_fault.clone())
         .with_checkpoint_providers(params.checkpoint_providers)
@@ -268,6 +276,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
             default_tool_mask: params.default_tool_mask,
             default_effect_journal: params.default_effect_journal,
             default_tool_observer: params.default_tool_observer,
+            tool_hooks: params.tool_hooks,
             prefix_source: params.prefix_source,
             model_capabilities,
             ptc_runtime: params.ptc_runtime.or_else(|| default_ptc_runtime(&config)),
@@ -284,13 +293,14 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         },
         io: EventIoContext {
             display: params.display,
-            session_event_sink: params.session_event_sink,
+            session_event_sinks: params.session_event_sinks,
             immutable_prefix: Mutex::new(None),
             event_log_warned: AtomicBool::new(false),
             event_log_writer,
             prefix_build_lock: tokio::sync::Mutex::new(()),
             stream_flush_last: Mutex::new(None),
         },
+        lifecycle: params.lifecycle,
     });
     ctx.log_event(crate::events::EventLog::ToolSurface {
         role: format!("{:?}", ctx.tools.tool_resolution_context.role()),

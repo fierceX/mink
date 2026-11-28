@@ -290,6 +290,9 @@ impl super::TurnExecutor {
             .await;
         self.tools.finalize_deferred_results(&mut processed_results);
         for result in &mut processed_results {
+            for effect in result.policy_effects.drain(..) {
+                self.ctx.log_critical_event(effect).await?;
+            }
             let model_label = self.model_label().to_string();
             self.signal_processor
                 .process(result, belief.as_deref_mut(), &self.ctx, &model_label)

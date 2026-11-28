@@ -34,6 +34,10 @@ pub mod tools {
     pub use crate::tools::metadata::{
         ApprovalTier, ToolBlocker, ToolFailureKind, ToolResultKind, ToolStatus,
     };
+    pub use crate::tools::rim_hooks::{
+        RuntimePlugin, ToolExecutionGate, ToolGateDecision, ToolGateRequest, ToolOutputFilter,
+        ToolOutputFilterContext, ToolOutputMutation,
+    };
     pub use crate::tools::semantic_capabilities::{
         CapabilityAvailability, CapabilityUseScope, ProviderTier, ToolSemanticCapability,
     };
@@ -118,6 +122,10 @@ pub use crate::tools::image::ImageFormat;
 pub use crate::tools::image::probe as probe_image;
 pub use crate::tools::metadata::{
     ApprovalTier, ToolBlocker, ToolFailureKind, ToolResultKind, ToolStatus,
+};
+pub use crate::tools::rim_hooks::{
+    RuntimePlugin, ToolExecutionGate, ToolGateDecision, ToolGateRequest, ToolOutputFilter,
+    ToolOutputFilterContext, ToolOutputMutation,
 };
 pub use crate::tools::semantic_capabilities::{
     CapabilityAvailability, CapabilityUseScope, ProviderTier, ToolSemanticCapability,
@@ -231,6 +239,7 @@ pub mod ext {
         ReadEvidenceContext, ReadObservation, ToolCallObserver, ToolEffectJournal,
         ToolExecutionMask, TurnPolicyProvider,
     };
+    pub use crate::tools::rim_hooks::{RegistrationGuard, ToolHookStats};
     pub use crate::tools::runner::format_tool_result;
 }
 

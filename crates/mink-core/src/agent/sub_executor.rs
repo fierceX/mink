@@ -426,7 +426,7 @@ impl SubAgentExecutor {
             resolved_paths: None,
             api_url: parent_ctx.paths.api_url.clone(),
             display: capture.clone(),
-            session_event_sink: parent_ctx.io.session_event_sink.clone(),
+            session_event_sinks: parent_ctx.io.session_event_sinks.clone(),
             sub_stream_tx: None,
             cancel,
             interrupt: parent_ctx.interrupt.clone(),
@@ -469,6 +469,8 @@ impl SubAgentExecutor {
             default_tool_mask,
             default_effect_journal: None,
             default_tool_observer,
+            tool_hooks: parent_ctx.tools.tool_hooks.clone(),
+            lifecycle: Arc::new(crate::tools::rim_hooks::RuntimeLifecycle::new()),
             budget_check,
         })
         .await

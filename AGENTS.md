@@ -10,6 +10,7 @@ Mink 是用 Rust 1.99+ 实现的轻量 AI coding agent，面向 DeepSeek/OpenAI-
 - 信号驱动的信念系统：轨迹证据注入（`[trajectory]`/`[detector]`）、编辑循环复核、恢复首步守卫；`SignalPolicy` 分档，阈值/超参为内部常量，`MINK_SIGNAL_POLICY=off` 关闭
 - 上下文自适应压缩：显式阈值/响应预留/热尾部/摘要预算，摘要以 `<compacted-summary>` checkpoint 投影；Todo（`todos.json` 权威快照 + revision/稳定 ID）、Artifact（超长输出落盘）、轻量资源读取（artifact/skill/rule/session URL）
 - Goal（独立扩展包 `crates/mink-goal`）：`GoalPlugin::install_into` + `GoalEngine::attach(handle, plugin)` 组合于 `mink-core` 通用原语之上；草案确认、独立只读审核、按需读取，显式跨轮目标、默认 20 turn/60 分钟绝对期限、三种验收、持久恢复与未知副作用对账；core `SessionLease` 覆盖所有可写 runtime。不需要 Goal 的嵌入宿主可零开销跳过。
+- 外环扩展与可选微内核（`crates/mink-core` 接缝 + `crates/mink-rim`）：支持多订阅 `SessionEventSink`、`PostInitHook` 队列、多方 `TurnPolicyProvider` 组合、异步策略门控 `ToolExecutionGate`（覆盖直调/PTC/子代理）、落盘前置输出过滤 `ToolOutputFilter` 与 LIFO `RuntimeLifecycle` 清理；可选独立包 `crates/mink-rim` 在其上提供 `Scope`/`Disposer`、`SeatRegistry<P>` 与声明式 `RimProfile`/`RimBundle`/`RuntimeAssembler`。
 - 工具元数据与审批策略；Edit 双模式（Hashline snapshot / Replace exact+fuzzy，启动后固定）；Python 宿主 Programmatic Tool Calling（`RunCode`，支持 `PtcMode::Off` / `Tool` / `Exclusive` 与 Subprocess / 可选 WASI 后端）；子代理（isolated home，可目录级 fork）；TUI `Ctrl+V` 粘贴图片
 - 网页搜索与读取由 `[web]` 独立开启（`WebSearch`/`WebFetch` 与原生联网声明）。公开历史和客户端事件只发布展示字段。
 
@@ -81,6 +82,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 修改对应子系统前请先阅读其本地 `AGENTS.md` 中的全部不变式与协议边界：
 
 - `crates/mink-core/AGENTS.md`：压缩与持久化、LLM 有界恢复、通用扩展原语、Plan 与 Todo、信号系统、嵌入事件与失败契约、工具面与执行、Read/Edit 协议、新增工具步骤。
+- `crates/mink-rim/AGENTS.md`：可选声明式外环微内核（`Scope`/`Disposer`、`SeatRegistry`、`RimProfile`/`RuntimeAssembler`）不变式。
 - `crates/mink-goal/AGENTS.md`：Goal 插件装配、生命周期、独立审核、验收门槛、恢复与 `GoalStore` 契约。
 - `crates/mink-cli/AGENTS.md`：Display、TUI、Inline/Full 渲染与输入/剪贴板/附件/REPL 契约。
 - `apps/web/AGENTS.md`：人类输入与 Web 工作台、`mink-server` 内嵌前端、卡片/草稿/附件/目标/移动阅读契约。

@@ -2219,6 +2219,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mink-rim"
+version = "0.10.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "mink-core",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "mink-server"
 version = "0.10.0"
 dependencies = [
