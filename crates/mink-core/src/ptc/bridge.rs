@@ -263,9 +263,9 @@ impl PtcDispatchBridge {
         {
             let tracks_effects = self
                 .ctx
-                .tool_observer
+                .effect_journal
                 .as_ref()
-                .is_some_and(|observer| observer.tracks_durable_effects());
+                .is_some_and(|journal| journal.tracks_durable_effects());
             return custom.definition.execution
                 == crate::tools::extension::ToolExecutionMode::Sequential
                 || (tracks_effects && !custom.definition.side_effect_exempt);

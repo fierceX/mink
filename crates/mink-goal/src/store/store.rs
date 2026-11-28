@@ -39,7 +39,7 @@ impl GoalStore {
     fn clear_journal(journal: &Path, fault: &PersistenceFault) -> Result<()> {
         match std::fs::remove_file(journal) {
             Ok(()) => {
-                if let Err(error) = mink::runtime::sync_parent(journal) {
+                if let Err(error) = mink::runtime::ext::sync_parent(journal) {
                     return Err(fault.raise(
                         journal,
                         format!("goal journal cleanup sync failed: {error:#}"),
@@ -766,7 +766,7 @@ impl GoalStore {
                 .flatten()
                 .filter(|b| {
                     b["type"] == "tool_result"
-                        && mink::runtime::effect_outcome_known(b.get("_mink"))
+                        && mink::runtime::ext::effect_outcome_known(b.get("_mink"))
                         && serde_json::from_value::<mink::runtime::tools::ToolStatus>(
                             b["_mink"]["status"].clone(),
                         )

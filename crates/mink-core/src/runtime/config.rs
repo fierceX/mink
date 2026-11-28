@@ -35,7 +35,7 @@ pub(crate) struct AgentRuntimeConfig {
     /// resolved runtime session id.
     pub resource_session_id: Option<String>,
     pub custom_tools: Vec<Arc<dyn crate::runtime::AgentTool>>,
-    pub turn_policies: Vec<Arc<dyn crate::runtime::TurnPolicyProvider>>,
+    pub turn_policies: Vec<Arc<dyn crate::tools::policy_hook::TurnPolicyProvider>>,
     pub checkpoint_providers:
         Vec<Arc<dyn crate::session::compaction::CompactionCheckpointProvider>>,
     pub prefix_source: Option<Arc<dyn PrefixSource>>,

@@ -30,6 +30,7 @@ async fn goal_missing_review_blocks_without_a_report_repair_round() {
     assert!(result.iterations.iter().all(|i| i.finished));
     assert_eq!(
         handle
+            .ext()
             .conversation_lines()
             .await
             .unwrap()
@@ -426,7 +427,11 @@ async fn goal_review_can_read_its_own_spilled_contract_artifact() {
         .collect();
     let imported = artifacts
         .iter()
-        .map(|(r, _)| handle.read_artifact_text(r.strip_prefix("artifact://").unwrap()))
+        .map(|(r, _)| {
+            handle
+                .ext()
+                .read_artifact_text(r.strip_prefix("artifact://").unwrap())
+        })
         .collect::<anyhow::Result<Vec<_>>>();
     runtime.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(home);
@@ -517,8 +522,8 @@ async fn goal_recovery_reaudits_known_checker_changes_without_replaying_checker(
         conversation_seq: 0,
         reviewer_id: format!(
             "goal-review:{}:{}",
-            handle.active_model_name(),
-            handle.tool_surface_fingerprint()
+            handle.ext().active_model_name(),
+            handle.ext().tool_surface_fingerprint()
         ),
     };
     let review: GoalReview = serde_json::from_value(serde_json::json!({
@@ -747,7 +752,7 @@ async fn goal_pause_during_verifier_keeps_execution_owned_until_checker_exits() 
     assert!(goals.resume(&paused.id, paused.revision).is_err());
     verifier.release.notify_one();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while handle.active_turn_id().is_some() {
+        while handle.ext().active_turn_id().is_some() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
@@ -793,7 +798,7 @@ async fn audit8_paused_checker_keeps_the_host_lease_until_it_exits() {
     let paused = goals.wait().await.unwrap();
     assert_eq!(paused.status, GoalStatus::Paused);
     assert!(
-        handle.active_turn_id().is_some(),
+        handle.ext().active_turn_id().is_some(),
         "the checker still owns the turn gate"
     );
     assert_eq!(
@@ -803,7 +808,7 @@ async fn audit8_paused_checker_keeps_the_host_lease_until_it_exits() {
     );
     verifier.release.notify_one();
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        while handle.active_turn_id().is_some()
+        while handle.ext().active_turn_id().is_some()
             || alive.load(std::sync::atomic::Ordering::SeqCst) > 0
         {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -847,7 +852,7 @@ async fn goal_checker_deadline_cannot_release_ownership_or_complete() {
     ));
     verifier.release.notify_one();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while handle.active_turn_id().is_some() {
+        while handle.ext().active_turn_id().is_some() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
@@ -1014,7 +1019,7 @@ async fn audit3_old_iteration_cannot_bill_replacement_goal() {
         .await
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while handle.active_turn_id().is_some() {
+        while handle.ext().active_turn_id().is_some() {
             tokio::task::yield_now().await;
         }
     })
@@ -1033,7 +1038,7 @@ async fn audit3_old_iteration_cannot_bill_replacement_goal() {
         .goal_store
         .create(
             GoalSpec::new("new goal"),
-            goal_environment_from_parts(&cwd, &handle.tool_surface_fingerprint()),
+            goal_environment_from_parts(&cwd, &handle.ext().tool_surface_fingerprint()),
         )
         .unwrap();
     sink.release.notify_one();
@@ -1139,7 +1144,7 @@ async fn audit4_old_sink_error_cannot_fail_replacement() {
         .await
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while handle.active_turn_id().is_some() {
+        while handle.ext().active_turn_id().is_some() {
             tokio::task::yield_now().await;
         }
     })
@@ -1158,7 +1163,7 @@ async fn audit4_old_sink_error_cannot_fail_replacement() {
         .goal_store
         .create(
             GoalSpec::new("new goal"),
-            goal_environment_from_parts(&cwd, &handle.tool_surface_fingerprint()),
+            goal_environment_from_parts(&cwd, &handle.ext().tool_surface_fingerprint()),
         )
         .unwrap();
     sink.release.notify_one();
@@ -1426,7 +1431,7 @@ async fn goal_review_rejects_unread_forged_or_changed_evidence() {
         .goal_store
         .create(
             GoalSpec::new("ship"),
-            goal_environment_from_parts(&cwd, &handle.tool_surface_fingerprint()),
+            goal_environment_from_parts(&cwd, &handle.ext().tool_surface_fingerprint()),
         )
         .unwrap();
     let candidate = GoalReviewCandidate {
@@ -1449,9 +1454,9 @@ async fn goal_review_rejects_unread_forged_or_changed_evidence() {
     let session = Arc::new(super::review::GoalReviewSession::new(
         goal.clone(),
         goals.goal_store.clone(),
-        Arc::new(move || handle_for_usage.usage_records()),
+        Arc::new(move || handle_for_usage.ext().usage_records()),
     ));
-    let artifacts = handle.artifact_reader();
+    let artifacts = handle.ext().artifact_reader();
     let evidence_ctx = crate::tools::GoalReviewToolContext {
         cwd: &cwd,
         artifacts: &artifacts,
@@ -1582,7 +1587,7 @@ async fn draft_deadline_returns_after_the_owned_turn_exits() {
     assert!(error.to_string().contains("timed out"), "{error}");
     assert_eq!(*backend.calls.lock().unwrap(), 1);
     assert!(
-        handle.active_turn_id().is_none(),
+        handle.ext().active_turn_id().is_none(),
         "timed-out draft still owns the turn"
     );
     assert!(!goals.draft_snapshot().unwrap().draft_ready);

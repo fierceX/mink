@@ -107,6 +107,7 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         ptc_runtime,
         billing_turn_id_override: None,
         default_tool_mask: None,
+        default_effect_journal: None,
         default_tool_observer: None,
         budget_check: None,
     })

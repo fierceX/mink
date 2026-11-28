@@ -1,13 +1,15 @@
 use crate::store::*;
 use async_trait::async_trait;
+use mink::runtime::ext::{
+    ArtifactReader, CompactionCheckpoint, CompactionCheckpointProvider, ReadEvidenceContext,
+    ReadObservation, ToolCallObserver, ToolEffectJournal, ToolExecutionMask, TurnPolicyProvider,
+    split_read_path_selection,
+};
 use mink::runtime::{
-    AgentTool, ApprovalTier, ArtifactReader, CompactionCheckpoint, CompactionCheckpointProvider,
-    ReadEvidenceContext, ToolDefinition, ToolError, ToolExecutionContext, ToolExecutionMask,
-    ToolExecutionMode, ToolExecutionObserver, ToolOutput, ToolPtcExposure, ToolResultKind,
-    ToolRoleScope, TurnPolicyProvider, split_read_path_selection,
+    AgentTool, ApprovalTier, ToolDefinition, ToolError, ToolExecutionContext, ToolExecutionMode,
+    ToolOutput, ToolPtcExposure, ToolResultKind, ToolRoleScope,
 };
 use sha2::{Digest, Sha256};
-use std::any::Any;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -468,7 +470,7 @@ impl TurnPolicyProvider for GoalTurnPolicyProvider {
         }
     }
 
-    fn ordinary_tool_observer(&self) -> Option<Arc<dyn ToolExecutionObserver>> {
+    fn ordinary_effect_journal(&self) -> Option<Arc<dyn ToolEffectJournal>> {
         let store = self.goal_store.get()?.clone();
         Some(Arc::new(GoalExecutionObserver { goal_store: store }))
     }
@@ -478,7 +480,7 @@ struct GoalExecutionObserver {
     goal_store: Arc<GoalStore>,
 }
 
-impl ToolExecutionObserver for GoalExecutionObserver {
+impl ToolEffectJournal for GoalExecutionObserver {
     fn tracks_durable_effects(&self) -> bool {
         self.goal_store
             .snapshot()
@@ -521,9 +523,30 @@ impl GoalReviewToolObserver {
     }
 }
 
-struct CapturedReadToken((String, PathBuf, String));
+struct CapturedReadObservation {
+    session: Arc<dyn GoalReviewToolSession>,
+    captured: (String, PathBuf, String),
+}
 
-impl ToolExecutionObserver for GoalReviewToolObserver {
+impl ReadObservation for CapturedReadObservation {
+    fn verify_bytes(&self, bytes: &[u8]) -> anyhow::Result<()> {
+        let actual: String = Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        anyhow::ensure!(
+            self.captured.2 == actual,
+            "image evidence changed during read"
+        );
+        Ok(())
+    }
+
+    fn on_succeeded(self: Box<Self>) -> anyhow::Result<()> {
+        self.session.finish_read(self.captured)
+    }
+}
+
+impl ToolCallObserver for GoalReviewToolObserver {
     fn on_parse_error(&self, tool_name: &str, error: &str) {
         if !self.is_reviewer && tool_name == "GoalReview" {
             self.session
@@ -538,13 +561,13 @@ impl ToolExecutionObserver for GoalReviewToolObserver {
         Ok(())
     }
 
-    fn before_read(
+    fn observe_read(
         &self,
         tool_name: &str,
         _call_id: &str,
         input: &serde_json::Value,
         ctx: &ReadEvidenceContext<'_>,
-    ) -> anyhow::Result<Option<Box<dyn Any + Send>>> {
+    ) -> anyhow::Result<Option<Box<dyn ReadObservation>>> {
         if tool_name != "Read" {
             return Ok(None);
         }
@@ -552,31 +575,12 @@ impl ToolExecutionObserver for GoalReviewToolObserver {
             return Ok(None);
         };
         let captured = capture_read_path(raw, ctx.cwd(), ctx.artifacts_dir())?;
-        Ok(captured.map(|c| Box::new(CapturedReadToken(c)) as Box<dyn Any + Send>))
-    }
-
-    fn verify_read_bytes(&self, token: &(dyn Any + Send), bytes: &[u8]) -> anyhow::Result<()> {
-        let Some(CapturedReadToken((_, _, expected_hash))) =
-            token.downcast_ref::<CapturedReadToken>()
-        else {
-            return Ok(());
-        };
-        let actual: String = Sha256::digest(bytes)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        anyhow::ensure!(
-            expected_hash == &actual,
-            "image evidence changed during read"
-        );
-        Ok(())
-    }
-
-    fn after_read_succeeded(&self, token: Box<dyn Any + Send>) -> anyhow::Result<()> {
-        if let Ok(captured) = token.downcast::<CapturedReadToken>() {
-            self.session.finish_read(captured.0)?;
-        }
-        Ok(())
+        Ok(captured.map(|captured| {
+            Box::new(CapturedReadObservation {
+                session: self.session.clone(),
+                captured,
+            }) as Box<dyn ReadObservation>
+        }))
     }
 }
 

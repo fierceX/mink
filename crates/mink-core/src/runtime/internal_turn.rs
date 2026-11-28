@@ -5,7 +5,7 @@ use crate::agent::failure::TurnFailureReason;
 use crate::agent::orchestrator::TurnStatus;
 use crate::runtime::{AgentTool, RuntimeResult, TurnId};
 use crate::session::usage::UsageRecord;
-use crate::tools::policy_hook::{ToolExecutionMask, ToolExecutionObserver};
+use crate::tools::policy_hook::{ToolCallObserver, ToolEffectJournal, ToolExecutionMask};
 use serde_json::Value;
 use std::future::Future;
 use std::path::PathBuf;
@@ -30,8 +30,9 @@ pub trait ExternalController: Send + Sync {
         None
     }
 
-    /// Invoked under the runtime admission lock during
-    /// `interrupt_current_turn()` before interrupting the turn gate.
+    /// Invoked during `interrupt_current_turn()` without holding the runtime
+    /// admission lock, before recording `StopCause::UserInterrupt` and
+    /// interrupting the turn gate.
     fn on_user_interrupt(&self) {}
 
     /// Invoked at the start of `shutdown()` / `Drop` before cancelling the
@@ -56,17 +57,14 @@ pub trait ExternalController: Send + Sync {
 
 #[derive(Default)]
 pub(crate) struct ExternalAdmissionState {
-    pub(crate) active_owner: Option<&'static str>,
     pub(crate) controller: Option<Arc<dyn ExternalController>>,
 }
 
 impl ExternalAdmissionState {
     pub(crate) fn blocking_owner(&self) -> Option<&'static str> {
-        self.active_owner.or_else(|| {
-            self.controller
-                .as_ref()
-                .and_then(|controller| controller.blocks_ordinary_control())
-        })
+        self.controller
+            .as_ref()
+            .and_then(|controller| controller.blocks_ordinary_control())
     }
 }
 
@@ -81,31 +79,6 @@ impl ExternalControlState {
         Self {
             admission: Mutex::new(ExternalAdmissionState::default()),
             stop_cause,
-        }
-    }
-}
-
-/// Exclusive external control lease for a session; clears ownership on drop.
-pub struct ExternalOwnerGuard {
-    pub(crate) control: Arc<ExternalControlState>,
-    pub(crate) owner: &'static str,
-}
-
-impl ExternalOwnerGuard {
-    pub fn owner(&self) -> &'static str {
-        self.owner
-    }
-}
-
-impl Drop for ExternalOwnerGuard {
-    fn drop(&mut self) {
-        let mut state = self
-            .control
-            .admission
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if state.active_owner == Some(self.owner) {
-            state.active_owner = None;
         }
     }
 }
@@ -143,6 +116,47 @@ pub type TurnSettlementHook = Arc<
         + Sync,
 >;
 
+/// Policy and tool constraints applied to an [`InternalTurnRequest`].
+#[derive(Clone)]
+pub struct InternalTurnPolicy {
+    pub count_as_user_turn: bool,
+    pub consume_inbox: bool,
+    pub enable_belief: bool,
+    pub disable_native_web: bool,
+    pub tool_mask: Option<ToolExecutionMask>,
+    pub effect_journal: Option<Arc<dyn ToolEffectJournal>>,
+    pub tool_observer: Option<Arc<dyn ToolCallObserver>>,
+    pub budget_check: Option<Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync>>,
+    pub stop_when: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    pub continue_prompt_when_not_stopped: Option<String>,
+}
+
+impl Default for InternalTurnPolicy {
+    fn default() -> Self {
+        Self {
+            count_as_user_turn: true,
+            consume_inbox: false,
+            enable_belief: true,
+            disable_native_web: false,
+            tool_mask: None,
+            effect_journal: None,
+            tool_observer: None,
+            budget_check: None,
+            stop_when: None,
+            continue_prompt_when_not_stopped: None,
+        }
+    }
+}
+
+/// Lifecycle hooks attached to an [`InternalTurnRequest`].
+#[derive(Clone, Default)]
+pub struct InternalTurnHooks {
+    pub pre_admission_check: Option<Arc<dyn Fn() -> RuntimeResult<()> + Send + Sync>>,
+    pub prepare_on_admit: Option<TurnPreAdmissionHook>,
+    pub on_billing_started: Option<TurnBillingHook>,
+    pub on_before_final: Option<TurnSettlementHook>,
+}
+
 /// Request parameters for executing an internal runtime turn without disguising
 /// it as ordinary human input.
 #[derive(Clone)]
@@ -151,21 +165,9 @@ pub struct InternalTurnRequest {
     pub source_tag: String,
     pub metadata: Value,
     pub turn_id_prefix: Option<String>,
-    pub accept_guidance: bool,
-    pub count_as_user_turn: bool,
-    pub consume_inbox: bool,
-    pub enable_belief: bool,
-    pub disable_native_web: bool,
     pub billing_turn_id_override: Option<String>,
-    pub tool_mask: Option<ToolExecutionMask>,
-    pub tool_observer: Option<Arc<dyn ToolExecutionObserver>>,
-    pub budget_check: Option<Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync>>,
-    pub stop_when: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
-    pub continue_prompt_when_not_stopped: Option<String>,
-    pub pre_admission_check: Option<Arc<dyn Fn() -> RuntimeResult<()> + Send + Sync>>,
-    pub prepare_on_admit: Option<TurnPreAdmissionHook>,
-    pub on_billing_started: Option<TurnBillingHook>,
-    pub on_before_final: Option<TurnSettlementHook>,
+    pub policy: InternalTurnPolicy,
+    pub hooks: InternalTurnHooks,
 }
 
 impl InternalTurnRequest {
@@ -175,22 +177,35 @@ impl InternalTurnRequest {
             source_tag: source_tag.into(),
             metadata: Value::Object(Default::default()),
             turn_id_prefix: None,
-            accept_guidance: false,
-            count_as_user_turn: true,
-            consume_inbox: false,
-            enable_belief: true,
-            disable_native_web: false,
             billing_turn_id_override: None,
-            tool_mask: None,
-            tool_observer: None,
-            budget_check: None,
-            stop_when: None,
-            continue_prompt_when_not_stopped: None,
-            pre_admission_check: None,
-            prepare_on_admit: None,
-            on_billing_started: None,
-            on_before_final: None,
+            policy: InternalTurnPolicy::default(),
+            hooks: InternalTurnHooks::default(),
         }
+    }
+
+    pub fn with_metadata(mut self, metadata: Value) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    pub fn with_turn_id_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.turn_id_prefix = Some(prefix.into());
+        self
+    }
+
+    pub fn with_billing_turn_id(mut self, billing_turn_id: impl Into<String>) -> Self {
+        self.billing_turn_id_override = Some(billing_turn_id.into());
+        self
+    }
+
+    pub fn with_policy(mut self, policy: InternalTurnPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    pub fn with_hooks(mut self, hooks: InternalTurnHooks) -> Self {
+        self.hooks = hooks;
+        self
     }
 }
 
@@ -205,7 +220,7 @@ pub struct EphemeralChildOptions {
     pub timeout_secs: Option<u64>,
     pub billing_turn_id: Option<String>,
     pub tool_mask: Option<ToolExecutionMask>,
-    pub tool_observer: Option<Arc<dyn ToolExecutionObserver>>,
+    pub tool_observer: Option<Arc<dyn ToolCallObserver>>,
     pub budget_check: Option<Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync>>,
     pub extra_tools: Vec<Arc<dyn AgentTool>>,
     pub deadline: Option<Instant>,

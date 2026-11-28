@@ -26,15 +26,13 @@ pub mod llm {
 
 pub mod tools {
     pub use super::custom_tools::{
-        AgentTool, ReadEvidenceContext, ToolActivation, ToolCapabilityOffer, ToolDefinition,
-        ToolError, ToolExecutionContext, ToolExecutionMask, ToolExecutionMode,
-        ToolExecutionObserver, ToolOutput, ToolPtcExposure, ToolRoleScope, TurnPolicyProvider,
+        AgentTool, ToolActivation, ToolCapabilityOffer, ToolDefinition, ToolError,
+        ToolExecutionContext, ToolExecutionMode, ToolOutput, ToolPtcExposure, ToolRoleScope,
     };
     pub use super::options::ToolOptions;
     pub use crate::config::{ToolApprovalMode, ToolApprovalPolicy};
     pub use crate::tools::metadata::{
         ApprovalTier, ToolBlocker, ToolFailureKind, ToolResultKind, ToolStatus,
-        effect_outcome_known,
     };
     pub use crate::tools::semantic_capabilities::{
         CapabilityAvailability, CapabilityUseScope, ProviderTier, ToolSemanticCapability,
@@ -186,9 +184,8 @@ pub fn validate_runtime_limits(
 }
 
 pub use custom_tools::{
-    AgentTool, ReadEvidenceContext, ToolActivation, ToolCapabilityOffer, ToolDefinition, ToolError,
-    ToolExecutionContext, ToolExecutionMask, ToolExecutionMode, ToolExecutionObserver, ToolOutput,
-    ToolPtcExposure, ToolRoleScope, TurnPolicyProvider,
+    AgentTool, ToolActivation, ToolCapabilityOffer, ToolDefinition, ToolError,
+    ToolExecutionContext, ToolExecutionMode, ToolOutput, ToolPtcExposure, ToolRoleScope,
 };
 pub use sdk_adapter::{
     exit_code_from_turn, final_from_outcome, runtime_skills_from_sdk_request,
@@ -204,27 +201,38 @@ pub fn reexec_in_sandbox(config: &SandboxConfig, exe: &std::path::Path, args: &[
     crate::sandbox::reexec_in_sandbox(config, exe, args);
 }
 
-pub use crate::agent::failure::BudgetExhaustedError;
-pub use crate::agent::sub_executor::EphemeralChildSession;
-pub use crate::resources::selector::{ReadPathSelection, split_read_path_selection};
-pub use crate::session::atomic_file::sync_parent;
-pub use crate::session::compaction::{
-    CompactionCheckpoint, CompactionCheckpointProvider, checkpoint_budget_chars,
-};
 pub use crate::session::lease::SessionLease;
-pub use crate::session::persistence::{
-    PersistenceFault, PersistenceFaultError, PersistenceFaultInfo, publish_state,
-};
 pub use crate::session::usage::{TokenUsage, UsageKind, UsageRecord, UsageStatus, UsageSummary};
-pub use crate::tools::metadata::effect_outcome_known;
-pub use crate::tools::runner::format_tool_result;
-pub use handle::TurnPermit;
-pub use internal_turn::{
-    ArtifactReader, ArtifactRef, EphemeralChildOptions, EphemeralChildOutcome,
-    EphemeralChildStatus, ExtensionEmitter, ExternalController, ExternalOwnerGuard,
-    InternalTurnRequest, PreparedInternalTurn, ScopedToolOutcome, StopCause, TurnBillingHook,
-    TurnPreAdmissionHook, TurnRollbackHook, TurnSettlementContext, TurnSettlementHook,
-};
+
+/// Advanced/experimental orchestrator extension SPI for external schedulers
+/// (such as `mink-goal`). Not part of the core embedding stability contract;
+/// ordinary embedders should use the top-level [`mink::runtime`](self) API.
+pub mod ext {
+    pub use super::handle::{RuntimeExtHandle, TurnPermit};
+    pub use super::internal_turn::{
+        ArtifactReader, ArtifactRef, EphemeralChildOptions, EphemeralChildOutcome,
+        EphemeralChildStatus, ExtensionEmitter, ExternalController, InternalTurnHooks,
+        InternalTurnPolicy, InternalTurnRequest, PreparedInternalTurn, ScopedToolOutcome,
+        StopCause, TurnBillingHook, TurnPreAdmissionHook, TurnRollbackHook, TurnSettlementContext,
+        TurnSettlementHook,
+    };
+    pub use crate::agent::failure::BudgetExhaustedError;
+    pub use crate::agent::sub_executor::EphemeralChildSession;
+    pub use crate::resources::selector::{ReadPathSelection, split_read_path_selection};
+    pub use crate::session::atomic_file::sync_parent;
+    pub use crate::session::compaction::{
+        CompactionCheckpoint, CompactionCheckpointProvider, checkpoint_budget_chars,
+    };
+    pub use crate::session::persistence::{
+        PersistenceFault, PersistenceFaultError, PersistenceFaultInfo, publish_state,
+    };
+    pub use crate::tools::metadata::effect_outcome_known;
+    pub use crate::tools::policy_hook::{
+        ReadEvidenceContext, ReadObservation, ToolCallObserver, ToolEffectJournal,
+        ToolExecutionMask, TurnPolicyProvider,
+    };
+    pub use crate::tools::runner::format_tool_result;
+}
 
 #[cfg(test)]
 #[path = "session_event_sink_tests.rs"]

@@ -296,8 +296,8 @@ impl super::TurnExecutor {
                 .await;
         }
 
-        if let Some(observer) = self.tools.tool_observer()
-            && observer.tracks_durable_effects()
+        if let Some(journal) = self.tools.effect_journal()
+            && journal.tracks_durable_effects()
         {
             let message =
                 crate::session::store::ConversationStore::tool_results_message(&processed_results);
@@ -311,7 +311,7 @@ impl super::TurnExecutor {
                 .filter(|r| crate::tools::metadata::effect_outcome_known(r.state_metadata.as_ref()))
                 .map(|r| r.tool_use_id.clone())
                 .collect::<Vec<_>>();
-            observer.after_known_effects(&known_ids)?;
+            journal.after_known_effects(&known_ids)?;
         } else {
             self.ctx
                 .stores

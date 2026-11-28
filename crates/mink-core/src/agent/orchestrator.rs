@@ -19,7 +19,7 @@ pub struct OrchActor {
 }
 
 pub(crate) struct InternalTurnExecution {
-    pub request: crate::runtime::InternalTurnRequest,
+    pub request: crate::runtime::ext::InternalTurnRequest,
 }
 
 /// Commands received by the orchestrator.
@@ -30,6 +30,10 @@ pub enum OrchCmd {
         turn_id: crate::runtime::TurnId,
         emitter: std::sync::Arc<crate::runtime::TurnEventEmitter>,
         done: oneshot::Sender<TurnRunResult>,
+    },
+    RunScopedInternalTurn {
+        request: Box<crate::runtime::ext::InternalTurnRequest>,
+        done: oneshot::Sender<anyhow::Result<TurnRunResult>>,
     },
     SetModel {
         model: String,
@@ -135,7 +139,7 @@ impl TurnRunResult {
 impl OrchActor {
     async fn append_internal_turn_row(
         &self,
-        req: &crate::runtime::InternalTurnRequest,
+        req: &crate::runtime::ext::InternalTurnRequest,
     ) -> anyhow::Result<()> {
         let mut meta = match &req.metadata {
             serde_json::Value::Object(map) => map.clone(),
@@ -250,6 +254,10 @@ impl OrchActor {
                             .await;
                         self.log_turn_final(&result, started_at.elapsed().as_millis() as u64)
                             .await;
+                        let _ = done.send(result);
+                    }
+                    Some(OrchCmd::RunScopedInternalTurn { request, done }) => {
+                        let result = self.handle_scoped_internal_turn(*request).await;
                         let _ = done.send(result);
                     }
                     Some(OrchCmd::SetModel { model, done }) => {
@@ -453,7 +461,7 @@ impl OrchActor {
             .and_then(|exec| exec.request.billing_turn_id_override.clone())
             .unwrap_or_else(|| self.ctx.stores.usage.begin_turn());
         if let Some(exec) = internal
-            && let Some(hook) = &exec.request.on_billing_started
+            && let Some(hook) = &exec.request.hooks.on_billing_started
             && let Err(error) = hook(&billing_turn_id)
         {
             let _ = self.ctx.stores.input_inbox.finish();
@@ -475,23 +483,13 @@ impl OrchActor {
             return result;
         }
         // 跨轮重复失败可累积升级，单次偶然失败自然消退。
-        let enable_belief = internal.is_none_or(|exec| exec.request.enable_belief);
+        let enable_belief = internal.is_none_or(|exec| exec.request.policy.enable_belief);
         if enable_belief {
             self.belief.decay(self.ctx.config.signal.decay_per_input);
         }
         self.refresh_title().await;
-        let scope = internal.map(|exec| crate::agent::turn::TurnExecutionScope {
-            internal_entry: None,
-            skip_add_user: true,
-            count_as_user_turn: exec.request.count_as_user_turn,
-            consume_inbox: exec.request.consume_inbox,
-            enable_belief: exec.request.enable_belief,
-            disable_native_web: exec.request.disable_native_web,
-            tool_mask: exec.request.tool_mask.clone(),
-            tool_observer: exec.request.tool_observer.clone(),
-            budget_check: exec.request.budget_check.clone(),
-            stop_when: exec.request.stop_when.clone(),
-            continue_prompt_when_not_stopped: exec.request.continue_prompt_when_not_stopped.clone(),
+        let scope = internal.map(|exec| {
+            crate::agent::turn::TurnExecutionScope::from_internal_request(&exec.request)
         });
         let (model, mut executor) = self.prepare_turn_with_scope(scope);
 
@@ -524,15 +522,65 @@ impl OrchActor {
         result
     }
 
+    async fn handle_scoped_internal_turn(
+        &mut self,
+        request: crate::runtime::ext::InternalTurnRequest,
+    ) -> anyhow::Result<TurnRunResult> {
+        self.ctx.stores.persistence_fault.check()?;
+        let start_seq = self.ctx.stores.store.committed_len().await?;
+        self.append_internal_turn_row(&request).await?;
+        let (billing_turn_id, own_billing) = match request.billing_turn_id_override.clone() {
+            Some(id) => (id, false),
+            None => (self.ctx.stores.usage.begin_turn(), true),
+        };
+        let scope = crate::agent::turn::TurnExecutionScope::from_internal_request(&request);
+        let (_model, mut executor) = self.prepare_turn_with_scope(Some(scope));
+        let belief_arg = request.policy.enable_belief.then_some(&mut self.belief);
+        let exec_result = self
+            .ctx
+            .stores
+            .usage
+            .with_billing_scope(
+                billing_turn_id.clone(),
+                executor.execute(&request.content, belief_arg),
+            )
+            .await;
+        if own_billing {
+            self.ctx.stores.usage.end_turn(&billing_turn_id);
+        }
+        let end_seq = self
+            .ctx
+            .stores
+            .store
+            .committed_len()
+            .await
+            .unwrap_or(start_seq);
+        let mut run_result = match exec_result {
+            Ok((decision, _effects)) => TurnRunResult::from_decision(&decision, &executor),
+            Err(error) => {
+                TurnRunResult::failed_with(classify_turn_error(&error), format!("{error:#}"))
+            }
+        };
+        run_result.billing_turn_id = billing_turn_id.clone();
+        run_result.start_seq = start_seq;
+        run_result.end_seq = end_seq;
+        if let Ok(records) = self.ctx.stores.usage.records_for(&billing_turn_id) {
+            run_result.usage = UsageSummary::from_records(&records);
+            run_result.usage_records = records;
+        }
+        Ok(run_result)
+    }
+
     async fn run_internal_settlement(
         &self,
         internal: Option<&InternalTurnExecution>,
         mut result: TurnRunResult,
     ) -> TurnRunResult {
-        let Some(hook) = internal.and_then(|exec| exec.request.on_before_final.as_ref()) else {
+        let Some(hook) = internal.and_then(|exec| exec.request.hooks.on_before_final.as_ref())
+        else {
             return result;
         };
-        let ctx = crate::runtime::TurnSettlementContext {
+        let ctx = crate::runtime::ext::TurnSettlementContext {
             billing_turn_id: result.billing_turn_id.clone(),
             status: result.status,
             failure: result.failure,

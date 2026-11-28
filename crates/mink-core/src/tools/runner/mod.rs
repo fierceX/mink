@@ -329,10 +329,10 @@ impl ToolRunner {
             .is_some_and(|m| m.disable_replan)
     }
 
-    pub(crate) fn tool_observer(
+    pub(crate) fn effect_journal(
         &self,
-    ) -> Option<&Arc<dyn crate::tools::policy_hook::ToolExecutionObserver>> {
-        self.ctx.tool_observer.as_ref()
+    ) -> Option<&Arc<dyn crate::tools::policy_hook::ToolEffectJournal>> {
+        self.ctx.effect_journal.as_ref()
     }
 }
 

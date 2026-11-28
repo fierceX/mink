@@ -1,8 +1,9 @@
 use super::test_helpers::*;
 use super::*;
+use mink::runtime::ext::InternalTurnRequest;
 use mink::runtime::{
-    AgentOptions, AgentRuntime, AgentTool, InternalTurnRequest, LlmBackend, LlmEvent, LlmRequest,
-    LlmResponseStream, ToolExecutionContext,
+    AgentOptions, AgentRuntime, AgentTool, LlmBackend, LlmEvent, LlmRequest, LlmResponseStream,
+    ToolExecutionContext,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -141,7 +142,7 @@ async fn host_agent_retries_rejected_conclusions_after_prose_only_independent_re
         .await
         .unwrap()
         .unwrap();
-    let history = runtime.handle().conversation_lines().await.unwrap();
+    let history = runtime.handle().ext().conversation_lines().await.unwrap();
     runtime.shutdown().await.unwrap();
     std::fs::remove_dir_all(root).unwrap();
     assert_eq!(completed.status, GoalStatus::Completed, "{completed:?}");
@@ -207,8 +208,8 @@ async fn blocked_review_fixture() -> (AgentRuntime, Arc<GoalEngine>, PathBuf, Go
         conversation_seq: 0,
         reviewer_id: format!(
             "goal-review:{}:{}",
-            goals.handle.active_model_name(),
-            goals.handle.tool_surface_fingerprint()
+            goals.handle.ext().active_model_name(),
+            goals.handle.ext().tool_surface_fingerprint()
         ),
     };
     let review: GoalReview = serde_json::from_value(serde_json::json!({
@@ -296,9 +297,9 @@ async fn external_blocker_requires_inspected_evidence() {
     let session = super::review::GoalReviewSession::new(
         goal.clone(),
         goals.goal_store.clone(),
-        Arc::new(move || handle_for_usage.usage_records()),
+        Arc::new(move || handle_for_usage.ext().usage_records()),
     );
-    let artifacts = goals.handle.artifact_reader();
+    let artifacts = goals.handle.ext().artifact_reader();
     let cwd = &goals.handle.session_info().cwd;
     let evidence_ctx = crate::tools::GoalReviewToolContext {
         cwd,
@@ -328,15 +329,17 @@ async fn host_conclusion_tool_is_scoped_and_rejections_preserve_goal_state() {
     let session = Arc::new(super::review::GoalReviewSession::new(
         goal.clone(),
         goals.goal_store.clone(),
-        Arc::new(move || handle_for_usage.usage_records()),
+        Arc::new(move || handle_for_usage.ext().usage_records()),
     ));
     let exec_ctx = ToolExecutionContext::new(
         goals.handle.session_info().cwd.clone(),
-        goals.handle.interrupt_flag(),
+        goals.handle.ext().interrupt_flag(),
     );
     let conclusion = serde_json::to_value(&goal.reviews[0]).unwrap();
-    let ordinary_tool =
-        crate::tools::GoalReviewTool::for_test_adjudication(None, goals.handle.artifact_reader());
+    let ordinary_tool = crate::tools::GoalReviewTool::for_test_adjudication(
+        None,
+        goals.handle.ext().artifact_reader(),
+    );
     let ordinary = AgentTool::execute(&ordinary_tool, conclusion.clone(), exec_ctx.clone())
         .await
         .unwrap_err();
@@ -348,7 +351,7 @@ async fn host_conclusion_tool_is_scoped_and_rejections_preserve_goal_state() {
     goals.goal_tools.set_adjudication(Some(session.clone()));
     let tool = crate::tools::GoalReviewTool::for_test_adjudication(
         Some(session.clone()),
-        goals.handle.artifact_reader(),
+        goals.handle.ext().artifact_reader(),
     );
     let mut invalid = conclusion;
     invalid["criteria"] = serde_json::json!([]);
@@ -389,8 +392,8 @@ async fn host_conclusion_tool_is_scoped_and_rejections_preserve_goal_state() {
     plugin.install_into(&mut opts);
     let rt2 = AgentRuntime::start(opts).await.unwrap();
     let mut req = InternalTurnRequest::new("goal_adjudication", "adjudicate");
-    req.tool_mask = Some(crate::tools::goal_adjudication_mask());
-    let mut stream = rt2.handle().stream_internal_turn(req).unwrap();
+    req.policy.tool_mask = Some(crate::tools::goal_adjudication_mask());
+    let mut stream = rt2.handle().ext().stream_internal_turn(req).unwrap();
     let mut saw_failed_write = false;
     while let Some(ev) = stream.recv().await {
         if let mink::runtime::AgentEvent {
@@ -484,7 +487,7 @@ async fn review_token_limit_stops_new_provider_requests() {
         .unwrap();
     goals.accept_goal(1, verifying).await.unwrap();
     let after = goals.snapshot().unwrap();
-    let requests = handle.usage_records().unwrap().len();
+    let requests = handle.ext().usage_records().unwrap().len();
     close_fixture(runtime, &goals, root).await;
     assert_eq!(after.status, GoalStatus::BudgetExhausted);
     assert_eq!(requests, 0, "review requests share the goal token budget");
@@ -1212,6 +1215,7 @@ async fn simple_conclusion_cannot_complete_without_independent_evidence() {
     let (runtime, goals, root, goal) = blocked_review_fixture().await;
     let handle = goals.handle.clone();
     let artifact = handle
+        .ext()
         .write_artifact(
             "IndependentGoalReview",
             "report",
@@ -1238,15 +1242,15 @@ async fn simple_conclusion_cannot_complete_without_independent_evidence() {
     let session = Arc::new(super::review::GoalReviewSession::new(
         current.clone(),
         goals.goal_store.clone(),
-        Arc::new(move || handle_for_usage.usage_records()),
+        Arc::new(move || handle_for_usage.ext().usage_records()),
     ));
     let tool = crate::tools::GoalReviewTool::for_test_adjudication(
         Some(session.clone()),
-        handle.artifact_reader(),
+        handle.ext().artifact_reader(),
     );
     let exec_ctx = mink::runtime::ToolExecutionContext::new(
         handle.session_info().cwd.clone(),
-        handle.interrupt_flag(),
+        handle.ext().interrupt_flag(),
     );
     let rejected = mink::runtime::AgentTool::execute(
         &tool,
@@ -1599,6 +1603,7 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
     let (runtime, goals, root, goal) = blocked_review_fixture().await;
     let handle = goals.handle.clone();
     let artifact = handle
+        .ext()
         .write_artifact(
             "IndependentGoalReview",
             "screening",
@@ -1626,7 +1631,7 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
     let session = Arc::new(super::review::GoalReviewSession::new(
         current.clone(),
         goals.goal_store.clone(),
-        Arc::new(move || handle_for_usage.usage_records()),
+        Arc::new(move || handle_for_usage.ext().usage_records()),
     ));
     let proposal = GoalContinueProposal {
         candidate: candidate.clone(),
@@ -1637,10 +1642,10 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
     let payload = serde_json::to_value(GoalReviewSubmission::Continue(proposal.clone())).unwrap();
     let exec_ctx = mink::runtime::ToolExecutionContext::new(
         handle.session_info().cwd.clone(),
-        handle.interrupt_flag(),
+        handle.ext().interrupt_flag(),
     );
     let no_session_tool =
-        crate::tools::GoalReviewTool::for_test_adjudication(None, handle.artifact_reader());
+        crate::tools::GoalReviewTool::for_test_adjudication(None, handle.ext().artifact_reader());
     assert!(
         mink::runtime::AgentTool::execute(&no_session_tool, payload.clone(), exec_ctx.clone(),)
             .await
@@ -1648,7 +1653,7 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
     );
     let tool = crate::tools::GoalReviewTool::for_test_adjudication(
         Some(session.clone()),
-        handle.artifact_reader(),
+        handle.ext().artifact_reader(),
     );
     for ids in [
         vec![],
@@ -1712,7 +1717,7 @@ async fn continuation_validation_is_negative_only_and_recovery_is_idempotent() {
     assert_eq!(replayed.continuation_rounds, 1);
     assert_eq!(replayed.continuations.len(), 1);
     assert!(
-        handle.usage_records().unwrap().is_empty(),
+        handle.ext().usage_records().unwrap().is_empty(),
         "replay sends no provider requests"
     );
     close_fixture(runtime, &goals, root).await;
@@ -1848,10 +1853,10 @@ async fn unknown_goal_format_version_fails_closed() {
         .goal_store
         .create(
             GoalSpec::new("reject unknown formats"),
-            goal_environment_from_parts(&cwd, &handle.tool_surface_fingerprint()),
+            goal_environment_from_parts(&cwd, &handle.ext().tool_surface_fingerprint()),
         )
         .unwrap();
-    let directory = handle.session_dir();
+    let directory = handle.ext().session_dir();
     let sid = handle.session_info().session_id.clone();
     runtime.shutdown().await.unwrap();
     drop(handle);
@@ -2033,7 +2038,7 @@ async fn interrupt_during_an_active_round_pauses_without_admitting_another() {
         GoalStatus::Active,
         "the goal must still be active when the interrupt is set"
     );
-    runtime.handle().interrupt_turn_gate();
+    runtime.handle().ext().interrupt_turn_gate();
     backend.release.notify_one();
 
     let settled = tokio::time::timeout(std::time::Duration::from_secs(10), goals.wait())
@@ -2075,7 +2080,7 @@ fn inconclusive_review_keeps_active_and_preserves_candidate() {
         time::OffsetDateTime::now_utc().unix_timestamp_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = GoalStore::load(&dir, mink::runtime::PersistenceFault::default()).unwrap();
+    let store = GoalStore::load(&dir, mink::runtime::ext::PersistenceFault::default()).unwrap();
     let goal = store
         .create(crate::store::GoalSpec::new("inconclusive"), "env".into())
         .unwrap();
@@ -2196,7 +2201,7 @@ fn settle_iteration_increments_revision_once_per_applied_settlement() {
         time::OffsetDateTime::now_utc().unix_timestamp_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = GoalStore::load(&dir, mink::runtime::PersistenceFault::default()).unwrap();
+    let store = GoalStore::load(&dir, mink::runtime::ext::PersistenceFault::default()).unwrap();
     let active = store
         .create(GoalSpec::new("bump revision"), "env".into())
         .unwrap();

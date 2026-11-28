@@ -1,7 +1,7 @@
 //! Durable explicit goals; model reports never grant lifecycle authority.
 pub mod protocol;
 use anyhow::{Result, ensure};
-use mink::runtime::{PersistenceFault, publish_state};
+use mink::runtime::ext::{PersistenceFault, publish_state};
 pub use protocol::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

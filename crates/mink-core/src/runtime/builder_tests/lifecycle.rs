@@ -1432,3 +1432,54 @@ async fn subagent_executor_retains_child_and_parent_session_leases() {
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(cwd);
 }
+
+#[tokio::test]
+async fn interrupt_current_turn_releases_admission_lock_before_controller_callback() {
+    struct ReentrantController {
+        handle: crate::runtime::AgentRuntimeHandle,
+        callback_ran: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl crate::runtime::ext::ExternalController for ReentrantController {
+        fn on_user_interrupt(&self) {
+            let ran = self.handle.ext().with_admission_lock(|| true);
+            self.callback_ran
+                .store(ran, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    let home = unique_temp_dir("interrupt-reentrant-home");
+    let cwd = unique_temp_dir("interrupt-reentrant-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let runtime = crate::runtime::AgentRuntime::start(AgentOptions::new(&home, &cwd))
+        .await
+        .unwrap();
+    let handle = runtime.handle();
+    let mut stop_rx = handle.ext().subscribe_stop_cause();
+    let callback_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    handle
+        .ext()
+        .attach_external_controller(Arc::new(ReentrantController {
+            handle: handle.clone(),
+            callback_ran: callback_ran.clone(),
+        }))
+        .unwrap();
+
+    let trigger = handle.clone();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::task::spawn_blocking(move || trigger.interrupt_current_turn()),
+    )
+    .await
+    .expect("interrupt_current_turn must release admission lock before callback")
+    .unwrap();
+
+    assert!(callback_ran.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        *stop_rx.borrow_and_update(),
+        Some(crate::runtime::ext::StopCause::UserInterrupt)
+    );
+    runtime.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(home);
+    let _ = std::fs::remove_dir_all(cwd);
+}

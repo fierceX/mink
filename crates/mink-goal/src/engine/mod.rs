@@ -3,9 +3,9 @@ use crate::store::*;
 use crate::tools::GoalToolBundle;
 use anyhow::{Result, ensure};
 use async_trait::async_trait;
+use mink::runtime::ext::{ExtensionEmitter, ExternalController};
 use mink::runtime::{
-    AgentOptions, AgentRuntimeHandle, EventSink, ExtensionEmitter, RuntimeError, RuntimeResult,
-    SessionReader,
+    AgentOptions, AgentRuntimeHandle, EventSink, RuntimeError, RuntimeResult, SessionReader,
 };
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -76,13 +76,14 @@ impl GoalEngine {
     /// Load and recover the session's durable goal state (under the runtime's
     /// active `SessionLease`) and wire Goal scheduling into `handle`.
     pub fn attach(handle: AgentRuntimeHandle, plugin: GoalPlugin) -> RuntimeResult<Arc<Self>> {
-        let session_dir = handle.session_dir();
+        let session_dir = handle.ext().session_dir();
         let goal_store = Arc::new(
-            GoalStore::load(&session_dir, handle.persistence_fault())
+            GoalStore::load(&session_dir, handle.ext().persistence_fault())
                 .map_err(|e| RuntimeError::Configuration(format!("{e:#}")))?,
         );
         if goal_store.snapshot().is_some() {
             let records = handle
+                .ext()
                 .usage_records()
                 .map_err(|e| RuntimeError::Configuration(format!("{e:#}")))?;
             goal_store
@@ -98,7 +99,7 @@ impl GoalEngine {
                 .map_err(|e| RuntimeError::Configuration(format!("{e:#}")))?;
             let env = goal_environment_from_parts(
                 &handle.session_info().cwd,
-                &handle.tool_surface_fingerprint(),
+                &handle.ext().tool_surface_fingerprint(),
             );
             goal_store
                 .recover(&env, &history, committed_sequence)
@@ -106,14 +107,14 @@ impl GoalEngine {
         }
         plugin
             .tools
-            .bind_store(goal_store.clone(), handle.artifact_reader());
+            .bind_store(goal_store.clone(), handle.ext().artifact_reader());
         let goal_driver = Arc::new(GoalDriver::new(plugin.verifiers, plugin.event_sink));
         let controller = Arc::new(GoalExternalController::new(
             goal_driver.clone(),
             goal_store.clone(),
-            handle.extension_emitter(),
+            handle.ext().extension_emitter(),
         ));
-        handle.attach_external_controller(controller)?;
+        handle.ext().attach_external_controller(controller)?;
         Ok(Arc::new(Self {
             handle,
             goal_driver,
@@ -209,6 +210,10 @@ pub(crate) struct GoalDriver {
     /// on-disk goal still reads active.
     #[cfg(test)]
     pub(crate) drive_attempts: std::sync::atomic::AtomicU64,
+    /// Serializes goal stop decisions, iteration admission, and acceptance commits
+    /// without requiring `mink-core`'s admission mutex during interrupt callbacks.
+    /// Lock ordering: `core admission (optional) -> transition_gate -> goal_store -> control -> turn_gate`.
+    pub(crate) transition_gate: Mutex<()>,
     pub(crate) control: Mutex<GoalControlState>,
     /// Driver lifecycle so waiters cannot lose a wakeup: a watch keeps the
     /// current state instead of racing a check against a notification.
@@ -231,6 +236,7 @@ impl GoalDriver {
         Self {
             #[cfg(test)]
             drive_attempts: std::sync::atomic::AtomicU64::new(0),
+            transition_gate: Mutex::new(()),
             control: Mutex::new(GoalControlState {
                 enabled: false,
                 next_run_id: 1,
@@ -241,6 +247,12 @@ impl GoalDriver {
             verifiers,
             sink,
         }
+    }
+
+    pub(crate) fn lock_transition(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.transition_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     pub(crate) fn lock_control(&self) -> std::sync::MutexGuard<'_, GoalControlState> {
@@ -311,40 +323,54 @@ impl GoalExternalController {
     }
 }
 
-impl mink::runtime::ExternalController for GoalExternalController {
+impl ExternalController for GoalExternalController {
     fn blocks_ordinary_control(&self) -> Option<&'static str> {
-        let blocked = self.goal_store.snapshot().is_some_and(|g| {
-            g.status == GoalStatus::Active
-                || (g.status == GoalStatus::Blocked && g.phase == GoalPhase::Verifying)
-        });
+        let blocked = self.goal_driver.is_active()
+            || self.goal_store.snapshot().is_some_and(|g| {
+                g.status == GoalStatus::Active
+                    || (g.status == GoalStatus::Blocked && g.phase == GoalPhase::Verifying)
+            });
         blocked.then_some("goal")
     }
 
     fn on_user_interrupt(&self) {
-        if self
-            .goal_store
-            .snapshot()
-            .is_some_and(|g| g.status == GoalStatus::Active)
-        {
-            match self.goal_store.pause_if_active("paused by user interrupt") {
-                Ok(Some(goal)) => {
-                    let payload = serde_json::json!({ "goal": goal });
-                    self.emitter
-                        .emit_extension_event(crate::events::GOAL_UPDATED_EVENT, payload.clone());
-                    if goal.status.is_terminal() {
-                        self.emitter
-                            .emit_live_extension_event(crate::events::GOAL_FINISHED_EVENT, payload);
+        let outcome = {
+            let _gate = self.goal_driver.lock_transition();
+            if self
+                .goal_store
+                .snapshot()
+                .is_some_and(|g| g.status == GoalStatus::Active)
+            {
+                match self.goal_store.pause_if_active("paused by user interrupt") {
+                    Ok(Some(goal)) => Some(Ok(goal)),
+                    Ok(None) => None,
+                    Err(error) => {
+                        let detail = format!("{error:#}");
+                        control::latch_stopping_after_failed_stop_intent(
+                            &self.goal_driver,
+                            &detail,
+                        );
+                        Some(Err(detail))
                     }
                 }
-                Ok(None) => {}
-                Err(error) => {
-                    control::latch_stopping_after_failed_stop_intent(
-                        &self.goal_driver,
-                        &format!("{error:#}"),
-                    );
-                    self.emitter.render_error(&format!("{error:#}"));
+            } else {
+                None
+            }
+        };
+        match outcome {
+            Some(Ok(goal)) => {
+                let payload = serde_json::json!({ "goal": goal });
+                self.emitter
+                    .emit_extension_event(crate::events::GOAL_UPDATED_EVENT, payload.clone());
+                if goal.status.is_terminal() {
+                    self.emitter
+                        .emit_live_extension_event(crate::events::GOAL_FINISHED_EVENT, payload);
                 }
             }
+            Some(Err(detail)) => {
+                self.emitter.render_error(&detail);
+            }
+            None => {}
         }
     }
 
@@ -435,11 +461,12 @@ impl GoalVerifier for CommandGoalVerifier {
     }
     async fn verify(&self, context: GoalVerificationContext) -> Result<GoalVerification> {
         ensure!(
-            context.handle.has_reachable_tool("Bash"),
+            context.handle.ext().has_reachable_tool("Bash"),
             "checker requires Bash in the resolved tool surface"
         );
         let result = context
             .handle
+            .ext()
             .execute_scoped_tool(
                 "Bash",
                 serde_json::json!({"command": self.command, "timeout": self.timeout_secs}),
@@ -492,7 +519,7 @@ impl RunGuard {
         let Some(lease) = self.lease.take() else {
             return;
         };
-        if self.engine.handle.active_turn_id().is_none() {
+        if self.engine.handle.ext().active_turn_id().is_none() {
             drop(lease);
             return;
         }
@@ -500,7 +527,7 @@ impl RunGuard {
         match tokio::runtime::Handle::try_current() {
             Ok(runtime) => {
                 runtime.spawn(async move {
-                    handle.wait_turn_idle().await;
+                    handle.ext().wait_turn_idle().await;
                     drop(lease);
                 });
             }

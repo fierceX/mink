@@ -112,15 +112,29 @@ struct TurnLocalState {
     scavenge_seq: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnEntryMode {
+    Human,
+    PrePersistedInternal { consume_inbox: bool },
+}
+
+impl TurnEntryMode {
+    fn consumes_inbox(self) -> bool {
+        match self {
+            Self::Human => true,
+            Self::PrePersistedInternal { consume_inbox } => consume_inbox,
+        }
+    }
+}
+
 pub(crate) struct TurnExecutionScope {
-    pub internal_entry: Option<(String, serde_json::Value)>,
-    pub skip_add_user: bool,
+    pub entry_mode: TurnEntryMode,
     pub count_as_user_turn: bool,
-    pub consume_inbox: bool,
     pub enable_belief: bool,
     pub disable_native_web: bool,
     pub tool_mask: Option<crate::tools::policy_hook::ToolExecutionMask>,
-    pub tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolExecutionObserver>>,
+    pub effect_journal: Option<Arc<dyn crate::tools::policy_hook::ToolEffectJournal>>,
+    pub tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolCallObserver>>,
     pub budget_check: Option<Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync>>,
     pub stop_when: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     pub continue_prompt_when_not_stopped: Option<String>,
@@ -129,17 +143,35 @@ pub(crate) struct TurnExecutionScope {
 impl Default for TurnExecutionScope {
     fn default() -> Self {
         Self {
-            internal_entry: None,
-            skip_add_user: false,
+            entry_mode: TurnEntryMode::Human,
             count_as_user_turn: true,
-            consume_inbox: true,
             enable_belief: true,
             disable_native_web: false,
             tool_mask: None,
+            effect_journal: None,
             tool_observer: None,
             budget_check: None,
             stop_when: None,
             continue_prompt_when_not_stopped: None,
+        }
+    }
+}
+
+impl TurnExecutionScope {
+    pub(crate) fn from_internal_request(req: &crate::runtime::ext::InternalTurnRequest) -> Self {
+        Self {
+            entry_mode: TurnEntryMode::PrePersistedInternal {
+                consume_inbox: req.policy.consume_inbox,
+            },
+            count_as_user_turn: req.policy.count_as_user_turn,
+            enable_belief: req.policy.enable_belief,
+            disable_native_web: req.policy.disable_native_web,
+            tool_mask: req.policy.tool_mask.clone(),
+            effect_journal: req.policy.effect_journal.clone(),
+            tool_observer: req.policy.tool_observer.clone(),
+            budget_check: req.policy.budget_check.clone(),
+            stop_when: req.policy.stop_when.clone(),
+            continue_prompt_when_not_stopped: req.policy.continue_prompt_when_not_stopped.clone(),
         }
     }
 }
@@ -194,15 +226,6 @@ impl TurnExecutor {
         Self::for_scope(ctx, resolved, TurnExecutionScope::default())
     }
 
-    pub(crate) fn new_for_scope(ctx: Arc<AgentSharedContext>, scope: TurnExecutionScope) -> Self {
-        let active = ctx
-            .active_model
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        Self::for_scope(ctx, active, scope)
-    }
-
     pub(crate) fn for_scope(
         ctx: Arc<AgentSharedContext>,
         resolved: crate::config::ResolvedModel,
@@ -211,6 +234,9 @@ impl TurnExecutor {
         let mut tool_context = crate::context::ToolContext::from_shared(&ctx);
         if let Some(mask) = &scope.tool_mask {
             tool_context.tool_mask = Some(mask.clone());
+        }
+        if let Some(journal) = &scope.effect_journal {
+            tool_context.effect_journal = Some(journal.clone());
         }
         if let Some(observer) = &scope.tool_observer {
             tool_context.tool_observer = Some(observer.clone());
@@ -529,40 +555,34 @@ impl TurnExecutor {
         let mut messages = self.ctx.stores.compaction.active_messages().await?;
         self.reconcile_todo_state(&mut messages).await?;
         let mut primary = None;
-        if let Some((content, metadata)) = &self.scope.internal_entry {
-            self.ctx
-                .stores
-                .store
-                .append_runtime_message(serde_json::json!({
-                    "role": "user",
-                    "content": content,
-                    "internal": true,
-                    "_mink": metadata,
-                }))
-                .await?;
-        } else if self.scope.skip_add_user {
-            if self.scope.consume_inbox && self.ctx.stores.input_inbox.active_turn().is_some() {
-                self.ctx
-                    .stores
-                    .input_inbox
-                    .apply_pending(&self.ctx.stores.store, || {
-                        self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set()
-                    })
-                    .await?;
+        match self.scope.entry_mode {
+            TurnEntryMode::PrePersistedInternal { consume_inbox } => {
+                if consume_inbox && self.ctx.stores.input_inbox.active_turn().is_some() {
+                    self.ctx
+                        .stores
+                        .input_inbox
+                        .apply_pending(&self.ctx.stores.store, || {
+                            self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set()
+                        })
+                        .await?;
+                }
             }
-        } else if self.scope.consume_inbox && self.ctx.stores.input_inbox.active_turn().is_some() {
-            self.ctx
-                .stores
-                .input_inbox
-                .apply_pending(&self.ctx.stores.store, || {
-                    self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set()
-                })
-                .await?;
-            if human {
-                primary = self.ctx.stores.input_inbox.active_primary();
+            TurnEntryMode::Human => {
+                if self.ctx.stores.input_inbox.active_turn().is_some() {
+                    self.ctx
+                        .stores
+                        .input_inbox
+                        .apply_pending(&self.ctx.stores.store, || {
+                            self.ctx.cancel.is_cancelled() || self.ctx.interrupt.is_set()
+                        })
+                        .await?;
+                    if human {
+                        primary = self.ctx.stores.input_inbox.active_primary();
+                    }
+                } else {
+                    self.ctx.stores.store.add_user(user_input).await?;
+                }
             }
-        } else {
-            self.ctx.stores.store.add_user(user_input).await?;
         }
         let user_input = match primary.as_ref() {
             Some(receipt) if receipt.status == crate::runtime::InputStatus::Applied => {
@@ -616,7 +636,7 @@ impl TurnExecutor {
                 self.ctx.io.display.render_stop("interrupted");
                 return Ok((TurnDecision::Interrupted, effects));
             }
-            if self.scope.consume_inbox
+            if self.scope.entry_mode.consumes_inbox()
                 && self
                     .ctx
                     .stores

@@ -356,8 +356,8 @@ async fn internal_settlement_failure_is_the_published_terminal() -> anyhow::Resu
 
     // A settlement hook that fails forces persistence-fault latching even
     // after the turn itself completed normally.
-    let mut req = crate::runtime::InternalTurnRequest::new("test_internal", "finish");
-    req.on_before_final = Some(Arc::new(|_ctx| {
+    let mut req = crate::runtime::ext::InternalTurnRequest::new("test_internal", "finish");
+    req.hooks.on_before_final = Some(Arc::new(|_ctx| {
         Box::pin(async { anyhow::bail!("injected settlement failure") })
     }));
     let result = send_user_input_with_internal(

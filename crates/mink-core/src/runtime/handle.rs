@@ -334,7 +334,7 @@ impl Drop for AgentRuntime {
             .handle
             .external_control
             .stop_cause
-            .send_replace(Some(crate::runtime::StopCause::RuntimeShutdown));
+            .send_replace(Some(crate::runtime::ext::StopCause::RuntimeShutdown));
         self.ctx.cancel.cancel();
         self.handle.turn_gate.close_and_interrupt();
         if let Some(controller) = &controller {
@@ -496,7 +496,7 @@ impl AgentRuntimeHandle {
 
     fn rollback_unstarted_submission(
         &self,
-        on_rollback: Option<&crate::runtime::TurnRollbackHook>,
+        on_rollback: Option<&crate::runtime::ext::TurnRollbackHook>,
         inbox_started: bool,
     ) {
         if inbox_started {
@@ -515,7 +515,7 @@ impl AgentRuntimeHandle {
         permit: TurnGatePermit,
         internal: Option<crate::agent::orchestrator::InternalTurnExecution>,
         inbox_started: bool,
-        on_rollback: Option<crate::runtime::TurnRollbackHook>,
+        on_rollback: Option<crate::runtime::ext::TurnRollbackHook>,
         receipt: crate::runtime::InputReceipt,
     ) -> RuntimeResult<(crate::runtime::InputReceipt, Option<AgentEventStream>)> {
         let stream_turn_id = turn_id.clone();
@@ -681,15 +681,54 @@ impl AgentRuntimeHandle {
         task.await.map_err(|e| RuntimeError::Join(e.to_string()))?
     }
 
-    // -------------------------------------------------------------------------
-    // Generic External Controller, Internal Turn, Child & Extension Primitives
-    // -------------------------------------------------------------------------
+    pub fn interrupt_current_turn(&self) {
+        let controller = {
+            let guard = self
+                .external_control
+                .admission
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if self.ext().is_closed() {
+                None
+            } else {
+                guard.controller.clone()
+            }
+        };
+        if let Some(controller) = controller {
+            controller.on_user_interrupt();
+        }
+        let _ = self
+            .external_control
+            .stop_cause
+            .send_replace(Some(crate::runtime::ext::StopCause::UserInterrupt));
+        self.turn_gate.interrupt();
+    }
 
+    pub fn session_info(&self) -> &SessionInfo {
+        &self.session
+    }
+
+    /// Access advanced/experimental orchestrator SPI methods.
+    pub fn ext(&self) -> RuntimeExtHandle<'_> {
+        RuntimeExtHandle(self)
+    }
+
+    fn is_closed(&self) -> bool {
+        self.ext().is_closed()
+    }
+}
+
+/// Extension SPI handle for external session orchestrators (such as `mink-goal`).
+#[derive(Clone, Copy)]
+pub struct RuntimeExtHandle<'a>(pub(crate) &'a AgentRuntimeHandle);
+
+impl<'a> RuntimeExtHandle<'a> {
     pub fn attach_external_controller(
         &self,
-        controller: Arc<dyn crate::runtime::ExternalController>,
+        controller: Arc<dyn crate::runtime::ext::ExternalController>,
     ) -> RuntimeResult<()> {
         let mut guard = self
+            .0
             .external_control
             .admission
             .lock()
@@ -706,30 +745,12 @@ impl AgentRuntimeHandle {
         Ok(())
     }
 
-    pub fn acquire_external_owner(
-        &self,
-        owner: &'static str,
-    ) -> RuntimeResult<crate::runtime::ExternalOwnerGuard> {
-        let mut guard = self
-            .external_control
-            .admission
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if self.is_closed() {
-            return Err(RuntimeError::Closed);
-        }
-        if let Some(existing) = guard.active_owner {
-            return Err(RuntimeError::ExternallyControlled { owner: existing });
-        }
-        guard.active_owner = Some(owner);
-        Ok(crate::runtime::ExternalOwnerGuard {
-            control: self.external_control.clone(),
-            owner,
-        })
-    }
-
+    /// Run `f` inside a short, non-reentrant critical section serialized
+    /// against human turn admission (`stream_input`/`compact`/`set_model`).
+    /// Callers must not invoke runtime admission methods or emit events inside `f`.
     pub fn with_admission_lock<R>(&self, f: impl FnOnce() -> R) -> R {
         let _guard = self
+            .0
             .external_control
             .admission
             .lock()
@@ -747,6 +768,7 @@ impl AgentRuntimeHandle {
         check: impl FnOnce() -> RuntimeResult<()>,
     ) -> RuntimeResult<TurnPermit> {
         let _guard = self
+            .0
             .external_control
             .admission
             .lock()
@@ -754,36 +776,38 @@ impl AgentRuntimeHandle {
         if self.is_closed() {
             return Err(RuntimeError::Closed);
         }
-        self.ctx
+        self.0
+            .ctx
             .stores
             .persistence_fault
             .check()
             .map_err(|e| RuntimeError::Command(format!("{e:#}")))?;
         check()?;
-        let base = self.next_turn_id();
+        let base = self.0.next_turn_id();
         let turn_id = match prefix {
             Some(prefix) => TurnId::new(format!("{prefix}:{base}")),
             None => base,
         };
-        Ok(TurnPermit(self.turn_gate.acquire(turn_id)?))
+        Ok(TurnPermit(self.0.turn_gate.acquire(turn_id)?))
     }
 
     pub async fn wait_turn_idle(&self) {
-        self.turn_gate.wait_idle().await;
+        self.0.turn_gate.wait_idle().await;
     }
 
     pub fn subscribe_stop_cause(
         &self,
-    ) -> tokio::sync::watch::Receiver<Option<crate::runtime::StopCause>> {
-        self.external_control.stop_cause.subscribe()
+    ) -> tokio::sync::watch::Receiver<Option<crate::runtime::ext::StopCause>> {
+        self.0.external_control.stop_cause.subscribe()
     }
 
     pub fn active_turn_id(&self) -> Option<TurnId> {
-        self.turn_gate.active()
+        self.0.turn_gate.active()
     }
 
     pub fn is_closed(&self) -> bool {
-        self.turn_gate
+        self.0
+            .turn_gate
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -791,30 +815,31 @@ impl AgentRuntimeHandle {
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.ctx.cancel.is_cancelled()
+        self.0.ctx.cancel.is_cancelled()
     }
 
     pub fn interrupt_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
-        self.ctx.interrupt.as_atomic()
+        self.0.ctx.interrupt.as_atomic()
     }
 
     pub fn is_interrupted(&self) -> bool {
-        self.ctx.interrupt.is_set()
+        self.0.ctx.interrupt.is_set()
     }
 
     pub fn interrupt_turn_gate(&self) {
-        self.turn_gate.interrupt();
+        self.0.turn_gate.interrupt();
     }
 
     pub fn interrupt_turn_if_owner(&self, expected: &TurnId) {
-        self.turn_gate.interrupt_if_owner(expected);
+        self.0.turn_gate.interrupt_if_owner(expected);
     }
 
     pub fn stream_internal_turn(
         &self,
-        mut req: crate::runtime::InternalTurnRequest,
+        mut req: crate::runtime::ext::InternalTurnRequest,
     ) -> RuntimeResult<AgentEventStream> {
         let _guard = self
+            .0
             .external_control
             .admission
             .lock()
@@ -822,16 +847,16 @@ impl AgentRuntimeHandle {
         if self.is_closed() {
             return Err(RuntimeError::Closed);
         }
-        if let Some(check) = &req.pre_admission_check {
+        if let Some(check) = &req.hooks.pre_admission_check {
             check()?;
         }
-        let base = self.next_turn_id();
+        let base = self.0.next_turn_id();
         let turn_id = match req.turn_id_prefix.as_deref() {
             Some(prefix) => TurnId::new(format!("{prefix}:{base}")),
             None => base,
         };
-        let permit = self.turn_gate.acquire(turn_id.clone())?;
-        let on_rollback = if let Some(prepare) = &req.prepare_on_admit {
+        let permit = self.0.turn_gate.acquire(turn_id.clone())?;
+        let on_rollback = if let Some(prepare) = &req.hooks.prepare_on_admit {
             let prepared = prepare(&turn_id)?;
             req.content = prepared.content;
             req.metadata = prepared.metadata;
@@ -839,7 +864,7 @@ impl AgentRuntimeHandle {
         } else {
             None
         };
-        if let Err(err) = self.input_inbox.begin_internal_turn(turn_id.as_str()) {
+        if let Err(err) = self.0.input_inbox.begin_internal_turn(turn_id.as_str()) {
             if let Some(hook) = &on_rollback {
                 hook();
             }
@@ -855,88 +880,38 @@ impl AgentRuntimeHandle {
             turn_id.as_str(),
         );
         let input_text = req.content.clone();
-        self.dispatch_turn_stream(
-            input_text,
-            turn_id,
-            permit,
-            Some(crate::agent::orchestrator::InternalTurnExecution { request: req }),
-            true,
-            on_rollback,
-            receipt,
-        )
-        .map(|(_, stream)| stream.expect("internal turn stream"))
+        self.0
+            .dispatch_turn_stream(
+                input_text,
+                turn_id,
+                permit,
+                Some(crate::agent::orchestrator::InternalTurnExecution { request: req }),
+                true,
+                on_rollback,
+                receipt,
+            )
+            .map(|(_, stream)| stream.expect("internal turn stream"))
     }
 
     pub async fn run_internal_turn_with_permit(
         &self,
         permit: &TurnPermit,
-        mut req: crate::runtime::InternalTurnRequest,
+        req: crate::runtime::ext::InternalTurnRequest,
     ) -> anyhow::Result<TurnOutcome> {
-        self.ctx.stores.persistence_fault.check()?;
-        let start_seq = self.ctx.stores.store.committed_len().await?;
-        let mut meta = match req.metadata.take() {
-            serde_json::Value::Object(map) => map,
-            _ => serde_json::Map::new(),
-        };
-        meta.insert("internal".into(), serde_json::Value::Bool(true));
-        meta.insert(
-            "source".into(),
-            serde_json::Value::String(req.source_tag.clone()),
-        );
-        let scope = crate::agent::turn::TurnExecutionScope {
-            internal_entry: Some((req.content.clone(), serde_json::Value::Object(meta))),
-            skip_add_user: false,
-            count_as_user_turn: req.count_as_user_turn,
-            consume_inbox: req.consume_inbox,
-            enable_belief: req.enable_belief,
-            disable_native_web: req.disable_native_web,
-            tool_mask: req.tool_mask,
-            tool_observer: req.tool_observer,
-            budget_check: req.budget_check,
-            stop_when: req.stop_when,
-            continue_prompt_when_not_stopped: req.continue_prompt_when_not_stopped,
-        };
-        let (billing_turn_id, own_billing) = match req.billing_turn_id_override {
-            Some(id) => (id, false),
-            None => (self.ctx.stores.usage.begin_turn(), true),
-        };
-        let mut executor = crate::agent::turn::TurnExecutor::new_for_scope(self.ctx.clone(), scope);
-        let exec_result = self
-            .ctx
-            .stores
-            .usage
-            .with_billing_scope(
-                billing_turn_id.clone(),
-                executor.execute(&req.content, None),
-            )
-            .await;
-        if own_billing {
-            self.ctx.stores.usage.end_turn(&billing_turn_id);
-        }
-        let end_seq = self
-            .ctx
-            .stores
-            .store
-            .committed_len()
-            .await
-            .unwrap_or(start_seq);
-        let mut run_result = match exec_result {
-            Ok((decision, _effects)) => TurnRunResult::from_decision(&decision, &executor),
-            Err(error) => TurnRunResult::failed_with(
-                crate::agent::failure::classify_turn_error(&error),
-                format!("{error:#}"),
-            ),
-        };
-        run_result.billing_turn_id = billing_turn_id.clone();
-        run_result.start_seq = start_seq;
-        run_result.end_seq = end_seq;
-        if let Ok(records) = self.ctx.stores.usage.records_for(&billing_turn_id) {
-            run_result.usage = crate::session::usage::UsageSummary::from_records(&records);
-            run_result.usage_records = records;
-        }
+        let (done_tx, done_rx) = oneshot::channel();
+        self.0
+            .cmd_tx
+            .send(OrchCmd::RunScopedInternalTurn {
+                request: Box::new(req),
+                done: done_tx,
+            })
+            .map_err(|e| anyhow::anyhow!("orchestrator command channel closed: {e}"))?;
+        let run_result = done_rx.await.map_err(|e| {
+            anyhow::anyhow!("orchestrator dropped scoped internal turn result: {e}")
+        })??;
         Ok(TurnOutcome::from_run_result(
             run_result,
-            self.session.clone(),
+            self.0.session.clone(),
             permit.turn_id().clone(),
         ))
     }
@@ -958,7 +933,8 @@ impl AgentRuntimeHandle {
                 serde_json::Value::String(source_tag.to_string()),
             );
         }
-        self.ctx
+        self.0
+            .ctx
             .stores
             .store
             .append_runtime_message_durable(serde_json::json!({
@@ -967,23 +943,23 @@ impl AgentRuntimeHandle {
                 "_mink": serde_json::Value::Object(meta),
             }))
             .await?;
-        self.ctx.stores.store.committed_len().await
+        self.0.ctx.stores.store.committed_len().await
     }
 
     pub async fn committed_seq(&self) -> anyhow::Result<usize> {
-        self.ctx.stores.store.committed_len().await
+        self.0.ctx.stores.store.committed_len().await
     }
 
     pub async fn sync_conversation(&self) -> anyhow::Result<()> {
-        self.ctx.stores.store.sync().await
+        self.0.ctx.stores.store.sync().await
     }
 
     pub async fn conversation_lines(&self) -> anyhow::Result<Vec<serde_json::Value>> {
-        self.ctx.stores.store.lines().await
+        self.0.ctx.stores.store.lines().await
     }
 
     pub fn has_outstanding_guidance(&self) -> bool {
-        self.input_inbox.outstanding().iter().any(|r| {
+        self.0.input_inbox.outstanding().iter().any(|r| {
             r.guidance
                 && matches!(
                     r.status,
@@ -999,26 +975,26 @@ impl AgentRuntimeHandle {
             return;
         }
         tokio::select! {
-            _ = self.ctx.interrupt.notified() => {}
-            _ = self.ctx.cancel.cancelled() => {}
+            _ = self.0.ctx.interrupt.notified() => {}
+            _ = self.0.ctx.cancel.cancelled() => {}
         }
     }
 
     pub async fn spawn_ephemeral_child(
         &self,
         session_id: String,
-        opts: crate::runtime::EphemeralChildOptions,
-    ) -> anyhow::Result<crate::runtime::EphemeralChildSession> {
+        opts: crate::runtime::ext::EphemeralChildOptions,
+    ) -> anyhow::Result<crate::runtime::ext::EphemeralChildSession> {
         let deadline = opts.deadline;
-        let cancel = self.ctx.cancel.linked_child_token();
+        let cancel = self.0.ctx.cancel.linked_child_token();
         let executor = crate::agent::sub_executor::SubAgentExecutor::new_ephemeral(
-            self.ctx.clone(),
+            self.0.ctx.clone(),
             session_id,
             cancel,
             opts,
         )
         .await?;
-        Ok(crate::runtime::EphemeralChildSession::new(
+        Ok(crate::runtime::ext::EphemeralChildSession::new(
             executor, deadline,
         ))
     }
@@ -1026,9 +1002,9 @@ impl AgentRuntimeHandle {
     pub async fn run_ephemeral_child(
         &self,
         session_id: String,
-        opts: crate::runtime::EphemeralChildOptions,
+        opts: crate::runtime::ext::EphemeralChildOptions,
         prompt: String,
-    ) -> anyhow::Result<crate::runtime::EphemeralChildOutcome> {
+    ) -> anyhow::Result<crate::runtime::ext::EphemeralChildOutcome> {
         let mut child = self.spawn_ephemeral_child(session_id, opts).await?;
         Ok(child.run_turn(prompt).await)
     }
@@ -1038,15 +1014,16 @@ impl AgentRuntimeHandle {
         tool: &str,
         description: &str,
         content: &str,
-    ) -> anyhow::Result<crate::runtime::ArtifactRef> {
+    ) -> anyhow::Result<crate::runtime::ext::ArtifactRef> {
         let record = self
+            .0
             .ctx
             .stores
             .artifacts
             .write_text(tool, description, content)?;
-        let path = self.session.artifacts_dir.join(&record.path);
+        let path = self.0.session.artifacts_dir.join(&record.path);
         let sha256 = crate::runtime::internal_turn::sha256_hex(content.as_bytes());
-        Ok(crate::runtime::ArtifactRef {
+        Ok(crate::runtime::ext::ArtifactRef {
             url: format!("artifact://{}", record.id),
             id: record.id,
             tool: record.tool,
@@ -1060,31 +1037,34 @@ impl AgentRuntimeHandle {
         &self,
         source_path: &std::path::Path,
         label: &str,
-    ) -> anyhow::Result<crate::runtime::ArtifactRef> {
+    ) -> anyhow::Result<crate::runtime::ext::ArtifactRef> {
         let content = std::fs::read_to_string(source_path)?;
         self.write_artifact(label, label, &content)
     }
 
-    pub fn artifact_reader(&self) -> crate::runtime::internal_turn::ArtifactReader {
-        crate::runtime::internal_turn::ArtifactReader {
-            artifacts: self.ctx.stores.artifacts.clone(),
-            artifacts_dir: self.session.artifacts_dir.clone(),
+    pub fn artifact_reader(&self) -> crate::runtime::ext::ArtifactReader {
+        crate::runtime::ext::ArtifactReader {
+            artifacts: self.0.ctx.stores.artifacts.clone(),
+            artifacts_dir: self.0.session.artifacts_dir.clone(),
         }
     }
 
-    pub fn extension_emitter(&self) -> crate::runtime::internal_turn::ExtensionEmitter {
-        crate::runtime::internal_turn::ExtensionEmitter {
-            event_display: self.event_display.clone(),
-            ctx: self.ctx.clone(),
+    pub fn extension_emitter(&self) -> crate::runtime::ext::ExtensionEmitter {
+        crate::runtime::ext::ExtensionEmitter {
+            event_display: self.0.event_display.clone(),
+            ctx: self.0.ctx.clone(),
         }
     }
 
-    pub fn find_artifact(&self, id: &str) -> anyhow::Result<Option<crate::runtime::ArtifactRef>> {
+    pub fn find_artifact(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::runtime::ext::ArtifactRef>> {
         self.artifact_reader().find(id)
     }
 
     pub fn read_artifact_text(&self, id: &str) -> anyhow::Result<String> {
-        self.ctx.stores.artifacts.read_text(id)
+        self.0.ctx.stores.artifacts.read_text(id)
     }
 
     pub fn format_tool_result(&self, text: &str, max_bytes: usize) -> String {
@@ -1095,8 +1075,8 @@ impl AgentRuntimeHandle {
         &self,
         name: &str,
         input: serde_json::Value,
-    ) -> anyhow::Result<crate::runtime::ScopedToolOutcome> {
-        self.ctx.stores.persistence_fault.check()?;
+    ) -> anyhow::Result<crate::runtime::ext::ScopedToolOutcome> {
+        self.0.ctx.stores.persistence_fault.check()?;
         let fields = input
             .as_object()
             .map(|obj| {
@@ -1119,11 +1099,11 @@ impl AgentRuntimeHandle {
             parse_error: None,
             raw_arguments_digest: None,
         };
-        let tool_ctx = Arc::new(crate::context::ToolContext::from_shared(&self.ctx));
+        let tool_ctx = Arc::new(crate::context::ToolContext::from_shared(&self.0.ctx));
         let result = crate::tools::runner::ToolRunner::new(tool_ctx)
             .execute_verifier_call(call)
             .await?;
-        Ok(crate::runtime::ScopedToolOutcome {
+        Ok(crate::runtime::ext::ScopedToolOutcome {
             succeeded: result.succeeded(),
             content: result.content,
             exit_code: result.exit_code,
@@ -1136,43 +1116,45 @@ impl AgentRuntimeHandle {
     }
 
     pub fn persistence_fault(&self) -> crate::session::persistence::PersistenceFault {
-        self.ctx.stores.persistence_fault.clone()
+        self.0.ctx.stores.persistence_fault.clone()
     }
 
     pub fn check_persistence_fault(&self) -> anyhow::Result<()> {
-        self.ctx.stores.persistence_fault.check()
+        self.0.ctx.stores.persistence_fault.check()
     }
 
     pub fn latch_persistence_fault(&self, detail: &str) {
         let _ = self
+            .0
             .ctx
             .stores
             .persistence_fault
-            .raise(&self.session.conversation_path, detail.to_string());
+            .raise(&self.0.session.conversation_path, detail.to_string());
     }
 
     pub fn tool_surface_fingerprint(&self) -> String {
-        self.ctx.tools.tool_surface.fingerprint().to_string()
+        self.0.ctx.tools.tool_surface.fingerprint().to_string()
     }
 
     pub fn has_tool(&self, name: &str) -> bool {
-        self.ctx.tools.tool_surface.has(name)
+        self.0.ctx.tools.tool_surface.has(name)
     }
 
     pub fn has_reachable_tool(&self, name: &str) -> bool {
-        self.ctx.tools.tool_surface.has_any_reachable(name)
+        self.0.ctx.tools.tool_surface.has_any_reachable(name)
     }
 
     pub fn max_context_tokens(&self) -> usize {
-        self.ctx.config.max_context_tokens
+        self.0.ctx.config.max_context_tokens
     }
 
     pub fn tool_result_max_bytes(&self) -> usize {
-        self.ctx.tools.tool_config.tool_result_max_bytes
+        self.0.ctx.tools.tool_config.tool_result_max_bytes
     }
 
     pub fn active_model_name(&self) -> String {
-        self.ctx
+        self.0
+            .ctx
             .active_model
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1181,11 +1163,11 @@ impl AgentRuntimeHandle {
     }
 
     pub fn usage_records(&self) -> anyhow::Result<Vec<crate::session::usage::UsageRecord>> {
-        self.ctx.stores.usage.all_records()
+        self.0.ctx.stores.usage.all_records()
     }
 
     pub fn session_dir(&self) -> std::path::PathBuf {
-        self.session.session_dir()
+        self.0.session.session_dir()
     }
 
     pub fn emit_extension_event(&self, kind: &str, payload: serde_json::Value) {
@@ -1198,33 +1180,11 @@ impl AgentRuntimeHandle {
     }
 
     pub fn render_info(&self, message: &str) {
-        self.ctx.io.display.render_info(message);
+        self.0.ctx.io.display.render_info(message);
     }
 
     pub fn render_error(&self, message: &str) {
-        self.ctx.io.display.render_error(message);
-    }
-
-    pub fn interrupt_current_turn(&self) {
-        let _guard = self
-            .external_control
-            .admission
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if !self.is_closed()
-            && let Some(controller) = &_guard.controller
-        {
-            controller.on_user_interrupt();
-        }
-        let _ = self
-            .external_control
-            .stop_cause
-            .send_replace(Some(crate::runtime::StopCause::UserInterrupt));
-        self.turn_gate.interrupt();
-    }
-
-    pub fn session_info(&self) -> &SessionInfo {
-        &self.session
+        self.0.ctx.io.display.render_error(message);
     }
 }
 
@@ -1326,7 +1286,7 @@ impl AgentRuntime {
             .handle
             .external_control
             .stop_cause
-            .send_replace(Some(crate::runtime::StopCause::RuntimeShutdown));
+            .send_replace(Some(crate::runtime::ext::StopCause::RuntimeShutdown));
         // Cancellation is the runtime's own stop signal and must land before the
         // turn-gate interrupt: an in-flight external round settles as a pause
         // only when the gate was interrupted without the runtime being cancelled,

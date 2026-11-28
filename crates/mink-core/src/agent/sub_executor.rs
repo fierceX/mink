@@ -266,7 +266,7 @@ impl SubAgentExecutor {
         parent_ctx: Arc<AgentSharedContext>,
         session_id: String,
         cancel: crate::cancel::CancellationToken,
-        opts: crate::runtime::EphemeralChildOptions,
+        opts: crate::runtime::ext::EphemeralChildOptions,
     ) -> Result<Self> {
         let mut config = parent_ctx.config.clone();
         let active = parent_ctx
@@ -340,7 +340,7 @@ impl SubAgentExecutor {
         custom_tools_override: Option<Vec<crate::tools::extension::RegisteredCustomTool>>,
         billing_turn_id_override: Option<String>,
         default_tool_mask: Option<crate::tools::policy_hook::ToolExecutionMask>,
-        default_tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolExecutionObserver>>,
+        default_tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolCallObserver>>,
         budget_check: Option<Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync>>,
     ) -> Result<Self> {
         if let Some(model) = model {
@@ -467,6 +467,7 @@ impl SubAgentExecutor {
             },
             billing_turn_id_override,
             default_tool_mask,
+            default_effect_journal: None,
             default_tool_observer,
             budget_check,
         })
@@ -712,8 +713,8 @@ impl EphemeralChildSession {
         self.executor.child_ctx.paths.home.clone()
     }
 
-    pub async fn run_turn(&mut self, prompt: String) -> crate::runtime::EphemeralChildOutcome {
-        use crate::runtime::{EphemeralChildOutcome, EphemeralChildStatus};
+    pub async fn run_turn(&mut self, prompt: String) -> crate::runtime::ext::EphemeralChildOutcome {
+        use crate::runtime::ext::{EphemeralChildOutcome, EphemeralChildStatus};
         if !self.usable {
             return EphemeralChildOutcome {
                 status: EphemeralChildStatus::Failed,

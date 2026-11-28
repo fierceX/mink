@@ -1,7 +1,8 @@
 //! Goal driver: iteration scheduling, the drive loop and run settlement.
 
 use super::*;
-use mink::runtime::{InternalTurnRequest, PreparedInternalTurn, TurnId, checkpoint_budget_chars};
+use mink::runtime::TurnId;
+use mink::runtime::ext::{InternalTurnRequest, PreparedInternalTurn, checkpoint_budget_chars};
 
 impl GoalEngine {
     /// One run: drive to a stop, then settle the lifecycle exactly once.
@@ -17,15 +18,6 @@ impl GoalEngine {
             goal_id: goal_id.clone(),
             lease,
             finished: false,
-        };
-        let _owner = match self.handle.acquire_external_owner("goal") {
-            Ok(owner) => Some(owner),
-            Err(error) => {
-                self.handle.render_error(&format!(
-                    "Goal runner: failed to claim session owner: {error}"
-                ));
-                None
-            }
         };
         let fault = match self.drive_goal(run_id).await {
             // A stop intent that could not be persisted latched this run in
@@ -58,7 +50,9 @@ impl GoalEngine {
                     ),
                     None => format!("goal run failed: {error:#}"),
                 };
-                self.handle.render_error(&format!("Goal runner: {fault}"));
+                self.handle
+                    .ext()
+                    .render_error(&format!("Goal runner: {fault}"));
                 if replaced {
                     None
                 } else {
@@ -81,11 +75,17 @@ impl GoalEngine {
             .snapshot()
             .filter(|g| g.status.is_terminal() && !g.hidden)
         {
-            let already_published = self.handle.conversation_lines().await.is_ok_and(|lines| {
-                lines.iter().any(|m| {
-                    m["_mink"]["goal_id"] == ended.id && m["_mink"]["goal_state_kind"] == "ended"
-                })
-            });
+            let already_published =
+                self.handle
+                    .ext()
+                    .conversation_lines()
+                    .await
+                    .is_ok_and(|lines| {
+                        lines.iter().any(|m| {
+                            m["_mink"]["goal_id"] == ended.id
+                                && m["_mink"]["goal_state_kind"] == "ended"
+                        })
+                    });
             if !already_published {
                 let content =
                     state_text(&ended, GoalStateKind::Ended, self.goal_projection_chars());
@@ -96,10 +96,11 @@ impl GoalEngine {
                 });
                 if let Err(error) = self
                     .handle
+                    .ext()
                     .append_internal_tail(content, "", metadata)
                     .await
                 {
-                    self.handle.render_error(&format!(
+                    self.handle.ext().render_error(&format!(
                         "Goal runner: terminal facts not recorded: {error:#}"
                     ));
                 }
@@ -110,7 +111,7 @@ impl GoalEngine {
             // exiting. Report the stop while it finishes, and only then settle
             // the fault with the run's single completion path: the fault is
             // stable only once the run owns nothing anymore.
-            if self.handle.active_turn_id().is_some() {
+            if self.handle.ext().active_turn_id().is_some() {
                 {
                     let mut control = self.goal_driver.lock_control();
                     if matches!(
@@ -127,7 +128,7 @@ impl GoalEngine {
                         );
                     }
                 }
-                self.handle.wait_turn_idle().await;
+                self.handle.ext().wait_turn_idle().await;
             }
             guard.finish(Some(reason));
         } else {
@@ -194,7 +195,9 @@ impl GoalEngine {
             // Work may remain (a replacement goal, or a resume racing the
             // finish). A clean finish chains into it; an error never restarts.
             if let Err(error) = self.schedule_goal() {
-                self.handle.render_error(&format!("Goal runner: {error:#}"));
+                self.handle
+                    .ext()
+                    .render_error(&format!("Goal runner: {error:#}"));
             }
         }
     }
@@ -255,7 +258,7 @@ impl GoalEngine {
                 self.announce_goal(&updated);
                 break;
             }
-            if self.handle.is_cancelled() || self.handle.is_closed() {
+            if self.handle.ext().is_cancelled() || self.handle.ext().is_closed() {
                 break;
             }
             if goal.phase == GoalPhase::Verifying
@@ -277,10 +280,11 @@ impl GoalEngine {
                 self.announce_goal(&updated);
                 break;
             }
-            let conversation_start = self.handle.committed_seq().await?;
+            let conversation_start = self.handle.ext().committed_seq().await?;
             let max_chars = self.goal_projection_chars();
             let store = self.goal_store.clone();
             let driver = self.goal_driver.clone();
+            let driver_for_prepare = driver.clone();
             let handle = self.handle.clone();
             let iteration_key = Arc::new(Mutex::new(None::<IterationKey>));
             let key_for_prepare = iteration_key.clone();
@@ -292,10 +296,9 @@ impl GoalEngine {
             let handle_for_settle = handle;
             let mut req = InternalTurnRequest::new(GOAL_MESSAGE_SOURCE, String::new());
             req.turn_id_prefix = Some("goal".to_string());
-            req.accept_guidance = false;
-            req.count_as_user_turn = true;
-            req.consume_inbox = true;
-            req.pre_admission_check = Some(Arc::new(move || {
+            req.policy.count_as_user_turn = true;
+            req.policy.consume_inbox = true;
+            req.hooks.pre_admission_check = Some(Arc::new(move || {
                 if !matches!(driver.state(), DriverState::Running { .. }) {
                     return Err(RuntimeError::Busy {
                         active_turn_id: TurnId::new("goal run is stopping; no new iteration"),
@@ -303,7 +306,13 @@ impl GoalEngine {
                 }
                 Ok(())
             }));
-            req.prepare_on_admit = Some(Arc::new(move |turn_id| {
+            req.hooks.prepare_on_admit = Some(Arc::new(move |turn_id| {
+                let _gate = driver_for_prepare.lock_transition();
+                if !matches!(driver_for_prepare.state(), DriverState::Running { .. }) {
+                    return Err(RuntimeError::Busy {
+                        active_turn_id: TurnId::new("goal run is stopping; no new iteration"),
+                    });
+                }
                 let goal = store_for_prepare
                     .begin_iteration(turn_id.as_str(), conversation_start)
                     .map_err(|e| RuntimeError::Command(format!("{e:#}")))?;
@@ -342,7 +351,7 @@ impl GoalEngine {
                     })),
                 })
             }));
-            req.on_billing_started = Some(Arc::new(move |billing_turn_id| {
+            req.hooks.on_billing_started = Some(Arc::new(move |billing_turn_id| {
                 if store_for_billing.snapshot().is_some_and(|g| {
                     g.phase == GoalPhase::Executing
                         && g.iterations.last().is_some_and(|i| !i.finished)
@@ -352,7 +361,7 @@ impl GoalEngine {
                 let _ = &key_for_billing;
                 Ok(())
             }));
-            req.on_before_final = Some(Arc::new(move |ctx| {
+            req.hooks.on_before_final = Some(Arc::new(move |ctx| {
                 let key = key_for_settle
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -363,7 +372,7 @@ impl GoalEngine {
                     let Some(key) = key else {
                         return Ok(());
                     };
-                    handle.sync_conversation().await?;
+                    handle.ext().sync_conversation().await?;
                     let facts = SettlementFacts {
                         interrupted_pause: ctx.interrupted_without_runtime_cancel,
                     };
@@ -379,7 +388,7 @@ impl GoalEngine {
                         .map(|_| ())
                 })
             }));
-            let stream = match self.handle.stream_internal_turn(req) {
+            let stream = match self.handle.ext().stream_internal_turn(req) {
                 Ok(stream) => stream,
                 Err(RuntimeError::Closed) => break,
                 Err(error) => {
@@ -430,7 +439,7 @@ impl GoalEngine {
                     )? {
                         self.announce_goal(&budget);
                     }
-                    self.handle.interrupt_turn_gate();
+                    self.handle.ext().interrupt_turn_gate();
                     outcome.await?
                 }
             };
@@ -445,7 +454,7 @@ impl GoalEngine {
                 // decisions belong to the goal that started the round.
                 return Ok(());
             }
-            if g.status != GoalStatus::Active || self.handle.is_closed() {
+            if g.status != GoalStatus::Active || self.handle.ext().is_closed() {
                 self.announce_goal(&g);
                 break;
             }
@@ -509,6 +518,6 @@ impl GoalEngine {
         }
     }
     pub(crate) fn goal_projection_chars(&self) -> usize {
-        checkpoint_budget_chars(self.handle.max_context_tokens())
+        checkpoint_budget_chars(self.handle.ext().max_context_tokens())
     }
 }

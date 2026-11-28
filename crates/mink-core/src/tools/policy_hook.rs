@@ -1,7 +1,6 @@
-//! Generic turn-scoped tool execution masks, observers, and policy providers.
+//! Generic turn-scoped tool execution masks, observers, journals, and policy providers.
 
 use crate::session::artifacts::{ArtifactManager, ArtifactRecord};
-use std::any::Any;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -75,7 +74,7 @@ impl ToolExecutionMask {
     }
 }
 
-/// Read-only session filesystem & artifact view passed to [`ToolExecutionObserver`]
+/// Read-only session filesystem & artifact view passed to [`ToolCallObserver`]
 /// read hooks.
 pub struct ReadEvidenceContext<'a> {
     cwd: &'a Path,
@@ -113,9 +112,8 @@ impl<'a> ReadEvidenceContext<'a> {
     }
 }
 
-/// Generic tool lifecycle observer for side-effect journaling, read evidence
-/// verification, and parse/rejection tracking.
-pub trait ToolExecutionObserver: Send + Sync {
+/// Durable side-effect journal for crash-recoverable external orchestrators.
+pub trait ToolEffectJournal: Send + Sync {
     /// Whether this turn requires durable tool-result persistence and
     /// side-effect tracking.
     fn tracks_durable_effects(&self) -> bool {
@@ -137,7 +135,25 @@ pub trait ToolExecutionObserver: Send + Sync {
     fn after_known_effects(&self, _known_call_ids: &[String]) -> anyhow::Result<()> {
         Ok(())
     }
+}
 
+/// Per-read observation handle returned by [`ToolCallObserver::observe_read`].
+pub trait ReadObservation: Send {
+    /// Invoked for image reads before committing to verify the prepared bytes
+    /// match the pre-read observation.
+    fn verify_bytes(&self, _bytes: &[u8]) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Invoked after a `Read` succeeds to finalize evidence recording.
+    fn on_succeeded(self: Box<Self>) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// Turn-scoped tool call observer for parse diagnostics, pre-execution checks,
+/// and read inspection tracking.
+pub trait ToolCallObserver: Send + Sync {
     /// Invoked when a tool call fails argument JSON parsing before dispatch.
     fn on_parse_error(&self, _tool_name: &str, _error: &str) {}
 
@@ -147,36 +163,30 @@ pub trait ToolExecutionObserver: Send + Sync {
     }
 
     /// Invoked before executing a `Read` call (text or image). Returning
-    /// `Some(token)` pairs with [`Self::verify_read_bytes`] / [`Self::after_read_succeeded`].
-    fn before_read(
+    /// `Some(observation)` pairs with [`ReadObservation::verify_bytes`] and
+    /// [`ReadObservation::on_succeeded`].
+    fn observe_read(
         &self,
         _tool_name: &str,
         _call_id: &str,
         _input: &serde_json::Value,
         _ctx: &ReadEvidenceContext<'_>,
-    ) -> anyhow::Result<Option<Box<dyn Any + Send>>> {
+    ) -> anyhow::Result<Option<Box<dyn ReadObservation>>> {
         Ok(None)
-    }
-
-    /// Invoked for image reads before committing to verify the prepared bytes
-    /// match the pre-read observation.
-    fn verify_read_bytes(&self, _token: &(dyn Any + Send), _bytes: &[u8]) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    /// Invoked after a `Read` succeeds to finalize evidence recording.
-    fn after_read_succeeded(&self, _token: Box<dyn Any + Send>) -> anyhow::Result<()> {
-        Ok(())
     }
 }
 
-/// Provides turn-scoped masks and observers for ordinary session turns.
+/// Provides turn-scoped masks, effect journals, and observers for ordinary session turns.
 pub trait TurnPolicyProvider: Send + Sync {
     fn ordinary_turn_mask(&self) -> Option<ToolExecutionMask> {
         None
     }
 
-    fn ordinary_tool_observer(&self) -> Option<Arc<dyn ToolExecutionObserver>> {
+    fn ordinary_effect_journal(&self) -> Option<Arc<dyn ToolEffectJournal>> {
+        None
+    }
+
+    fn ordinary_tool_observer(&self) -> Option<Arc<dyn ToolCallObserver>> {
         None
     }
 }

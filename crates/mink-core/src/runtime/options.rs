@@ -163,7 +163,7 @@ pub struct AgentOptions {
     llm_backend: Option<Arc<dyn LlmBackend>>,
     resource_session_id: Option<String>,
     custom_tools: Vec<Arc<dyn crate::runtime::AgentTool>>,
-    turn_policies: Vec<Arc<dyn crate::runtime::TurnPolicyProvider>>,
+    turn_policies: Vec<Arc<dyn crate::tools::policy_hook::TurnPolicyProvider>>,
     checkpoint_providers: Vec<Arc<dyn crate::session::compaction::CompactionCheckpointProvider>>,
     prefix_source: Option<Arc<dyn PrefixSource>>,
     post_init_hook: Option<Arc<dyn PostInitHook>>,
@@ -507,12 +507,18 @@ impl AgentOptions {
         self.custom_tools.push(tool);
     }
 
-    pub fn with_turn_policy(mut self, policy: Arc<dyn crate::runtime::TurnPolicyProvider>) -> Self {
+    pub fn with_turn_policy(
+        mut self,
+        policy: Arc<dyn crate::tools::policy_hook::TurnPolicyProvider>,
+    ) -> Self {
         self.add_turn_policy(policy);
         self
     }
 
-    pub fn add_turn_policy(&mut self, policy: Arc<dyn crate::runtime::TurnPolicyProvider>) {
+    pub fn add_turn_policy(
+        &mut self,
+        policy: Arc<dyn crate::tools::policy_hook::TurnPolicyProvider>,
+    ) {
         self.turn_policies.push(policy);
     }
 

@@ -112,3 +112,48 @@ fn mink_core_sources_contain_no_goal_coupling() {
         violations.join("\n")
     );
 }
+
+#[test]
+fn only_orchestrators_import_runtime_ext() {
+    let core = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace = core.parent().and_then(Path::parent).unwrap();
+    let non_orchestrator_roots = [
+        workspace.join("crates/mink-cli/src"),
+        workspace.join("crates/mink-server/src"),
+        core.join("examples"),
+    ];
+    let mut files = Vec::new();
+    for root in non_orchestrator_roots {
+        assert!(
+            root.is_dir(),
+            "workspace consumer directory is missing: {}",
+            root.display()
+        );
+        rust_files(&root, &mut files);
+    }
+
+    let direct_ext = regex::Regex::new(r"\bmink::runtime::ext\b").unwrap();
+    let braced_ext = regex::Regex::new(r"\buse\s+mink::runtime::\{[^}]*\bext\b").unwrap();
+    let ext_call = regex::Regex::new(r"\.ext\(\)").unwrap();
+    let mut violations = Vec::new();
+    for path in files {
+        let text = fs::read_to_string(&path).unwrap();
+        if braced_ext.is_match(&text) {
+            violations.push(format!(
+                "{}: braced use of mink::runtime::ext",
+                path.display()
+            ));
+        }
+        for (idx, line) in text.lines().enumerate() {
+            if direct_ext.is_match(line) || ext_call.is_match(line) {
+                violations.push(format!("{}:{}: {}", path.display(), idx + 1, line.trim()));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "ordinary hosts/examples must use mink::runtime, not mink::runtime::ext:\n{}",
+        violations.join("\n")
+    );
+}

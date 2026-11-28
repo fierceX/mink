@@ -1,9 +1,10 @@
 //! Host-owned, read-only reviews of one durable execution boundary.
 use super::*;
-use mink::runtime::{
+use mink::runtime::ext::{
     BudgetExhaustedError, EphemeralChildOptions, EphemeralChildSession, EphemeralChildStatus,
-    InternalTurnRequest, SessionReader, TurnPermit, UsageRecord,
+    InternalTurnRequest, TurnPermit,
 };
+use mink::runtime::{SessionReader, UsageRecord};
 use std::collections::BTreeMap;
 
 type EvidenceVersions = Vec<(String, String)>;
@@ -216,6 +217,7 @@ impl GoalReviewSession {
             .unwrap_or_else(|e| e.into_inner());
         let parent_artifacts_dir = parent
             .handle
+            .ext()
             .artifact_reader()
             .artifacts_dir()
             .to_path_buf();
@@ -233,7 +235,7 @@ impl GoalReviewSession {
                 .strip_prefix("artifact://")
                 .ok_or_else(|| anyhow::anyhow!("invalid artifact reference: {reference}"))?;
             let parent_path = parent_artifacts_dir.join(format!("{id}.txt"));
-            match parent.handle.find_artifact(id)? {
+            match parent.handle.ext().find_artifact(id)? {
                 Some(existing) => {
                     ensure!(
                         existing.sha256 == *hash,
@@ -245,7 +247,7 @@ impl GoalReviewSession {
                         !parent_path.try_exists()?,
                         "unindexed parent artifact identity"
                     );
-                    let record = parent.handle.write_artifact(
+                    let record = parent.handle.ext().write_artifact(
                         "GoalReviewEvidence",
                         "read-only reviewer evidence",
                         &content,
@@ -608,7 +610,7 @@ impl GoalEngine {
             .review_candidate
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("missing review candidate"))?;
-        let session_dir = self.handle.session_dir();
+        let session_dir = self.handle.ext().session_dir();
         let (history, committed_sequence) =
             SessionReader::new(session_dir).conversation_with_sequence()?;
         let start = goal.iterations.last().map_or(0, |i| i.conversation_start);
@@ -626,7 +628,7 @@ impl GoalEngine {
             )?;
             self.announce_goal(&next);
         }
-        let conclusion_artifact = self.handle.write_artifact(
+        let conclusion_artifact = self.handle.ext().write_artifact(
             "GoalExecutionConclusion",
             "final committed execution response",
             &conclusion,
@@ -644,6 +646,7 @@ impl GoalEngine {
                     && committed_sequence <= r.conversation_seq
                     && self
                         .handle
+                        .ext()
                         .read_artifact_text(r.artifact.strip_prefix("artifact://").unwrap_or(""))
                         .is_ok_and(|text| hash_bytes(text.as_bytes()) == r.content_hash)
                     && r.evidence_versions.iter().all(|(reference, hash)| {
@@ -662,7 +665,7 @@ impl GoalEngine {
             }
             let report = if let Some(report) = cached {
                 ensure!(
-                    self.handle.committed_seq().await? == report.conversation_seq,
+                    self.handle.ext().committed_seq().await? == report.conversation_seq,
                     "conversation changed before host adjudication"
                 );
                 for (reference, hash) in &report.evidence_versions {
@@ -681,7 +684,7 @@ impl GoalEngine {
                 if child.is_none() {
                     let allowed: Vec<String> = ["Read", "Glob", "Grep", "GoalRead"]
                         .into_iter()
-                        .filter(|name| self.handle.has_reachable_tool(name))
+                        .filter(|name| self.handle.ext().has_reachable_tool(name))
                         .map(str::to_string)
                         .collect();
                     let session_for_budget = session.clone();
@@ -704,6 +707,7 @@ impl GoalEngine {
                     )];
                     let spawned = self
                         .handle
+                        .ext()
                         .spawn_ephemeral_child(
                             format!(
                                 "sub_review_{}",
@@ -726,7 +730,8 @@ impl GoalEngine {
                     serde_json::to_string(&current.requirement_ids())?,
                     goal.iterations.last().map_or("", |i| i.turn_id.as_str()),
                     self.handle
-                        .format_tool_result(&conclusion, self.handle.tool_result_max_bytes()),
+                        .ext()
+                        .format_tool_result(&conclusion, self.handle.ext().tool_result_max_bytes()),
                     conclusion_artifact.id,
                     serde_json::to_string(&current.reviews.last())?,
                     serde_json::to_string(&current.continuations.last())?,
@@ -756,12 +761,12 @@ impl GoalEngine {
                     "independent reviewer returned an empty report"
                 );
                 let (reads, mapping) = session.import_evidence(self)?;
-                let seq = self.handle.committed_seq().await?;
+                let seq = self.handle.ext().committed_seq().await?;
                 ensure!(
                     seq == current.acceptance_conversation_seq,
                     "conversation changed before host adjudication"
                 );
-                let artifact = self.handle.write_artifact(
+                let artifact = self.handle.ext().write_artifact(
                     "IndependentGoalReview",
                     "independent descriptive audit report",
                     &result.text,
@@ -779,6 +784,7 @@ impl GoalEngine {
             };
             let report_text = self
                 .handle
+                .ext()
                 .read_artifact_text(report.artifact.strip_prefix("artifact://").unwrap_or(""))?;
             session.set_stage(GoalReviewStage::Adjudicating)?;
             let current = session.snapshot_for_read();
@@ -788,9 +794,11 @@ impl GoalEngine {
                 serde_json::to_string(&current.spec)?,
                 serde_json::to_string(&current.requirement_ids())?,
                 self.handle
-                    .format_tool_result(&conclusion, self.handle.tool_result_max_bytes()),
+                    .ext()
+                    .format_tool_result(&conclusion, self.handle.ext().tool_result_max_bytes()),
                 self.handle
-                    .format_tool_result(&report_text, self.handle.tool_result_max_bytes()),
+                    .ext()
+                    .format_tool_result(&report_text, self.handle.ext().tool_result_max_bytes()),
                 report.artifact,
                 serde_json::to_string(&report.evidence_versions)?,
                 serde_json::to_string(&report.reference_mapping)?,
@@ -804,29 +812,33 @@ impl GoalEngine {
             let session_for_stop = session.clone();
             let mut req = InternalTurnRequest::new("goal_adjudication", prompt);
             req.metadata = serde_json::json!({"candidate": session.goal.review_candidate});
-            req.count_as_user_turn = false;
-            req.consume_inbox = false;
-            req.enable_belief = false;
-            req.disable_native_web = true;
+            req.policy.count_as_user_turn = false;
+            req.policy.consume_inbox = false;
+            req.policy.enable_belief = false;
+            req.policy.disable_native_web = true;
             req.billing_turn_id_override =
                 Some(format!("goal-review:{}:{}", goal.id, goal.iterations.len()));
-            req.tool_mask = Some(crate::tools::goal_adjudication_mask());
-            req.tool_observer = Some(Arc::new(
+            req.policy.tool_mask = Some(crate::tools::goal_adjudication_mask());
+            req.policy.tool_observer = Some(Arc::new(
                 crate::tools::GoalReviewToolObserver::for_adjudication(session.clone()),
             ));
-            req.budget_check = Some(Arc::new(move || session_for_budget.check_budget()));
-            req.stop_when = Some(Arc::new(move || session_for_stop.has_submission()));
-            req.continue_prompt_when_not_stopped = Some(
+            req.policy.budget_check = Some(Arc::new(move || session_for_budget.check_budget()));
+            req.policy.stop_when = Some(Arc::new(move || session_for_stop.has_submission()));
+            req.policy.continue_prompt_when_not_stopped = Some(
                 "<goal-conclusion-required>The independent review is available, but no valid host conclusion has been recorded. Submit GoalReview for the bound candidate. If a previous call was rejected, correct its specific tool-result diagnostic and call again. Do not end this adjudication with a prose-only declaration.</goal-conclusion-required>".to_string(),
             );
-            let outcome = self.handle.run_internal_turn_with_permit(permit, req).await;
+            let outcome = self
+                .handle
+                .ext()
+                .run_internal_turn_with_permit(permit, req)
+                .await;
             drop(_slot_guard);
-            self.handle.sync_conversation().await?;
-            let seq = self.handle.committed_seq().await?;
+            self.handle.ext().sync_conversation().await?;
+            let seq = self.handle.ext().committed_seq().await?;
             // Bind a reusable report to the host history even when submission failed.
             let mut report = report;
             report.conversation_seq = seq;
-            if !self.handle.is_cancelled() && !self.handle.is_interrupted() {
+            if !self.handle.ext().is_cancelled() && !self.handle.ext().is_interrupted() {
                 self.publish_review_report(&session, report)?;
             }
             session.check_budget()?;
@@ -905,7 +917,8 @@ impl GoalEngine {
                 .strip_prefix("artifact://")
                 .ok_or_else(|| anyhow::anyhow!("invalid report reference"))?;
             ensure!(
-                hash_bytes(self.handle.read_artifact_text(id)?.as_bytes()) == report.content_hash,
+                hash_bytes(self.handle.ext().read_artifact_text(id)?.as_bytes())
+                    == report.content_hash,
                 "independent report changed"
             );
         }

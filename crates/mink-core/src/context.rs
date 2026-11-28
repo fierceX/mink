@@ -127,7 +127,8 @@ pub struct ToolContext {
     pub(crate) web_api_key: Option<Arc<str>>,
     pub(crate) human_web_command: bool,
     pub(crate) tool_mask: Option<crate::tools::policy_hook::ToolExecutionMask>,
-    pub(crate) tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolExecutionObserver>>,
+    pub(crate) effect_journal: Option<Arc<dyn crate::tools::policy_hook::ToolEffectJournal>>,
+    pub(crate) tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolCallObserver>>,
     pub(crate) _session_lease: Option<Arc<crate::session::lease::SessionLease>>,
     pub cwd: PathBuf,
     pub home: PathBuf,
@@ -192,7 +193,14 @@ impl From<&AgentSharedContext> for ToolContext {
                 .iter()
                 .find_map(|policy| policy.ordinary_turn_mask())
         });
-        let tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolExecutionObserver>> =
+        let effect_journal: Option<Arc<dyn crate::tools::policy_hook::ToolEffectJournal>> =
+            ctx.tools.default_effect_journal.clone().or_else(|| {
+                ctx.tools
+                    .turn_policies
+                    .iter()
+                    .find_map(|policy| policy.ordinary_effect_journal())
+            });
+        let tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolCallObserver>> =
             ctx.tools.default_tool_observer.clone().or_else(|| {
                 ctx.tools
                     .turn_policies
@@ -203,6 +211,7 @@ impl From<&AgentSharedContext> for ToolContext {
             web_api_key: crate::tools::web::api_key(&ctx.config),
             human_web_command: false,
             tool_mask,
+            effect_journal,
             tool_observer,
             _session_lease: ctx
                 .stores
@@ -442,8 +451,9 @@ pub struct ToolRuntimeContext {
     pub(crate) custom_tools: Arc<Vec<crate::tools::extension::RegisteredCustomTool>>,
     pub(crate) turn_policies: Arc<Vec<Arc<dyn crate::tools::policy_hook::TurnPolicyProvider>>>,
     pub(crate) default_tool_mask: Option<crate::tools::policy_hook::ToolExecutionMask>,
-    pub(crate) default_tool_observer:
-        Option<Arc<dyn crate::tools::policy_hook::ToolExecutionObserver>>,
+    pub(crate) default_effect_journal:
+        Option<Arc<dyn crate::tools::policy_hook::ToolEffectJournal>>,
+    pub(crate) default_tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolCallObserver>>,
     pub(crate) prefix_source: Option<Arc<dyn crate::runtime::PrefixSource>>,
     pub(crate) model_capabilities:
         Arc<crate::capabilities::model_capabilities::SessionModelCapabilities>,

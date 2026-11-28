@@ -1,7 +1,8 @@
 //! Goal acceptance, evidence versions and verification failures.
 
 use super::*;
-use mink::runtime::{BudgetExhaustedError, InputStatus, TurnPermit};
+use mink::runtime::InputStatus;
+use mink::runtime::ext::{BudgetExhaustedError, TurnPermit};
 
 pub(super) fn blocker_evidence_versions(
     references: &[String],
@@ -30,6 +31,7 @@ impl GoalEngine {
                 "invalid artifact reference"
             );
             self.handle
+                .ext()
                 .artifact_reader()
                 .artifacts_dir()
                 .join(format!("{id}.txt"))
@@ -85,8 +87,8 @@ impl GoalEngine {
             };
             if current.status != GoalStatus::Active
                 || current.review_candidate != old.review_candidate
-                || self.handle.is_interrupted()
-                || self.handle.is_cancelled()
+                || self.handle.ext().is_interrupted()
+                || self.handle.ext().is_cancelled()
             {
                 return Ok(());
             }
@@ -120,12 +122,11 @@ impl GoalEngine {
         run_id: u64,
         apply: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
-        self.handle.with_admission_lock(|| {
-            if !self.run_scheduled(run_id) {
-                return Ok(());
-            }
-            apply()
-        })
+        let _gate = self.goal_driver.lock_transition();
+        if !self.run_scheduled(run_id) {
+            return Ok(());
+        }
+        apply()
     }
     pub(crate) async fn accept_goal(&self, run_id: u64, mut goal: GoalSnapshot) -> Result<()> {
         if goal.iterations.last().is_some_and(|i| {
@@ -155,7 +156,7 @@ impl GoalEngine {
                     || self
                         .goal_snapshot()
                         .is_none_or(|g| g.status != GoalStatus::Active)
-                    || self.handle.is_closed()
+                    || self.handle.ext().is_closed()
                 {
                     return Ok(());
                 }
@@ -179,7 +180,7 @@ impl GoalEngine {
                             || self
                                 .goal_snapshot()
                                 .is_none_or(|g| g.status != GoalStatus::Active)
-                            || self.handle.is_closed() =>
+                            || self.handle.ext().is_closed() =>
                     {
                         return Ok(());
                     }
@@ -190,11 +191,11 @@ impl GoalEngine {
         if !self.run_scheduled(run_id) {
             return Ok(());
         }
-        let seq = self.handle.committed_seq().await?;
+        let seq = self.handle.ext().committed_seq().await?;
         let reviewer_id = format!(
             "goal-review:{}:{}",
-            self.handle.active_model_name(),
-            self.handle.tool_surface_fingerprint()
+            self.handle.ext().active_model_name(),
+            self.handle.ext().tool_surface_fingerprint()
         );
         if goal.review_candidate.as_ref().is_none_or(|c| {
             c.goal_id != goal.id
@@ -241,12 +242,13 @@ impl GoalEngine {
             let permit = permit;
             handle.review_and_accept(run_id, audit_goal, &permit).await
         });
+        let ext = self.handle.ext();
         tokio::select! {
             result = &mut task => {
                 match result {
                     Ok(Ok(())) => {},
                     Ok(Err(error)) => self.apply_if_run_scheduled(run_id, || {
-                        if self.handle.is_interrupted() || self.handle.is_cancelled() {
+                        if self.handle.ext().is_interrupted() || self.handle.ext().is_cancelled() {
                             return Ok(());
                         }
                         self.goal_review_failure(
@@ -256,7 +258,7 @@ impl GoalEngine {
                         )
                     })?,
                     Err(error) => self.apply_if_run_scheduled(run_id, || {
-                        if self.handle.is_interrupted() || self.handle.is_cancelled() {
+                        if self.handle.ext().is_interrupted() || self.handle.ext().is_cancelled() {
                             return Ok(());
                         }
                         self.goal_review_failure(
@@ -268,7 +270,7 @@ impl GoalEngine {
                 }
             }
             _ = self.wait_verification_deadline(&goal) => {
-                self.handle.interrupt_turn_gate();
+                self.handle.ext().interrupt_turn_gate();
                 self.apply_if_run_scheduled(run_id, || {
                     if self.goal_snapshot().is_some_and(|g| goal_now() >= g.spec.limits.deadline_unix_secs) {
                         self.goal_review_failure(
@@ -285,7 +287,7 @@ impl GoalEngine {
                     }
                 })?;
             }
-            _ = self.handle.wait_interrupted_or_cancelled() => {},
+            _ = ext.wait_interrupted_or_cancelled() => {},
         }
         Ok(())
     }
@@ -302,13 +304,13 @@ impl GoalEngine {
                 .ok_or_else(|| anyhow::anyhow!("goal missing"))?;
             ensure!(
                 current.status == GoalStatus::Active
-                    && !self.handle.is_interrupted()
-                    && !self.handle.is_cancelled(),
+                    && !self.handle.ext().is_interrupted()
+                    && !self.handle.ext().is_cancelled(),
                 "goal stopped during continuation adjudication"
             );
             proposal.validate(&current)?;
             ensure!(
-                !self.handle.has_outstanding_guidance(),
+                !self.handle.ext().has_outstanding_guidance(),
                 "human guidance arrived during adjudication; explicitly resume or withdraw it"
             );
             let report = current
@@ -354,7 +356,7 @@ impl GoalEngine {
                 && record.proposal.candidate == candidate
             {
                 ensure!(
-                    self.handle.committed_seq().await? == record.conversation_seq,
+                    self.handle.ext().committed_seq().await? == record.conversation_seq,
                     "continued decision history changed"
                 );
                 self.apply_if_run_scheduled(run_id, || {
@@ -428,14 +430,14 @@ impl GoalEngine {
                 let session = Arc::new(super::review::GoalReviewSession::new(
                     goal.clone(),
                     self.goal_store.clone(),
-                    Arc::new(move || handle_for_usage.usage_records()),
+                    Arc::new(move || handle_for_usage.ext().usage_records()),
                 ));
                 let outcome = self
                     .run_goal_review(goal.clone(), session.clone(), permit)
                     .await;
                 self.goal_store
-                    .reconcile_usage(&self.handle.usage_records()?)?;
-                if self.handle.is_cancelled() || self.handle.is_interrupted() {
+                    .reconcile_usage(&self.handle.ext().usage_records()?)?;
+                if self.handle.ext().is_cancelled() || self.handle.ext().is_interrupted() {
                     return Ok(());
                 }
                 if let Some(error) = outcome.as_ref().err()
@@ -459,15 +461,15 @@ impl GoalEngine {
                 let (review, reads) = session.export(self)?;
                 (review, reads, expected_conversation_seq)
             };
-            let conversation_seq = self.handle.committed_seq().await?;
+            let conversation_seq = self.handle.ext().committed_seq().await?;
             self.apply_if_run_scheduled(run_id, || {
                 let Some(current) = self.goal_snapshot() else {
                     return Ok(());
                 };
                 if current.status != GoalStatus::Active
                     || current.review_candidate.as_ref() != Some(&candidate)
-                    || self.handle.is_interrupted()
-                    || self.handle.is_cancelled()
+                    || self.handle.ext().is_interrupted()
+                    || self.handle.ext().is_cancelled()
                 {
                     return Ok(());
                 }
@@ -476,7 +478,7 @@ impl GoalEngine {
                     "conversation changed during review"
                 );
                 ensure!(
-                    !self.handle.has_outstanding_guidance(),
+                    !self.handle.ext().has_outstanding_guidance(),
                     "human guidance arrived during adjudication; explicitly resume or withdraw it"
                 );
                 for (reference, hash) in &reads {
@@ -550,8 +552,8 @@ impl GoalEngine {
             if review.verdict != GoalReviewVerdict::Satisfied
                 || !self.run_scheduled(run_id)
                 || goal.status != GoalStatus::Active
-                || self.handle.is_interrupted()
-                || self.handle.is_cancelled()
+                || self.handle.ext().is_interrupted()
+                || self.handle.ext().is_cancelled()
             {
                 return Ok(());
             }
@@ -572,7 +574,7 @@ impl GoalEngine {
                 let context = GoalVerificationContext {
                     cwd: self.handle.session_info().cwd.clone(),
                     goal: goal.clone(),
-                    cancelled: self.handle.interrupt_flag(),
+                    cancelled: self.handle.ext().interrupt_flag(),
                     handle: self.handle.clone(),
                 };
                 let effect_id = format!(
@@ -592,8 +594,8 @@ impl GoalEngine {
                     Ok(())
                 })?;
                 if !self.run_scheduled(run_id)
-                    || self.handle.is_interrupted()
-                    || self.handle.is_cancelled()
+                    || self.handle.ext().is_interrupted()
+                    || self.handle.ext().is_cancelled()
                 {
                     return Ok(());
                 }
@@ -649,8 +651,8 @@ impl GoalEngine {
                     return Ok(());
                 }
                 if !self.run_scheduled(run_id)
-                    || self.handle.is_interrupted()
-                    || self.handle.is_cancelled()
+                    || self.handle.ext().is_interrupted()
+                    || self.handle.ext().is_cancelled()
                 {
                     return Ok(());
                 }
@@ -687,7 +689,7 @@ impl GoalEngine {
                 evidence: Vec<(String, String)>,
                 checker_ok: bool,
             }
-            let conversation_seq = self.handle.committed_seq().await?;
+            let conversation_seq = self.handle.ext().committed_seq().await?;
             let precheck = if let Some(snap) = self.goal_snapshot() {
                 let handle_for_precheck = self.clone();
                 let has_checker = checker.is_some();
@@ -716,8 +718,8 @@ impl GoalEngine {
                 };
                 if current.status != GoalStatus::Active
                     || current.review_candidate.as_ref() != Some(&candidate)
-                    || self.handle.is_interrupted()
-                    || self.handle.is_cancelled()
+                    || self.handle.ext().is_interrupted()
+                    || self.handle.ext().is_cancelled()
                 {
                     return Ok(());
                 }

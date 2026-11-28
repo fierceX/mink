@@ -1,5 +1,6 @@
 use super::test_helpers::*;
 use super::*;
+use mink::runtime::ext::*;
 use mink::runtime::*;
 
 #[tokio::test]
@@ -468,6 +469,7 @@ async fn refused_host_activation_destroys_its_lease() {
     }
     runtime
         .handle()
+        .ext()
         .latch_persistence_fault("injected publish failure");
     let latched = confirmed_test_goal_with_lease(
         &goals,
@@ -501,6 +503,7 @@ async fn goal_persistence_fault_stops_scheduling_without_restart() {
     );
     runtime
         .handle()
+        .ext()
         .latch_persistence_fault("injected publish failure");
 
     // An unrecoverable failure must stop scheduling: wait_goal returns the
@@ -620,6 +623,7 @@ fn goal_fault_stop_child() {
         }
         runtime
             .handle()
+            .ext()
             .latch_persistence_fault("injected publish failure");
         let waited = tokio::time::timeout(std::time::Duration::from_secs(10), goals.wait())
             .await
@@ -708,6 +712,7 @@ async fn failed_stop_intent_stops_the_run_and_never_reads_as_saved() {
     }
     runtime
         .handle()
+        .ext()
         .latch_persistence_fault("injected publish failure");
 
     let paused = goals.pause(&goal.id, goal.revision);
@@ -1117,7 +1122,7 @@ async fn audit8_prepublication_stop_failure_stops_the_run() {
     std::fs::set_permissions(&session_dir, original).unwrap();
     assert!(stopped.is_err(), "{stopped:?}");
     assert!(
-        handle.check_persistence_fault().is_ok(),
+        handle.ext().check_persistence_fault().is_ok(),
         "the failure is a plain publication failure, not a latched fault"
     );
     assert!(
@@ -1238,7 +1243,7 @@ async fn audit8_failed_stop_waits_for_gate_before_stable_fault() {
     .await
     .unwrap();
     let goal = goals.snapshot().unwrap();
-    handle.persistence_fault().raise(
+    handle.ext().persistence_fault().raise(
         std::path::Path::new("goal.json"),
         "audit injected publish failure",
     );
@@ -1251,7 +1256,7 @@ async fn audit8_failed_stop_waits_for_gate_before_stable_fault() {
         "the fault must not be stable while the checker exits: {:?}",
         goals.goal_driver.state()
     );
-    assert!(handle.active_turn_id().is_some());
+    assert!(handle.ext().active_turn_id().is_some());
     let early = tokio::time::timeout(std::time::Duration::from_millis(200), goals.wait()).await;
     assert!(
         early.is_err(),
@@ -1325,13 +1330,13 @@ async fn audit8_stale_stop_revision_does_not_stop_the_run() {
         "a stale command must not latch the run: {:?}",
         goals.goal_driver.state()
     );
-    assert!(handle.active_turn_id().is_some());
+    assert!(handle.ext().active_turn_id().is_some());
     // The run is still stoppable with the live revision.
     let cancelled = goals.cancel(&goal.id, goal.revision).unwrap();
     assert_eq!(cancelled.status, GoalStatus::Cancelled);
     verifier.release.notify_one();
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        while handle.active_turn_id().is_some()
+        while handle.ext().active_turn_id().is_some()
             || alive.load(std::sync::atomic::Ordering::SeqCst) > 0
         {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -1513,6 +1518,7 @@ async fn assert_unknown_goal_effect(timeout: bool) {
     goals.goal_store.begin_iteration("test-turn", 0).unwrap();
     let mut stream = runtime
         .handle()
+        .ext()
         .stream_internal_turn(InternalTurnRequest::new(
             "goal_continuation",
             "record result",
@@ -1524,7 +1530,7 @@ async fn assert_unknown_goal_effect(timeout: bool) {
     assert_eq!(std::fs::read(cwd.join("attempted")).unwrap(), b"once");
     assert!(!cwd.join("later").exists());
     assert_eq!(goals.snapshot().unwrap().pending_effects, ["effect"]);
-    let rows = runtime.handle().conversation_lines().await.unwrap();
+    let rows = runtime.handle().ext().conversation_lines().await.unwrap();
     let results = rows
         .iter()
         .filter_map(|row| row["content"].as_array())

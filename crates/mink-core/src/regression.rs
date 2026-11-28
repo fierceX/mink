@@ -497,6 +497,7 @@ async fn harness_inner_ext(
             ptc_runtime: None,
             billing_turn_id_override: None,
             default_tool_mask: None,
+            default_effect_journal: None,
             default_tool_observer: None,
             budget_check: None,
         },

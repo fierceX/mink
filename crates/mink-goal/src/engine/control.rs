@@ -1,7 +1,8 @@
 //! Goal control surface: contract lifecycle, leases and admission.
 
 use super::*;
-use mink::runtime::{InternalTurnRequest, PreparedInternalTurn, TurnId, TurnPermit, TurnStatus};
+use mink::runtime::ext::{InternalTurnRequest, PreparedInternalTurn, TurnPermit};
+use mink::runtime::{TurnId, TurnStatus};
 
 impl GoalEngine {
     pub fn verifier_ids(&self) -> Vec<String> {
@@ -181,10 +182,11 @@ impl GoalEngine {
         self.goal_store.subscribe()
     }
     pub(crate) fn ensure_goal_control_open(&self) -> RuntimeResult<()> {
-        if self.handle.is_closed() {
+        if self.handle.ext().is_closed() {
             return Err(RuntimeError::Closed);
         }
         self.handle
+            .ext()
             .check_persistence_fault()
             .map_err(|e| RuntimeError::Command(format!("{e:#}")))
     }
@@ -194,6 +196,7 @@ impl GoalEngine {
         revision: u64,
     ) -> RuntimeResult<TurnPermit> {
         self.handle
+            .ext()
             .acquire_turn_permit_when(Some("goal-verification"), || {
                 if !self.goal_snapshot().is_some_and(|g| {
                     g.id == id && g.revision == revision && g.status == GoalStatus::Active
@@ -209,13 +212,14 @@ impl GoalEngine {
         duration_secs: u64,
         ready: bool,
     ) -> RuntimeResult<GoalDraftSnapshot> {
-        let goal = self.handle.with_admission_lock(|| {
+        let goal = self.handle.ext().with_admission_lock(|| {
+            let _gate = self.goal_driver.lock_transition();
             self.ensure_goal_activation_allowed()?;
             self.ensure_goal_driver_idle()?;
-            if let Some(active_turn_id) = self.handle.active_turn_id() {
+            if let Some(active_turn_id) = self.handle.ext().active_turn_id() {
                 return Err(RuntimeError::Busy { active_turn_id });
             }
-            if !self.handle.has_reachable_tool("GoalRead") {
+            if !self.handle.ext().has_reachable_tool("GoalRead") {
                 return Err(RuntimeError::Configuration(
                     "goal requires GoalRead in the resolved tool surface".into(),
                 ));
@@ -233,7 +237,7 @@ impl GoalEngine {
             }
             let environment = goal_environment_from_parts(
                 &self.handle.session_info().cwd,
-                &self.handle.tool_surface_fingerprint(),
+                &self.handle.ext().tool_surface_fingerprint(),
             );
             if ready {
                 self.goal_store.draft(spec, environment, duration_secs)
@@ -263,13 +267,14 @@ impl GoalEngine {
         } else if self.goal_driver.lock_control().enabled {
             self.ensure_goal_executor_available()?;
         }
-        let goal = self.handle.with_admission_lock(|| {
+        let goal = self.handle.ext().with_admission_lock(|| {
+            let _gate = self.goal_driver.lock_transition();
             self.ensure_goal_activation_allowed()?;
             self.ensure_goal_driver_idle()?;
-            if let Some(active_turn_id) = self.handle.active_turn_id() {
+            if let Some(active_turn_id) = self.handle.ext().active_turn_id() {
                 return Err(RuntimeError::Busy { active_turn_id });
             }
-            if !self.handle.has_reachable_tool("GoalRead") {
+            if !self.handle.ext().has_reachable_tool("GoalRead") {
                 return Err(RuntimeError::Configuration(
                     "goal requires GoalRead in the resolved tool surface".into(),
                 ));
@@ -280,7 +285,7 @@ impl GoalEngine {
                     revision,
                     goal_environment_from_parts(
                         &self.handle.session_info().cwd,
-                        &self.handle.tool_surface_fingerprint(),
+                        &self.handle.ext().tool_surface_fingerprint(),
                     ),
                 )
                 .map_err(command_error)
@@ -300,14 +305,15 @@ impl GoalEngine {
         feedback: &str,
         timeout: Option<std::time::Duration>,
     ) -> RuntimeResult<GoalDraftSnapshot> {
-        if !self.handle.has_tool("GoalDraft") {
+        if !self.handle.ext().has_tool("GoalDraft") {
             return Err(RuntimeError::Configuration(
                 "draft generation requires GoalDraft in the resolved tool surface".into(),
             ));
         }
-        let goal = self.handle.with_admission_lock(|| {
+        let goal = self.handle.ext().with_admission_lock(|| {
+            let _gate = self.goal_driver.lock_transition();
             self.ensure_goal_activation_allowed()?;
-            if let Some(active_turn_id) = self.handle.active_turn_id() {
+            if let Some(active_turn_id) = self.handle.ext().active_turn_id() {
                 return Err(RuntimeError::Busy { active_turn_id });
             }
             let current = self
@@ -342,10 +348,9 @@ impl GoalEngine {
         let prompt_for_prepare = prompt.clone();
         let source_for_prepare = source.clone();
         let mut req = InternalTurnRequest::new("goal_draft", prompt);
-        req.accept_guidance = true;
-        req.count_as_user_turn = true;
-        req.consume_inbox = false;
-        req.prepare_on_admit = Some(Arc::new(move |_turn_id| {
+        req.policy.count_as_user_turn = true;
+        req.policy.consume_inbox = false;
+        req.hooks.prepare_on_admit = Some(Arc::new(move |_turn_id| {
             let current = store
                 .snapshot()
                 .filter(|g| g.status == GoalStatus::Draft)
@@ -367,7 +372,7 @@ impl GoalEngine {
                 on_rollback: None,
             })
         }));
-        let mut stream = self.handle.stream_internal_turn(req)?;
+        let mut stream = self.handle.ext().stream_internal_turn(req)?;
         let turn_id = stream.turn_id().clone();
         let discussion = async {
             while let Some(event) = stream.recv().await {
@@ -386,7 +391,7 @@ impl GoalEngine {
             match tokio::time::timeout(timeout, &mut discussion).await {
                 Ok(result) => result?,
                 Err(_) => {
-                    self.handle.interrupt_turn_if_owner(&turn_id);
+                    self.handle.ext().interrupt_turn_if_owner(&turn_id);
                     discussion.await?;
                     return Err(RuntimeError::Command("draft generation timed out".into()));
                 }
@@ -426,7 +431,7 @@ impl GoalEngine {
             GoalTransition::Resume {
                 environment: goal_environment_from_parts(
                     &self.handle.session_info().cwd,
-                    &self.handle.tool_surface_fingerprint(),
+                    &self.handle.ext().tool_surface_fingerprint(),
                 ),
             },
             false,
@@ -439,7 +444,7 @@ impl GoalEngine {
     }
 
     fn ensure_goal_submission_available(&self) -> RuntimeResult<()> {
-        if !self.handle.has_tool("GoalReview") {
+        if !self.handle.ext().has_tool("GoalReview") {
             return Err(RuntimeError::Configuration(
                 "goal requires GoalReview in the host's resolved tool surface".into(),
             ));
@@ -566,7 +571,8 @@ impl GoalEngine {
         interrupt: bool,
         check_idle_turn: bool,
     ) -> RuntimeResult<GoalSnapshot> {
-        let g = self.handle.with_admission_lock(|| {
+        let run = || {
+            let _gate = self.goal_driver.lock_transition();
             if let Err(error) = self.ensure_goal_control_open() {
                 // A latched session cannot persist a stop intent either: latch the
                 // stop so the run does not keep executing on a command that was
@@ -587,7 +593,7 @@ impl GoalEngine {
                             goal.reason.as_deref().unwrap_or("not recorded")
                         );
                         ensure!(
-                            self.handle.active_turn_id().is_none(),
+                            self.handle.ext().active_turn_id().is_none(),
                             "previous goal execution has not exited"
                         );
                     }
@@ -611,17 +617,22 @@ impl GoalEngine {
                 }
             };
             if interrupt {
-                self.handle.interrupt_turn_gate();
+                self.handle.ext().interrupt_turn_gate();
             }
             Ok(g)
-        })?;
+        };
+        let g = if check_idle_turn {
+            self.handle.ext().with_admission_lock(run)?
+        } else {
+            run()?
+        };
         self.announce_goal(&g);
         Ok(g)
     }
 
     pub(crate) fn stop_run_after_failed_stop_intent(&self, error: &str) {
         latch_stopping_after_failed_stop_intent(&self.goal_driver, error);
-        self.handle.interrupt_turn_gate();
+        self.handle.ext().interrupt_turn_gate();
     }
 
     /// A run can only be started from a scheduler, and the contract must never
@@ -661,9 +672,11 @@ impl GoalEngine {
     pub(crate) fn announce_goal(&self, goal: &GoalSnapshot) {
         let payload = serde_json::json!({ "goal": goal });
         self.handle
+            .ext()
             .emit_extension_event(crate::events::GOAL_UPDATED_EVENT, payload.clone());
         if goal.status.is_terminal() {
             self.handle
+                .ext()
                 .emit_live_extension_event(crate::events::GOAL_FINISHED_EVENT, payload);
         }
         if let Some(stage) = goal.review_stage {
@@ -673,9 +686,10 @@ impl GoalEngine {
                 GoalReviewStage::Adjudicating => "adjudicating review",
             };
             self.handle
+                .ext()
                 .render_info(&format!("Goal {}: {label}", goal.id));
         }
-        self.handle.render_info(&format!(
+        self.handle.ext().render_info(&format!(
             "Goal {:?}: {} ({} turns remaining; acceptance {:?}; basis {:?})",
             goal.status,
             goal.reason.as_deref().unwrap_or(&goal.spec.objective),
@@ -774,9 +788,9 @@ impl GoalEngine {
                 }
                 DriverState::Idle => {}
             }
-            if !control.enabled || self.handle.is_closed() {
+            if !control.enabled || self.handle.ext().is_closed() {
                 if lease.is_some() {
-                    return Err(if self.handle.is_closed() {
+                    return Err(if self.handle.ext().is_closed() {
                         RuntimeError::Closed
                     } else {
                         RuntimeError::Command("goal driver is not enabled".into())

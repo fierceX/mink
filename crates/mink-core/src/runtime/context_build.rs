@@ -64,7 +64,8 @@ pub struct AgentContextBuild {
     pub ptc_runtime: Option<Arc<dyn crate::ptc::PtcRuntime>>,
     pub billing_turn_id_override: Option<String>,
     pub default_tool_mask: Option<crate::tools::policy_hook::ToolExecutionMask>,
-    pub default_tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolExecutionObserver>>,
+    pub default_effect_journal: Option<Arc<dyn crate::tools::policy_hook::ToolEffectJournal>>,
+    pub default_tool_observer: Option<Arc<dyn crate::tools::policy_hook::ToolCallObserver>>,
     pub budget_check: Option<Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync>>,
 }
 
@@ -265,6 +266,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
             custom_tools: Arc::new(params.custom_tools),
             turn_policies: Arc::new(params.turn_policies),
             default_tool_mask: params.default_tool_mask,
+            default_effect_journal: params.default_effect_journal,
             default_tool_observer: params.default_tool_observer,
             prefix_source: params.prefix_source,
             model_capabilities,

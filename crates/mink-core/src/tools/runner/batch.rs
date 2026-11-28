@@ -38,9 +38,9 @@ impl ToolRunner {
             let custom_def = self.find_custom_tool(&call.name).map(|t| &t.definition);
             let tracks_effects = self
                 .ctx
-                .tool_observer
+                .effect_journal
                 .as_ref()
-                .is_some_and(|observer| observer.tracks_durable_effects());
+                .is_some_and(|journal| journal.tracks_durable_effects());
             let custom_sequential = custom_def.is_some_and(|def| {
                 def.execution == crate::tools::extension::ToolExecutionMode::Sequential
                     || (tracks_effects && !def.side_effect_exempt)
@@ -68,8 +68,8 @@ impl ToolRunner {
                 };
                 if tracks_effects
                     && records_durable_effect(metadata.as_ref(), custom_def)
-                    && let Some(observer) = &self.ctx.tool_observer
-                    && let Err(error) = observer.before_side_effect(&call.id, &call.name)
+                    && let Some(journal) = &self.ctx.effect_journal
+                    && let Err(error) = journal.before_side_effect(&call.id, &call.name)
                 {
                     results.push(not_executed_tool_result(
                         call,
@@ -397,16 +397,15 @@ impl ToolRunner {
                 Ok(context) => context,
                 Err(error) => return prepare_error(error),
             };
-            match observer.before_read(&call.name, &call.id, &call.input_json, &evidence_context) {
+            match observer.observe_read(&call.name, &call.id, &call.input_json, &evidence_context) {
                 Ok(capture) => capture,
                 Err(error) => return prepare_error(error),
             }
         } else {
             None
         };
-        if let (Some(observer), Some(token)) =
-            (&self.ctx.tool_observer, observer_capture.as_deref())
-            && let Err(error) = observer.verify_read_bytes(token, &prepared.bytes)
+        if let Some(observation) = observer_capture.as_deref()
+            && let Err(error) = observation.verify_bytes(&prepared.bytes)
         {
             return prepare_error(error);
         }
@@ -461,8 +460,8 @@ impl ToolRunner {
             .unwrap_or_else(|error| error.into_inner())
             .insert(image_id.clone());
 
-        if let (Some(observer), Some(captured)) = (&self.ctx.tool_observer, observer_capture)
-            && let Err(error) = observer.after_read_succeeded(captured)
+        if let Some(observation) = observer_capture
+            && let Err(error) = observation.on_succeeded()
         {
             return prepare_error(error);
         }
@@ -589,7 +588,7 @@ impl ToolRunner {
     ) -> Result<ToolExecution> {
         let observer = ctx.tool_observer.as_ref();
         let captured = if let Some(observer) = observer {
-            observer.before_read(
+            observer.observe_read(
                 &call.name,
                 &call.id,
                 &call.input_json,
@@ -600,9 +599,9 @@ impl ToolRunner {
         };
         let raw = dispatch_tool(ctx, call, tool_fn);
         if raw.status == ToolStatus::Succeeded
-            && let (Some(observer), Some(captured)) = (observer, captured)
+            && let Some(observation) = captured
         {
-            observer.after_read_succeeded(captured)?;
+            observation.on_succeeded()?;
         }
         let mut result = format_dispatched_result(ctx, call, raw);
         ctx.plan_store.bind_transition(&mut result)?;
@@ -712,9 +711,9 @@ async fn execute_custom_raw(
             if unknown_effect_bail
                 && (definition.mutating
                     || ctx
-                        .tool_observer
+                        .effect_journal
                         .as_ref()
-                        .is_some_and(|observer| observer.has_pending_effect(&call.id)))
+                        .is_some_and(|journal| journal.has_pending_effect(&call.id)))
             {
                 anyhow::bail!("{reason}");
             }
