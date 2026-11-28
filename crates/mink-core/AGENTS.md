@@ -1,6 +1,6 @@
 # Core Runtime Invariants (`mink-core`)
 
-> 归属：`crates/mink-core/`；从根目录 `AGENTS.md` 拆分的 `mink-core` 运行时契约，改完 core 相关路径时必守。
+> 归属：`crates/mink-core/`；更新日期：2026-11-28；从根目录 `AGENTS.md` 拆分的 `mink-core` 运行时契约，改完 core 相关路径时必守。Goal 领域契约与状态机已迁入独立 workspace crate [`crates/mink-goal/AGENTS.md`](../mink-goal/AGENTS.md)。
 
 ## 关键不变式
 
@@ -12,7 +12,6 @@
 - `context-state.json` 必须同目录临时文件 + rename 原子替换，成功后更新内存并按新 `active_start` 裁剪缓存；JSONL 续写前修复未换行尾记录、以含换行的单缓冲区追加、append 经内部写锁串行化，读盘只容忍文件末尾半截记录。
 - 状态发布区分**发布前失败**（旧文件不变）与“已发布但目录同步失败”：后者必须重读并比对**完整预期快照**、重做目录同步；无法恢复时闩锁 session（拒绝后续状态变更、以 fatal 结束当前 turn），禁止按旧 revision 重试。闩锁后 turn/压缩入口、同批工具派发与 `publish_state*` 一律拒绝（低层 `atomic_replace` 仅供显式恢复路径）；启动期写入与 telemetry/外观元数据（stats、session title）不在此列。
 - 投影边界必须位于完整历史内、不得拆开 tool call/result 协议；cut point 优先保留最近 ≥2 条真实 user 消息（优先于纯 token 预算）。当请求已经超出输入预算、而严格规则找不到任何边界（热尾部目标吞掉整个窗口，或窗口只剩最近两个用户轮次），或严格候选（保留两条 user）装不进预算时，允许退化为「折到最新安全边界之前」的最后手段（`_cut=degraded`，当前请求仅以摘要文本保留）；仍然无边界时才 fail-closed 结束该轮，调用方应以下一条输入续跑。
-- Goal 的自动注入状态只有两处（按需 GoalRead 另返回完整快照，审核者读候选绑定快照）：每轮追加的 `<current-goal>` round prompt（逐行可读、显式给出 `Round: N/M`、剩余轮次、绝对截止与 blocked 门槛）与压缩后挂载的低频稳定契约 checkpoint（不含任何每轮字段）；禁止把每轮变化的 Goal 状态挂进请求前缀（命令式 round prompt 文本、轮次计数与 `Decision` 只走尾部追加）。
 - plan/todo 的**模型可见派生展示**必须按额度有损（`输入预算/8`，头尾保留 + 省略标记）：权威 `plan.md`/`todos.json`、revision 与计数不得被改写；候选验收与真实发送共用同一渲染函数（`checkpoint_prefix` / `sync_message_bounded`），禁止「预演短版、发送长版」。
 - 应急 checkpoint（`trigger=emergency`、`_mode=emergency`）：仅在上一条与 LLM 摘要都不能让请求装下时提交；提交前必须①检查 runtime cancel 与 interrupt（入锁后、每次收缩前、提交前各一次，映射为 `Interrupted`）②验证活跃窗口没有未完成的工具交换（否则以 `incomplete tool exchange` 原样失败）③收缩每步严格变小并在到达地板后返回「无法继续」（不得原样返回同一文本）。候选验收（普通摘要与应急共用）必须把「候选折走 revision 后随之上场的 TodoSync」计入预算，材料优先级为固定有损标记 → 当前用户请求摘录 → 上一份摘要片段 → 最近已完成工具交换的结构化事实；`active_start` 推进到历史末尾（尾部为空），`conversation.jsonl` 只追加不重写；候选投影（摘录 + plan 派生片段 + 预演 TodoSync）必须过一遍 `estimate_openai_context_tokens` 才算提交，连最小摘录都装不下时返回 `Ok(false)`，由上层以「最小工作空间不可用」诊断 fail-closed。权威 plan/todo/conversation 不被改写。
 - 正常路径的压缩统一调用 LLM 摘要，以唯一 internal user `<compacted-summary>` checkpoint 投影，不修改 immutable system/tools prefix；`context_compact_input_reduction=true` 只精简摘要请求，不改写完整历史或热尾部。当请求已经超出输入预算、而摘要侧不可用（输入装不下、调用/超时/重试耗尽、输出不合格、候选发布前验收不通过）时，允许**不调用 LLM 的确定性应急 checkpoint** 提交同一投影（有损摘录，见下一条）；取消、持久化 fault、正式历史协议损坏不得转为应急成功。
@@ -31,20 +30,13 @@
 - 压缩摘要请求共用同一重试状态、错误分类与 attempt/deadline 语义；完整但不可用的摘要（空输出、工具调用、坏 stop 原因）在同一次压缩操作内追加用途纠正到临时请求尾部重试，不写父 conversation、不改公共缓存前缀、不推进主 agent 格式窗口。
 - 上游错误必须类型化：`LlmUpstreamError`（Recoverable / ProtocolDamaged / Permanent，带可选 status/code/source 与受限诊断）是唯一分类依据；永久拒绝与未知 provider 错误默认失败且不重试；未类型化的自定义错误保持既有失败行为。
 
-### Goal
+### 通用扩展原语
 
-- `failed` 表示本 run 已结束，禁止自动调度；宿主显式 resume 可以重试同一目标，不按异常文字或历史版本分流。重试保留契约、iteration、用量、失败/阻断记录与原截止时间；过期或执行轮耗尽必须先明确调整预算，未决副作用先人工对账。completed/cancelled 禁止恢复和改预算；draft 须确认。审核阶段恢复仍复核原候选，最后一个执行轮允许续审；执行阶段恢复开启新轮，不重放已提交工具。当前 runtime 的 Faulted、持久化闩锁、关闭、执行未退出、容量和环境门槛不能被显式重试绕过。
-- 已结束/非活动的 Goal 不得保留 `verifying`：取消与完成在载入/发布时归一 `idle`；paused、blocked、budget_exhausted 与 failed 的 `verifying` 保留，供 resume 重试原审核。普通用户 turn 的压缩只受当前 review 会话预算约束，不得因无关 Goal 的 review 期限失败整轮。
-- 独立审核先读取已提交的执行轮最终结论；明确部分完成且有契约内下一步可轻量继续，完成声明、空白/含糊/矛盾或外部阻断必须核对证据。轻量继续只写 continuations，不修改 reviews、验收项通过状态或完成依据；连续三轮相同剩余要求升级检查，指纹不取自然语言措辞。强制检查标志先落盘，同一进程复用原只读子会话；所有阶段共用验收 deadline 与 usage。旧候选恢复仍完整审核，不重置历史或额度。
-- GoalStore 是唯一权威状态；模型可 GoalRead、只修改未确认 proposal 的 GoalDraft；正常执行结束由宿主调度只读审核。审核子代理只有读取工具，自然返回描述性报告，不得调用 GoalReview 或修改 GoalStore；宿主 agent 在原会话的候选绑定内部提交轮调用 GoalReview 统一提交 decision=continue/complete/blocked、summary、未完成时的 next_step；客观阻断才提供 blocker 字符串，可选 remaining_requirements。runtime 绑定候选、报告与证据后发布；不要求模型复制候选或重写逐项表。描述性结论保留 report，不制造逐项 findings；旧完整提交仅保留解码。GoalReview 固定在主代理工具 schema 中，只有提交轮可执行；已解码的结论校验拒绝返回具体工具失败供同轮纠正，不计入格式恢复窗口。模型不能确认草案、修改已确认契约、额度或运行时状态文件。typed continuation 不得伪装人类输入；普通 turn 不得绕过活动目标与验收所有权。
-- 驱动故障是稳定终态：不可恢复错误停止本 run 的调度并最多尝试一次落盘 `failed`，不得因磁盘仍为 `active` 自动重启（即使 failed 无法发布）；`goals().wait()` 返回运行时错误，`goals().start_driver()` / `goals().confirm()` 拒绝新激活，仅重开会话恢复。仍有工具/检查器未退出时先停止中，待其实际退出后才成为稳定故障；暂停/取消无法持久化（含未闩锁的发布前失败）时命令只按当前 run 身份记录带原始错误的 `Stopping` 并 interrupt，禁止继续调度与提交成功，由唯一 run 结算在 turn gate 空闲后发布 `Faulted`，不得提前发布稳定故障或把随后正常返回改写成 Idle。激活在任何状态写入前确认调度执行器与 readiness，拒绝返回错误且不写 active 契约；已写出的契约若仍无法启动 run 同样返回错误并闩锁 Faulted，不静默留下无人驱动的 active。
-- 默认 20 turn/60 分钟从新草案确认时启动，暂停不重置；正常结束无需报告或补全轮。独立审核 blocked 需 `blocked_after_consecutive_rounds`（默认 3）轮*同一阻断*才结束目标，描述性结论的阻断身份为 `category`/契约版本/受影响验收 ID/依赖事实版本的持久化指纹（`blocker_fingerprint`）；自然语言依赖描述、新产物 ID 及本轮结论不参与身份，旧逐项审核保持原指纹，身份变化把同一阻断计数（`blocker_rounds`）重置为 1；`blocked_rounds` 仅记录连续 blocked 轮数，非 blocked 审核清零身份与两个计数。blocked 必须有实际读取的非空事实证据，审核与轮决策同次发布，恢复同一审核不增加阻断轮数。永久/格式/信号/持久化故障停止当前 run，不自动用新 turn 清空恢复计数；宿主明确重试保留 Goal 的持久计数，单个请求的自动重试与格式恢复上限不变。
-- 正常 `shutdown()` 先取消 runtime token 再中断 turn gate：在飞的 goal round 只有在「gate 被中断且 runtime 未被取消」时才会结算为用户暂停，而正常关闭必须保留 active 意图供下一次打开恢复（`docs/reference/goals.md`）。
-- 完成依据必须区分 agent_reviewed/verified/human_approved（model_reported 只保留旧终态历史）；验收前后核对声明证据、revision 与 conversation 序号。检查器缺失不得降级；证据变更用新 generation 在同一执行轮内重审，已知结果按返回时的证据版本复用，不重复执行检查器。新审核请求核对 Token 预算；人工批准核对绝对期限；审核者实际读取的新产物经宿主 ArtifactManager 导入父会话并保持 SHA-256 与引用一致。
-- 独立审核的基础设施失败、无效输出或超时不得记为目标证据失败；持久化审核失败原因与 review_failure_stage 并保留候选；报告有效时只重试宿主提交，显式 resume 只重试审核且不消耗执行轮数。
-- 审核报告通过 artifact 保护并交给宿主 agent，主会话只追加带 goal_adjudication 身份的内部消息；宿主提交轮不消费人类输入、不接纳任务执行工具，不额外消耗 Goal 执行轮数，与只读审核共用验收期限和 usage。无有效提交时返回真实宿主终止原因，不把子代理普通文字当成结论。候选绑定执行边界，acceptance_conversation_seq 绑定宿主提交后的历史水位；完成与恢复均核对水位，新引导令完成失效。
-- core SessionLease 在恢复前获取，工具/检查器实际退出前不释放；草案生成超时须中断所属 turn 并等待退出；Goal 中已派发的扩展工具被放弃等待时保留未决记录并停止同批后续派发。未知副作用恢复必须 blocked，不能合成成功或自动重放。`goals().start_driver()` 只启用调度、不启动 run；宿主容量 run 只能经 `goals().confirm_and_start()` / `goals().resume_and_start()` 携带许可启动，恢复出的 active goal 只能由显式 resume 重新启动（无容量账本的生命周期宿主用 `goals().start_driver_and_run()`）；被拒绝的 resume 不启动 run、不发出 provider 请求，停止意图的发布失败不读作已保存。Rust/Web/Python 默认不自动驱动，终端只在 UI 接入后启动 active。宿主容量随目标 run 转移：`GoalRunLease` 只在对应 run（RunGuard）内存活，且只在 run 结束且 turn gate 空闲后释放；驱动未启用、已有 run、合同/持久化拒绝时激活返回错误且立即销毁租约，不得先启动旧 active 目标或留下无人调度的 active 目标。
-- Goal 控制与只读面隔离：Rust 宿主通过 `handle.goals()` 访问生命周期控制，模型通过 `GoalRead` 读取契约，界面不得绕过 core 修改契约、额度或状态。
+- `mink-core` 不包含任何 Goal 业务概念、schema、存储或事件；只通过 `mink::runtime` 暴露 5 组通用扩展原语供 `mink-goal` 等外部扩展包组合：
+  - **工具与执行掩码**：`AgentOptions::add_tool`（动态工具注册）、`InternalTurnRequest.tool_mask`（`ToolExecutionMask` 运行时阻断工具但保持请求 `tools` schema 字节不变，保护前缀缓存）与 `ToolExecutionContext::new`。
+  - **外部执行所有权与停因**：`AgentRuntimeHandle::acquire_external_owner` / `ExternalOwnerGuard`（释放 `TurnGate` 时拒绝人类流式输入，返回 `RuntimeError::ExternallyControlled`）与 `handle.subscribe_stop_cause()`（区分 `StopCause::UserInterrupt` 与 `StopCause::RuntimeShutdown`）。
+  - **内部 turn 与扩展通道**：`InternalTurnRequest`、`ExtensionEmitter`（`emit_extension_event` / `emit_live_extension_event`）、`ArtifactReader`、`handle.run_ephemeral_child`、`handle.import_artifact`、`handle.execute_scoped_tool`、`handle.wait_turn_idle()`、`handle.committed_seq()`。
+  - **压缩与前缀锚点**：`CompactionCheckpointProvider` 与 `SessionReader::conversation_with_sequence`。
 
 ### Plan 与 Todo
 

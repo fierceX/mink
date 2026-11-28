@@ -1,6 +1,6 @@
 # 架构与模块
 
-> 更新日期：2026-11-27
+> 更新日期：2026-11-28
 
 分层、职责与关键不变式。
 
@@ -442,6 +442,11 @@ VFS 只接管普通路径。`artifact://`、`skill://`、`rule://` 和 `session:
 | 图片对象内容寻址、独占创建、读回 digest 校验；子代理不继承父缓存 | `session/image_cache.rs`、`agent/sub_executor.rs` | 覆盖/篡改对象或 fork 后引用损坏 |
 | 图片批次配额从 0 计数且在物化层重复校验；超限本轮失败、历史降级 | `tools/runner.rs`、`llm/image_projection.rs` | 导入或损坏会话绕过图片预算 |
 
-## Goal 协调与会话所有权
+## Goal 协调与独立包边界（`crates/mink-goal`）
 
-`runtime/goal/{mod,control,driver,verification,review}.rs` 在单轮执行器外调度目标和验收：`control` 负责合同生命周期、租约与准入，`driver` 持有 run 生命周期（idle/running/stopping/faulted/closed），`verification` 负责候选 generation、验收与证据版本，检查器变更证据后同轮重新只读审核；`review` 组织轻量分流与完整证据审核，重复继续时复用原只读子会话升级检查，将描述性报告与实际读取证据导入父会话，再运行宿主 agent 的候选绑定提交轮；GoalReview 只在该轮提交简洁的 decision/summary/next_step，候选和报告由 runtime 绑定；完成审核的逐项事实留在独立报告，不要求宿主重复填表，校验拒绝留在同轮纠正；`session/goal.rs` 保存权威契约、迭代、账单关联、副作用标记与恢复 journal，`session/goal_protocol.rs` 定义草案与审核协议，`tools/goal.rs` 提供 GoalRead/GoalDraft 和内部 GoalReview；确认只由宿主进行。`session/lease.rs` 是所有可写 runtime 与 server 删除共享的租约协议；终端使用同一命令解析器，并在 UI 初始化后启用驱动（`goals().start_driver()` 只启用调度，`goals().start_driver_and_run()` 才接起恢复出的 active 目标）。宿主容量以 `GoalRunLease` 随真实 run 存活，只在 run 结束且 turn gate 空闲后归还；停止意图无法发布时先进入 stopping，执行退出后由 run 结算发布 faulted。完整状态和恢复约束见 [Goal 契约](../reference/goals.md)。
+Goal 子系统已从 `mink-core` 解耦至独立 workspace crate `crates/mink-goal`（`mink-goal`），并通过 5 组通用 `mink::runtime` 原语与内核协同：`AgentOptions::add_tool` / `ToolExecutionMask`、`ExternalOwnerGuard`、`StopCause`、`InternalTurnRequest` / `ExtensionEmitter` / `ArtifactReader` / `run_ephemeral_child`、`CompactionCheckpointProvider` / `SessionReader::conversation_with_sequence`。不需要 Goal 的纯 `mink-core` 宿主零 Goal 工具与状态开销；CLI 与 server 通过 `GoalPlugin::install_into(&mut options)` 与 `GoalEngine::attach(handle, plugin)` 组合：
+
+- `crates/mink-goal/src/engine/{mod,control,driver,verification,review}.rs` 在单轮执行器外调度目标和验收：`control` 负责合同生命周期、租约与准入，`driver` 持有 run 生命周期（`idle`/`running`/`stopping`/`faulted`/`closed`），`verification` 负责候选 generation、验收与证据版本，检查器变更证据后同轮重新只读审核；`review` 组织轻量分流与完整证据审核，重复继续时复用原只读子会话升级检查，通过 `run_ephemeral_child` 运行只读子会话并将描述性报告与实际读取证据经 `import_artifact` 导入父会话，再通过候选绑定的 `InternalTurnRequest` 调用 `GoalReview` 提交 `decision`/`summary`/`next_step`。
+- `crates/mink-goal/src/store/`（`types`、`transitions`、`store`、`protocol`）保存权威契约 `goal.json`、迭代、账单关联、副作用标记与恢复 journal `goal-transaction.json`。
+- `crates/mink-goal/src/tools.rs` 提供 `GoalRead`、`GoalDraft` 与内部 `GoalReview`；`crates/mink-goal/src/events.rs` 与 `display.rs` 提供扩展事件解码与只读展示投影。
+- `mink-core` 保留 `session/lease.rs`（所有可写 runtime 与 server 删除共享的租约协议）。宿主容量以 `mink_goal::GoalRunLease` 随真实 run 存活，只在 run 结束且 `wait_turn_idle()` 返回后归还；停止意图无法发布时先进入 `stopping`，执行退出后由 run 结算发布 `faulted`。完整状态和恢复约束见 [Goal 契约](../reference/goals.md)。

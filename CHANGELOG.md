@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### 架构与破坏性变更
+
+- **Goal 子系统解耦为独立包 `mink-goal`**：将原内置于 `mink-core` 的 Goal 领域模型、持久化存储（`GoalStore`）、状态机与审核引擎（`GoalEngine` / `GoalDriver` / `GoalReview`）物理拆出至 `crates/mink-goal`，`mink-core` 只保留 5 组通用扩展原语（动态 `AgentTool` 与 `ToolExecutionMask`、`ExternalOwnerGuard`、`StopCause`、`InternalTurnRequest` / `ExtensionEmitter` / `ArtifactReader` / ephemeral child、`CompactionCheckpointProvider`）及静态边界守卫 `mink_core_sources_contain_no_goal_coupling`；`mink-cli`、`mink-server` 与相关示例改为通过 `GoalPlugin::install_into` + `GoalEngine::attach` 外挂组合，不需要 Goal 的纯 `mink-core` 宿主零 Goal 工具与状态开销；`RuntimeError::GoalActive` 泛化为 `RuntimeError::ExternallyControlled { owner }`。
+
 ## v0.10.0 (2026-11-27)
 
 本版引入 Python 宿主 Programmatic Tool Calling（PTC / `RunCode`）与可配置的 DeepSeek 网页搜索/读取能力，收敛 Rust 嵌入 API（`GoalController`、`mink::prelude` 精简与分组子模块），并全面加固沙箱隔离、核心热路径性能及长生命周期稳定性。

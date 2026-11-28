@@ -1,8 +1,8 @@
 # Goal 契约
 
-> 更新日期：2026-10-16
+> 更新日期：2026-11-28
 
-Goal 是 Session 内版本化、有边界的跨 turn 目标：目标形成、执行与独立审核分离；GoalStore 是唯一权威状态，`goal.json` 与 `goal-transaction.json` 通过 journal 和原子发布保持一致。普通 turn 不隐式创建或确认目标。
+Goal 由独立 workspace crate `mink-goal`（`crates/mink-goal`）提供，是 Session 内版本化、有边界的跨 turn 目标：目标形成、执行与独立审核分离；`GoalStore` 是唯一权威状态，`goal.json` 与 `goal-transaction.json` 通过 journal 和原子发布保持一致。普通 turn 不隐式创建或确认目标，纯 `mink-core` 宿主不挂载 `GoalPlugin` 时无 Goal 工具与状态开销。
 
 ## 契约与草案
 
@@ -77,7 +77,7 @@ core SessionLease 在恢复前获取；停止意图发布失败进入 Stopping �
 
 ## 宿主接口与界面
 
-Rust：`handle.goals()` 返回 `GoalController`，提供 `draft`、`request_draft`、`draft_snapshot`、`generate_draft`、`generate_draft_at`、`confirm`、`confirm_and_start`、`cancel_draft`、`snapshot`、`subscribe`、`pause`/`resume`/`cancel`、`update_limits`、`approve`/`approve_async`、`reconcile_effects` 与 `clear`。`generate_draft_at` 在同一准入锁内核对 ID/revision 并使旧草案不可确认，陈旧修改在写入和模型请求前拒绝。GoalStore 通过类型化 GoalCommand 统一处理草案创建、替换、确认与取消。`start_driver` 只启用调度；有容量账本的宿主经 `confirm_and_start`/`resume_and_start` 传递 GoalRunLease，执行和退出期间持续占容量，等待人工验收时释放。
+Rust：通过 `GoalPlugin::new().install_into(&mut options)` 在启动前注册 Goal 工具、策略与压缩 checkpoint，在 `AgentRuntime::start(options)` 后调用 `mink_goal::GoalEngine::attach(runtime.handle(), plugin)` 获取 `Arc<GoalEngine>`，提供 `draft`、`request_draft`、`draft_snapshot`、`generate_draft`、`generate_draft_at`、`confirm`、`confirm_and_start`、`cancel_draft`、`snapshot`、`subscribe`、`pause`/`resume`/`cancel`、`update_limits`、`approve`/`approve_async`、`reconcile_effects` 与 `clear`。`generate_draft_at` 在同一准入锁内核对 ID/revision 并使旧草案不可确认，陈旧修改在写入和模型请求之前拒绝。`GoalStore` 通过类型化 `GoalCommand` 统一处理草案创建、替换、确认与取消。`start_driver` 只启用调度；有容量账本的宿主经 `confirm_and_start`/`resume_and_start` 传递 `mink_goal::GoalRunLease`，执行和退出期间持续占容量，等待人工验收时释放。
 
 Web：GET `/api/sessions/{id}/goal` 优先读活运行时快照，关闭时回退落盘 current；hidden 归一为 null。POST 同路径要求 `protocol_version:2`，objective、acceptance（agent_reviewed/human/verifier）、max_turns、max_minutes、acceptance_criteria、constraints；默认形成模型草案，宿主准备结构化 `draft_spec` 时可设 `generate:false`。成功返回 draft，尚未启动执行。
 

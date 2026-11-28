@@ -1,6 +1,6 @@
 # Rust 集成
 
-> 更新日期：2026-11-27
+> 更新日期：2026-11-28
 
 进程内 runtime 生命周期与可靠事件。前置：Rust 1.99+。
 
@@ -22,11 +22,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
 ```
 
-公开入口为 `mink::prelude`、`mink::runtime`（含 `llm`/`tools`/`vfs`/`ptc`/`goal`/`ui` 分组子模块）和 `mink::sdk_protocol`。启用
+公开入口为 `mink::prelude`、`mink::runtime`（含 `llm`/`tools`/`vfs`/`ptc`/`ui` 分组子模块）和 `mink::sdk_protocol`。启用
 `config-file` feature 后还可使用 `mink::config_file`，它提供与 CLI/server 共用的
-`.minkrc` schema 解析入口。
+`.minkrc` schema 解析入口。可选跨轮 Goal 编排由同仓库 crate `mink-goal` 提供。
 
-`RuntimeError` 包含 `GoalActive`，表示当前会话已有活动目标而拒绝该 runtime 操作。
+`RuntimeError` 包含 `ExternallyControlled { owner }`，表示当前会话已由外部控制器（如 `GoalEngine`）接管执行所有权而拒绝该 runtime 操作。
 新增公开 enum 变体会要求下游穷举 `match` 增加对应分支。
 
 ### 只读输入变更与历史窗口
@@ -304,15 +304,24 @@ Rust crate mink ─────────────────────�
 
 私有化业务服务可以通过自身隐藏 worker 分支 + `sandbox::reexec_in_sandbox()` 实现进程级沙箱。沙箱配置走 argv，任务数据走 stdin（re-exec 后读），和 Mink CLI 流程完全一致。该隐藏分支属于业务服务实现细节，不要求 `mink` / `mink-core` 暴露新的公开 CLI。
 
-## Goal 驱动
+## Goal 驱动（`mink-goal`）
 
-failed 停止当前 run，宿主可显式 `handle.goals().resume(id, revision)` / `resume_and_start` 重试同一目标。`GoalStatus::can_resume()` 与 `can_adjust_limits()` 定义控制状态边界，completed/cancelled 拒绝恢复和改预算，draft 仅能调整预算。显式重试不依赖错误分类或文本；它保留契约、iteration、用量及失败/阻断记录，不重置原期限或已用额度。预算耗尽先调用 `goals().update_limits`，未决副作用先 `goals().reconcile_effects`；Faulted、持久化闩锁、环境和执行租约门槛仍有效。phase=verifying 的恢复继续审核原候选，即使最后一个执行轮已用完；其他阶段启动下一执行轮。
+跨轮目标能力由独立 crate `mink-goal` 提供；不需要 Goal 的 Rust 嵌入宿主可只依赖 `mink-core`，零 Goal 工具与状态开销。需要 Goal 时在 `AgentRuntime::start` 前安装 `GoalPlugin`，启动后再外挂 `GoalEngine::attach`：
 
-Rust 默认不自动驱动。先订阅 Goal 与接入事件；宿主提交完整契约使用 `handle.goals().draft(spec, duration_secs)`，需要模型形成契约则先 `handle.goals().request_draft(spec, duration_secs)`，再 `handle.goals().generate_draft(feedback).await`。后者从创建时就不可确认，模型保存有效 proposal 后才变为可确认。向用户展示 ID/revision 与完整契约后，明确调用 `handle.goals().confirm(id, revision)`；未确认草案不会执行。
+```rust
+let mut plugin = mink_goal::GoalPlugin::new();
+plugin.install_into(&mut options);
+let runtime = AgentRuntime::start(options).await?;
+let goals = mink_goal::GoalEngine::attach(runtime.handle(), plugin)?;
+```
 
-`goals().generate_draft_at(id, revision, feedback)` 对展示过的精确版本修改；陈旧版本在写入或模型请求之前拒绝。`goals().generate_draft_at_with_timeout(id, revision, feedback, Some(duration))` 允许宿主限定讨论时间，到期后中断所属 turn 并等待退出再返回。`goals().start_driver()` 只启用调度。宿主管理容量时使用 `confirm_and_start` / `resume_and_start` 传入 GoalRunLease；无容量账本的生命周期宿主可用 `goals().start_driver_and_run()` 接起恢复出的已确认 active。旧 direct create 入口已移除，不能跳过草案确认。
+failed 停止当前 run，宿主可显式 `goals.resume(id, revision)` / `resume_and_start` 重试同一目标。`GoalStatus::can_resume()` 与 `can_adjust_limits()` 定义控制状态边界，completed/cancelled 拒绝恢复和改预算，draft 仅能调整预算。显式重试不依赖错误分类或文本；它保留契约、iteration、用量及失败/阻断记录，不重置原期限或已用额度。预算耗尽先调用 `goals.update_limits`，未决副作用先 `goals.reconcile_effects`；Faulted、持久化闩锁、环境和执行租约门槛仍有效。phase=verifying 的恢复继续审核原候选，即使最后一个执行轮已用完；其他阶段启动下一执行轮。
 
-每轮正常结束后 runtime 自动运行只读分流或证据审核，并将描述性报告交给原会话的宿主 agent 调用 GoalReview 提交结论；显式工具白名单须包含 GoalReview。两步共用验收期限和 Goal usage，提交校验拒绝由宿主在同轮纠正重试，默认 completion basis 为 agent_reviewed。with_goal_verifier 注册宿主检查器，配置的检查器也必须通过；Human 再等待宿主 `goals().approve` / `goals().approve_async`，过期批准拒绝。检查器修改证据时以新 generation 在同一执行轮重新审核；已知通过结果只在返回时记录的证据版本仍匹配时复用，恢复不重放已知检查器。所有停止、验收、恢复和 lease 约束见 [Goal 契约](../reference/goals.md)，完整例子在 crates/mink-core/examples/goal.rs。不可恢复故障需要关闭并重开 runtime；未知副作用仍须明确对账。
+Rust 默认不自动驱动。先订阅 Goal 与接入事件；宿主提交完整契约使用 `goals.draft(spec, duration_secs)`，需要模型形成契约则先 `goals.request_draft(spec, duration_secs)`，再 `goals.generate_draft(feedback).await`。后者从创建时就不可确认，模型保存有效 proposal 后才变为可确认。向用户展示 ID/revision 与完整契约后，明确调用 `goals.confirm(id, revision)`；未确认草案不会执行。
+
+`goals.generate_draft_at(id, revision, feedback)` 对展示过的精确版本修改；陈旧版本在写入或模型请求之前拒绝。`goals.generate_draft_at_with_timeout(id, revision, feedback, Some(duration))` 允许宿主限定讨论时间，到期后中断所属 turn 并等待退出再返回。`goals.start_driver()` 只启用调度。宿主管理容量时使用 `confirm_and_start` / `resume_and_start` 传入 `GoalRunLease`；无容量账本的生命周期宿主可用 `goals.start_driver_and_run()` 接起恢复出的已确认 active。旧 direct create 入口已移除，不能跳过草案确认。
+
+每轮正常结束后由 `GoalEngine` 自动通过只读子会话运行分流或证据审核，并将描述性报告交给原会话的宿主 agent 调用 `GoalReview` 提交结论；显式工具白名单须包含 `GoalReview`。两步共用验收期限和 Goal usage，提交校验拒绝由宿主在同轮纠正重试，默认 completion basis 为 `agent_reviewed`。`GoalPlugin::with_verifier` 注册宿主检查器，配置的检查器也必须通过；`Human` 再等待宿主 `goals.approve` / `goals.approve_async`，过期批准拒绝。检查器修改证据时以新 generation 在同一执行轮重新审核；已知通过结果只在返回时记录的证据版本仍匹配时复用，恢复不重放已知检查器。所有停止、验收、恢复和 lease 约束见 [Goal 契约](../reference/goals.md)，完整例子在 `crates/mink-goal/examples/goal.rs`。不可恢复故障需要关闭并重开 runtime；未知副作用仍须明确对账。
 
 GoalSnapshot 增加 review_failure_stage，保留 review_stage、review_requires_full、review_escalation_reason、review_report、continuations 和轻量计数。SDK 通过 GoalReviewSubmission、GoalContinueProposal/Record、GoalRoundDecision、GoalReviewStage 读取协议类型，requirement_ids() 和 latest_round_decision() 派生当前要求及最近轮次决策。新的宿主工具输入为 GoalHostConclusion（decision/summary/next_step 及可选剩余要求和阻断描述），runtime 绑定候选与报告；旧完整提交保留解码。reviews 中的新结论携带 report、无 original_request 和逐项 findings；旧审核保留原义，不制造逐项通过或未知状态。
 

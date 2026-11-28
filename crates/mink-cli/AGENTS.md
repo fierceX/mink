@@ -17,4 +17,4 @@
 - Inline TUI 只提交连续且 sealed 的 transcript 前缀，committed 项不得修改或重复写入原生 scrollback；空闲保留最后一个 sealed item，新工作开始后才能推进 committed 边界。
 - Inline 详情视图不得丢弃或重建主视图 terminal（否则 alternate screen 内容叠加残影）；Full TUI 保留主视图鼠标命中、可逆折叠与应用内 viewport，不受 Inline committed 边界影响。
 - TUI 实时 signal 与 replay 必须经同一个 reducer，结构化工具状态不得从展示文本反向解析；Todo 增量 presentation 合并到当前完整状态；Plan/Todo/Artifact 详情先按内容宽度折行再算滚动范围。
-- Goal 在 TUI 状态栏仅只读呈现：`goal:<状态> <剩余>/<上限>` 标记可点击打开只读详情（`/goals` 等效），会话打开从 `goal.json` 恢复、运行中由 `GoalUpdated` 更新，界面不得绕过 core 修改契约、额度或状态。
+- Goal 在 TUI 状态栏仅只读呈现：`goal:<状态> <剩余>/<上限>` 标记可点击打开只读详情（`/goals` 等效），会话打开从 `mink_goal::goal_path`（`goal.json`）恢复、运行中由 `mink-goal` 发布的 `goal_updated` 扩展事件更新，所有控制指令经 `mink_goal::GoalEngine` 提交，界面不得绕过契约直接修改状态或额度。
