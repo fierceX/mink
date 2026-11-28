@@ -42,7 +42,7 @@ cargo build --release
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.10.0", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.11.0", default-features = false, features = ["runtime"] }
 ```
 
 ```rust
@@ -61,6 +61,8 @@ rt.shutdown().await?;
 pip install mink-agent
 ```
 
+要求 Python ≥ 3.10。
+
 ```python
 from mink_agent import AgentSession, SandboxConfig
 
@@ -70,7 +72,9 @@ with AgentSession(SandboxConfig(api_key="sk-...", read_dirs=["src"])) as session
 
 ---
 
-## 性能实测（v0.10.0）
+## 性能实测
+
+以下数据来自已归档的发布测量记录；报告链接保留原始测量版本。
 
 在 Apple M4 Pro（macOS 15.7.7、`rustc 1.99.0`、`release` / `bench` 构建）下的实测数据：
 
@@ -90,6 +94,8 @@ with AgentSession(SandboxConfig(api_key="sk-...", read_dirs=["src"])) as session
 | 包路径 | 职责 |
 |---|---|
 | [crates/mink-core](crates/mink-core/README.md) | 核心库 `mink-core`（库名 `mink`）：运行时、工具、PTC、会话与沙箱 |
+| `crates/mink-goal` | 可选跨轮 Goal 编排（`GoalPlugin` / `GoalEngine`，通过公开扩展接缝接入） |
+| `crates/mink-rim` | 可选声明式外环装配（`Scope` / `SeatRegistry` / `RimProfile` / `RuntimeAssembler`） |
 | [crates/mink-cli](crates/mink-cli/README.md) | 终端二进制 `mink` 与 SDK 协议二进制 `mink-core`（REPL / TUI） |
 | [mink_agent](mink_agent/README.md) | Python SDK（wheel 内置 `mink-core` 二进制） |
 | [crates/mink-server](crates/mink-server/README.md) | Web 工作台服务端（REST + SSE + 内嵌前端） |

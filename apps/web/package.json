@@ -1,7 +1,7 @@
 {
   "name": "mink-web",
   "private": true,
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Mink web workbench: React shell with a vendored reference design snapshot (no runtime dependency)",
   "type": "module",
   "engines": {

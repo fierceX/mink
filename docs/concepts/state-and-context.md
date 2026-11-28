@@ -279,7 +279,7 @@ transcript：用户和 assistant text 保留，thinking 删除，工具参数限
 
 **同轮可重复压缩**（`TurnCompactor::compactions_this_turn`）：auto、preflight 和 overflow 共用同一入口，不设次数上限；每次
 提交后重新投影并重估，只要求严格降低请求估算（不降即停，避免在同一投影上重复摘要），且发布前必须过净收益门控（auto ≥10% 净下降，强制路径严格下降）；压无可压时仍以 fail-closed
-拒绝发送超预算请求。长任务（尤其嵌入式单输入长任务）因此不再在首次压缩后必然失败。同轮内的 overflow 收缩、其摘要请求与主请求共享 round 绝对期限（`request_timeout_secs`）。
+拒绝发送超预算请求。长任务（尤其嵌入式单输入长任务）因此不会在首次压缩后必然失败。同轮内的 overflow 收缩、其摘要请求与主请求共享 round 绝对期限（`request_timeout_secs`）。
 
 **最后手段切点（`_cut=degraded`）**：当请求已经超出输入预算（`local_tokens > request_input_limit`）而严格切点搜索
 返回 0（热尾部目标吞掉整个窗口，或窗口只剩最近两个用户轮次），或严格切点存在但「保留最近两条真实 user」的候选连
@@ -343,7 +343,7 @@ overflow，则缩小投影并重试；同一 round 可反复收缩，每步必�
 
 CLI 默认使用 `project`，Python SDK 默认使用 `home`，Rust 嵌入式 `AgentOptions` 默认使用 `isolated`。
 `direct` 用于一个共享 Mink 根目录下保存多个 session。`isolated` 用于外层服务已经按任务/session
-创建独立目录的场景，此时不再追加 `session_id` 子目录。
+创建独立目录的场景，此时不追加 `session_id` 子目录。
 
 以 `project` layout 为例：
 
@@ -414,7 +414,7 @@ session 恢复和重放仍可按需读取全部原始消息；`session://current
 - `EventLog::is_critical()` 定义契约关键事件：`PrefixSnapshot`、`SignalRollback(Error)`、`SignalReplan(Error)`、`SignalHandover`。这些事件会被读回重建状态（前缀缓存、恢复审计），必须**可靠、有期限**地提交。
 - 关键事件走 `log_critical_event`（async）：`AppendCritical` 携带单次写入应答，调用方等待的是 **writer 的真实 open/write 结果**（入队成功不算成功）；等待为异步、有期限（5s，正常回归与生产一致），同时响应 **runtime cancel 与当前轮 interrupt**（`interrupt_current_turn()` 设置的同一标志），不阻塞 tokio worker。
 - 等待语义：健康 writer 的提交不被打断（先给 500ms 宽限拿到在途应答）；只有真正停摆的等待才被 cancel/interrupt 提前结束。失败返回给调用方；调用方不得按成功推进（prefix 失败不更新缓存、下一次 `ensure()` 重建；信号恢复失败向上传播）；cancel/interrupt 统一保持 interruption 分类。
-- `EventLogWriter::flush` 的应答等待同样受内部期限约束（超时返回错误，不再无限等待 ack），orchestrator 每轮 flush 在 writer 停摆时也不会挂起整个 turn。
+- `EventLogWriter::flush` 的应答等待同样受内部期限约束（超时返回错误，不会无限等待 ack），orchestrator 每轮 flush 在 writer 停摆时也不会挂起整个 turn。
 - 关键事件同时沿用 `log_event` 的 stream-json stdout 输出：三条入口共用同一个 `emit_stream_json` 实现，避免关键事件从既有协议输出中消失。
 - 诊断事件仍走 `send_best_effort`：满队列可见丢弃并计入丢失报告。`log_event` 收到关键事件时兜底走可靠路径并告警，契约调用点应显式使用 `log_critical_event`。
 - 反压边界表述精确化：SSE 队列（1024）只限制**事件个数**，不限制单事件字节与解析缓冲；runtime 可靠事件（工具结果等）不计入 1 MiB 进度预算。整条事件链路"内存完全有界"仍不成立。
@@ -422,7 +422,7 @@ session 恢复和重放仍可按需读取全部原始消息；`session://current
 ### shutdown 预算与日志回压
 
 - `shutdown` 的收尾阶段各有明确预算（5s，正常回归与生产一致）：gate/orchestrator、event dispatcher、event log、usage、stats、compaction projection 分别超时并把超时列为失败；**阻塞 IO（usage.flush）经 `spawn_blocking` 移出 async worker**（stats/projection 原本已在 blocking pool），超时只界定调用者等待，**"调用返回"不等于"后台写入完成"**，不谎报完成。
-- `EventLogWriter::flush` 用 `try_send` + async 重试至内部期限（30s，入队重试与应答共享起始时刻），不阻塞 async worker；runtime 收尾仍受外层 5s 阶段预算约束。**异步调用方（turn/runtime 的 `log_event`）改用 `send_best_effort`**：队列满时可见地丢弃诊断事件并计入丢失报告，不再阻塞 tokio worker；同步测试仍可用阻塞 `send`。
+- `EventLogWriter::flush` 用 `try_send` + async 重试至内部期限（30s，入队重试与应答共享起始时刻），不阻塞 async worker；runtime 收尾仍受外层 5s 阶段预算约束。**异步调用方（turn/runtime 的 `log_event`）改用 `send_best_effort`**：队列满时可见地丢弃诊断事件并计入丢失报告，不阻塞 tokio worker；同步测试仍可用阻塞 `send`。
 - 短期限只通过参数注入到停摆/超时单测，不以全局 `cfg(test)` 改写健康路径的预算。延迟 writer 应答、满队列延迟恢复和阻塞 flush 回归验证超过 200ms 后仍按生产预算完成；原有故障单测继续验证有界失败，不忽略错误、不自动重试失败断言。
 - 超时后写入线程保持单一所有权：不启动第二个 writer、不接管未完成状态；未完成状态如实上报。
 - 证据：paused-writer 测试（队列满时 flush 有界返回、`send_best_effort` 不阻塞且丢失可见、恢复后 1024 条事件不丢不重）；`flush_stage` 与 `flush_stage_blocking` 期限单测（含真实阻塞闭包）；正常 runtime 的真实 shutdown 在预算内完成。端到端"暂停真实 writer + shutdown"及磁盘挂死注入需要生产测试开关，列为 deferred 验证项；本项不宣称已覆盖真实磁盘阻塞的最坏时延。

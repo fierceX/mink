@@ -147,7 +147,7 @@ SubAgent 由 `SubAgentCoordinator` 在 turn 内部启动、收集和注入结果
 ```
 
 各个阶段之间有严格的依赖关系：
-- 同一用户输入的压缩可重复执行（不再有次数互锁）：auto / preflight / overflow 共用同一引擎入口，不设次数上限（终止条件是严格下降/严格缩小）；发布前过净收益门控——auto 要求 ≥10% 净下降，强制路径要求严格下降；Plan transition 不强制压缩
+- 同一用户输入的压缩可重复执行：auto / preflight / overflow 共用同一引擎入口，不设次数上限（终止条件是严格下降/严格缩小）；发布前过净收益门控——auto 要求 ≥10% 净下降，强制路径要求严格下降；Plan transition 不强制压缩
 - 步骤 4 依赖步骤 3 收集的 thinking + text 内容
 - 步骤 6 依赖步骤 4 补充后的 calls 列表
 - 步骤 7 根据 stop_reason 决定是否循环
@@ -275,9 +275,9 @@ session 状态会整体继承。ArtifactManager 从克隆后的 index 恢复下�
 
 - `text` 取子会话最后一条非空 assistant 消息中**全部** text 块；为空时渲染 `(no output)`。
 - thinking 只进入 TUI 实时流与子会话历史，**不进入父模型上下文**。
-- 失败/超时/中断的终止原因放入 `diagnostic`（剥离控制字符，按 UTF-8 boundary 截断；含 `… [truncated]` 标记的总长不超过 4096 字节），不再拼进正文。
+- 失败/超时/中断的终止原因放入 `diagnostic`（剥离控制字符，按 UTF-8 boundary 截断；含 `… [truncated]` 标记的总长不超过 4096 字节），不拼进正文。
 - tool result 形如 `[sub-agent <id>] <status> (in=..., out=...)`，随后是结果正文与可选 `diagnostic:` 段；整体仍受 `format_tool_result`/artifact 保护。
-- `_mink.sub_agent` 携带 `session_id/label/mode/depth/status/stop_reason/input_tokens/output_tokens/elapsed_ms`，供 TUI/Web 结构化渲染；pending 中断/通道失败结果也写同形元数据，并在未测量时带可选 `usage_known=false` / `elapsed_known=false`（缺省 true，旧数据兼容）。
+- `_mink.sub_agent` 携带 `session_id/label/mode/depth/status/stop_reason/input_tokens/output_tokens/elapsed_ms`，供 TUI/Web 结构化渲染；pending 中断/通道失败结果也写同形元数据，并在未测量时带可选 `usage_known=false` / `elapsed_known=false`（缺省 true；缺失字段按已知处理）。
 - 父 display 的 `SubAgentOutput` 对 thinking/text 做展示侧头尾有界（含 `… [truncated]`），不改变子会话历史、tool result 与 artifact。
 
 ### 身份、目录与恢复展示
@@ -293,7 +293,7 @@ session 状态会整体继承。ArtifactManager 从克隆后的 index 恢复下�
 
 - 批内并发上限为 20；第 21 个及以后**排队等待名额**，不拒绝。
 - `sub_agent_timeout_secs` 从**获得名额之后**起算，覆盖 setup + run；排队等待不计入；`elapsed_ms`/事件 `duration_ms` 同为 setup+run，不含排队；超时结果的 elapsed 在 deadline 时记录，后续取消宽限只用于清理。
-- 不再使用批次 deadline：一个慢子代理超时不会连带同批其他子代理；整批最坏耗时为 `ceil(N/20) × timeout`。
+- 不使用批次 deadline：一个慢子代理超时不会连带同批其他子代理；整批最坏耗时为 `ceil(N/20) × timeout`。
 - 状态按 `launched(phase=queued) → running(phase=run) → 终态` 记录；setup 超时的 diagnostic 标记 `phase=setup`，超时先 cancel 再给 setup 一个短宽限，部分 child home 由清理 guard 删除。
 - 批次中断/取消/Cancel 唤醒收集，未完成项标记 `cancelled` 并中止任务；`SubAgentBatch::drop` 仍对剩余任务 cancel + abort。
 - 结果按输入顺序回填；每个子代理的 usage 在父 stats 中汇总一次。

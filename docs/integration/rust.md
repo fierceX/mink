@@ -17,7 +17,7 @@ Rust 发布包为 `mink-core`，库 crate 名为 `mink`。发布包提供可嵌�
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.10.0", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.11.0", default-features = false, features = ["runtime"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
 ```
@@ -96,7 +96,7 @@ let outcome = stream.outcome().await?;
 需要从多个任务共享同一 runtime 时，调用 `rt.handle()` 获取可克隆的
 `AgentRuntimeHandle`。handle 只提供 `run_turn`、`stream_turn`、`compact`、`set_model`
 和 interrupt，所有克隆共享同一个 Busy 门禁；只有原始 `AgentRuntime` 拥有
-`shutdown()`。0.5.0 不再暴露 raw actor sender、cancel token 或 interrupt flag。
+`shutdown()`。handle 不暴露 raw actor sender、cancel token 或 interrupt flag。
 
 全局观察者实现异步 `EventSink`：
 
@@ -257,7 +257,7 @@ Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。`mink-core` 发布�
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.10.0", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.11.0", default-features = false, features = ["runtime"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
 ```
@@ -321,11 +321,11 @@ failed 停止当前 run，宿主可显式 `goals.resume(id, revision)` / `resume
 
 Rust 默认不自动驱动。先订阅 Goal 与接入事件；宿主提交完整契约使用 `goals.draft(spec, duration_secs)`，需要模型形成契约则先 `goals.request_draft(spec, duration_secs)`，再 `goals.generate_draft(feedback).await`。后者从创建时就不可确认，模型保存有效 proposal 后才变为可确认。向用户展示 ID/revision 与完整契约后，明确调用 `goals.confirm(id, revision)`；未确认草案不会执行。
 
-`goals.generate_draft_at(id, revision, feedback)` 对展示过的精确版本修改；陈旧版本在写入或模型请求之前拒绝。`goals.generate_draft_at_with_timeout(id, revision, feedback, Some(duration))` 允许宿主限定讨论时间，到期后中断所属 turn 并等待退出再返回。`goals.start_driver()` 只启用调度。宿主管理容量时使用 `confirm_and_start` / `resume_and_start` 传入 `GoalRunLease`；无容量账本的生命周期宿主可用 `goals.start_driver_and_run()` 接起恢复出的已确认 active。旧 direct create 入口已移除，不能跳过草案确认。
+`goals.generate_draft_at(id, revision, feedback)` 对展示过的精确版本修改；陈旧版本在写入或模型请求之前拒绝。`goals.generate_draft_at_with_timeout(id, revision, feedback, Some(duration))` 允许宿主限定讨论时间，到期后中断所属 turn 并等待退出再返回。`goals.start_driver()` 只启用调度。宿主管理容量时使用 `confirm_and_start` / `resume_and_start` 传入 `GoalRunLease`；无容量账本的生命周期宿主可用 `goals.start_driver_and_run()` 接起恢复出的已确认 active。创建目标必须经草案确认。
 
 每轮正常结束后由 `GoalEngine` 自动通过只读子会话运行分流或证据审核，并将描述性报告交给原会话的宿主 agent 调用 `GoalReview` 提交结论；显式工具白名单须包含 `GoalReview`。两步共用验收期限和 Goal usage，提交校验拒绝由宿主在同轮纠正重试，默认 completion basis 为 `agent_reviewed`。`GoalPlugin::with_verifier` 注册宿主检查器，配置的检查器也必须通过；`Human` 再等待宿主 `goals.approve` / `goals.approve_async`，过期批准拒绝。检查器修改证据时以新 generation 在同一执行轮重新审核；已知通过结果只在返回时记录的证据版本仍匹配时复用，恢复不重放已知检查器。所有停止、验收、恢复和 lease 约束见 [Goal 契约](../reference/goals.md)，完整例子在 `crates/mink-goal/examples/goal.rs`。不可恢复故障需要关闭并重开 runtime；未知副作用仍须明确对账。
 
-GoalSnapshot 增加 review_failure_stage，保留 review_stage、review_requires_full、review_escalation_reason、review_report、continuations 和轻量计数。SDK 通过 GoalReviewSubmission、GoalContinueProposal/Record、GoalRoundDecision、GoalReviewStage 读取协议类型，requirement_ids() 和 latest_round_decision() 派生当前要求及最近轮次决策。新的宿主工具输入为 GoalHostConclusion（decision/summary/next_step 及可选剩余要求和阻断描述），runtime 绑定候选与报告；旧完整提交保留解码。reviews 中的新结论携带 report、无 original_request 和逐项 findings；旧审核保留原义，不制造逐项通过或未知状态。
+GoalSnapshot 包含 `review_failure_stage`、`review_stage`、`review_requires_full`、`review_escalation_reason`、`review_report`、`continuations` 和轻量计数。SDK 通过 `GoalReviewSubmission`、`GoalContinueProposal/Record`、`GoalRoundDecision`、`GoalReviewStage` 读取协议类型，`requirement_ids()` 和 `latest_round_decision()` 派生当前要求及最近轮次决策。宿主工具输入为 `GoalHostConclusion`（`decision`/`summary`/`next_step` 及可选剩余要求和阻断描述），runtime 绑定候选与报告；完整提交仍可解码。`reviews` 中的结论携带 `report`、不含 `original_request` 和逐项 `findings`；逐项审核保留其既有字段，不制造逐项通过或未知状态。
 
 ## 文本工具协议
 

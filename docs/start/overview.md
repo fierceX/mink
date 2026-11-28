@@ -1,6 +1,6 @@
 # 文档总览
 
-> 更新日期：2026-11-27
+> 更新日期：2026-11-28
 
 Mink 是轻量 Rust AI coding agent：终端、Web、Rust 进程内 runtime 与 Python SDK 共用执行内核。按目标选择一条路径；第一次任务无需先读设计文档。
 
@@ -12,7 +12,7 @@ Mink 是轻量 Rust AI coding agent：终端、Web、Rust 进程内 runtime 与 
 
 ## 嵌入已有系统
 
-[Rust 集成](../integration/rust.md)是进程内调用；[Python 集成](../integration/python.md)通过子进程复用会话。自定义模型、知识库和初始化逻辑见[扩展契约](../integration/extensions.md)。
+[Rust 集成](../integration/rust.md)是进程内调用；[Python 集成](../integration/python.md)通过子进程复用会话。自定义模型、知识库和初始化逻辑见[扩展契约](../integration/extensions.md)。需要跨轮 Goal 或声明式外环装配时，再引入独立 crate `mink-goal` / `mink-rim`；只嵌入 runtime 的宿主无需它们。
 
 ## 理解运行机制
 

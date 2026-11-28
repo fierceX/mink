@@ -122,7 +122,7 @@ max_parallel_sub_calls = 8
 max_sub_calls_per_minute = 512
 ```
 
-旧的顶层扁平字段不再接受；解析器会报告 unknown field。算法阈值、先验、衰减、证据长度、冷却和恢复限制是内部策略，不属于配置协议。
+顶层扁平字段不是有效配置；解析器会报告 unknown field。算法阈值、先验、衰减、证据长度、冷却和恢复限制是内部策略，不属于配置协议。
 `llm_first_event_timeout` 覆盖「请求建立（含等待响应头）＋首事件」的**总预算**：建流返回不会重置计时，`Retry` 不延长；Ctrl+C 在建立阶段同样生效，中断映射为 Interrupted。
 `--agent-jsonl` 模式不会读取 `.minkrc`，但仍应用命令行 `--config`。
 
@@ -130,7 +130,7 @@ max_sub_calls_per_minute = 512
 
 一次 `run_turn()` 内的自愈限制全部来自这一组配置（Rust `Config.llm_recovery`、JSONL `options.recovery`、Python `SandboxConfig` 同名参数）：
 
-- 模型输出格式错误采用滑动的 round 窗口：`format_window_size`（默认 10）与 `format_max_errors`（默认 3）。每个完成判定的 round 只占一个槽；坏参数工具调用返回 `ArgumentInvalid` 失败结果让模型重发，缺名/缺 ID/重复 ID 的候选批整体丢弃并反馈一次内部诊断，`length`/`max_tokens` 候选整体废弃，空正文/未知 stop 不再静默成功；错误数超过 K 以 `format_recovery_exhausted` 结束，已执行工具不回滚。
+- 模型输出格式错误采用滑动的 round 窗口：`format_window_size`（默认 10）与 `format_max_errors`（默认 3）。每个完成判定的 round 只占一个槽；坏参数工具调用返回 `ArgumentInvalid` 失败结果让模型重发，缺名/缺 ID/重复 ID 的候选批整体丢弃并反馈一次内部诊断，`length`/`max_tokens` 候选整体废弃，空正文/未知 stop 不作为成功；错误数超过 K 以 `format_recovery_exhausted` 结束，已执行工具不回滚。
 - 请求暂时故障（408/409/425/429/500/502/503/504、连接重置、首事件/idle 超时、响应协议损坏）自动重试：`request_max_retries`（默认 3）表示首次之外允许的重试调用数，退避 1s/2s/4s…上限 10s，`Retry-After`（秒数或 HTTP-date）作为最早重试时间；401/403、模型不存在、未知 provider 错误不重试。
 - `request_timeout_secs`（默认不设）限定一个逻辑请求的总期限，包含全部重试与等待，重试不会延长它。
 - 传输层还有一道**provider HTTP 总超时**（`[provider] http_timeout_secs`，默认 7200 秒，`0` = 不设）：单次物理请求（含流式响应体读取）超过它就中断并归入可重试故障。它先于 `request_timeout_secs` 生效，长流式生成（文档生成、长思考）必须调大或设 `0`，否则每次尝试都会被固定墙钟时间砍断（表现为 `request_timeout: … error decoding response body … operation timed out`，且耗时呈 7200s 的整数倍）。该字段属于传输层配置，不是 `[recovery]` 恢复策略。
@@ -768,4 +768,4 @@ macOS `write_dirs`、临时目录和会话存储的写入规则包含字面路�
 
 ## 终端 Goal 检查器
 
-`MINK_GOAL_CHECK` 是用户声明的固定 Bash 检查命令，终端与 server 都从它加载；`/goal verified TEXT` 或 `POST /api/sessions/{id}/goal` 选择 `verifier` 验收时使用其稳定配置 ID，检查超时 60 秒。命令无效时该能力视为未配置，server 不拒绝会话启动，`GET /api/sessions/{id}/goal` 的 `verifier` 字段返回是否可用，工作台据此禁用检查器选项并在命令列表中不再宣称 `/goal verified`。默认 Goal turn/期限在 GoalLimits 中统一定义，见 [Goal 契约](goals.md)。Web/Python 不启用自动驱动：Web 只在显式创建目标时启用驱动，关闭会话后不自动续跑；崩溃恢复出的 active goal 需在界面显式「恢复」（先预约容量许可、再由 core 启动唯一 run）才继续。
+`MINK_GOAL_CHECK` 是用户声明的固定 Bash 检查命令，终端与 server 都从它加载；`/goal verified TEXT` 或 `POST /api/sessions/{id}/goal` 选择 `verifier` 验收时使用其稳定配置 ID，检查超时 60 秒。命令无效时该能力视为未配置，server 不拒绝会话启动，`GET /api/sessions/{id}/goal` 的 `verifier` 字段返回是否可用，工作台据此禁用检查器选项，命令列表不展示 `/goal verified`。默认 Goal turn/期限在 GoalLimits 中统一定义，见 [Goal 契约](goals.md)。Web/Python 不启用自动驱动：Web 只在显式创建目标时启用驱动，关闭会话后不自动续跑；崩溃恢复出的 active goal 需在界面显式「恢复」（先预约容量许可、再由 core 启动唯一 run）才继续。

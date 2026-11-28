@@ -6,13 +6,13 @@
 
 ## Web 持久输入与快照协议
 
-所有 session 路由接受 `?project=`。`POST /api/sessions/{id}/inputs` 接受 `{request_id, text, attachment_ids:[], target_turn_id:null|string}`，返回带 input_id、revision、turn_id、status 和 guidance 的持久回执。相同 request ID 与相同原始内容幂等，内容不同冲突；网络结果不确定时先 GET inputs?request_id=... 对账，不自动重复执行。PATCH / DELETE 使用 revision，resume 必须由用户明确触发。旧 `/turn` 保留并转入同一执行路径。
+所有 session 路由接受 `?project=`。`POST /api/sessions/{id}/inputs` 接受 `{request_id, text, attachment_ids:[], target_turn_id:null|string}`，返回带 input_id、revision、turn_id、status 和 guidance 的持久回执。相同 request ID 与相同原始内容幂等，内容不同冲突；网络结果不确定时先 GET inputs?request_id=... 对账，不自动重复执行。PATCH / DELETE 使用 revision，resume 必须由用户明确触发。`/turn` 仍可用，并与 `/inputs` 共用同一执行路径。
 
-`GET /stream?snapshot=true` 首帧是 `session_snapshot`：generation、stream_sequence、conversation（物理行号 seq）、progress、current_turn、phase、running、inputs、capabilities、resources（Plan/完整 Todo/Artifact）及 diagnostics / activity / last_final。可选 `activity:{work_state,wait_elapsed_secs:null|number,active_sub_agents:[]}` 保留可靠事件推导的工作状态和模型等待时间；diagnostics 的完整 `title_update.stats` 保留轮次/请求数和互斥的未缓存输入、缓存读取、缓存创建分区。快照与订阅在同一发布边界建立。后续 `conversation_committed`、`inputs_updated`、`phase_updated` 和既有事件携带 generation 与 stream_sequence；旧 generation/重复水位丢弃，gap 后重取 snapshot，无需等待运行 turn 空闲。`after_conversation_seq` 定位暂态诊断的历史相邻位置。
+`GET /stream?snapshot=true` 首帧是 `session_snapshot`：generation、stream_sequence、conversation（物理行号 seq）、progress、current_turn、phase、running、inputs、capabilities、resources（Plan/完整 Todo/Artifact）及 diagnostics / activity / last_final。可选 `activity:{work_state,wait_elapsed_secs:null|number,active_sub_agents:[]}` 保留可靠事件推导的工作状态和模型等待时间；diagnostics 的完整 `title_update.stats` 保留轮次/请求数和互斥的未缓存输入、缓存读取、缓存创建分区。快照与订阅在同一发布边界建立。`conversation_committed`、`inputs_updated`、`phase_updated` 和既有事件携带 generation 与 stream_sequence；generation 不匹配或重复水位的帧被丢弃，gap 后重取 snapshot，无需等待运行 turn 空闲。`after_conversation_seq` 定位暂态诊断的历史相邻位置。
 
-Core 的新增 `AgentEventKind::ConversationCommitted {conversation_seq,message}` 经可靠 runtime 流发出，不能与实时候选文本混同。Web stable key 为 `message:{seq}:{block_index}` 或 `input:{input_id}`，正式历史接管 `live:{generation}:{stream_sequence}`（旧流兼容无 generation 的 key）。既有 SSE 模式不发送新增输入/提交/阶段控制事件；CLI 展示忽略 commit 通知，避免重复正文。
+Core 的 `AgentEventKind::ConversationCommitted {conversation_seq,message}` 经可靠 runtime 流发出，不能与实时候选文本混同。Web stable key 为 `message:{seq}:{block_index}` 或 `input:{input_id}`，正式历史接管 `live:{generation}:{stream_sequence}`（无 generation 的流使用兼容 key）。兼容 SSE 模式不发送输入/提交/阶段控制事件；CLI 展示忽略 commit 通知，避免重复正文。
 
-附件 POST 发送原始图片字节，返回内容寻址描述 `{id,mime,width,height,bytes}`，GET `/attachments/{id}` 只预览本 session 的传输文件；上传不会生成模型图片块。`/conversation?turns=true` 可按真实非 internal、非 guidance 用户轮次分页，保留完整工具交换；旧行分页参数与默认行为保持兼容。
+附件 POST 发送原始图片字节，返回内容寻址描述 `{id,mime,width,height,bytes}`，GET `/attachments/{id}` 只预览本 session 的传输文件；上传不会生成模型图片块。`/conversation?turns=true` 可按真实非 internal、非 guidance 用户轮次分页，保留完整工具交换；行分页参数与默认行为保持兼容。
 
 plan/todo/goal/artifacts 的读取区分“不存在”与“存在但不可读”：只有 `NotFound` 返回缺失表示（`null` 或空集合，artifact 正文为 404）；权限拒绝、无效 UTF-8、把目录当文件、读取中断等返回 500 并在 `message` 中命名资源，不降级为空状态。artifact 超过 1 MiB 仍为 413；`artifacts/index.jsonl` 的既有逐行容错不变（坏行跳过，整份不可读才是错误）。前端读取失败时保留已展示的可信状态并给出错误。
 
@@ -38,12 +38,12 @@ plan/todo/goal/artifacts 的读取区分“不存在”与“存在但不可读�
 
 ## REST API
 
-会话目录扫描与 ID 查找统一排除子代理：目录名或 metadata.id 带 `sub_`/`replan_` 前缀，或 metadata.parent 存在。目录判断在读取元数据之前执行，旧子代理缺失、损坏或继承元数据也不会出现在列表；正常用户会话的 alias 不参与过滤。
+会话目录扫描与 ID 查找统一排除子代理：目录名或 metadata.id 带 `sub_`/`replan_` 前缀，或 metadata.parent 存在。目录判断在读取元数据之前执行，子代理元数据缺失、损坏或继承时也不会出现在列表；正常用户会话的 alias 不参与过滤。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/sessions` | 会话列表（含运行 phase、未处理输入数、最近活跃终态及 tokens/context 汇总） |
-| POST | `/api/sessions` | 创建会话；Web 传 `{cwd,draft_id,first_prompt?}`，`draft_id` 是首发送幂等键；无名称时生成唯一内部 alias，不再复用 `unnamed` |
+| POST | `/api/sessions` | 创建会话；Web 传 `{cwd,draft_id,first_prompt?}`，`draft_id` 是首发送幂等键；无名称时生成唯一内部 alias，不复用 `unnamed` |
 | GET | `/api/workspace?path=` | 仅校验工作目录并返回 `{cwd,project_key,name}`，不创建项目或会话 |
 | GET | `/api/sessions/{id}` | 会话状态（open/running、runtime generation、当前 turn、能力、阶段与最近终态） |
 | DELETE | `/api/sessions/{id}` | 删除会话（先持有系统文件锁，阻止并发删除） |
@@ -68,11 +68,11 @@ plan/todo/goal/artifacts 的读取区分“不存在”与“存在但不可读�
 | GET | `/api/sessions/{id}/stream` | **SSE 实时事件流** |
 | GET | `/health` | 健康检查 |
 
-- **project 消歧**：所有 session 路由接受可选 `?project=`（0.4.0 起，用于跨项目同名 session）；提供安全的 `project` 时直接 O(1) 定位目录（仅一次校验并排除子代理），不传或无匹配时回退按 id 扫描。
+- **project 消歧**：所有 session 路由接受可选 `?project=`（用于跨项目同名 session）；提供安全的 `project` 时直接 O(1) 定位目录（仅一次校验并排除子代理），不传或无匹配时回退按 id 扫描。
 - **请求体上限与 JSON 兜底**：标准 `/api/*` 路由限制请求体不超过 2 MiB，`/api/sessions/{id}/attachments` 为 16 MiB；未匹配的 `/api` 与 `/api/*` 返回统一 404 JSON 信封而非 SPA HTML；`create_session`（`first_prompt`）与 `inputs`/`edit_input` 文字上限 128 KiB，`create_goal` 草案输入上限 1 MiB。
 - **文件树与只读安全**：`GET /api/sessions/{id}/files` 使用单次 `session_dir` 解析，目录列表最多返回 `MAX_DIR_ENTRIES = 2000` 项并附带 `truncated` 布尔标记；文件与 artifact 读取使用 `O_NONBLOCK | O_NOFOLLOW` 并校验普通文件类型与上限（1 MiB），拒绝符号链接/FIFO/设备文件。
 - **Host / Origin 防护**：服务端中间件校验证明来源的 `Host`（反向代理可通过 `MINK_SERVER_ALLOWED_HOSTS` 白名单放行）、非安全/变更路由的 `Origin` 与 `Sec-Fetch-Site`，并为 API 响应附加 `Cache-Control: no-store` 与安全响应头。
-- **新对话创建**：Web 在首次发送前不创建服务端会话。点击项目/新建项目只进入 composing 视图；首次发送用稳定 `draft_id` 创建会话，`first_prompt` 生成 `title`/`first_prompt`（最多 128 KiB，超出直接 400）。同一 draft id 的网络重试返回同一会话；无文本创建标记 `untitled=true`，后续首个非空文本用户消息回填标题。空名称不再落成共享的 `unnamed` 会话。列表摘要把 `first_prompt` 截到 512 字节并加省略号，避免大首条输入放大会话目录。
+- **新对话创建**：Web 在首次发送前不创建服务端会话。点击项目/新建项目只进入 composing 视图；首次发送用稳定 `draft_id` 创建会话，`first_prompt` 生成 `title`/`first_prompt`（最多 128 KiB，超出直接 400）。同一 draft id 的网络重试返回同一会话；无文本创建标记 `untitled=true`，后续首个非空文本用户消息回填标题。空名称生成唯一内部 alias，不共享 `unnamed` 会话。列表摘要把 `first_prompt` 截到 512 字节并加省略号，避免大首条输入放大会话目录。
 - **分页约束**：`limit` 必须在 `1..=2000`，超出返回 400；`tail`/`before_seq` 取“最接近目标”的末尾段，`from_seq` 前向读取保留开头；响应注入真实行号 `seq` 作为稳定 key。`turns=true` 时 `max_bytes`（默认 512 KiB，上限 16 MiB）限制一批完整轮次的序列化体积：`tail`/`before_seq` 丢最旧轮并保证最新一轮完整，`from_seq` 则从请求起点向后截断。
 - **错误映射**（typed `RegistryError`）：404 NotFound；409 Ambiguous / Locked / Busy；429 Capacity；500 Internal（对外返回受限错误描述）。
 
@@ -84,7 +84,7 @@ plan/todo/goal/artifacts 的读取区分“不存在”与“存在但不可读�
 
 附件 POST 是原始文件字节，无浏览器重新编码；能力/格式/完整解码/尺寸/字节/校验和/路径/权限均校验，返回 `{id,mime,width,height,bytes}`。PNG/JPEG/GIF/WebP 与会话能力取交集，数量最多 8，单图及总量各取 core 上限与 16 MiB 的较小值。仅保存 session attachments 传输副本，输入加入无歧义绝对路径，图片上下文仍由 Read 捕获。仅图片输入生成明确查看请求；移除 UI 卡片不删除已存文件。预览不扩大工作目录 files 权限。
 
-默认 conversation 仍按物理行分页。`turns=true` 改为完整真实用户轮次分页（internal 与 guidance 不建立新轮次），保留工具调用/result 与引导归属；Web 每次 20 轮。
+默认 conversation 仍按物理行分页。`turns=true` 使用完整真实用户轮次分页（internal 与 guidance 不建立新轮次），保留工具调用/result 与引导归属；Web 每次 20 轮。
 
 ## SSE 事件
 
@@ -114,15 +114,15 @@ plan/todo/goal/artifacts 的读取区分“不存在”与“存在但不可读�
 - **协议一致性**：`crates/mink-server/protocol-fixtures/agent-events.json` 是 core 与
   server 共享的协议 fixture，mink-core 测试对其做反序列化 round-trip，保证两端口径一致。
 - 前端 reducer 以 `turn_final` 为权威状态；历史展示来自 `/conversation` 与 `/events`
-  （注入 `seq`），实时事件与历史通过 `seq` / `live:{generation}:{stream_sequence}`（旧流兼容无 generation 的 key） 区分 key。
+  （注入 `seq`），实时事件与历史通过 `seq` / `live:{generation}:{stream_sequence}`（无 generation 的流使用兼容 key） 区分 key。
 
-### 新版原子快照订阅
+### 原子快照订阅
 
-`GET /stream?snapshot=true` 首帧 `session_snapshot` 与订阅位置在同一 mirror 发布锁下建立，包含 generation、stream_sequence、conversation、has_older、progress、current_turn、phase、running、inputs、capabilities、resources（Plan、完整 Todo、Artifact）、diagnostics、activity 与 last_final。conversation 只带**最近 4 个真实用户轮次且不超过 256 KiB**（最新一轮始终完整保留；超出时丢更早的整轮），has_older 表示还有可用 `/conversation?before_seq=` 加载的历史。`goal` 是流摘要：保留 bar 与状态判断所需字段（含 `iterations_count`、最新 review/continuation、budget 来源），不带 `usage_records`、完整 `reviews`/`iterations`/候选与报告；详情页用 `GET /goal?full=true` 取完整契约。`goal` 与 `stream_sequence` 在同一临界区更新，渲染快照不获取会话状态锁（锁序固定为 state → projection），`hidden` 目标归一为 `null`。activity 为 `{work_state,wait_elapsed_secs:null|number,active_sub_agents:[]}`，由可靠事件更新并与快照同时发布；active_sub_agents 是未结束子代理 ID 列表，单个子任务结束不抹掉其他活动任务，主动中断后工作状态回到 idle。旧客户端可忽略新字段。diagnostics 保留完整 `title_update.stats`，包括轮次、请求数和独立缓存读取/创建计数。打开时镜像经公开 SessionReader 重建，运行中消费可靠 runtime 事件；best-effort EventSink 不用于权威恢复。
+`GET /stream?snapshot=true` 首帧 `session_snapshot` 与订阅位置在同一 mirror 发布锁下建立，包含 generation、stream_sequence、conversation、has_older、progress、current_turn、phase、running、inputs、capabilities、resources（Plan、完整 Todo、Artifact）、diagnostics、activity 与 last_final。conversation 只带**最近 4 个真实用户轮次且不超过 256 KiB**（最新一轮始终完整保留；超出时丢更早的整轮），has_older 表示还有可用 `/conversation?before_seq=` 加载的历史。`goal` 是流摘要：保留 bar 与状态判断所需字段（含 `iterations_count`、最新 review/continuation、budget 来源），不带 `usage_records`、完整 `reviews`/`iterations`/候选与报告；详情页用 `GET /goal?full=true` 取完整契约。`goal` 与 `stream_sequence` 在同一临界区更新，渲染快照不获取会话状态锁（锁序固定为 state → projection），`hidden` 目标归一为 `null`。activity 为 `{work_state,wait_elapsed_secs:null|number,active_sub_agents:[]}`，由可靠事件更新并与快照同时发布；active_sub_agents 是未结束子代理 ID 列表，单个子任务结束不抹掉其他活动任务，主动中断后工作状态回到 idle。客户端可忽略未知字段。diagnostics 保留完整 `title_update.stats`，包括轮次、请求数和独立缓存读取/创建计数。打开时镜像经公开 SessionReader 重建，运行中消费可靠 runtime 事件；best-effort EventSink 不用于权威恢复。
 
-快照在锁内只复制字段与建立订阅，JSON 序列化在锁外完成；大 session 不再长时间阻塞 live 发布。REST JSON 与嵌入静态资源经 `CompressionLayer` 压缩；SSE 由默认 predicate 排除，避免压缩缓冲给每一帧增加延迟。
+快照在锁内只复制字段与建立订阅，JSON 序列化在锁外完成；大 session 不长时间阻塞 live 发布。REST JSON 与嵌入静态资源经 `CompressionLayer` 压缩；SSE 由默认 predicate 排除，避免压缩缓冲给每一帧增加延迟。
 
-后续新增 `conversation_committed {conversation_seq,message}`、`inputs_updated {inputs}`、`phase_updated {phase}`，与既有 AgentEvent 均携带 generation、stream_sequence 和 after_conversation_seq。正式历史接管暂态 text/thinking，稳定身份为物理 `(seq,block_index)` 或 input_id；诊断保持相邻时序。旧 generation 与重复水位丢弃，gap 后立即重取 snapshot，无需等待 turn 空闲。旧 SSE 模式过滤新增输入/commit/phase 控制事件，仍转发原有协议。运行态、成功与失败由 turn_final/outcome 决定，stop 与 HTTP 成功均不提前完成任务。
+`conversation_committed {conversation_seq,message}`、`inputs_updated {inputs}`、`phase_updated {phase}` 与既有 AgentEvent 均携带 generation、stream_sequence 和 after_conversation_seq。正式历史接管暂态 text/thinking，稳定身份为物理 `(seq,block_index)` 或 input_id；诊断保持相邻时序。generation 不匹配或重复水位的帧被丢弃，gap 后立即重取 snapshot，无需等待 turn 空闲。兼容 SSE 模式过滤输入/commit/phase 控制事件，仍转发 AgentEvent。运行态、成功与失败由 turn_final/outcome 决定，stop 与 HTTP 成功均不提前完成任务。
 
 Web diagnostics 的统计定义见[用量与统计](usage.md#状态栏统计口径)。
 

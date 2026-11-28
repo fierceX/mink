@@ -30,7 +30,7 @@
 - `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>` 可通过当前 `Read` provider 读取可用 skills，列表、诊断视图、正文和 filesystem-backed skill 子资源来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；built-in/runtime skill 只支持读取正文，不支持子资源。selected skill 正文直接进入 prompt，不依赖此 provider。
 - `rule://list` / `rule://<name>` 可读取可用 rules。
 - `session://current`、`session://current/stats`、`session://current/messages`、`session://current/history`、`session://current/artifacts` 可读取当前 session 状态。
-- 默认可读整文件，但大文件超过工具结果上限时返回头尾预览 + 行数 + selector 示例（不再纯报错）。
+- 默认可读整文件，但大文件超过工具结果上限时返回头尾预览 + 行数 + selector 示例。
 - 会话内重复读取同一未变更文件返回 "unchanged, no edits since. Reuse that content." 短响应（Read memo，本地文件）；Write/Edit 成功后失效，压缩后强制重读。
 - 参数只接受 `path`（行范围用路径选择器）；未知字段被拒绝。
 - 搜索具体内容时优先用 `Grep`，定位后再用 `Read` path selector 读取目标范围。
@@ -64,8 +64,8 @@
 ## `Edit`
 
 编辑已有文件。runtime 启动时由 `edit_mode` 固定为一种协议；同一次模型请求只会看到该
-模式的 schema 和提示词。旧 `path + patch`、`@PATH#TAG` 和
-`old_string/new_string` 输入均不兼容。
+模式的 schema 和提示词。`path + patch`、`@PATH#TAG` 和
+`old_string/new_string` 不是有效输入。
 
 ### Hashline（默认）
 
@@ -127,7 +127,7 @@
 
 - 命令在当前会话 `cwd` 下通过 `bash -lc` 执行。
 - 空命令和危险命令会被安全策略拒绝；`rm -rf` 类删除按目标判定：目标先经受限 POSIX 词法解析（转义/引号）与 symlink 感知的真实路径解析（`realpath(strict=False)` 语义），`/`、`/*` 与临时目录之外的真实目标仍被拒绝（`/tmp`、`/var/folders` 等临时目录放行）；命令替换/变量/字符类/花括号/重定向/未闭合引号等不可静态确定的目标保守拦截。
-- 用于读文件、搜索内容或发现路径的 Bash 命令照常执行，并在结果尾部附一行软提示（`Hint: prefer <Provider> for <purpose>.`）引导后续调用改用 `Read`、`Grep` 或 `Glob`；误用检测不再拒绝调用。
+- 用于读文件、搜索内容或发现路径的 Bash 命令照常执行，并在结果尾部附一行软提示（`Hint: prefer <Provider> for <purpose>.`）引导后续调用改用 `Read`、`Grep` 或 `Glob`；误用检测只附加提示，不拒绝调用。
 - 当 `Write` 或 `Edit` 同时位于模型工具 surface 时，系统提示词要求文件创建、完整覆盖和锚定修改优先使用专用 provider，不使用 Bash 重定向、heredoc、sed 或 awk 代替。
 - 恢复首步守卫生效后，首个 Bash 调用还要单独满足 `FocusedVerificationExec`。这只是
   恢复首步资格，不改变普通 Bash 的误用提示；
@@ -437,4 +437,4 @@ runtime 启动时 fail closed。
 
 GoalRead 默认启用，无必填参数，读取完整当前契约或待确认草案；超长结果仍走 artifact 输出保护。GoalDraft 默认在主代理可用，只替换未确认 proposal，要求精确 draft_id/revision；原始请求、验收方式与预算由宿主拥有，模型没有确认入口。
 
-GoalReview 固定在主代理的默认工具面中，只有宿主 agent 的候选绑定提交轮能成功调用，审核子代理没有该工具。只读审核者自然返回描述性报告，宿主 agent 根据报告统一提交 decision（continue/complete/blocked）、summary 和未完成时的 next_step；仅 blocked 提供 blocker 依赖说明，可选 remaining_requirements；runtime 自动绑定候选、报告与证据，不要求模型复制身份或逐项审核表；已解码的结论校验拒绝会返回具体工具失败供同轮纠正，不计入通用格式恢复窗口。执行者正常结束后由 runtime 调度这两步，不需调用 GoalReport。显式工具白名单须包含 GoalReview；缺失时确认或恢复执行被拒绝。旧 GoalReport 已从 catalog 删除。完整字段与验收规则由 [Goal 契约](goals.md) 定义。
+GoalReview 固定在主代理的默认工具面中，只有宿主 agent 的候选绑定提交轮能成功调用，审核子代理没有该工具。只读审核者自然返回描述性报告，宿主 agent 根据报告统一提交 decision（continue/complete/blocked）、summary 和未完成时的 next_step；仅 blocked 提供 blocker 依赖说明，可选 remaining_requirements；runtime 自动绑定候选、报告与证据，不要求模型复制身份或逐项审核表；已解码的结论校验拒绝会返回具体工具失败供同轮纠正，不计入通用格式恢复窗口。执行者正常结束后由 runtime 调度这两步，不需调用 GoalReport。显式工具白名单须包含 GoalReview；缺失时确认或恢复执行被拒绝。catalog 只包含 GoalRead、GoalDraft 与 GoalReview；GoalReport 不是可用工具。完整字段与验收规则由 [Goal 契约](goals.md) 定义。

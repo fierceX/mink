@@ -444,9 +444,13 @@ VFS 只接管普通路径。`artifact://`、`skill://`、`rule://` 和 `session:
 
 ## Goal 协调与独立包边界（`crates/mink-goal`）
 
-Goal 子系统已从 `mink-core` 解耦至独立 workspace crate `crates/mink-goal`（`mink-goal`），并通过 `mink::runtime::ext` 与 `handle.ext()` 暴露的通用编排器 SPI 与内核协同：`AgentOptions::add_tool` / `ToolExecutionMask`、`ToolEffectJournal` / `ToolCallObserver` / `ReadObservation`、`ExternalController`、`StopCause`、`InternalTurnRequest`（统一经 `OrchActor` 执行）/ `ExtensionEmitter` / `ArtifactReader` / `run_ephemeral_child`、`CompactionCheckpointProvider` / `SessionReader::conversation_with_sequence`。不需要 Goal 的纯 `mink-core` 宿主零 Goal 工具与状态开销；CLI 与 server 通过 `GoalPlugin::install_into(&mut options)` 与 `GoalEngine::attach(handle, plugin)` 组合：
+Goal 子系统位于独立 workspace crate `crates/mink-goal`（`mink-goal`），通过 `mink::runtime::ext` 与 `handle.ext()` 暴露的通用编排器 SPI 与内核协同：`AgentOptions::add_tool` / `ToolExecutionMask`、`ToolEffectJournal` / `ToolCallObserver` / `ReadObservation`、`ExternalController`、`StopCause`、`InternalTurnRequest`（统一经 `OrchActor` 执行）/ `ExtensionEmitter` / `ArtifactReader` / `run_ephemeral_child`、`CompactionCheckpointProvider` / `SessionReader::conversation_with_sequence`。不需要 Goal 的纯 `mink-core` 宿主零 Goal 工具与状态开销；CLI 与 server 通过 `GoalPlugin::install_into(&mut options)` 与 `GoalEngine::attach(handle, plugin)` 组合：
 
 - `crates/mink-goal/src/engine/{mod,control,driver,verification,review}.rs` 在单轮执行器外调度目标和验收：`control` 负责合同生命周期、租约与准入，`driver` 持有 run 生命周期（`idle`/`running`/`stopping`/`faulted`/`closed`），`verification` 负责候选 generation、验收与证据版本，检查器变更证据后同轮重新只读审核；`review` 组织轻量分流与完整证据审核，重复继续时复用原只读子会话升级检查，通过 `run_ephemeral_child` 运行只读子会话并将描述性报告与实际读取证据经 `import_artifact` 导入父会话，再通过候选绑定的 `InternalTurnRequest` 调用 `GoalReview` 提交 `decision`/`summary`/`next_step`。
 - `crates/mink-goal/src/store/`（`types`、`transitions`、`store`、`protocol`）保存权威契约 `goal.json`、迭代、账单关联、副作用标记与恢复 journal `goal-transaction.json`。
 - `crates/mink-goal/src/tools.rs` 提供 `GoalRead`、`GoalDraft` 与内部 `GoalReview`；`crates/mink-goal/src/events.rs` 与 `display.rs` 提供扩展事件解码与只读展示投影。
 - `mink-core` 保留 `session/lease.rs`（所有可写 runtime 与 server 删除共享的租约协议）。宿主容量以 `mink_goal::GoalRunLease` 随真实 run 存活，只在 run 结束且 `wait_turn_idle()` 返回后归还；停止意图无法发布时先进入 `stopping`，执行退出后由 run 结算发布 `faulted`。完整状态和恢复约束见 [Goal 契约](../reference/goals.md)。
+
+## 外环扩展与 `mink-rim`
+
+`mink-core` 只提供可逆接缝：多订阅 `SessionEventSink`、`PostInitHook` 队列、组合 `TurnPolicyProvider`、实例级 LIFO `RuntimeLifecycle`、`RuntimePlugin`、`ToolExecutionGate`、`ToolOutputFilter`、`ModelRequestHook` 与 `handle.ext()` 的 RAII `RegistrationGuard`。可选 crate `crates/mink-rim` 在这些接缝上提供 `Scope`/`Disposer`、`SeatRegistry<P>`/`SeatHub` 三态仲裁，以及声明式 `RimProfile`/`RimBundle`/`RuntimeAssembler`；启动失败时按 LIFO 原子回滚，`RimSession` 结束时卸载全部作用域注册。普通嵌入宿主只依赖 `mink-core`，不需要外环装配。

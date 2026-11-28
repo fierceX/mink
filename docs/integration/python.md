@@ -1,6 +1,6 @@
 # Python 集成
 
-> 更新日期：2026-11-27
+> 更新日期：2026-11-28
 
 子进程调用、流式接口与磁盘会话复用。
 
@@ -120,7 +120,7 @@ stdout 行数、退出码等）。此时已收到的事件内容（`text` / `thi
 
 ### `stream(prompt, *, extra_options=None) -> Iterator[dict]`
 
-兼容旧版本的流式接口，逐条产出原始 dict 事件。新代码优先使用 `stream_events()`。
+逐条产出原始 dict 事件。优先使用 `stream_events()`。
 
 ### `raw_stream(prompt, *, extra_options=None) -> Iterator[dict]`
 
@@ -150,6 +150,8 @@ stdout 行数、退出码等）。此时已收到的事件内容（`text` / `thi
 Python SDK 不提供 Goal 的产品入口，也不自动驱动恢复出的目标：活动目标期间独立 `run`/`stream` 提交返回 busy，目标只能由终端或 Web 工作台显式创建、暂停与恢复（见 [Goal 契约](../reference/goals.md)）。
 
 ## 支持平台
+
+Python 运行时要求 **≥ 3.10**；更早版本无法安装 SDK wheel。
 
 | 发布 wheel 的平台 | 架构/ABI | 沙箱（由 Rust 内部处理） |
 |------|------|------|

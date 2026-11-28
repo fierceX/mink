@@ -43,7 +43,7 @@ tool-call 列表中。每个候选调用都通过 `build_tool_call_event()` 转�
 {"name":"Edit","arguments":{"input":"[src/lib.rs#0A3B]\nPUT 40:\n+    return new_value;"}}
 ```
 
-Replace 模式使用 `path + edits`，两种模式都不接受旧 `path + patch`；完整定义见[工具参考](../reference/tools.md#edit)。`Read` 的行范围仍写在
+Replace 模式使用 `path + edits`，两种模式都不接受 `path + patch`；完整定义见[工具参考](../reference/tools.md#edit)。`Read` 的行范围仍写在
 `path` 选择器里；外部框架习惯的读参（`limit`/`offset`/`selector` 等）以及 `Grep`/`Python` 的
 同类字段只被接受并忽略，真正未知的字段仍会在模型与执行层被拒绝；`Edit old_string/new_string`
 会被拒绝。
@@ -77,7 +77,7 @@ StormDecision::Suppress(reason) => {
 
 ## 信号驱动的信念系统
 
-> 实现收敛：`ToolSignalProcessor` 不再累计完整信号副本（原 `signals`/`collected_signals` 已删除）；事实来源是 `ToolExecution.signals` 与 events.jsonl 的 `type=signal` 事件。
+> `ToolSignalProcessor` 以 `ToolExecution.signals` 与 events.jsonl 的 `type=signal` 事件为事实来源，不保存完整信号副本。
 
 信号系统是 Mink 的反馈回路：工具执行质量被采集为信号，合并为单一信念度 `B`，
 低信念时向 LLM 注入修正提示（或中止），构成闭环。完整设计（设计思想、信号采集、
@@ -140,7 +140,7 @@ StormDecision::Suppress(reason) => {
 - SSE 流式 `arguments` 类型错误是粘性的（不在流内纠正，模型下一 round 重发）；首事件/idle 期限只由真实进度推进，Retry 不延长 idle；失败 attempt 在重试前先取消自身子 token。
 - 格式窗口按 round 计（不是按工具、不是按 attempt）：一个 round 内多个坏参数调用、多次损坏流只占一个 `true`；预判（`would_exceed`）不改变窗口，提交只在唯一 round 结束点发生，且在所有真实工具结果持久化之后。
 - 参数错与请求重试严格分离：参数错不能归入“原样重试同请求”，502 不能靠给模型追加提示恢复；已知格式调用不消耗恢复守卫，也不触发 belief/回滚/重启。所有模型可见内置工具的模型参数解码经共享 helper（不完整迁移会造成真实失败信号与格式额度的错配）。
-- 不确定的词法修复不再执行：截断 JSON 只带 parse error 与原始参数摘要交给模型重发；正文中已识别的工具调用同样如此（降级候选进入纠错分支），普通 JSON 示例仍不会被当成格式错误。
+- 不确定的词法修复不执行：截断 JSON 只带 parse error 与原始参数摘要交给模型重发；正文中已识别的工具调用同样如此（降级候选进入纠错分支），普通 JSON 示例仍不会被当成格式错误。
 - 可选总期限是整次逻辑请求的上限：建流、流消费与退避等待共用同一个 deadline；到点时停止等待/消费并保留已收到的 usage，重试不会延长它（主请求与压缩摘要请求共用该语义）。
 - 内置 backend 一次调用 = 一次物理请求，重试责任收敛到 runtime attempt 循环，避免嵌套重试相乘；自定义 backend 内部的多次物理请求只按既有聚合 `attempt_count` 记录（不拆明细、不外层乘算）。
 
@@ -618,7 +618,7 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%)
 | `O:20K` | 总输出 tokens |
 | `C:400K` | 缓存相关 tokens |
 
-> 费用统计已移除：状态栏不再展示累计费用；流式等待心跳显示为状态栏精简标签（如 `·30s`）。
+> 状态栏不展示累计费用；流式等待心跳显示为状态栏精简标签（如 `·30s`）。
 
 信念度语义：
 

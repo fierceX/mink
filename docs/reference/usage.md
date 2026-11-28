@@ -47,9 +47,9 @@ Agent 工具循环、自动压缩、子代理共享同一 `billing_turn_id`。�
 
 ### 费用说明
 
-费用统计已移除：上游模型单价随时段（高峰/空闲）与官方调价变动，本地无法准确持续计价。
+用量统计不包含费用：上游模型单价随时段（高峰/空闲）与官方调价变动，本地无法准确持续计价。
 `UsageRecord.cost_nano_cny` 作为兼容字段保留：已上报记录恒为 `0`，未上报记录为 `null`；
-`UsageSummary` 不再包含费用字段，终端/服务端不再展示费用。
+`UsageSummary` 不包含费用字段，终端/服务端不展示费用。
 
 ### usage.jsonl 格式
 
@@ -103,7 +103,7 @@ cat ~/.mink/projects/<project_key>/<session_id>/usage.jsonl | jq -c
 
 ## 状态栏统计口径
 
-`T` 是真实用户 turn 数，`R` 是已结算 LLM 请求数；`I` 显示未缓存输入加缓存读取，`O` 为输出，`C` 为当前上下文与上限占比。缓存命中率为 `floor(read × 100 / (input + read + creation))`，只将 read 计作命中；缺失分区或旧统计显示未知，不以 0 代替。`B` 为信念，不是任务正确率。Web diagnostics 与 TUI 使用相同 StatsSnapshot，activity 中的等待时间从可靠事件恢复。
+`T` 是真实用户 turn 数，`R` 是已结算 LLM 请求数；`I` 显示未缓存输入加缓存读取，`O` 为输出，`C` 为当前上下文与上限占比。缓存命中率为 `floor(read × 100 / (input + read + creation))`，只将 read 计作命中；缺失分区或统计不完整时显示未知，不以 0 代替。`B` 为信念，不是任务正确率。Web diagnostics 与 TUI 使用相同 StatsSnapshot，activity 中的等待时间从可靠事件恢复。
 
 reported/unreported 都保留请求明细；计量完整不等于模型请求或任务成功。费用由宿主另行计算。
 

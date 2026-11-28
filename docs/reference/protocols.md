@@ -151,10 +151,10 @@ echo '{"version":3,"prompt":"scan this repo"}' | mink-core --agent-jsonl
 }
 ```
 
-> 兼容性：`usage` 不再包含 `cost` 字段（费用统计已移除）；`usage_records[].cost_nano_cny`
+> `usage` 不包含 `cost` 字段；`usage_records[].cost_nano_cny`
 > 为兼容字段，已上报记录为 `0`、未上报记录为 `null`。
 
-失败时 `final` 追加可选 `failure`（snake_case code，失败且已分类时出现；成功与旧版本省略）：
+失败时 `final` 追加可选 `failure`（snake_case code，失败且已分类时出现；成功时省略）：
 `request_timeout` / `request_retry_exhausted` / `provider_rejected` / `provider_stopped` /
 `context_overflow` / `context_unavailable` / `format_recovery_exhausted` / `max_turns_exceeded` /
 `signal_aborted` / `signal_handover` / `goal_budget_exhausted` / `persistence` / `internal`。
@@ -180,7 +180,7 @@ echo '{"version":3,"prompt":"scan this repo"}' | mink-core --agent-jsonl
 
 ## Web 输入与展示元数据
 
-Web 的任务、引导和图片上传属于 runtime 人类输入协议，不是新增模型工具。Plan/Todo 仍只能经现有公开工具修改。引导在完整工具调用/result 交换之后加入正式历史；图片上传仅存 session 传输副本并附绝对路径，模型图片捕获仍走 `Read`。
+Web 的任务、引导和图片上传属于 runtime 人类输入协议，不是模型工具。Plan/Todo 仍只能经现有公开工具修改。引导在完整工具调用/result 交换之后加入正式历史；图片上传仅存 session 传输副本并附绝对路径，模型图片捕获仍走 `Read`。
 
 Full/Inline TUI 也使用此 Inbox 协议，运行中 Enter 提交引导，`/inputs`、`/resume ID`、`/withdraw ID` 是本地人类输入管理命令，不进入模型 tool surface。图片仍随绝对路径请求交给 `Read`，没有第二套图片入口。
 

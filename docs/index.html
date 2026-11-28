@@ -449,7 +449,7 @@
   <div class="shell nav-inner">
     <a class="brand" href="#home" onclick="showPage('home'); return false;" aria-label="Mink 首页">
       <svg class="brand-mark" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 18.5V8.2a1.6 1.6 0 0 1 2.75-1.1L12 12.6l5.25-5.5A1.6 1.6 0 0 1 20 8.2v10.3"/></svg>
-      <span class="brand-version">v0.10.0</span>
+      <span class="brand-version">v0.11.0</span>
     </a>
     <div class="nav-links">
       <a id="nav-home" class="active" href="#features" onclick="openSection('features'); return false;">探索</a>
@@ -488,7 +488,7 @@
       </div>
     </section>
 
-    <section id="metrics" class="metrics-strip" aria-label="v0.10.0 核心指标">
+    <section id="metrics" class="metrics-strip" aria-label="核心指标">
       <div class="metric-item"><strong>9.17 ms</strong><span>Runtime 启动 P50</span></div>
       <div class="metric-item"><strong>0.87 ms</strong><span>单轮工具派发均值</span></div>
       <div class="metric-item"><strong>~99.7%</strong><span>Prefix Cache 稳定命中</span></div>
@@ -578,7 +578,7 @@ finally:
         <div id="tab-rust" class="tab-panel" role="tabpanel" aria-labelledby="quick-tab-rust" tabindex="0">
           <div class="tab-copy"><h3>在 Rust 进程内运行。</h3><p>通过 mink::runtime 直接在 Rust 进程内运行 agent，管理启动、任务和关闭，无需启动 CLI 子进程。</p><ul><li>crate：mink-core · library：mink</li><li>等待结果，或订阅事件流</li><li>可注入自己的 LLM backend</li></ul><a class="text-link" href="#docs/integration/rust.md" onclick="loadDoc('integration/rust.md'); return false;">阅读 Rust 嵌入指南 ↗</a></div>
           <div class="quick-code"><div class="top"><span>rust / quickstart</span><button class="copy-button" type="button" data-copy="code-rust">复制代码 ⧉</button></div><pre><code id="code-rust"><span class="c">// Cargo.toml：还需添加 tokio 和 anyhow</span>
-<span class="c">// mink = { package = "mink-core", version = "0.10.0",</span>
+<span class="c">// mink = { package = "mink-core", version = "0.11.0",</span>
 <span class="c">//   default-features = false, features = ["runtime"] }</span>
 use mink::prelude::{AgentOptions, AgentRuntime};
 

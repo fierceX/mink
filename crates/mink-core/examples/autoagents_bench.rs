@@ -395,7 +395,7 @@ async fn main() -> Result<()> {
     println!(
         "{}",
         json!({
-            "framework": "mink (mink-core 0.10.0, mock backend)",
+            "framework": format!("mink (mink-core {}, mock backend)", env!("CARGO_PKG_VERSION")),
             "mode": match args.mode { BenchMode::Tool => "tool", BenchMode::LlmOnly => "llm-only" },
             "lifecycle": match args.lifecycle { Lifecycle::Cold => "cold", Lifecycle::Warm => "warm" },
             "requests": args.requests,

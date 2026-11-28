@@ -2,7 +2,11 @@
 
 ## Unreleased
 
-### 架构与破坏性变更
+## v0.11.0 (2026-11-28)
+
+本版将 Goal 子系统拆分为独立 `mink-goal` crate，新增可选声明式外环 `mink-rim` 与可逆扩展接缝，并统一 PTC 与 Python SDK 的 Python ≥ 3.10 门槛。
+
+### 破坏性变更
 
 - **Goal 子系统解耦为独立包 `mink-goal`**：将原内置于 `mink-core` 的 Goal 领域模型、持久化存储（`GoalStore`）、状态机与审核引擎（`GoalEngine` / `GoalDriver` / `GoalReview`）物理拆出至 `crates/mink-goal`，`mink-core` 只保留 5 组通用扩展原语（动态 `AgentTool` 与 `ToolExecutionMask`、`ExternalOwnerGuard`、`StopCause`、`InternalTurnRequest` / `ExtensionEmitter` / `ArtifactReader` / ephemeral child、`CompactionCheckpointProvider`）及静态边界守卫 `mink_core_sources_contain_no_goal_coupling`；`mink-cli`、`mink-server` 与相关示例改为通过 `GoalPlugin::install_into` + `GoalEngine::attach` 外挂组合，不需要 Goal 的纯 `mink-core` 宿主零 Goal 工具与状态开销；`RuntimeError::GoalActive` 泛化为 `RuntimeError::ExternallyControlled { owner }`。
 - **可逆外环接缝与独立可选包 `mink-rim`**：`mink-core` 消除 `SessionEventSink`/`PostInitHook`/`TurnPolicyProvider` 单槽与静默覆盖限制（`ToolExecutionMask` 取交集、`ToolCallObserver` 组合、`ToolEffectJournal` 冲突 fail-closed），新增实例级 LIFO `RuntimeLifecycle`（覆盖启动失败回滚、`shutdown()` 与 `Drop`）、`RuntimePlugin`、异步策略门控 `ToolExecutionGate`（覆盖直调、`RunCode` 嵌套与子代理继承，超时/出错/关闭均 fail-closed 为 `ToolBlocker::Policy`）、落盘前输出过滤 `ToolOutputFilter`（改写 `Read` 时自动失效快照与 memo）以及关键审计事件 `EventLog::PolicyEffect`（同步写入 `_mink.policy_effect`），并通过 `handle.ext()` 提供返回 RAII `RegistrationGuard` 的运行期动态注册入口；在此之上新增独立可选 workspace crate `crates/mink-rim`，提供 `Scope`/`Disposer`、`SeatRegistry<P>` 三态仲裁与声明式 `RimProfile`/`RimBundle`/`RuntimeAssembler`（含启动原子回滚与 `RimSession` 作用域零残留绑定）。
@@ -10,6 +14,7 @@
 ### 变更与修复
 
 - **PTC Python ≥ 3.10 版本门槛与启动期探测**：将 `subprocess-python` 后端最低要求明确为 **Python ≥ 3.10**（避免 3.9 下 `isinstance(x, A | B)`、`match`/`case`、`zip(..., strict=True)` 等常见模型生成代码在运行时触发非预期失败与额外提示词约束）；在 `PtcConfig::validate_for_runtime` 增加解释器可执行性与版本探测（低于 3.10 启动即 fail-closed 报错，给出 `[ptc].python_executable` 与 `wasi_python` 指引），同时在 `crates/mink-core/src/ptc/bootstrap.py` 保留运行时 `sys.version_info >= (3, 10)` 防线并以 `dont_inherit=True` 编译用户代码；同步更新文档，并在 CI 新增 `macos-test`（macOS + Python 3.10 最低版本单测与 Python 3.9 拒绝校验）。
+- **Python SDK 最低版本提升至 3.10**：`pyproject.toml` 的 `requires-python` 由 `>=3.9` 改为 `>=3.10` 并移除 3.9 classifier，与 PTC `subprocess-python` 后端的 Python ≥ 3.10 门槛保持一致；Python 3.9 环境安装 `mink-agent` 时由 pip 直接拒绝。
 - **Prompt workflow 渲染器错误返回**：将 `crates/mink-core/src/prompt/workflows.rs` 中全部 `primary_provider(...).unwrap()` 替换为带工作流 ID 与缺失能力名的可诊断 `Err` 返回，避免库嵌入场景下因能力解析不一致触发 panic。
 
 ## v0.10.0 (2026-11-27)

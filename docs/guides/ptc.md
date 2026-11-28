@@ -1,6 +1,6 @@
 # Python 程序化工具调用（PTC / `RunCode`）
 
-Mink 从 `v0.10.0` 起支持 **Python 宿主 Programmatic Tool Calling（PTC）**：模型可以在单次工具调用中编写一段支持顶层 `await` 的 Python 3 程序，通过 `RunCode` 在沙箱内批量调用、过滤并聚合多个工具结果，再将精简后的结构化摘要回传给模型。
+Mink 支持 **Python 宿主 Programmatic Tool Calling（PTC）**：模型可以在单次工具调用中编写一段支持顶层 `await` 的 Python 3 程序，通过 `RunCode` 在沙箱内批量调用、过滤并聚合多个工具结果，再将精简后的结构化摘要回传给模型。
 
 完整工具参数与配置字段定义见[工具参考](../reference/tools.md#runcodepython-ptc)与[配置参考](../reference/configuration.md#ptc)。
 

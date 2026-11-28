@@ -71,7 +71,7 @@ catalog order 和名称稳定决胜；fallback 只填补未绑定能力。workfl
 所有生成 section 都携带 `referenced_tools` 和
 `consumed_facts`，装配时校验其属于当前 surface/事实闭包。
 
-MISSION 不再支持旧 section alias。它只能覆盖 allowlist 中当前存在的 core：
+MISSION 只支持当前 section，不接受 section alias。它只能覆盖 allowlist 中当前存在的 core：
 `system-conventions`、`agent-identity`、`environment`、`execution-codes`、
 `belief-awareness` 和 `output-language`。tool/workflow、`runtime-capabilities`、
 `tool-inventory`、`rules`、instruction files、rule/skill index、selected skills 和 current plan
@@ -116,7 +116,7 @@ ToolCallEvent
 ```
 
 OpenAI SSE parser 在生成 `ToolCallEvent` 前合并碎片化 arguments，并要求输入是 JSON object。
-参数不可解析时不再执行词法修复：候选带 parse error 与原始参数摘要交给模型重发（失败结果
+参数不可解析时不执行词法修复：候选带 parse error 与原始参数摘要交给模型重发（失败结果
 `Failed(ArgumentInvalid)`，来源 `ToolFormat(ModelFormat)`），既不会静默跳过，也不会把占位 `{}`
 当成功调用执行；缺名/缺 ID/重复 ID 的候选整批丢弃并反馈一次内部诊断。Scavenge 回收的候选调用也
 通过同一个 `build_tool_call_event()` 结构化校验；DSML 参数头必须完整包含 `>`，缺失时生成降级候选和错误反馈，不执行部分参数。Runner 接收结构化 `input_json`，内置工具
@@ -412,8 +412,7 @@ tool name: 字典序最终决胜
 
 解析结果 `CapabilityBinding` 包含一个 primary 和零到多个 alternatives。
 
-`alternatives` 只保留当前 surface 中有效的 provider，用于路由说明和诊断。它不是旧实现的
-fallback，也不会在 executor 失败后自动切换代码路径。
+`alternatives` 只保留当前 surface 中有效的 provider，用于路由说明和诊断。它不是 fallback，也不会在 executor 失败后自动切换代码路径。
 
 ## 四、Workflow 与受约束前向求值
 
